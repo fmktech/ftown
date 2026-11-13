@@ -1822,6 +1822,72 @@ describe('LocalApiServer coordination routes and attention tree events (via disp
     assert.equal(plain.body.worktreeOutcome, undefined);
     assert.equal(await f.store.loadSession('child-a'), null);
   });
+
+  it('routes a child question to the human when the parent is removed', async (t) => {
+    const f = await coordFixture(t);
+    const notices: HookEvent[] = [];
+    f.server.on('event', (event) => notices.push(event));
+    const created = await f.call('POST', '/api/sessions/child-a/attention', {
+      title: 'Still open',
+      message: 'Waiting on the parent',
+    });
+    const event = created.body.event as AttentionItem;
+    assert.equal(event.route, 'parent');
+    assert.equal(f.pushes.includes(`question:${event.id}`), false);
+
+    const removed = await f.call('DELETE', '/api/sessions/root-1');
+    assert.equal(removed.status, 200);
+    assert.equal(removed.body.removed, true);
+    assert.equal(await f.store.loadSession('root-1'), null);
+
+    const updated = (await f.attention.list('child-a')).events.find((item) => item.id === event.id);
+    assert.equal(updated?.route, 'human');
+    assert.equal(updated?.escalationNote, PARENT_UNAVAILABLE_NOTE);
+    assert.ok(updated?.escalatedAt);
+    assert.equal(
+      notices.filter((notice) => notice.eventName === 'Notification' && notice.data.attentionId === event.id).length,
+      1,
+    );
+    assert.equal(f.pushes.filter((key) => key === `question:${event.id}`).length, 1);
+  });
+
+  it('routes a child question to the human when the parent is stopped', async (t) => {
+    const f = await coordFixture(t);
+    const notices: HookEvent[] = [];
+    f.server.on('event', (event) => notices.push(event));
+    const created = await f.call('POST', '/api/sessions/child-a/attention', {
+      title: 'Still open',
+      message: 'Waiting on the parent',
+    });
+    const event = created.body.event as AttentionItem;
+    assert.equal(event.route, 'parent');
+    assert.equal(f.pushes.includes(`question:${event.id}`), false);
+
+    f.server.setSessionController(new SessionController({
+      store: f.store,
+      runner: { stop: () => true },
+      publishSessionUpdate: async () => {},
+      removeSession: async () => null,
+      publishSyntheticStop: () => {},
+      withSessionWrite: async (_sessionId, task) => { await task(); },
+      unregisterSession: () => {},
+      onSessionEnding: (session) => f.coordination.onSessionExit(session.id, session),
+    }));
+
+    const stopped = await f.call('POST', '/api/sessions/root-1/stop');
+    assert.equal(stopped.status, 200);
+    assert.equal(stopped.body.stopped, true);
+    assert.equal((await f.store.loadSession('root-1'))?.status, 'completed');
+
+    const updated = (await f.attention.list('child-a')).events.find((item) => item.id === event.id);
+    assert.equal(updated?.route, 'human');
+    assert.equal(updated?.escalationNote, PARENT_UNAVAILABLE_NOTE);
+    assert.equal(
+      notices.filter((notice) => notice.eventName === 'Notification' && notice.data.attentionId === event.id).length,
+      1,
+    );
+    assert.equal(f.pushes.filter((key) => key === `question:${event.id}`).length, 1);
+  });
 });
 
 describe('LocalApiServer worktree create', () => {

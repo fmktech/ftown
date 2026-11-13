@@ -92,6 +92,11 @@ export interface SessionControllerDeps {
   unregisterSession?(sessionId: string): void;
   flushTerminalBuffer?(sessionId: string): void;
   destroyTerminal?(sessionId: string): void;
+  /**
+   * Live session, after a successful stop and immediately before archive/remove.
+   * Must run before the store record is deleted: the exit handler cannot reload it.
+   */
+  onSessionEnding?(session: Session): Promise<void>;
 }
 
 export type WorktreeRemoveMode = 'auto' | 'keep' | 'force';
@@ -131,6 +136,7 @@ export class SessionController {
     const stopped = this.deps.runner.stop(sessionId);
     if (stopped) {
       this.require(this.deps.publishSyntheticStop, 'publishSyntheticStop')(sessionId, 'stopped');
+      let ended: Session | undefined;
       await this.require(this.deps.withSessionWrite, 'withSessionWrite')(sessionId, async () => {
         const session = await this.deps.store.loadSession(sessionId);
         if (session) {
@@ -138,11 +144,26 @@ export class SessionController {
           session.updatedAt = new Date().toISOString();
           await this.deps.store.saveSession(session);
           await this.deps.publishSessionUpdate(session);
+          ended = session;
         }
       });
+      if (ended) await this.noteSessionEnding(ended);
       this.require(this.deps.unregisterSession, 'unregisterSession')(sessionId);
     }
     return { stopped };
+  }
+
+  /** Best-effort. A failure here must not block stop or archive. */
+  private async noteSessionEnding(session: Session): Promise<void> {
+    if (!this.deps.onSessionEnding) return;
+    try {
+      await this.deps.onSessionEnding(session);
+    } catch (error) {
+      console.warn(
+        '[SessionController] Failed to escalate attention before session ended:',
+        error instanceof Error ? error.message : String(error),
+      );
+    }
   }
 
   list(): Promise<Session[]> {
@@ -424,7 +445,12 @@ export class SessionController {
           }
         }
 
-        if (worktreeOutcome.action === 'retained' && worktreeOutcome.reason !== undefined) {
+        if (worktreeOutcome.action === 'removed') {
+          // list/prune read the archived tombstone. A removed worktree left on
+          // that record shows up as "retained: worktree missing".
+          delete session.worktree;
+          await this.deps.store.saveSession(session);
+        } else if (worktreeOutcome.action === 'retained' && worktreeOutcome.reason !== undefined) {
           session.worktree = {
             ...wt,
             retained: {
@@ -436,6 +462,7 @@ export class SessionController {
         }
       }
 
+      await this.noteSessionEnding(session);
       const removed = await this.deps.removeSession(sessionId, options);
       if (!removed) {
         return { removed: false };

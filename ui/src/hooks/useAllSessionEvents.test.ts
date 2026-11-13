@@ -454,9 +454,11 @@ describe("durable explicit attention restoration", () => {
 it("rejects a stale captured notice before sending a durable dismissal", async () => {
   const h = durableSetup(async () => reply(saved)); await settle();
   const previous = h.current()!.attention!; act(() => h.publishSaved(newer));
-  const before = h.rpc.sendCommand.mock.calls.length;
+  await settle();
+  const resolveCalls = () => h.rpc.sendCommand.mock.calls.filter(([command]) => command.type === "resolve_session_attention").length;
+  const before = resolveCalls();
   await expect(h.result.current.clearSessionAttention("agent", previous)).rejects.toThrow("changed");
-  expect(h.rpc.sendCommand).toHaveBeenCalledTimes(before); expect(h.current()?.attention?.attentionId).toBe(newer.id);
+  expect(resolveCalls()).toBe(before); expect(h.current()?.attention?.attentionId).toBe(newer.id);
 });
 it("rejects a failed stamped dismissal and retains the captured notice", async () => {
   const h = durableSetup(command => command.type === "resolve_session_attention" ? Promise.resolve({ requestId: command.requestId, success: false }) : Promise.resolve(reply(saved)));
@@ -563,6 +565,7 @@ describe("structured attention questions", () => {
     act(() => h.publish("PreToolUse", askedEvent));
     expect(h.current()?.attention).toMatchObject({ type: "ask_user", attentionId: "ask-1", prompt: { channel: "hook" } });
     const reads = () => h.rpc.sendCommand.mock.calls.length;
+    await settle(); // the stamped publication's routing reconciliation read
     const beforeBash = reads();
     await act(async () => { h.publish("PostToolUse", { tool_name: "Bash" }); await Promise.resolve(); });
     await settle();
@@ -827,6 +830,185 @@ describe("structured attention questions", () => {
       expect(reads()).toBe(afterFail + 1);
       await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
       expect(reads()).toBe(afterFail + 1); // no loop
+    } finally { vi.useRealTimers(); }
+  });
+});
+
+describe("parent routing applies live (phase B smoke)", () => {
+  const routed = { ...saved, id: "routed-1", sequence: 2, route: "parent" as const, routedTo: "boss" };
+  const escalated = { ...routed, route: "human" as const, escalatedAt: "2026-11-13T00:00:00.000Z", escalationNote: "Parent is gone" };
+  type RoutedItem = typeof saved & { route?: string; routedTo?: string; escalatedAt?: string; escalationNote?: string };
+  const respond = (attention: RoutedItem | null, sequence?: number): CommandResponse => ({ requestId: "r", success: true,
+    data: { sessionId: "agent", attention, sequence: sequence ?? attention?.sequence ?? 1 } });
+  const reads = (h: ReturnType<typeof durableSetup>) => h.rpc.sendCommand.mock.calls.filter(([command]) => command.type === "get_session_attention").length;
+
+  it("shows the escalation note when the bridge republishes the stamped question", async () => {
+    vi.useFakeTimers();
+    try {
+      let item: RoutedItem | null = routed;
+      const h = durableSetup(async () => respond(item));
+      await settle();
+      expect(h.current()?.attention).toMatchObject({ route: "parent", routedTo: "boss" });
+      // The escalation republishes the same stamped payload as creation, without
+      // routing fields; the debounced snapshot reconciliation applies them live.
+      item = escalated;
+      act(() => h.publishSaved(routed));
+      expect(h.current()?.attention?.escalatedAt).toBeUndefined(); // the greyed state holds until the read
+      await act(async () => { await vi.advanceTimersByTimeAsync(200); });
+      expect(h.current()?.attention).toMatchObject({ attentionId: routed.id, escalatedAt: "2026-11-13T00:00:00.000Z", escalationNote: "Parent is gone" });
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("keeps a human-routed item when the snapshot only offers a newer with-parent item", async () => {
+    let item: RoutedItem | null = { ...saved };
+    const h = durableSetup(async () => respond(item));
+    await settle();
+    expect(h.current()?.attention?.attentionId).toBe(saved.id);
+    item = routed;
+    await act(async () => { h.publish("UserPromptSubmit"); });
+    await settle();
+    // The with-parent item waits with the parent; the human-routed one keeps the slot.
+    expect(h.current()?.attention?.attentionId).toBe(saved.id);
+    expect(h.current()?.attention?.route).toBeUndefined();
+    // Once nothing needs the human, the with-parent item is the fallback.
+    await act(async () => { h.publish("AttentionSnapshot"); });
+    await settle();
+    expect(h.current()?.attention).toMatchObject({ attentionId: routed.id, route: "parent", routedTo: "boss" });
+  });
+
+  it("surfaces a yielded with-parent item when the parent escalates it", async () => {
+    vi.useFakeTimers();
+    try {
+      let item: RoutedItem | null = { ...saved };
+      const h = durableSetup(async () => respond(item));
+      await settle();
+      item = routed;
+      await act(async () => { h.publish("UserPromptSubmit"); });
+      await settle();
+      expect(h.current()?.attention?.attentionId).toBe(saved.id); // the with-parent item yielded
+      // A repeat of the with-parent question must not steal the slot back.
+      act(() => h.publishSaved(routed));
+      await act(async () => { await vi.advanceTimersByTimeAsync(200); });
+      expect(h.current()?.attention?.attentionId).toBe(saved.id);
+      // The parent escalates: the republished payload is fenced live and the
+      // reconciliation read applies the escalated item.
+      item = escalated;
+      act(() => h.publishSaved(routed));
+      await act(async () => { await vi.advanceTimersByTimeAsync(200); });
+      expect(h.current()?.attention).toMatchObject({ attentionId: routed.id, escalatedAt: "2026-11-13T00:00:00.000Z", escalationNote: "Parent is gone" });
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("a local clear surfaces a yielded with-parent item immediately", async () => {
+    let item: RoutedItem | null = { ...saved };
+    const h = durableSetup(async () => respond(item));
+    await settle();
+    item = routed;
+    await act(async () => { h.publish("UserPromptSubmit"); });
+    await settle();
+    expect(h.current()?.attention?.attentionId).toBe(saved.id);
+    // A legacy live notice takes the slot, then its completion clears it locally.
+    act(() => h.publish("Notification", { notification_type: "permission_prompt", message: "Approve tool access" }));
+    expect(h.current()?.attention?.type).toBe("permission_prompt");
+    const before = reads(h);
+    act(() => h.publish("Notification", { notification_type: "elicitation_complete" }));
+    await settle();
+    expect(reads(h)).toBeGreaterThan(before); // the clear re-read immediately
+    expect(h.current()?.attention).toMatchObject({ attentionId: routed.id, route: "parent", routedTo: "boss" });
+  });
+
+  it("a snapshot with no open items clears the yield bookkeeping and replays stay fenced", async () => {
+    let item: RoutedItem | null = { ...saved };
+    const h = durableSetup(async () => respond(item, item ? undefined : 2));
+    await settle();
+    item = routed;
+    await act(async () => { h.publish("UserPromptSubmit"); });
+    await settle();
+    expect(h.current()?.attention?.attentionId).toBe(saved.id);
+    item = null;
+    await act(async () => { h.publish("AttentionSnapshot"); });
+    await settle();
+    expect(h.current()?.attention).toBeUndefined();
+    // The formerly yielded item's replay is fenced by the canonical null: no
+    // reconciliation read and no display.
+    const before = reads(h);
+    act(() => h.publishSaved(routed));
+    await settle();
+    expect(h.current()?.attention).toBeUndefined();
+    expect(reads(h)).toBe(before);
+  });
+
+  it("a resolved yielded item's replay stays fenced while the older human item is displayed", async () => {
+    vi.useFakeTimers();
+    try {
+      let item: RoutedItem | null = { ...saved };
+      const h = durableSetup(async () => respond(item));
+      await settle();
+      item = routed;
+      await act(async () => { h.publish("UserPromptSubmit"); });
+      await settle();
+      expect(h.current()?.attention?.attentionId).toBe(saved.id); // yielded
+      // The parent answers the yielded item; the snapshot now reports only the older open item.
+      item = { ...saved };
+      await act(async () => { h.publish("UserPromptSubmit"); });
+      await settle();
+      expect(h.current()?.attention?.attentionId).toBe(saved.id);
+      // A replay of the resolved yielded item must not steal the slot.
+      act(() => h.publishSaved(routed));
+      await act(async () => { await vi.advanceTimersByTimeAsync(200); });
+      expect(h.current()?.attention?.attentionId).toBe(saved.id);
+      expect(h.current()?.attention).not.toHaveProperty("escalatedAt");
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("debounces stamped reconciles per session and caps concurrent snapshot reads", async () => {
+    vi.useFakeTimers();
+    try {
+      const rows: Session[] = Array.from({ length: 10 }, (_, index) => ({ id: `s${index}`, name: `S${index}`, bridgeId: "bridge", status: "running", createdAt: "2026-10-23", updatedAt: "2026-10-23" }));
+      const publications = new Map<string, (event: MessageEvents["publication"]) => void>();
+      const client: MessageClient = {
+        getSubscription: () => null, removeSubscription: () => {},
+        newSubscription: (channel) => {
+          const sub: MessageSubscription = {
+            state: "subscribed", subscribe: () => {}, unsubscribe: () => {},
+            publish: async () => {}, presence: async () => ({ clients: {} }),
+            on: <K extends keyof MessageEvents>(event: K, listener: (value: MessageEvents[K]) => void) => {
+              if (event === "publication") publications.set(channel, listener as (value: MessageEvents["publication"]) => void);
+              return sub;
+            },
+            off: () => sub, removeAllListeners: () => { publications.delete(channel); },
+          };
+          return sub;
+        },
+      };
+      let inFlight = 0; let peak = 0;
+      let barrier: Promise<void> = Promise.resolve();
+      const rpc = { sendCommand: vi.fn(async (command: Command) => {
+        if (command.type !== "get_session_attention") return reply(null);
+        inFlight += 1; peak = Math.max(peak, inFlight);
+        await barrier;
+        inFlight -= 1;
+        return reply(null);
+      }), onSubscribed: () => () => {} };
+      renderHook(() => useAllSessionEvents(client, rows, "user", rpc));
+      await act(async () => { await Promise.resolve(); }); // the ten mount reads
+      const readsOf = () => rpc.sendCommand.mock.calls.filter(([command]) => command.type === "get_session_attention").length;
+      const afterMount = readsOf();
+      expect(afterMount).toBe(10);
+      let release!: () => void;
+      barrier = new Promise<void>(done => { release = done; });
+      const publish = (sessionId: string) => publications.get(`events:${sessionId}#user`)!({ data: { type: "hook_event", eventName: "Notification",
+        data: { notification_type: "agent_needs_input", title: "Q", message: "m", attentionId: `a-${sessionId}`, attentionSequence: 2, attentionCreatedAt: "2026-11-13T00:00:00.000Z" } } });
+      await act(async () => {
+        for (const row of rows) for (let i = 0; i < 3; i++) publish(row.id);
+      });
+      expect(readsOf()).toBe(afterMount); // debounced per session: nothing yet
+      await act(async () => { await vi.advanceTimersByTimeAsync(200); });
+      expect(peak).toBe(4); // global concurrency cap: only four reads in flight
+      expect(readsOf()).toBe(afterMount + 4);
+      release();
+      await act(async () => { for (let i = 0; i < 50; i++) await Promise.resolve(); });
+      expect(readsOf()).toBe(afterMount + 10); // one trailing read per session
     } finally { vi.useRealTimers(); }
   });
 });

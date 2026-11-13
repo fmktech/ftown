@@ -311,6 +311,22 @@ describe('SessionController.stop', () => {
     assert.equal(h.published.length, 0);
     assert.equal(h.unregistered.length, 0);
   });
+
+  it('notifies onSessionEnding with the completed session before unregister', async () => {
+    const seen: string[] = [];
+    const h = setup([makeSession({ status: 'running' })], {
+      onSessionEnding: async (session) => {
+        seen.push(`ending:${session.status}`);
+        assert.equal(h.store.sessions.get('sess-1')?.status, 'completed');
+      },
+      unregisterSession: (sessionId) => {
+        seen.push(`unregister:${sessionId}`);
+      },
+    });
+
+    assert.deepEqual(await h.controller.stop('sess-1'), { stopped: true });
+    assert.deepEqual(seen, ['ending:completed', 'unregister:sess-1']);
+  });
 });
 
 describe('SessionController.remove', () => {
@@ -394,7 +410,8 @@ describe('SessionController.remove', () => {
     assert.deepEqual(worktrees.removeCalls, [
       { wt: sampleWorktree, opts: { force: false, deleteBranch: true } },
     ]);
-    assert.equal(h.store.saved.length, 0);
+    assert.equal(h.store.saved.length, 1);
+    assert.equal(h.store.saved[0].worktree, undefined);
   });
 
   it('auto-retains a dirty or unpushed worktree and persists worktree.retained before archiving', async () => {
@@ -502,6 +519,100 @@ describe('SessionController.remove', () => {
     assert.equal(h.removedCalls.length, 1);
     assert.equal(h.store.saved.length, 1);
     assert.equal(h.store.saved[0].worktree?.retained?.reason, 'fatal: worktree locked');
+  });
+
+  it('clears session.worktree on the archived record only when removal succeeded', async () => {
+    const removedWorktrees = makeFakeWorktrees({
+      status: async () => makeStatus({ mergedIntoBase: true, dirty: false }),
+    });
+    let archivedRemoved: Session | null = null;
+    const removed = setup([makeSession({ worktree: { ...sampleWorktree } })], {
+      worktrees: removedWorktrees,
+    });
+    const removedStore = removed.store.sessions;
+    const removedController = new SessionController({
+      store: removed.store,
+      runner: { stop: () => false },
+      publishSessionUpdate: async () => {},
+      worktrees: removedWorktrees,
+      removeSession: async (id) => {
+        const s = await removed.store.loadSession(id);
+        archivedRemoved = s ? structuredClone(s) : null;
+        removedStore.delete(id);
+        return s;
+      },
+    });
+    assert.deepEqual(await removedController.remove('sess-1'), {
+      removed: true,
+      worktreeOutcome: { action: 'removed' },
+    });
+    assert.equal(archivedRemoved?.worktree, undefined);
+
+    const keptWorktrees = makeFakeWorktrees({
+      status: async () => makeStatus({ dirty: true, mergedIntoBase: false }),
+    });
+    let archivedKept: Session | null = null;
+    const kept = setup([makeSession({ worktree: { ...sampleWorktree } })], {
+      worktrees: keptWorktrees,
+    });
+    const keptStore = kept.store.sessions;
+    const keptController = new SessionController({
+      store: kept.store,
+      runner: { stop: () => false },
+      publishSessionUpdate: async () => {},
+      worktrees: keptWorktrees,
+      removeSession: async (id) => {
+        const s = await kept.store.loadSession(id);
+        archivedKept = s ? structuredClone(s) : null;
+        keptStore.delete(id);
+        return s;
+      },
+    });
+    await keptController.remove('sess-1');
+    assert.equal(archivedKept?.worktree?.path, sampleWorktree.path);
+    assert.equal(archivedKept?.worktree?.retained?.reason, 'uncommitted changes');
+  });
+
+  it('escalates before archive and still archives when escalation throws', async () => {
+    const order: string[] = [];
+    let hook: ReturnType<typeof setup> | undefined;
+    hook = setup([makeSession({ id: 'parent', status: 'running' })], {
+      onSessionEnding: async (session) => {
+        order.push('ending');
+        assert.equal(hook?.store.sessions.has(session.id), true);
+      },
+      removeSession: async (sessionId) => {
+        order.push('remove');
+        const session = hook?.store.sessions.get(sessionId) ?? null;
+        if (session) hook?.store.sessions.delete(sessionId);
+        return session;
+      },
+    });
+    assert.deepEqual(await hook.controller.remove('parent'), { removed: true });
+    assert.deepEqual(order, ['ending', 'remove']);
+
+    let called = false;
+    const throwing = setup([makeSession({ status: 'completed' })], {
+      onSessionEnding: async () => {
+        called = true;
+        throw new Error('attention down');
+      },
+    });
+    assert.deepEqual(await throwing.controller.remove('sess-1'), { removed: true });
+    assert.equal(called, true);
+    assert.equal(throwing.removedCalls.length, 1);
+
+    let rejectedHook = false;
+    const rejected = setup([makeSession({ status: 'running' })], {
+      onSessionEnding: async () => {
+        rejectedHook = true;
+      },
+      removeSession: async () => null,
+    });
+    assert.deepEqual(await rejected.controller.remove('sess-1', { onlyIfFinished: true }), {
+      removed: false,
+    });
+    assert.equal(rejectedHook, false);
   });
 
   it('does not touch worktrees when onlyIfFinished rejects a running session', async () => {

@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import type { MessageClient, MessageSubscription } from "@/lib/message-client";
 import { sessionChannel } from "@security/ledger/channels";
 import { Session } from "@/types";
-import { clearsManualInputNotice, isAskUserQuestionTool, parseLenientPrompt, hookEventToActivity, extractManualInputNotice, extractToolLabel, isDurableNotice, type ManualInputNotice } from "@/lib/hook-events";
+import { clearsManualInputNotice, isAskUserQuestionTool, parseLenientPrompt, hookEventToActivity, extractManualInputNotice, extractToolLabel, isDurableNotice, isWithParentNotice, type ManualInputNotice } from "@/lib/hook-events";
 import type { AnswerSessionAttentionPayload, AttentionAnswerDelivery, AttentionAnswerEntry, AttentionPrompt } from "../../../bridge/src/attention-prompt-protocol";
 import { TokenUsage } from "./useSessionEvents";
 import type { BridgeRpc } from "./useBridgeRpc";
@@ -12,6 +12,9 @@ import type { PersistedSessionAttention, SessionAttentionResponse } from "@/type
 import { v4 as uuidv4 } from "uuid";
 
 const ANSWER_DELIVERIES: ReadonlySet<string> = new Set<AttentionAnswerDelivery>(["waiter", "mail", "mail_failed"]);
+
+/** Global cap on concurrent get_session_attention reads. */
+const READ_LIMIT = 4;
 
 /** Re-parse a persisted prompt; the channel must match the item type (request: mail, question: hook). */
 function persistedPrompt(value: unknown, type: string): AttentionPrompt | undefined {
@@ -139,7 +142,7 @@ export function useAllSessionEvents(
   rpc?: Pick<BridgeRpc, "sendCommand" | "onSubscribed">,
 ): AllSessionEvents {
   const [activityMap, setActivityMap] = useState<Map<string, SessionActivity>>(new Map());
-  const subsRef = useRef<Map<string, { client: MessageClient; user: string; sub: MessageSubscription; queued: boolean; inFlight: boolean; dirty: boolean }>>(new Map());
+  const subsRef = useRef<Map<string, { client: MessageClient; user: string; sub: MessageSubscription; queued: boolean; inFlight: boolean; dirty: boolean; dirtyResolving: boolean; pendingResolving: boolean }>>(new Map());
   const clientRef = useRef(client);
   const userIdRef = useRef(userId);
   const rpcRef = useRef(rpc);
@@ -152,13 +155,35 @@ export function useAllSessionEvents(
   const retries = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const retried = useRef(new Set<string>());
   const canonical = useRef(new Map<string, { sequence: number; activeId: string | null }>());
+  /** With-parent snapshot items yielded to a displayed item that needs the human (per session). */
+  const yieldedItems = useRef(new Map<string, Set<string>>());
+  /** Forget a yielded item only on proof from a snapshot: the slot now shows it
+   * (it is the open item), or the snapshot reports no open items at all. */
+  const pruneYielded = (sessionId: string, snapshotItem: { id: string } | null, appliedId: string | undefined): void => {
+    const yielded = yieldedItems.current.get(sessionId);
+    if (!yielded) return;
+    if (!snapshotItem) { yieldedItems.current.delete(sessionId); return; }
+    if (appliedId !== undefined && yielded.delete(appliedId) && !yielded.size) yieldedItems.current.delete(sessionId);
+  };
+  /** Trailing debounce for reconciliation reads a stamped publication asked for. */
+  const stampedDebounce = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const readsInFlight = useRef(0);
+  const readWaiters = useRef<Array<() => void>>([]);
+  const releaseRead = (): void => {
+    const next = readWaiters.current.shift();
+    if (next) next(); else readsInFlight.current -= 1;
+  };
+  const acquireRead = (): Promise<() => void> => {
+    if (readsInFlight.current < READ_LIMIT) { readsInFlight.current += 1; return Promise.resolve(releaseRead); }
+    return new Promise(resolve => readWaiters.current.push(() => resolve(releaseRead)));
+  };
   clientRef.current = client;
   userIdRef.current = userId;
   rpcRef.current = rpc;
   sessionsRef.current = sessions;
   activityRef.current = activityMap;
 
-  const readSnapshot = useCallback(async (sessionId: string) => {
+  const readSnapshot = useCallback(async (sessionId: string, resolving: boolean) => {
     const owner = subsRef.current.get(sessionId);
     const user = owner?.user;
     const session = sessionsRef.current.find(row => row.id === sessionId && row.status === "running");
@@ -172,56 +197,85 @@ export function useAllSessionEvents(
       const shown = activityRef.current.get(sessionId)?.attention;
       if (shown?.type !== "ask_user" || !isDurableNotice(shown) || retried.current.has(sessionId)) return;
       retried.current.add(sessionId);
-      retries.current.set(sessionId, setTimeout(() => { retries.current.delete(sessionId); hydrate(sessionId); }, 2000));
+      retries.current.set(sessionId, setTimeout(() => { retries.current.delete(sessionId); hydrate(sessionId, true); }, 2000));
     };
     try {
-      const response = await rpcRef.current.sendCommand({ type: "get_session_attention", requestId: uuidv4(),
-        payload: { bridgeId: session.bridgeId, sessionId } });
-      if (!response.success) { retryOnce(); return; }
-      retried.current.delete(sessionId);
-      if (userIdRef.current !== user || clientRef.current !== owner.client
-        || subsRef.current.get(sessionId) !== owner || reads.current.get(sessionId) !== read
-        || (observations.current.get(sessionId) ?? 0) !== observation
-        || !sessionsRef.current.some(row => row.id === sessionId && row.bridgeId === session.bridgeId && row.status === "running")) return;
-      const snapshot = snapshotResponse(response.data, sessionId);
-      if (!snapshot) return;
-      const known = canonical.current.get(sessionId);
-      if (known && known.sequence > snapshot.sequence) return;
-      canonical.current.set(sessionId, { sequence: snapshot.sequence, activeId: snapshot.attention?.id ?? null });
-      setActivityMap(prev => {
-        if (userIdRef.current !== user || clientRef.current !== owner.client || subsRef.current.get(sessionId) !== owner
-          || (observations.current.get(sessionId) ?? 0) !== observation || reads.current.get(sessionId) !== read) return prev;
-        const current = prev.get(sessionId) ?? { activity: "idle" as const };
-        if (current.attention && !isDurableNotice(current.attention)) return prev;
-        if ((current.attention?.attentionSequence ?? 0) > snapshot.sequence) return prev;
-        const attention = snapshot.attention && snapshot.attention.sequence > (dismissedThrough.current.get(sessionId) ?? 0)
+      const release = await acquireRead();
+      try {
+        const response = await rpcRef.current.sendCommand({ type: "get_session_attention", requestId: uuidv4(),
+          payload: { bridgeId: session.bridgeId, sessionId } });
+        if (!response.success) { retryOnce(); return; }
+        retried.current.delete(sessionId);
+        if (userIdRef.current !== user || clientRef.current !== owner.client
+          || subsRef.current.get(sessionId) !== owner || reads.current.get(sessionId) !== read
+          || (observations.current.get(sessionId) ?? 0) !== observation
+          || !sessionsRef.current.some(row => row.id === sessionId && row.bridgeId === session.bridgeId && row.status === "running")) return;
+        const snapshot = snapshotResponse(response.data, sessionId);
+        if (!snapshot) return;
+        const known = canonical.current.get(sessionId);
+        if (known && known.sequence > snapshot.sequence) return;
+        const incoming = snapshot.attention && snapshot.attention.sequence > (dismissedThrough.current.get(sessionId) ?? 0)
           ? restoredNotice(snapshot.attention) : undefined;
-        return new Map(prev).set(sessionId, { ...current, attention });
-      });
+        canonical.current.set(sessionId, { sequence: snapshot.sequence, activeId: snapshot.attention?.id ?? null });
+        setActivityMap(prev => {
+          if (userIdRef.current !== user || clientRef.current !== owner.client || subsRef.current.get(sessionId) !== owner
+            || (observations.current.get(sessionId) ?? 0) !== observation || reads.current.get(sessionId) !== read) return prev;
+          const current = prev.get(sessionId) ?? { activity: "idle" as const };
+          if (current.attention && !isDurableNotice(current.attention)) return prev;
+          if ((current.attention?.attentionSequence ?? 0) > snapshot.sequence) return prev;
+          let attention = incoming;
+          let kept = false;
+          // A with-parent item never takes the slot from a displayed item that
+          // needs the human; the snapshot supplies it again once nothing does.
+          // Resolving reads apply the truth: they follow a resolution the display
+          // cannot see (cross-tab commands, the ask tool finishing).
+          if (!resolving && incoming?.attentionId && current.attention && isDurableNotice(current.attention)
+            && incoming.attentionId !== current.attention.attentionId
+            && !isWithParentNotice(current.attention) && isWithParentNotice(incoming)) {
+            attention = current.attention; kept = true;
+            const yielded = yieldedItems.current.get(sessionId) ?? new Set<string>();
+            yielded.add(incoming.attentionId);
+            yieldedItems.current.set(sessionId, yielded);
+          }
+          pruneYielded(sessionId, snapshot.attention, kept ? undefined : incoming?.attentionId);
+          return new Map(prev).set(sessionId, { ...current, attention });
+        });
+      } finally { release(); }
     } catch { retryOnce(); /* Older/offline bridges retain the existing live-only dashboard. */ }
   }, []);
 
-  const hydrate: (sessionId: string) => void = useCallback((sessionId: string) => {
+  const hydrate: (sessionId: string, resolving?: boolean) => void = useCallback((sessionId: string, resolving = false) => {
+    const pendingStamp = stampedDebounce.current.get(sessionId);
+    if (pendingStamp) { clearTimeout(pendingStamp); stampedDebounce.current.delete(sessionId); }
     const owner = subsRef.current.get(sessionId);
     if (!owner || owner.client !== clientRef.current || owner.user !== userIdRef.current) return;
     if (owner.inFlight) {
       // A later trigger requires a new snapshot; fence the old response now.
       reads.current.set(sessionId, (reads.current.get(sessionId) ?? 0) + 1);
       owner.dirty = true;
+      owner.dirtyResolving = owner.dirtyResolving || resolving;
       return;
     }
-    if (owner.queued) return;
+    if (owner.queued) {
+      owner.pendingResolving = owner.pendingResolving || resolving;
+      return;
+    }
     owner.queued = true;
+    owner.pendingResolving = resolving;
     queueMicrotask(() => {
       if (subsRef.current.get(sessionId) !== owner || owner.client !== clientRef.current || owner.user !== userIdRef.current) return;
       owner.queued = false;
       owner.inFlight = true;
-      void readSnapshot(sessionId).finally(() => {
+      const read = owner.pendingResolving;
+      owner.pendingResolving = false;
+      void readSnapshot(sessionId, read).finally(() => {
         if (subsRef.current.get(sessionId) !== owner || owner.client !== clientRef.current || owner.user !== userIdRef.current) return;
         owner.inFlight = false;
         if (owner.dirty) {
           owner.dirty = false;
-          hydrate(sessionId);
+          const dirtyResolving = owner.dirtyResolving;
+          owner.dirtyResolving = false;
+          hydrate(sessionId, dirtyResolving);
         }
       });
     });
@@ -267,6 +321,19 @@ export function useAllSessionEvents(
         const olderExplicit = incomingSequence !== undefined && (incomingSequence <= (dismissedThrough.current.get(sessionId) ?? 0)
           || (known !== undefined && incomingSequence <= known.sequence && attention?.attentionId !== known.activeId)
           || (isDurableNotice(current.attention) && incomingSequence < (current.attention?.attentionSequence ?? 0)));
+        // A yielded with-parent item waits with the parent: its unstamped replays
+        // must not steal the slot from the displayed item that needs the human.
+        const yieldFenced = !olderExplicit && !!attention?.attentionId
+          && current.attention?.attentionId !== attention.attentionId
+          && yieldedItems.current.get(sessionId)?.has(attention.attentionId) === true;
+        // The republished stamped payload never carries routing fields; keep the
+        // displayed routing (greyed/escalated) until the snapshot reconciles it.
+        const dropsRouting = !!attention?.attentionId && !!current.attention && isDurableNotice(current.attention)
+          && attention.attentionId === current.attention.attentionId
+          && (current.attention.route !== undefined || current.attention.escalatedAt !== undefined
+            || current.attention.escalationNote !== undefined || current.attention.answeredBy !== undefined)
+          && attention.route === undefined && attention.escalatedAt === undefined
+          && attention.escalationNote === undefined && attention.answeredBy === undefined;
         const updated: SessionActivity = {
           ...current,
           ...(activity
@@ -275,7 +342,7 @@ export function useAllSessionEvents(
                 toolName: activity === "tool_use" ? toolName : undefined,
               }
             : {}),
-          ...(attention && !olderExplicit ? { attention } : {}),
+          ...(attention && !olderExplicit && !yieldFenced && !dropsRouting ? { attention } : {}),
           ...(clearsAttention ? { attention: undefined } : {}),
           ...(activity === "idle" && msg.usage
             ? {
@@ -291,14 +358,44 @@ export function useAllSessionEvents(
         next.set(sessionId, updated);
         return next;
       });
+      // A local clear emptied the slot: a yielded with-parent item may be the
+      // open item now, so surface it immediately instead of waiting for the
+      // next scheduled read.
+      if (clearsManualInputNotice(msg.eventName, msg.data, activityRef.current.get(sessionId)?.attention)
+        && yieldedItems.current.get(sessionId)?.size) void hydrate(sessionId, true);
       // Prompt hooks have already resolved the ledger. Learn its watermark
       // even if the first read was pending and no displayed ID was known yet.
       // A finished AskUserQuestion was resolved by the bridge; learn that from a snapshot.
       // AttentionSnapshot is the cross-tab signal for command resolutions
       // (dismiss/reply); it only triggers a re-read, with no activity/clear.
-      if (msg.eventName === "UserPromptSubmit" || msg.eventName === "beforeSubmitPrompt" || msg.eventName === "AttentionSnapshot"
-        || ((msg.eventName === "PostToolUse" || msg.eventName === "postToolUse" || msg.eventName === "postToolUseFailure")
-          && isAskUserQuestionTool(extractToolLabel(msg.eventName, msg.data)))) void hydrate(sessionId);
+      // Resolving reads follow an event that may have resolved the displayed
+      // item; every other read keeps an item that needs the human in the slot.
+      const shown = activityRef.current.get(sessionId)?.attention;
+      if (msg.eventName === "AttentionSnapshot") void hydrate(sessionId, true);
+      else if ((msg.eventName === "PostToolUse" || msg.eventName === "postToolUse" || msg.eventName === "postToolUseFailure")
+        && isAskUserQuestionTool(extractToolLabel(msg.eventName, msg.data))
+        && shown !== undefined && isDurableNotice(shown) && shown.type === "ask_user") void hydrate(sessionId, true);
+      else if (msg.eventName === "UserPromptSubmit" || msg.eventName === "beforeSubmitPrompt") void hydrate(sessionId, false);
+      // A stamped publication the bridge re-issued (creation, repeat, parent
+      // escalation) carries no routing fields; reconcile route, escalatedAt and
+      // escalationNote from the durable snapshot so escalation applies live.
+      // An identical republish of the displayed item carries nothing new, and
+      // the reads are debounced and globally capped.
+      if (attention?.attentionId && !(shown !== undefined && sameNotice(attention, shown))) {
+        const stampedSequence = attention.attentionSequence ?? 0;
+        const knownStamp = canonical.current.get(sessionId);
+        const replay = stampedSequence <= (dismissedThrough.current.get(sessionId) ?? 0)
+          || (knownStamp !== undefined && stampedSequence <= knownStamp.sequence && attention.attentionId !== knownStamp.activeId)
+          || (isDurableNotice(shown) && stampedSequence < (shown?.attentionSequence ?? 0));
+        if (!replay) {
+          const pending = stampedDebounce.current.get(sessionId);
+          if (pending) clearTimeout(pending);
+          stampedDebounce.current.set(sessionId, setTimeout(() => {
+            stampedDebounce.current.delete(sessionId);
+            hydrate(sessionId, false);
+          }, 200));
+        }
+      }
     };
 
     const existing = c.getSubscription(channel);
@@ -316,7 +413,7 @@ export function useAllSessionEvents(
     sub.on("subscribed", () => {
       if (clientRef.current === c && userIdRef.current === u && subsRef.current.get(sessionId)?.sub === sub) void hydrate(sessionId);
     });
-    subsRef.current.set(sessionId, { client: c, user: u, sub, queued: false, inFlight: false, dirty: false });
+    subsRef.current.set(sessionId, { client: c, user: u, sub, queued: false, inFlight: false, dirty: false, dirtyResolving: false, pendingResolving: false });
     sub.subscribe();
     if (sub.state === "subscribed") void hydrate(sessionId);
   }, [hydrate]);
@@ -340,7 +437,9 @@ export function useAllSessionEvents(
     }
     for (const timer of retries.current.values()) clearTimeout(timer);
     retries.current.clear(); retried.current.clear();
-    observations.current.clear(); reads.current.clear(); dismissedThrough.current.clear(); canonical.current.clear();
+    for (const timer of stampedDebounce.current.values()) clearTimeout(timer);
+    stampedDebounce.current.clear();
+    observations.current.clear(); reads.current.clear(); dismissedThrough.current.clear(); canonical.current.clear(); yieldedItems.current.clear();
     activityOwner.current = { client, user: userId };
     setActivityMap(new Map());
   }, [client, userId, unsubscribe]);
@@ -385,6 +484,8 @@ export function useAllSessionEvents(
       for (const sessionId of subsRef.current.keys()) {
         unsubscribe(sessionId);
       }
+      for (const timer of stampedDebounce.current.values()) clearTimeout(timer);
+      stampedDebounce.current.clear();
       setActivityMap(new Map());
     };
   }, [unsubscribe]);
@@ -432,7 +533,9 @@ export function useAllSessionEvents(
         if (userIdRef.current !== user || clientRef.current !== owner.client || subsRef.current.get(sessionId) !== owner) return prev;
         const current = prev.get(sessionId);
         if (!current || !sameNotice(current.attention, captured)) return prev;
-        return new Map(prev).set(sessionId, { ...current, attention: snapshot.attention ? restoredNotice(snapshot.attention) : undefined });
+        const attention = snapshot.attention ? restoredNotice(snapshot.attention) : undefined;
+        pruneYielded(sessionId, snapshot.attention, attention?.attentionId);
+        return new Map(prev).set(sessionId, { ...current, attention });
       });
       return;
     }
@@ -468,7 +571,7 @@ export function useAllSessionEvents(
     const payload: AnswerSessionAttentionPayload = { bridgeId: session.bridgeId, sessionId, eventId, answers };
     let response;
     try { response = await rpcRef.current.sendCommand({ type: "answer_session_attention", requestId: uuidv4(), payload }); }
-    catch { hydrate(sessionId); return fail("rpc_failed", "Could not send the answer. Reconnect and try again."); }
+    catch { hydrate(sessionId, true); return fail("rpc_failed", "Could not send the answer. Reconnect and try again."); }
     if (response.success && (userIdRef.current !== user || clientRef.current !== owner.client || subsRef.current.get(sessionId) !== owner
       || !sessionsRef.current.some(row => row.id === sessionId && row.bridgeId === session.bridgeId))) {
       // The answer was delivered; only the local view moved on. Remember it so a replay stays hidden,
@@ -484,18 +587,18 @@ export function useAllSessionEvents(
       const code = typeof data.code === "string" ? data.code : "command_failed";
       const bridgeMessage = response.error || "Could not send the answer. Try again.";
       if (code === "unknown_command" || code === "unsupported_command" || response.error === "Unknown command type: answer_session_attention") {
-        hydrate(sessionId);
+        hydrate(sessionId, true);
         return fail(code === "command_failed" ? "unsupported_command" : code, "Update this computer's ftown bridge to answer questions.");
       }
       if (code === "attention_already_resolved" || code === "attention_not_found") {
         dismissedThrough.current.set(sessionId, Math.max(dismissedThrough.current.get(sessionId) ?? 0, sequence));
       }
       // The observation bump fenced any in-flight snapshot; read a fresh one.
-      hydrate(sessionId);
+      hydrate(sessionId, true);
       return fail(code, bridgeMessage);
     }
     const parsed = answerResponse(response.data, sessionId);
-    if (!parsed) { hydrate(sessionId); return fail("invalid_response", "Could not confirm the answer. Try again."); }
+    if (!parsed) { hydrate(sessionId, true); return fail("invalid_response", "Could not confirm the answer. Try again."); }
     const { snapshot, delivery } = parsed;
     dismissedThrough.current.set(sessionId, Math.max(dismissedThrough.current.get(sessionId) ?? 0, sequence));
     if (observations.current.get(sessionId) !== observation) return { ok: true, delivery };
@@ -506,7 +609,9 @@ export function useAllSessionEvents(
       if (userIdRef.current !== user || clientRef.current !== owner.client || subsRef.current.get(sessionId) !== owner) return prev;
       const current = prev.get(sessionId);
       if (!current || !sameNotice(current.attention, expected)) return prev;
-      return new Map(prev).set(sessionId, { ...current, attention: snapshot.attention ? restoredNotice(snapshot.attention) : undefined });
+      const attention = snapshot.attention ? restoredNotice(snapshot.attention) : undefined;
+      pruneYielded(sessionId, snapshot.attention, attention?.attentionId);
+      return new Map(prev).set(sessionId, { ...current, attention });
     });
     return { ok: true, delivery };
   }, [hydrate]);
@@ -528,7 +633,7 @@ export function useAllSessionEvents(
   }, [activityMap, sessions]);
 
   const refreshSessionAttention = useCallback(async (sessionId: string) => {
-    await readSnapshot(sessionId);
+    await readSnapshot(sessionId, true);
   }, [readSnapshot]);
 
   return { sessionActivity, markSessionIdle, clearSessionAttention, answerSessionAttention, refreshSessionAttention };

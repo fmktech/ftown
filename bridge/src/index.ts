@@ -875,6 +875,7 @@ program
       publishSyntheticStop: (sid, reason) => pump.publishSyntheticStop(sid, reason),
       withSessionWrite: (sid, task) => pump.withSessionWrite(sid, task),
       unregisterSession: handleSessionExit,
+      onSessionEnding: (session) => coordination.onSessionExit(session.id, session),
       flushTerminalBuffer: (sid) => pump.flush(sid),
       destroyTerminal: (sid) => terminalManager.destroy(sid),
     });

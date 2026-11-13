@@ -26,6 +26,11 @@ export function isDurableNotice(notice: ManualInputNotice | undefined): boolean 
     && (notice.type === "agent_needs_input" || (notice.type === "ask_user" && !!notice.prompt));
 }
 
+/** A parent-routed item the parent has not escalated yet: greyed "with parent" in the inbox. */
+export function isWithParentNotice(notice: Pick<ManualInputNotice, "route" | "escalatedAt">): boolean {
+  return notice.route === "parent" && !notice.escalatedAt;
+}
+
 function validAttentionId(value: unknown): value is string {
   return typeof value === "string" && /^[A-Za-z0-9_-]+$/.test(value);
 }

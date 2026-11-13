@@ -633,4 +633,64 @@ describe('coordination wiring', () => {
     assert.equal(h.escalatedCallbacks[0].item.route, 'human');
     assert.equal(h.escalatedCallbacks[0].item.escalationNote, PARENT_UNAVAILABLE_NOTE);
   });
+
+  it('escalates from a running snapshot and from a deleted parent without a second notice', async () => {
+    const h = createHarness();
+    const parent = makeSession('parent-1', { name: 'Parent', status: 'running' });
+    const child = makeSession('child-1', { name: 'Worker', parentSessionId: 'parent-1' });
+    h.sessions.set(parent.id, parent);
+    h.sessions.set(child.id, child);
+    h.routedMap.set('child-1', [
+      {
+        id: 'att-1',
+        sequence: 1,
+        type: 'agent_needs_input',
+        title: 'Question',
+        message: 'Help',
+        createdAt: '2026-11-13T10:00:00.000Z',
+        lastSeenAt: '2026-11-13T10:00:00.000Z',
+        occurrences: 1,
+        route: 'parent',
+        routedTo: 'parent-1',
+      },
+    ]);
+
+    // A live non-terminal session is not an exit.
+    await h.coord.onSessionExit('parent-1');
+    assert.equal(h.setRouteCalls.length, 0);
+    assert.equal(h.fakeEvents.byRoot.get('parent-1'), undefined);
+
+    // Remove/stop passes the snapshot it already holds. loadSession must not be required.
+    h.setLoadSessionThrow(true);
+    await h.coord.onSessionExit('parent-1', parent);
+    h.setLoadSessionThrow(false);
+    assert.equal(h.setRouteCalls.length, 1);
+    assert.equal(h.setRouteCalls[0].fields.escalationNote, PARENT_UNAVAILABLE_NOTE);
+    assert.equal(h.escalatedCallbacks.length, 1);
+    assert.equal(h.fakeEvents.byRoot.get('parent-1'), undefined);
+
+    // The record is gone. A later exit handler must still try, and must not publish again.
+    h.sessions.delete('parent-1');
+    h.routedMap.set('child-1', [
+      {
+        id: 'att-1',
+        sequence: 1,
+        type: 'agent_needs_input',
+        title: 'Question',
+        message: 'Help',
+        createdAt: '2026-11-13T10:00:00.000Z',
+        lastSeenAt: '2026-11-13T10:00:00.000Z',
+        occurrences: 1,
+        route: 'parent',
+        routedTo: 'parent-1',
+      },
+    ]);
+    h.setRouteCalls.length = 0;
+    h.escalatedCallbacks.length = 0;
+    await h.coord.onSessionExit('parent-1');
+    assert.equal(h.setRouteCalls.length, 1);
+    assert.equal(h.escalatedCallbacks.length, 1);
+    await h.coord.onSessionExit('parent-1');
+    assert.equal(h.escalatedCallbacks.length, 1);
+  });
 });

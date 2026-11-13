@@ -848,6 +848,10 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       removeSession: (id, options) =>
         removeFtownSession({ store, runner, centrifugo, userId }, id, options),
       collectUsage: (session) => collectSessionUsage(session),
+      onSessionEnding: async (session) => {
+        const coordination = this.getCoordination();
+        if (coordination) await coordination.onSessionExit(session.id, session);
+      },
       ...(this.sessionDeps ? { sessionFactory: this.sessionDeps } : {}),
     });
     return this.sessionController;

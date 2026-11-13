@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 
-import { clearsManualInputNotice, extractManualInputNotice, hookEventToActivity, type ManualInputNotice } from "./hook-events";
+import { clearsManualInputNotice, extractManualInputNotice, hookEventToActivity, isWithParentNotice, type ManualInputNotice } from "./hook-events";
+
+describe("isWithParentNotice", () => {
+  it("greys only parent-routed items the parent has not escalated", () => {
+    expect(isWithParentNotice({ route: "parent", escalatedAt: undefined })).toBe(true);
+    expect(isWithParentNotice({})).toBe(false);
+    expect(isWithParentNotice({ route: "human" })).toBe(false);
+    expect(isWithParentNotice({ route: "parent", escalatedAt: "2026-11-13T00:00:00.000Z" })).toBe(false);
+  });
+});
 
 describe("extractManualInputNotice", () => {
   it("uses committed ledger identity and creation time rather than a harness notification id", () => {

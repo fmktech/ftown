@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, type RefObject } from "react";
 import type { ManualInputNotice } from "@/lib/hook-events";
+import { isWithParentNotice } from "@/lib/hook-events";
 import type { SessionActivity } from "@/hooks/useAllSessionEvents";
 import type { BridgeInfo } from "@/hooks/useBridges";
 import type { Command, CommandResponse, Session } from "@/types";
@@ -71,7 +72,7 @@ export function inboxEntries(sessions: readonly Session[], activity: ReadonlyMap
 
 /** A parent-routed item the parent has not escalated yet: greyed "with parent", expandable, outside the waiting counts. */
 export function isWithParent(notice: Pick<ManualInputNotice, "route" | "escalatedAt">): boolean {
-  return notice.route === "parent" && !notice.escalatedAt;
+  return isWithParentNotice(notice);
 }
 
 /** Items that count toward the title-bar waiting prefix and the inbox trigger badge. */

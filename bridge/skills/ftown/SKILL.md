@@ -128,6 +128,9 @@ ftown board --wait --until any-done --timeout 300
 ftown events --wait
 ```
 
+**Delegating work.** Delegate implementation to ftown child sessions (`ftown sessions create --parent ...`) rather than in-process subagents — only sessions appear on the board and dashboard (cards, events, digests, parent-first questions).
+A child session may use its own subagents for reviews and lookups. Pick the CLI and model with `ftown quota --json` (see `references/quota.md`).
+
 ## Manager brief
 
 If you coordinate children, set a brief at the start and add a note at each
