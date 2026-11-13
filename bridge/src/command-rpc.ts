@@ -23,7 +23,7 @@ import { formatAttentionAnswerMail } from './attention-prompt.js';
 import type { AttentionAnswerDelivery } from './attention-prompt-protocol.js';
 import { BridgeUpdateError, type BridgeUpdateCoordinator } from './bridge-update.js';
 import type { UpdateEffects } from './update-effects.js';
-import { validPreviewId, validRevision } from './session-preview.js';
+import { validFileId, validPreviewId, validRevision } from './session-preview.js';
 import { PREVIEW_CHUNK_BYTES } from './preview-protocol.js';
 
 import type {
@@ -68,6 +68,8 @@ export interface CommandRpcDeps {
   pullRequestReview?: PrReviewService;
   enqueueSessionMessage?: (session: Session, message: string) => Promise<{ ok: true; id: string } | { ok: false; error: string }>;
   attentionStore?: AttentionStore;
+  /** Ask every tab to re-read the attention snapshot after a command resolves it. */
+  publishAttentionChanged?: (sessionId: string) => void;
   /** Durable mail path with full mail fields (threadId etc.); used for the answer_session_attention mail fallback. */
   acceptSessionMail?: (session: Session, body: Record<string, unknown>) => Promise<{ ok: true; id: string } | { ok: false; error: string }>;
   updates?: BridgeUpdateCoordinator;
@@ -124,9 +126,11 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
           const payload = command.payload as Record<string, unknown>;
           const failure = (code: SessionMessageErrorCode, error: string): CommandResponse =>
             ({ requestId: command.requestId, success: false, error, data: { code } });
-          if (!payload || typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).sort().join(',') !== 'bridgeId,message,sessionId'
+          const keys = payload && typeof payload === 'object' && !Array.isArray(payload) ? Object.keys(payload).sort().join(',') : '';
+          if (!payload || typeof payload !== 'object' || Array.isArray(payload) || (keys !== 'bridgeId,eventId,message,sessionId' && keys !== 'bridgeId,message,sessionId')
             || payload.bridgeId !== bridgeId || typeof payload.sessionId !== 'string' || !/^[A-Za-z0-9_-]{1,200}$/.test(payload.sessionId)
-            || typeof payload.message !== 'string' || !payload.message.trim() || payload.message.length > 65_536) {
+            || typeof payload.message !== 'string' || !payload.message.trim() || payload.message.length > 65_536
+            || (payload.eventId !== undefined && (typeof payload.eventId !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(payload.eventId)))) {
             response = failure('invalid_request', 'Invalid reply request.'); break;
           }
           let session: Session | null;
@@ -137,11 +141,19 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
           if (!deps.enqueueSessionMessage) { response = failure('mail_not_ready', 'Mail is not ready on this bridge.'); break; }
           try {
             const result = await deps.enqueueSessionMessage(session, payload.message);
-            response = result.ok && typeof result.id === 'string' && result.id.length > 0
-              ? { requestId: command.requestId, success: true, data: { sessionId: session.id, messageId: result.id, status: 'queued' } satisfies SessionMessageAccepted }
-              : !result.ok && result.error === 'Mail store not ready'
+            if (result.ok && typeof result.id === 'string' && result.id.length > 0) {
+              if (typeof payload.eventId === 'string' && deps.attentionStore) {
+                try {
+                  await deps.attentionStore.resolveReplied(payload.sessionId, payload.eventId);
+                  try { deps.publishAttentionChanged?.(payload.sessionId); } catch (err) { console.warn('[Bridge] Could not publish replied attention:', err instanceof Error ? err.message : err); }
+                } catch (err) { console.warn('[Bridge] Could not resolve replied attention:', err instanceof Error ? err.message : err); }
+              }
+              response = { requestId: command.requestId, success: true, data: { sessionId: session.id, messageId: result.id, status: 'queued' } satisfies SessionMessageAccepted };
+            } else {
+              response = !result.ok && result.error === 'Mail store not ready'
                 ? failure('mail_not_ready', 'Mail is not ready on this bridge.')
                 : failure('enqueue_failed', 'Reply may have been queued; check before sending again.');
+            }
           } catch {
             response = failure('enqueue_failed', 'Reply may have been queued; check before sending again.');
           }
@@ -194,11 +206,12 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
         case 'session_preview_chunk': {
           const payload = command.payload;
           const keys = Object.keys(payload);
-          const common = ['bridgeId', 'sessionId', 'previewId'];
+          const common = ['bridgeId', 'sessionId', 'previewId', 'fileId'];
           const allowed = command.type === 'session_preview_status' ? [...common, 'knownRevision'] : [...common, 'revision', 'offset'];
           if (keys.some(key => !allowed.includes(key)) || !('bridgeId' in payload) || payload.bridgeId !== bridgeId
             || !('sessionId' in payload) || typeof payload.sessionId !== 'string' || !/^[A-Za-z0-9_-]{1,200}$/.test(payload.sessionId)
             || !('previewId' in payload) || !validPreviewId(payload.previewId)
+            || !('fileId' in payload) || !validFileId(payload.fileId)
             || (command.type === 'session_preview_status' && 'knownRevision' in payload && !validRevision(payload.knownRevision))
             || (command.type === 'session_preview_chunk' && (!('revision' in payload) || !validRevision(payload.revision)
               || !('offset' in payload) || typeof payload.offset !== 'number' || !Number.isSafeInteger(payload.offset)
@@ -207,8 +220,8 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
             break;
           }
           const result = command.type === 'session_preview_status'
-            ? await sessionController.getPreviewStatus(payload.sessionId, payload.previewId, 'knownRevision' in payload && typeof payload.knownRevision === 'string' ? payload.knownRevision : undefined)
-            : await sessionController.getPreviewChunk(payload.sessionId, payload.previewId, 'revision' in payload && typeof payload.revision === 'string' ? payload.revision : '', 'offset' in payload && typeof payload.offset === 'number' ? payload.offset : -1);
+            ? await sessionController.getPreviewStatus(payload.sessionId, payload.previewId, payload.fileId, 'knownRevision' in payload && typeof payload.knownRevision === 'string' ? payload.knownRevision : undefined)
+            : await sessionController.getPreviewChunk(payload.sessionId, payload.previewId, payload.fileId, 'revision' in payload && typeof payload.revision === 'string' ? payload.revision : '', 'offset' in payload && typeof payload.offset === 'number' ? payload.offset : -1);
           response = result.ok ? { requestId: command.requestId, success: true, data: result.preview }
             : { requestId: command.requestId, success: false, error: result.message, data: { code: result.code } };
           break;
@@ -275,6 +288,9 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
           const snapshot = command.type === 'get_session_attention'
             ? await deps.attentionStore.explicitSnapshot(payload.sessionId)
             : await deps.attentionStore.resolveExplicitThrough(payload.sessionId, payload.eventId as string);
+          if (command.type === 'resolve_session_attention') {
+            try { deps.publishAttentionChanged?.(payload.sessionId); } catch (err) { console.warn('[Bridge] Could not publish dismissed attention:', err instanceof Error ? err.message : err); }
+          }
           response = { requestId: command.requestId, success: true, data: { sessionId: payload.sessionId, ...snapshot } };
           break;
         }

@@ -82,6 +82,8 @@ export interface AllSessionEvents {
   markSessionIdle: (sessionId: string) => void;
   clearSessionAttention: (sessionId: string, expected?: ManualInputNotice) => Promise<void>;
   answerSessionAttention: (sessionId: string, expected: ManualInputNotice, answers: AttentionAnswerEntry[]) => Promise<AnswerSessionAttentionResult>;
+  /** Re-read a session's durable attention snapshot (after a reply resolved it). */
+  refreshSessionAttention: (sessionId: string) => Promise<void>;
 }
 
 export type AnswerSessionAttentionResult =
@@ -206,12 +208,10 @@ export function useAllSessionEvents(
       setActivityMap((prev) => {
         if (clientRef.current !== c || userIdRef.current !== u || subsRef.current.get(sessionId)?.sub !== sub) return prev;
         const current = prev.get(sessionId) ?? { activity: "idle" as const };
-        // Use the latest queued notice, including a Notification from this React batch.
-        // A delayed prompt publication may predate an already restored newer
-        // request. Only the committed snapshot can resolve a stamped notice.
-        const durablePrompt = (msg.eventName === "UserPromptSubmit" || msg.eventName === "beforeSubmitPrompt")
-          && current.attention?.type === "agent_needs_input" && !!current.attention.attentionId;
-        const clearsAttention = !durablePrompt && clearsManualInputNotice(msg.eventName, msg.data, current.attention);
+        // C1: prompts never clear explicit notices (clearsManualInputNotice
+        // returns false for them), so no local guard is needed here; only the
+        // committed snapshot may clear them.
+        const clearsAttention = clearsManualInputNotice(msg.eventName, msg.data, current.attention);
         if (!activity && !attention && !clearsAttention) return prev;
         const toolName =
           activity === "tool_use"
@@ -252,7 +252,9 @@ export function useAllSessionEvents(
       // Prompt hooks have already resolved the ledger. Learn its watermark
       // even if the first read was pending and no displayed ID was known yet.
       // A finished AskUserQuestion was resolved by the bridge; learn that from a snapshot.
-      if (msg.eventName === "UserPromptSubmit" || msg.eventName === "beforeSubmitPrompt"
+      // AttentionSnapshot is the cross-tab signal for command resolutions
+      // (dismiss/reply); it only triggers a re-read, with no activity/clear.
+      if (msg.eventName === "UserPromptSubmit" || msg.eventName === "beforeSubmitPrompt" || msg.eventName === "AttentionSnapshot"
         || ((msg.eventName === "PostToolUse" || msg.eventName === "postToolUse" || msg.eventName === "postToolUseFailure")
           && isAskUserQuestionTool(extractToolLabel(msg.eventName, msg.data)))) void hydrate(sessionId);
     };
@@ -483,5 +485,9 @@ export function useAllSessionEvents(
     return effective;
   }, [activityMap, sessions]);
 
-  return { sessionActivity, markSessionIdle, clearSessionAttention, answerSessionAttention };
+  const refreshSessionAttention = useCallback(async (sessionId: string) => {
+    await readSnapshot(sessionId);
+  }, [readSnapshot]);
+
+  return { sessionActivity, markSessionIdle, clearSessionAttention, answerSessionAttention, refreshSessionAttention };
 }

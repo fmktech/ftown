@@ -1,9 +1,12 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
+import { useLayoutEffect, useState, type ReactNode } from 'react';
 import type { Command, CommandResponse, Session } from '@/types';
 import type { MessageClient } from '@/lib/message-client';
 import { SessionWorkspace } from './SessionWorkspace';
+import type { InboxEntry } from './SessionInbox';
+import { PREVIEW_CSP } from '@/lib/session-preview';
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 it('reports separator bounds consistently at Home and End for fractional pane limits', () => {
@@ -16,7 +19,7 @@ it('reports separator bounds consistently at Home and End for fractional pane li
     disconnect() {}
   }
   vi.stubGlobal('ResizeObserver', TestResizeObserver);
-  const session: Session = { id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '', preview: { id: '12345678-1234-4234-8234-123456789abc', fileName: 'demo.html' } };
+  const session: Session = { id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '', preview: { id: '12345678-1234-4234-8234-123456789abc', files: [{ id: '22345678-2234-4234-8234-123456789abc', fileName: 'demo.html', kind: 'html' }] } };
   render(<SessionWorkspace session={session} client={null} userId="user" readable={false} sendCommand={vi.fn()} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}><div>Terminal content</div></SessionWorkspace>);
   const separator = screen.getByRole('separator', { name: 'Resize terminal and preview' });
   const values = () => ['aria-valuemin', 'aria-valuenow', 'aria-valuemax'].map(name => Number(separator.getAttribute(name)));
@@ -48,14 +51,14 @@ it('preserves iframe and terminal nodes through expansion and benign auth checks
   const subscribeAuthority = (listener: () => void) => { accountListeners.add(listener); return () => accountListeners.delete(listener); };
   const pending: Array<(response: CommandResponse) => void> = []; let initial = true;
   const sendCommand = vi.fn((command: Command): Promise<CommandResponse> => {
-    if (command.type === 'session_preview_chunk') return Promise.resolve({ requestId: 'c', success: true, data: { state: 'chunk', previewId: '12345678-1234-4234-8234-123456789abc', revision, totalBytes: html.length, offset: 0, dataBase64: btoa(html), done: true } });
-    if (initial) { initial = false; return Promise.resolve({ requestId: 's', success: true, data: { state: 'ready', previewId: '12345678-1234-4234-8234-123456789abc', revision, totalBytes: html.length } }); }
+    if (command.type === 'session_preview_chunk') return Promise.resolve({ requestId: 'c', success: true, data: { state: 'chunk', previewId: '12345678-1234-4234-8234-123456789abc', fileId: '22345678-2234-4234-8234-123456789abc', revision, totalBytes: html.length, offset: 0, dataBase64: btoa(html), done: true } });
+    if (initial) { initial = false; return Promise.resolve({ requestId: 's', success: true, data: { state: 'ready', previewId: '12345678-1234-4234-8234-123456789abc', fileId: '22345678-2234-4234-8234-123456789abc', revision, totalBytes: html.length } }); }
     return new Promise(resolve => pending.push(resolve));
   });
-  const session: Session = { id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '', preview: { id: '12345678-1234-4234-8234-123456789abc', fileName: 'demo.html' } };
+  const session: Session = { id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '', preview: { id: '12345678-1234-4234-8234-123456789abc', files: [{ id: '22345678-2234-4234-8234-123456789abc', fileName: 'demo.html', kind: 'html' }] } };
   const workspace = (readable: boolean, reviewOpen = false, isDesktop = true, mobileTab: "terminal" | "preview" | "review" = "preview") => <SessionWorkspace session={session} client={client} userId="user" readable={readable} sendCommand={sendCommand} subscribeAuthority={subscribeAuthority} securityGeneration={0} open onClose={vi.fn()} isDesktop={isDesktop} mobileTab={mobileTab} onMobileTab={vi.fn()} onRefit={vi.fn()} reviewOpen={reviewOpen} reviewActivation={reviewOpen ? 1 : 0}><div data-testid="terminal-node">Terminal content</div></SessionWorkspace>;
   const { container, rerender } = render(workspace(true));
-  const frame = await screen.findByTitle('HTML preview: demo.html');
+  const frame = await screen.findByTitle('Preview: demo.html');
   expect(frame.getAttribute('sandbox')).toBe('allow-scripts');
   const terminal = screen.getByTestId('terminal-node');
   const separator = screen.getByRole('separator', { name: 'Resize terminal and preview' });
@@ -64,17 +67,17 @@ it('preserves iframe and terminal nodes through expansion and benign auth checks
   const expand = screen.getByRole('button', { name: 'Expand preview' }); expand.focus(); fireEvent.click(expand);
   expect(screen.getByRole('button', { name: 'Collapse preview' })).toBe(expand);
   expect(document.activeElement).toBe(expand); expect(terminal.parentElement?.hidden).toBe(true);
-  expect(screen.getByTitle('HTML preview: demo.html')).toBe(frame);
+  expect(screen.getByTitle('Preview: demo.html')).toBe(frame);
   expect(container.querySelector('[role="separator"]')).toBeNull();
   fireEvent.keyDown(expand, { key: 'Escape' });
   expect(screen.getByRole('button', { name: 'Expand preview' })).toBe(expand);
   expect(terminal.parentElement?.hidden).toBe(false); expect(terminal.parentElement?.getAttribute('style')).toBe(width);
-  expect(screen.getByTitle('HTML preview: demo.html')).toBe(frame); expect(screen.getByTestId('terminal-node')).toBe(terminal);
+  expect(screen.getByTitle('Preview: demo.html')).toBe(frame); expect(screen.getByTestId('terminal-node')).toBe(terminal);
   rerender(workspace(true, true));
   expect(screen.getByRole('tab', { name: 'PR review' }).getAttribute('aria-selected')).toBe('true');
   expect(frame.isConnected).toBe(true); expect(screen.getByTestId('terminal-node')).toBe(terminal);
   fireEvent.click(screen.getByRole('tab', { name: 'Preview' }));
-  expect(screen.getByTitle('HTML preview: demo.html')).toBe(frame);
+  expect(screen.getByTitle('Preview: demo.html')).toBe(frame);
   fireEvent.keyDown(screen.getByRole('tablist', { name: 'Auxiliary view' }), { key: 'End' });
   expect(screen.getByRole('tab', { name: 'PR review' }).getAttribute('aria-selected')).toBe('true');
   fireEvent.click(screen.getByRole('tab', { name: 'Preview' }));
@@ -84,21 +87,21 @@ it('preserves iframe and terminal nodes through expansion and benign auth checks
   expect(terminal.parentElement?.hidden).toBe(false);
   expect(frame.isConnected).toBe(true); expect(screen.getByTestId('terminal-node')).toBe(terminal);
   rerender(workspace(true, true, false, 'preview'));
-  expect(screen.getByTitle('HTML preview: demo.html')).toBe(frame);
+  expect(screen.getByTitle('Preview: demo.html')).toBe(frame);
   rerender(workspace(true));
   act(() => listeners.forEach(listener => listener()));
   expect(frame.isConnected).toBe(true); expect(frame.style.visibility).not.toBe('hidden');
   expect(screen.queryByText('Checking preview access…')).toBeNull();
-  await act(async () => { pending.shift()!({ requestId: 's2', success: true, data: { state: 'unchanged', previewId: session.preview!.id, revision, totalBytes: html.length } }); });
+  await act(async () => { pending.shift()!({ requestId: 's2', success: true, data: { state: 'unchanged', previewId: session.preview!.id, fileId: '22345678-2234-4234-8234-123456789abc', revision, totalBytes: html.length } }); });
   await waitFor(() => expect(frame.isConnected).toBe(true));
-  expect(screen.getByTitle('HTML preview: demo.html')).toBe(frame);
+  expect(screen.getByTitle('Preview: demo.html')).toBe(frame);
   act(() => { status = 'offline'; listeners.forEach(listener => listener()); });
   rerender(workspace(false));
-  expect(screen.getByTitle('HTML preview: demo.html')).toBe(frame);
+  expect(screen.getByTitle('Preview: demo.html')).toBe(frame);
   expect(frame.isConnected).toBe(true); expect(frame.style.visibility).not.toBe('hidden');
   expect(screen.queryByText('Reconnect to load preview')).toBeNull();
   act(() => { status = 'connecting'; listeners.forEach(listener => listener()); });
-  expect(screen.getByTitle('HTML preview: demo.html')).toBe(frame);
+  expect(screen.getByTitle('Preview: demo.html')).toBe(frame);
   act(() => { allowed = false; accountListeners.forEach(listener => listener()); allowed = true; accountListeners.forEach(listener => listener()); });
   expect(frame.isConnected).toBe(false);
   if (originalSubtle) Object.defineProperty(globalThis.crypto, 'subtle', originalSubtle); else Reflect.deleteProperty(globalThis.crypto, 'subtle');
@@ -119,14 +122,14 @@ it('disconnects the old iframe when the timer detects changed permissions while 
     const pin = { bridgeId: 'bridge', endpoint, permissions: ['read'] };
     const runtime = { identity: { endpoint: { ...endpoint, kind: 'browser', id: 'browser' } }, bridge: () => pin, state: () => ({ status: 'ready' }), assertCanSend: () => {}, onChange: () => () => {} };
     const client = { securityRuntime: runtime } as unknown as MessageClient;
-    const html = '<p>preview</p>'; const revision = '9'.repeat(64); const previewId = '12345678-1234-4234-8234-123456789abc';
+    const html = '<p>preview</p>'; const revision = '9'.repeat(64); const previewId = '12345678-1234-4234-8234-123456789abc'; const fileId = '22345678-2234-4234-8234-123456789abc';
     const sendCommand = vi.fn(async (command: Command) => ({ requestId: 'x', success: true, data: command.type === 'session_preview_chunk'
-      ? { state: 'chunk', previewId, revision, totalBytes: html.length, offset: 0, dataBase64: btoa(html), done: true }
-      : { state: 'ready', previewId, revision, totalBytes: html.length } }));
-    const session: Session = { id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '', preview: { id: previewId, fileName: 'demo.html' } };
+      ? { state: 'chunk', previewId, fileId, revision, totalBytes: html.length, offset: 0, dataBase64: btoa(html), done: true }
+      : { state: 'ready', previewId, fileId, revision, totalBytes: html.length } }));
+    const session: Session = { id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '', preview: { id: previewId, files: [{ id: fileId, fileName: 'demo.html', kind: 'html' }] } };
     const workspace = (readable: boolean) => <SessionWorkspace session={session} client={client} userId="user" readable={readable} sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}><div>Terminal</div></SessionWorkspace>;
     const { rerender } = render(workspace(true)); await act(async () => {});
-    const frame = screen.getByTitle('HTML preview: demo.html');
+    const frame = screen.getByTitle('Preview: demo.html');
     rerender(workspace(false)); expect(frame.isConnected).toBe(true);
     pin.permissions.push('control'); // Still has read, but its authority fingerprint changed.
     await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
@@ -144,7 +147,7 @@ it("provides compact review navigation with roving keyboard selection", () => {
     unobserve() {} disconnect() {}
   }
   vi.stubGlobal("ResizeObserver", TestResizeObserver);
-  const session: Session = { id: "one", bridgeId: "bridge", name: "one", status: "running", createdAt: "", updatedAt: "", pullRequestUrl: "https://github.com/owner/repo/pull/1", preview: { id: "12345678-1234-4234-8234-123456789abc", fileName: "demo.html" } };
+  const session: Session = { id: "one", bridgeId: "bridge", name: "one", status: "running", createdAt: "", updatedAt: "", pullRequestUrl: "https://github.com/owner/repo/pull/1", preview: { id: "12345678-1234-4234-8234-123456789abc", files: [{ id: "22345678-2234-4234-8234-123456789abc", fileName: "demo.html", kind: "html" }] } };
   render(<SessionWorkspace session={session} client={null} userId="user" readable={false} sendCommand={vi.fn()} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()} reviewOpen reviewActivation={1}><div>Terminal content</div></SessionWorkspace>);
   const tabs = screen.getByRole("tablist", { name: "Session view" });
   const review = screen.getByRole("tab", { name: "PR review" }); expect(review.getAttribute("aria-selected")).toBe("true");
@@ -153,7 +156,7 @@ it("provides compact review navigation with roving keyboard selection", () => {
   fireEvent.keyDown(tabs, { key: "End" }); expect(review.getAttribute("aria-selected")).toBe("true");
 });
 
-const reviewFixture: Session = { id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '', pullRequestUrl: 'https://github.com/owner/repo/pull/1', preview: { id: '12345678-1234-4234-8234-123456789abc', fileName: 'demo.html' } };
+const reviewFixture: Session = { id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '', pullRequestUrl: 'https://github.com/owner/repo/pull/1', preview: { id: '12345678-1234-4234-8234-123456789abc', files: [{ id: '22345678-2234-4234-8234-123456789abc', fileName: 'demo.html', kind: 'html' }] } };
 function resizeTo(width: number) {
   class TestResizeObserver implements ResizeObserver {
     constructor(private callback: ResizeObserverCallback) {}
@@ -193,7 +196,7 @@ it.each([900, 500])('preview registration replacement or removal retains selecte
   const { rerender } = render(workspace(reviewFixture));
   const terminal = screen.getByTestId('stable-terminal');
   expect(screen.getByRole('tabpanel', { name: 'PR review' }).hidden).toBe(false);
-  rerender(workspace({ ...reviewFixture, preview: { id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', fileName: 'new.html' } }));
+  rerender(workspace({ ...reviewFixture, preview: { id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', files: [{ id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', fileName: 'new.html', kind: 'html' }] } }));
   expect(screen.getByRole('tabpanel', { name: 'PR review' }).hidden).toBe(false);
   rerender(workspace({ ...reviewFixture, preview: undefined }));
   expect(screen.getByRole('tabpanel', { name: 'PR review' }).hidden).toBe(false);
@@ -281,14 +284,14 @@ it('focuses the link confirmation once and keeps user focus across unrelated ren
   const client = { securityRuntime: runtime } as unknown as MessageClient;
   const previewId = '12345678-1234-4234-8234-123456789abc';
   const sendCommand = vi.fn(async (command: Command) => ({ requestId: 'x', success: true, data: command.type === 'session_preview_chunk'
-    ? { state: 'chunk', previewId, revision, totalBytes: html.length, offset: 0, dataBase64: btoa(html), done: true }
-    : { state: 'ready', previewId, revision, totalBytes: html.length } }));
-  const session: Session = { id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '', preview: { id: previewId, fileName: 'demo.html' } };
+    ? { state: 'chunk', previewId, fileId: '22345678-2234-4234-8234-123456789abc', revision, totalBytes: html.length, offset: 0, dataBase64: btoa(html), done: true }
+    : { state: 'ready', previewId, fileId: '22345678-2234-4234-8234-123456789abc', revision, totalBytes: html.length } }));
+  const session: Session = { id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '', preview: { id: previewId, files: [{ id: '22345678-2234-4234-8234-123456789abc', fileName: 'demo.html', kind: 'html' }] } };
   const workspace = (generation: number) => <SessionWorkspace session={session} client={client} userId="user" readable sendCommand={sendCommand} securityGeneration={generation} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}><div>Terminal</div></SessionWorkspace>;
   try {
     const { rerender } = render(workspace(0));
     await act(async () => {});
-    const frame = screen.getByTitle('HTML preview: demo.html') as HTMLIFrameElement;
+    const frame = screen.getByTitle('Preview: demo.html') as HTMLIFrameElement;
     const expand = screen.getByRole('button', { name: 'Expand preview' });
     expand.focus(); expect(document.activeElement).toBe(expand);
     act(() => { window.dispatchEvent(new MessageEvent('message', { data: { channel: 'ftown-preview-link-v1', kind: 'open-link', url: 'https://preview.example.test/x' }, source: frame.contentWindow, origin: 'null' })); });
@@ -320,6 +323,1051 @@ it('focuses the link confirmation once and keeps user focus across unrelated ren
     expect(screen.queryByRole('dialog', { name: 'Open external link' })).toBeNull();
     expect(document.activeElement).toBe(expand);
   } finally {
+    if (originalSubtle) Object.defineProperty(globalThis.crypto, 'subtle', originalSubtle); else Reflect.deleteProperty(globalThis.crypto, 'subtle');
+  }
+});
+
+// SPEC-A multi-file selector
+
+function makeFile(idSuffix: string, fileName: string, kind: 'html' | 'markdown') {
+  return { id: `40000000-4000-4000-8000-${idSuffix.padStart(12, '0').slice(-12)}`, fileName, kind };
+}
+function uuid(id: string) { return id; }
+
+it('shows no selector for a single file', () => {
+  resizeTo(900);
+  const session: Session = {
+    id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '',
+    preview: { id: '12345678-1234-4234-8234-123456789abc', files: [{ id: '22345678-2234-4234-8234-123456789abc', fileName: 'demo.html', kind: 'html' }] },
+  };
+  render(<SessionWorkspace session={session} client={null} userId="user" readable={false} sendCommand={vi.fn()} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}><div>Terminal</div></SessionWorkspace>);
+  expect(screen.getByText('demo.html')).toBeTruthy();
+  expect(screen.queryByLabelText('Preview file')).toBeNull();
+  expect(screen.queryByRole('tablist', { name: 'Preview file' })).toBeNull();
+});
+
+it('shows a tablist for 2-4 files with aria-selected and title ellipsis', () => {
+  resizeTo(900);
+  const session: Session = {
+    id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '',
+    preview: {
+      id: '12345678-1234-4234-8234-123456789abc',
+      files: [
+        { id: '40000000-4000-4000-8000-000000000001', fileName: 'a.html', kind: 'html' },
+        { id: '40000000-4000-4000-8000-000000000002', fileName: 'very-long-file-name-that-should-ellipsis.md', kind: 'markdown' },
+        { id: '40000000-4000-4000-8000-000000000003', fileName: 'c.html', kind: 'html' },
+      ],
+    },
+  };
+  render(<SessionWorkspace session={session} client={null} userId="user" readable={false} sendCommand={vi.fn()} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}><div>Terminal</div></SessionWorkspace>);
+  const list = screen.getByRole('tablist', { name: 'Preview file' });
+  expect(list).toBeTruthy();
+  const tabs = within(list).getAllByRole('tab');
+  expect(tabs).toHaveLength(3);
+  expect(tabs[0].getAttribute('aria-selected')).toBe('true');
+  expect(tabs[1].getAttribute('aria-selected')).toBe('false');
+  expect(tabs[1].getAttribute('title')).toBe('very-long-file-name-that-should-ellipsis.md');
+  expect(tabs[1].textContent).toBe('very-long-file-name-that-should-ellipsis.md');
+  // keyboard accessible: tab buttons are focusable and selectable via Enter/space (implicit) + arrow nav
+  tabs[1].focus();
+  fireEvent.keyDown(list, { key: 'ArrowRight' });
+  // after arrow, focus moves and click occurs via our handler, so selection should update
+  // Our handler clicks the next tab, so c.html should become selected after another arrow from focused element
+  // Verify at least one selection change via direct click
+  fireEvent.click(tabs[1]);
+  expect(tabs[1].getAttribute('aria-selected')).toBe('true');
+  expect(tabs[0].getAttribute('aria-selected')).toBe('false');
+});
+
+it('shows a native select for 6+ side pane entries', () => {
+  resizeTo(900);
+  const session: Session = {
+    id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '',
+    preview: {
+      id: '12345678-1234-4234-8234-123456789abc',
+      files: [
+        { id: '40000000-4000-4000-8000-000000000001', fileName: 'a.html', kind: 'html' },
+        { id: '40000000-4000-4000-8000-000000000002', fileName: 'b.html', kind: 'html' },
+        { id: '40000000-4000-4000-8000-000000000003', fileName: 'c.html', kind: 'html' },
+        { id: '40000000-4000-4000-8000-000000000004', fileName: 'd.html', kind: 'html' },
+        { id: '40000000-4000-4000-8000-000000000005', fileName: 'e.html', kind: 'html' },
+        { id: '40000000-4000-4000-8000-000000000006', fileName: 'f.html', kind: 'html' },
+      ],
+    },
+  };
+  render(<SessionWorkspace session={session} client={null} userId="user" readable={false} sendCommand={vi.fn()} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}><div>Terminal</div></SessionWorkspace>);
+  const select = screen.getByLabelText('Preview file') as HTMLSelectElement;
+  expect(select.tagName).toBe('SELECT');
+  expect(select.value).toBe('a.html');
+  fireEvent.change(select, { target: { value: 'c.html' } });
+  expect(select.value).toBe('c.html');
+});
+
+it('keeps selection by fileName across set change even with new file id, and selects newly added file', () => {
+  resizeTo(900);
+  const sendCommand = vi.fn();
+  const { rerender } = render(
+    <SessionWorkspace
+      session={{
+        id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '',
+        preview: {
+          id: '11111111-1111-4111-8111-111111111111',
+          files: [
+            { id: '40000000-4000-4000-8000-000000000001', fileName: 'a.html', kind: 'html' },
+            { id: '40000000-4000-4000-8000-000000000002', fileName: 'b.html', kind: 'html' },
+          ],
+        },
+      }}
+      client={null} userId="user" readable={false} sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}
+    ><div>Terminal</div></SessionWorkspace>
+  );
+  let list = screen.getByRole('tablist', { name: 'Preview file' });
+  let tabs = within(list).getAllByRole('tab');
+  fireEvent.click(tabs[1]); // select b.html
+  expect(tabs[1].getAttribute('aria-selected')).toBe('true');
+
+  // set change: new set id, same fileNames but new file ids
+  rerender(
+    <SessionWorkspace
+      session={{
+        id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '',
+        preview: {
+          id: '22222222-2222-4222-8222-222222222222',
+          files: [
+            { id: '40000000-4000-4000-8000-000000000011', fileName: 'a.html', kind: 'html' },
+            { id: '40000000-4000-4000-8000-000000000012', fileName: 'b.html', kind: 'html' },
+          ],
+        },
+      }}
+      client={null} userId="user" readable={false} sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}
+    ><div>Terminal</div></SessionWorkspace>
+  );
+  list = screen.getByRole('tablist', { name: 'Preview file' });
+  tabs = within(list).getAllByRole('tab');
+  expect(tabs[1].getAttribute('aria-selected')).toBe('true');
+  expect(tabs[0].getAttribute('aria-selected')).toBe('false');
+
+  // addition via --add: introduce c.html not previously seen
+  rerender(
+    <SessionWorkspace
+      session={{
+        id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '',
+        preview: {
+          id: '33333333-3333-4333-8333-333333333333',
+          files: [
+            { id: '40000000-4000-4000-8000-000000000011', fileName: 'a.html', kind: 'html' },
+            { id: '40000000-4000-4000-8000-000000000012', fileName: 'b.html', kind: 'html' },
+            { id: '40000000-4000-4000-8000-000000000013', fileName: 'c.html', kind: 'html' },
+          ],
+        },
+      }}
+      client={null} userId="user" readable={false} sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}
+    ><div>Terminal</div></SessionWorkspace>
+  );
+  list = screen.getByRole('tablist', { name: 'Preview file' });
+  tabs = within(list).getAllByRole('tab');
+  expect(tabs[2].getAttribute('aria-selected')).toBe('true');
+  expect(tabs[0].getAttribute('aria-selected')).toBe('false');
+  expect(tabs[1].getAttribute('aria-selected')).toBe('false');
+
+  // removal of selected file falls back to first
+  rerender(
+    <SessionWorkspace
+      session={{
+        id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '',
+        preview: {
+          id: '44444444-4444-4444-8444-444444444444',
+          files: [
+            { id: '40000000-4000-4000-8000-000000000011', fileName: 'a.html', kind: 'html' },
+            { id: '40000000-4000-4000-8000-000000000012', fileName: 'b.html', kind: 'html' },
+          ],
+        },
+      }}
+      client={null} userId="user" readable={false} sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}
+    ><div>Terminal</div></SessionWorkspace>
+  );
+  list = screen.getByRole('tablist', { name: 'Preview file' });
+  tabs = within(list).getAllByRole('tab');
+  expect(tabs[0].getAttribute('aria-selected')).toBe('true');
+});
+
+it('switching files shows loading never stale content and markdown vs HTML srcDoc branch', async () => {
+  resizeTo(900);
+  const originalSubtle = Object.getOwnPropertyDescriptor(globalThis.crypto, 'subtle');
+  Object.defineProperty(globalThis.crypto, 'subtle', { configurable: true, value: { digest: async (_alg: string, bytes: Uint8Array) => {
+    void _alg;
+    const text = new TextDecoder().decode(bytes);
+    const byte = text.includes('first') ? 0xaa : 0xbb;
+    return Uint8Array.from({ length: 32 }, () => byte).buffer;
+  } } });
+  const htmlContent = '<p>first</p>'; const mdContent = '# Heading\n\n| A | B |\n|---|---|';
+  const revisionHtml = 'a'.repeat(64); const revisionMd = 'b'.repeat(64);
+  const sendCommand = vi.fn((command: Command): Promise<CommandResponse> => {
+    const payload = command.payload as Record<string, unknown>;
+    const fileId = typeof payload.fileId === 'string' ? payload.fileId : '';
+    const isHtml = fileId === '40000000-4000-4000-8000-000000000001';
+    const text = isHtml ? htmlContent : mdContent;
+    const rev = isHtml ? revisionHtml : revisionMd;
+    if (command.type === 'session_preview_chunk') {
+      return Promise.resolve({ requestId: 'c', success: true, data: { state: 'chunk', previewId: '12345678-1234-4234-8234-123456789abc', fileId, revision: rev, totalBytes: text.length, offset: 0, dataBase64: btoa(text), done: true } });
+    }
+    return Promise.resolve({ requestId: 's', success: true, data: { state: 'ready', previewId: '12345678-1234-4234-8234-123456789abc', fileId, revision: rev, totalBytes: text.length } });
+  });
+  const session: Session = {
+    id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '',
+    preview: {
+      id: '12345678-1234-4234-8234-123456789abc',
+      files: [
+        { id: '40000000-4000-4000-8000-000000000001', fileName: 'a.html', kind: 'html' },
+        { id: '40000000-4000-4000-8000-000000000002', fileName: 'notes.md', kind: 'markdown' },
+      ],
+    },
+  };
+  render(
+    <SessionWorkspace session={session} client={{} as unknown as MessageClient} userId="user" readable={true} sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}><div>Terminal</div></SessionWorkspace>
+  );
+  // first file loads html
+  const frame = await screen.findByTitle('Preview: a.html');
+  const srcDoc = frame.getAttribute('srcdoc') ?? '';
+  expect(srcDoc).toContain(PREVIEW_CSP);
+  expect(srcDoc).toContain('first');
+  expect(srcDoc).toContain('a.html');
+  // switch to markdown
+  const list = screen.getByRole('tablist', { name: 'Preview file' });
+  const mdTab = within(list).getByRole('tab', { name: 'notes.md' });
+  fireEvent.click(mdTab);
+  // while loading, stale content should not be visible: iframe disappears and loading message appears, or at least not show previous html under new name
+  expect(screen.queryByTitle('Preview: a.html')).toBeNull();
+  const mdFrame = await screen.findByTitle('Preview: notes.md');
+  const mdSrcDoc = mdFrame.getAttribute('srcdoc') ?? '';
+  expect(mdSrcDoc).toContain(PREVIEW_CSP);
+  expect(mdSrcDoc).toContain('Heading');
+  // markdown document should contain markdownDocument structure (doctype, heading)
+  expect(mdSrcDoc).toContain('<h1');
+  if (originalSubtle) Object.defineProperty(globalThis.crypto, 'subtle', originalSubtle); else Reflect.deleteProperty(globalThis.crypto, 'subtle');
+});
+
+it('relative link to registered file switches selection via onSwitchFile', async () => {
+  resizeTo(900);
+  const originalSubtle = Object.getOwnPropertyDescriptor(globalThis.crypto, 'subtle');
+  Object.defineProperty(globalThis.crypto, 'subtle', { configurable: true, value: { digest: async () => Uint8Array.from({ length: 32 }, () => 0x99).buffer } });
+  const html = '<p>preview</p>'; const revision = '9'.repeat(64);
+  const sendCommand = vi.fn(async (command: Command) => ({ requestId: 'x', success: true, data: command.type === 'session_preview_chunk'
+    ? { state: 'chunk', previewId: '12345678-1234-4234-8234-123456789abc', fileId: (command.payload as Record<string, unknown>).fileId, revision, totalBytes: html.length, offset: 0, dataBase64: btoa(html), done: true }
+    : { state: 'ready', previewId: '12345678-1234-4234-8234-123456789abc', fileId: (command.payload as Record<string, unknown>).fileId, revision, totalBytes: html.length } }));
+  const session: Session = {
+    id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '',
+    preview: {
+      id: '12345678-1234-4234-8234-123456789abc',
+      files: [
+        { id: '40000000-4000-4000-8000-000000000001', fileName: 'a.html', kind: 'html' },
+        { id: '40000000-4000-4000-8000-000000000002', fileName: 'notes.md', kind: 'markdown' },
+      ],
+    },
+  };
+  render(<SessionWorkspace session={session} client={{} as unknown as MessageClient} userId="user" readable={true} sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}><div>Terminal</div></SessionWorkspace>);
+  const frame = await screen.findByTitle('Preview: a.html') as HTMLIFrameElement;
+  // simulate iframe posting switch-file
+  act(() => {
+    window.dispatchEvent(new MessageEvent('message', { data: { channel: 'ftown-preview-link-v1', kind: 'switch-file', fileName: 'notes.md' }, source: frame.contentWindow, origin: 'null' }));
+  });
+  const list = screen.getByRole('tablist', { name: 'Preview file' });
+  const mdTab = within(list).getByRole('tab', { name: 'notes.md' });
+  expect(mdTab.getAttribute('aria-selected')).toBe('true');
+  const aTab = within(list).getByRole('tab', { name: 'a.html' });
+  expect(aTab.getAttribute('aria-selected')).toBe('false');
+  if (originalSubtle) Object.defineProperty(globalThis.crypto, 'subtle', originalSubtle); else Reflect.deleteProperty(globalThis.crypto, 'subtle');
+});
+
+it('ignores switch-file for an unregistered file and keeps the current selection', async () => {
+  resizeTo(900);
+  const originalSubtle = Object.getOwnPropertyDescriptor(globalThis.crypto, 'subtle');
+  Object.defineProperty(globalThis.crypto, 'subtle', { configurable: true, value: { digest: async () => Uint8Array.from({ length: 32 }, () => 0x99).buffer } });
+  const html = '<p>preview</p>'; const revision = '9'.repeat(64);
+  const sendCommand = vi.fn(async (command: Command) => ({ requestId: 'x', success: true, data: command.type === 'session_preview_chunk'
+    ? { state: 'chunk', previewId: '12345678-1234-4234-8234-123456789abc', fileId: (command.payload as Record<string, unknown>).fileId, revision, totalBytes: html.length, offset: 0, dataBase64: btoa(html), done: true }
+    : { state: 'ready', previewId: '12345678-1234-4234-8234-123456789abc', fileId: (command.payload as Record<string, unknown>).fileId, revision, totalBytes: html.length } }));
+  const session: Session = {
+    id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '',
+    preview: {
+      id: '12345678-1234-4234-8234-123456789abc',
+      files: [
+        { id: '40000000-4000-4000-8000-000000000001', fileName: 'a.html', kind: 'html' },
+        { id: '40000000-4000-4000-8000-000000000002', fileName: 'notes.md', kind: 'markdown' },
+      ],
+    },
+  };
+  render(<SessionWorkspace session={session} client={{} as unknown as MessageClient} userId="user" readable={true} sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}><div>Terminal</div></SessionWorkspace>);
+  await screen.findByTitle('Preview: a.html');
+  // Start on the second file so a broken match check (which would store the
+  // unknown name and fall back to the first file) is observable.
+  const list = screen.getByRole('tablist', { name: 'Preview file' });
+  fireEvent.click(within(list).getByRole('tab', { name: 'notes.md' }));
+  const mdFrame = await screen.findByTitle('Preview: notes.md') as HTMLIFrameElement;
+  expect(within(screen.getByRole('tablist', { name: 'Preview file' })).getByRole('tab', { name: 'notes.md' }).getAttribute('aria-selected')).toBe('true');
+  act(() => {
+    window.dispatchEvent(new MessageEvent('message', { data: { channel: 'ftown-preview-link-v1', kind: 'switch-file', fileName: 'missing.md' }, source: mdFrame.contentWindow, origin: 'null' }));
+  });
+  const after = screen.getByRole('tablist', { name: 'Preview file' });
+  expect(within(after).getByRole('tab', { name: 'notes.md' }).getAttribute('aria-selected')).toBe('true');
+  expect(within(after).getByRole('tab', { name: 'a.html' }).getAttribute('aria-selected')).toBe('false');
+  expect(screen.getByTitle('Preview: notes.md')).toBe(mdFrame);
+  if (originalSubtle) Object.defineProperty(globalThis.crypto, 'subtle', originalSubtle); else Reflect.deleteProperty(globalThis.crypto, 'subtle');
+});
+
+it('remembers the selected file per session across session switches while mounted', async () => {
+  resizeTo(900);
+  const originalSubtle = Object.getOwnPropertyDescriptor(globalThis.crypto, 'subtle');
+  Object.defineProperty(globalThis.crypto, 'subtle', { configurable: true, value: { digest: async () => Uint8Array.from({ length: 32 }, () => 0x99).buffer } });
+  const html = '<p>preview</p>'; const revision = '9'.repeat(64);
+  const client = {} as unknown as MessageClient;
+  const sendCommand = vi.fn((command: Command): Promise<CommandResponse> => {
+    const payload = command.payload as Record<string, unknown>;
+    const previewId = typeof payload.previewId === 'string' ? payload.previewId : '';
+    const fileId = typeof payload.fileId === 'string' ? payload.fileId : '';
+    if (command.type === 'session_preview_chunk') {
+      return Promise.resolve({ requestId: 'c', success: true, data: { state: 'chunk', previewId, fileId, revision, totalBytes: html.length, offset: 0, dataBase64: btoa(html), done: true } });
+    }
+    return Promise.resolve({ requestId: 's', success: true, data: { state: 'ready', previewId, fileId, revision, totalBytes: html.length } });
+  });
+  const sessionA: Session = {
+    id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '',
+    preview: {
+      id: '11111111-1111-4111-8111-111111111111',
+      files: [
+        { id: '40000000-4000-4000-8000-000000000001', fileName: 'a.html', kind: 'html' },
+        { id: '40000000-4000-4000-8000-000000000002', fileName: 'notes.md', kind: 'markdown' },
+      ],
+    },
+  };
+  const sessionB: Session = {
+    id: 'two', bridgeId: 'bridge', name: 'two', status: 'running', createdAt: '', updatedAt: '',
+    preview: {
+      id: '22222222-2222-4222-8222-222222222222',
+      files: [
+        { id: '40000000-4000-4000-8000-000000000003', fileName: 'x.html', kind: 'html' },
+        { id: '40000000-4000-4000-8000-000000000004', fileName: 'y.md', kind: 'markdown' },
+      ],
+    },
+  };
+  const workspace = (session: Session) => <SessionWorkspace session={session} client={client} userId="user" readable={true} sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}><div>Terminal</div></SessionWorkspace>;
+  const { rerender } = render(workspace(sessionA));
+  await screen.findByTitle('Preview: a.html');
+  fireEvent.click(within(screen.getByRole('tablist', { name: 'Preview file' })).getByRole('tab', { name: 'notes.md' }));
+  await screen.findByTitle('Preview: notes.md');
+  expect(within(screen.getByRole('tablist', { name: 'Preview file' })).getByRole('tab', { name: 'notes.md' }).getAttribute('aria-selected')).toBe('true');
+  rerender(workspace(sessionB));
+  await screen.findByTitle('Preview: x.html');
+  const listB = screen.getByRole('tablist', { name: 'Preview file' });
+  expect(within(listB).getByRole('tab', { name: 'x.html' }).getAttribute('aria-selected')).toBe('true');
+  expect(within(listB).getByRole('tab', { name: 'y.md' }).getAttribute('aria-selected')).toBe('false');
+  rerender(workspace(sessionA));
+  await screen.findByTitle('Preview: notes.md');
+  const listBack = screen.getByRole('tablist', { name: 'Preview file' });
+  expect(within(listBack).getByRole('tab', { name: 'notes.md' }).getAttribute('aria-selected')).toBe('true');
+  expect(within(listBack).getByRole('tab', { name: 'a.html' }).getAttribute('aria-selected')).toBe('false');
+  if (originalSubtle) Object.defineProperty(globalThis.crypto, 'subtle', originalSubtle); else Reflect.deleteProperty(globalThis.crypto, 'subtle');
+});
+
+it('treats old bridge shape without files as no preview', () => {
+  resizeTo(900);
+  const session = { id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '', preview: { id: '12345678-1234-4234-8234-123456789abc', fileName: 'demo.html' } } as unknown as Session;
+  render(<SessionWorkspace session={session} client={null} userId="user" readable={false} sendCommand={vi.fn()} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}><div>Terminal</div></SessionWorkspace>);
+  expect(screen.queryByLabelText('Session preview')).toBeNull();
+  expect(screen.queryByRole('region', { name: 'Session preview' })).toBeNull();
+  expect(screen.queryByText('Loading preview…')).toBeNull();
+});
+
+it('error shows file name of selected file', async () => {
+  resizeTo(900);
+  const sendCommand = vi.fn(async () => ({ requestId: 'x', success: false, data: { code: 'unknown' } }));
+  const session: Session = {
+    id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '',
+    preview: {
+      id: '12345678-1234-4234-8234-123456789abc',
+      files: [
+        { id: '40000000-4000-4000-8000-000000000001', fileName: 'a.html', kind: 'html' },
+        { id: '40000000-4000-4000-8000-000000000002', fileName: 'b.html', kind: 'html' },
+      ],
+    },
+  };
+  render(<SessionWorkspace session={session} client={{} as unknown as MessageClient} userId="user" readable={true} sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}><div>Terminal</div></SessionWorkspace>);
+  const list = screen.getByRole('tablist', { name: 'Preview file' });
+  expect(list).toBeTruthy();
+  // error state shows Retry and file-related message including the selected file name
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy());
+  const status = screen.getByRole('status');
+  expect(status.querySelector('span')?.textContent).toBe('a.html is unavailable');
+  // selected file name is in the tablist
+  expect(within(list).getByRole('tab', { name: 'a.html' }).getAttribute('aria-selected')).toBe('true');
+});
+
+it('first registration of two files selects the first file', () => {
+  resizeTo(900);
+  const sendCommand = vi.fn();
+  const baseSession = { id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '' } as Session;
+  const workspace = (session: Session) => <SessionWorkspace session={session} client={null} userId="user" readable={false} sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}><div>Terminal</div></SessionWorkspace>;
+  const { rerender } = render(workspace(baseSession));
+  expect(screen.queryByRole('tablist', { name: 'Preview file' })).toBeNull();
+  rerender(workspace({
+    ...baseSession,
+    preview: {
+      id: '11111111-1111-4111-8111-111111111111',
+      files: [
+        { id: '40000000-4000-4000-8000-000000000001', fileName: 'a.html', kind: 'html' },
+        { id: '40000000-4000-4000-8000-000000000002', fileName: 'notes.md', kind: 'markdown' },
+      ],
+    },
+  }));
+  const list = screen.getByRole('tablist', { name: 'Preview file' });
+  const tabs = within(list).getAllByRole('tab');
+  expect(tabs).toHaveLength(2);
+  expect(tabs[0].getAttribute('aria-selected')).toBe('true');
+  expect(tabs[1].getAttribute('aria-selected')).toBe('false');
+});
+
+it('replacing the set with all-new names selects the first file', () => {
+  resizeTo(900);
+  const sendCommand = vi.fn();
+  const baseSession = { id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '' } as Session;
+  const workspace = (preview: Session['preview']) => <SessionWorkspace session={{ ...baseSession, preview }} client={null} userId="user" readable={false} sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}><div>Terminal</div></SessionWorkspace>;
+  const { rerender } = render(workspace({
+    id: '11111111-1111-4111-8111-111111111111',
+    files: [
+      { id: '40000000-4000-4000-8000-000000000001', fileName: 'a.html', kind: 'html' },
+      { id: '40000000-4000-4000-8000-000000000002', fileName: 'b.html', kind: 'html' },
+    ],
+  }));
+  let list = screen.getByRole('tablist', { name: 'Preview file' });
+  let tabs = within(list).getAllByRole('tab');
+  fireEvent.click(tabs[1]);
+  expect(tabs[1].getAttribute('aria-selected')).toBe('true');
+  rerender(workspace({
+    id: '22222222-2222-4222-8222-222222222222',
+    files: [
+      { id: '40000000-4000-4000-8000-000000000011', fileName: 'x.html', kind: 'html' },
+      { id: '40000000-4000-4000-8000-000000000012', fileName: 'y.md', kind: 'markdown' },
+    ],
+  }));
+  list = screen.getByRole('tablist', { name: 'Preview file' });
+  tabs = within(list).getAllByRole('tab');
+  expect(tabs[0].getAttribute('aria-selected')).toBe('true');
+  expect(tabs[1].getAttribute('aria-selected')).toBe('false');
+});
+
+it('add selects the newly added file and several new selects the last new', () => {
+  resizeTo(900);
+  const sendCommand = vi.fn();
+  const baseSession = { id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '' } as Session;
+  const workspace = (preview: Session['preview']) => <SessionWorkspace session={{ ...baseSession, preview }} client={null} userId="user" readable={false} sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}><div>Terminal</div></SessionWorkspace>;
+  const { rerender } = render(workspace({
+    id: '11111111-1111-4111-8111-111111111111',
+    files: [
+      { id: '40000000-4000-4000-8000-000000000001', fileName: 'a.html', kind: 'html' },
+    ],
+  }));
+  rerender(workspace({
+    id: '22222222-2222-4222-8222-222222222222',
+    files: [
+      { id: '40000000-4000-4000-8000-000000000001', fileName: 'a.html', kind: 'html' },
+      { id: '40000000-4000-4000-8000-000000000002', fileName: 'b.md', kind: 'markdown' },
+    ],
+  }));
+  let list = screen.getByRole('tablist', { name: 'Preview file' });
+  let tabs = within(list).getAllByRole('tab');
+  expect(tabs[1].getAttribute('aria-selected')).toBe('true');
+  expect(tabs[0].getAttribute('aria-selected')).toBe('false');
+  rerender(workspace({
+    id: '33333333-3333-4333-8333-333333333333',
+    files: [
+      { id: '40000000-4000-4000-8000-000000000001', fileName: 'a.html', kind: 'html' },
+      { id: '40000000-4000-4000-8000-000000000002', fileName: 'b.md', kind: 'markdown' },
+      { id: '40000000-4000-4000-8000-000000000003', fileName: 'c.html', kind: 'html' },
+      { id: '40000000-4000-4000-8000-000000000004', fileName: 'd.html', kind: 'html' },
+    ],
+  }));
+  list = screen.getByRole('tablist', { name: 'Preview file' });
+  tabs = within(list).getAllByRole('tab');
+  expect(tabs[3].getAttribute('aria-selected')).toBe('true');
+  expect(tabs[0].getAttribute('aria-selected')).toBe('false');
+  expect(tabs[1].getAttribute('aria-selected')).toBe('false');
+});
+
+it('dashboard reload with existing three-file set selects the first file', () => {
+  resizeTo(900);
+  const sendCommand = vi.fn();
+  const session: Session = {
+    id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '',
+    preview: {
+      id: '12345678-1234-4234-8234-123456789abc',
+      files: [
+        { id: '40000000-4000-4000-8000-000000000001', fileName: 'a.html', kind: 'html' },
+        { id: '40000000-4000-4000-8000-000000000002', fileName: 'b.html', kind: 'html' },
+        { id: '40000000-4000-4000-8000-000000000003', fileName: 'c.html', kind: 'html' },
+      ],
+    },
+  };
+  render(<SessionWorkspace session={session} client={null} userId="user" readable={false} sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}><div>Terminal</div></SessionWorkspace>);
+  const list = screen.getByRole('tablist', { name: 'Preview file' });
+  const tabs = within(list).getAllByRole('tab');
+  expect(tabs).toHaveLength(3);
+  expect(tabs[0].getAttribute('aria-selected')).toBe('true');
+  expect(tabs[1].getAttribute('aria-selected')).toBe('false');
+  expect(tabs[2].getAttribute('aria-selected')).toBe('false');
+});
+
+it('mounts the switched iframe exactly once for unchanged bytes (P3)', async () => {
+  vi.useFakeTimers();
+  resizeTo(900);
+  const originalSubtle = Object.getOwnPropertyDescriptor(globalThis.crypto, 'subtle');
+  const htmlContent = '<p>first</p>'; const mdContent = '# Heading\n\n| A | B |\n|---|---|';
+  const revisionHtml = 'a'.repeat(64); const revisionMd = 'b'.repeat(64);
+  Object.defineProperty(globalThis.crypto, 'subtle', { configurable: true, value: { digest: async (_alg: string, bytes: Uint8Array) => {
+    const text = new TextDecoder().decode(bytes);
+    const byte = text === htmlContent ? 0xaa : 0xbb;
+    return Uint8Array.from({ length: 32 }, () => byte).buffer;
+  } } });
+  try {
+    const sendCommand = vi.fn((command: Command): Promise<CommandResponse> => {
+      const payload = command.payload as Record<string, unknown>;
+      const fileId = typeof payload.fileId === 'string' ? payload.fileId : '';
+      const isHtml = fileId === '40000000-4000-4000-8000-000000000001';
+      const text = isHtml ? htmlContent : mdContent;
+      const rev = isHtml ? revisionHtml : revisionMd;
+      if (command.type === 'session_preview_chunk') {
+        return Promise.resolve({ requestId: 'c', success: true, data: { state: 'chunk', previewId: '12345678-1234-4234-8234-123456789abc', fileId, revision: rev, totalBytes: text.length, offset: 0, dataBase64: btoa(text), done: true } });
+      }
+      if ('knownRevision' in payload && payload.knownRevision === rev) {
+        return Promise.resolve({ requestId: 's', success: true, data: { state: 'unchanged', previewId: '12345678-1234-4234-8234-123456789abc', fileId, revision: rev, totalBytes: text.length } });
+      }
+      return Promise.resolve({ requestId: 's', success: true, data: { state: 'ready', previewId: '12345678-1234-4234-8234-123456789abc', fileId, revision: rev, totalBytes: text.length } });
+    });
+    const session: Session = {
+      id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '',
+      preview: {
+        id: '12345678-1234-4234-8234-123456789abc',
+        files: [
+          { id: '40000000-4000-4000-8000-000000000001', fileName: 'a.html', kind: 'html' },
+          { id: '40000000-4000-4000-8000-000000000002', fileName: 'notes.md', kind: 'markdown' },
+        ],
+      },
+    };
+    const { container } = render(<SessionWorkspace session={session} client={{} as unknown as MessageClient} userId="user" readable={true} sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}><div>Terminal</div></SessionWorkspace>);
+    const added: HTMLIFrameElement[] = [];
+    const observer = new MutationObserver(mutations => { for (const mutation of mutations) { mutation.addedNodes.forEach(node => { if (node instanceof HTMLIFrameElement) added.push(node); }); } });
+    observer.observe(container, { childList: true, subtree: true });
+    try {
+      // Initial file A loads through the immediate first poll.
+      await act(async () => {});
+      const frameA = screen.getByTitle('Preview: a.html');
+      expect(frameA).toBeTruthy();
+      fireEvent.click(within(screen.getByRole('tablist', { name: 'Preview file' })).getByRole('tab', { name: 'notes.md' }));
+      await act(async () => {});
+      const frameB = screen.getByTitle('Preview: notes.md');
+      expect(frameB).toBeTruthy();
+      // Several 'unchanged' polls (1000ms cadence) until stable: the same DOM node must survive.
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+      await act(async () => {});
+      expect(screen.getByTitle('Preview: notes.md')).toBe(frameB);
+      const notesFrames = new Set(added.filter(node => node.title === 'Preview: notes.md'));
+      notesFrames.add(frameB as HTMLIFrameElement);
+      expect(notesFrames.size).toBe(1);
+      expect(added.filter(node => node.title === 'Preview: a.html')).toHaveLength(1);
+    } finally { observer.disconnect(); }
+  } finally {
+    cleanup(); vi.useRealTimers();
+    if (originalSubtle) Object.defineProperty(globalThis.crypto, 'subtle', originalSubtle); else Reflect.deleteProperty(globalThis.crypto, 'subtle');
+  }
+});
+
+it.each([
+  { reason: 'missing', expected: 'a.html is missing' },
+  { reason: 'too_large', expected: 'a.html exceeds the 1 MiB limit' },
+  { reason: 'invalid_utf8', expected: 'a.html is not valid UTF-8' },
+  { reason: 'invalid_file', expected: 'a.html is unavailable' },
+  { reason: 'unavailable', expected: 'a.html is unavailable' },
+])('per-file error text includes the selected file name for reason $reason', async ({ reason, expected }) => {
+  resizeTo(900);
+  const previewId = '12345678-1234-4234-8234-123456789abc';
+  const sendCommand = vi.fn((command: Command) => {
+    const payload = command.payload as Record<string, unknown>;
+    const fileId = typeof payload.fileId === 'string' ? payload.fileId : '40000000-4000-4000-8000-000000000001';
+    const requestedPreviewId = typeof payload.previewId === 'string' ? payload.previewId : previewId;
+    return Promise.resolve({ requestId: 'x', success: true, data: { state: 'unavailable', previewId: requestedPreviewId, fileId, reason } });
+  });
+  const session: Session = {
+    id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '',
+    preview: {
+      id: previewId,
+      files: [
+        { id: '40000000-4000-4000-8000-000000000001', fileName: 'a.html', kind: 'html' },
+        { id: '40000000-4000-4000-8000-000000000002', fileName: 'notes.md', kind: 'markdown' },
+      ],
+    },
+  };
+  render(<SessionWorkspace session={session} client={{} as unknown as MessageClient} userId="user" readable={true} sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}><div>Terminal</div></SessionWorkspace>);
+  await waitFor(() => expect(screen.getByRole('status').querySelector('span')?.textContent).toBe(expected));
+  expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy();
+});
+
+// SPEC-C waiting side pane
+
+const plainSession: Session = { id: 'one', bridgeId: 'bridge', name: 'one', status: 'running', createdAt: '', updatedAt: '' };
+const previewOf = (...names: string[]): Session => ({ ...plainSession, preview: { id: '12345678-1234-4234-8234-123456789abc', files: names.map((fileName, index) => ({ id: `40000000-4000-4000-8000-00000000000${index + 1}`, fileName, kind: 'html' as const })) } });
+const itemFor = (attentionId: string, message = `Message ${attentionId}`): InboxEntry => ({
+  session: plainSession, bridgeName: 'Test bridge',
+  notice: { type: 'agent_needs_input', title: 'Review', message, receivedAt: 1, attentionId, attentionSequence: 1 },
+});
+type PaneProps = { session?: Session; entry?: InboxEntry | null; isDesktop?: boolean; mobileTab?: 'sessions' | 'terminal' | 'preview' | 'review'; open?: boolean; reviewOpen?: boolean; reviewActivation?: number; sessionActivation?: number };
+function paneSpies() {
+  return {
+    onShow: vi.fn(), onHide: vi.fn<(refocusTerminal: boolean) => void>(), onDismiss: vi.fn(async (_entry: InboxEntry) => {}), onReply: vi.fn(async (_entry: InboxEntry, _message: string) => {}),
+    onAnswer: vi.fn(async () => ({ ok: true, message: 'Answered' }) as const), onMobileTab: vi.fn(), onClose: vi.fn(),
+  };
+}
+/** The workspace with the hidden marker kept the way Dashboard keeps it: per item, cleared by onShow. */
+function Pane({ spies, session = plainSession, entry = null, isDesktop = true, mobileTab = 'terminal', open = true, reviewOpen = false, reviewActivation = 0, sessionActivation = 0 }: PaneProps & { spies: ReturnType<typeof paneSpies> }) {
+  const [hidden, setHidden] = useState<string | null>(null);
+  const key = entry ? entry.notice.attentionId ?? '' : '';
+  return <SessionWorkspace session={session} client={null} userId="user" readable={false} sendCommand={vi.fn()} securityGeneration={0} open={open} onClose={spies.onClose} isDesktop={isDesktop} mobileTab={mobileTab} onMobileTab={spies.onMobileTab} onRefit={vi.fn()} reviewOpen={reviewOpen} reviewActivation={reviewActivation} sessionActivation={sessionActivation}
+    attention={entry ? { entry, shown: hidden !== key, onShow: () => { spies.onShow(); setHidden(null); }, onHide: refocus => { spies.onHide(refocus); setHidden(key); }, onDismiss: spies.onDismiss, onReply: spies.onReply, onAnswer: spies.onAnswer } : undefined}>
+    <div data-testid="terminal-node" tabIndex={-1}>Terminal</div>
+  </SessionWorkspace>;
+}
+function mountPane(initial: PaneProps = {}) {
+  const spies = paneSpies();
+  const view = render(<Pane spies={spies} {...initial} />);
+  return { spies, set: (next: PaneProps) => view.rerender(<Pane spies={spies} {...next} />) };
+}
+const waitingRegion = () => screen.queryByRole('region', { name: 'Waiting for you' });
+const layouts = [{ layout: 'wide', width: 900 }, { layout: 'compact', width: 500 }] as const;
+
+it.each(layouts)('$layout: a session without preview opens the pane on its waiting item, with no preview controls', ({ width }) => {
+  resizeTo(width);
+  mountPane({ entry: itemFor('a') });
+  expect(within(waitingRegion()!).getByText('Message a')).toBeTruthy();
+  expect(within(waitingRegion()!).queryByRole('button', { name: 'Open session' })).toBeNull();
+  expect(screen.getByText('Waiting for you').className).toBe('session-preview-filename');
+  expect(screen.queryByRole('tablist', { name: 'Side pane view' })).toBeNull();
+  for (const name of ['Expand preview', 'Refresh preview', 'Close preview']) expect(screen.queryByRole('button', { name })).toBeNull();
+  expect(screen.queryByRole('img', { name: 'Auto-refresh enabled' })).toBeNull();
+  expect(screen.getByRole('button', { name: 'Close waiting' })).toBeTruthy();
+  if (width < 640) expect(within(screen.getByRole('tablist', { name: 'Session view' })).getByRole('tab', { name: 'Waiting' }).getAttribute('aria-selected')).toBe('true');
+  else expect(screen.getByTestId('terminal-node').parentElement?.hidden).toBe(false);
+});
+
+it.each(layouts)('$layout: an item arriving while the session is open switches the pane to it and leaves focus in the terminal', ({ width }) => {
+  resizeTo(width);
+  const { set } = mountPane({ session: previewOf('a.html') });
+  const terminal = screen.getByTestId('terminal-node');
+  if (width < 640) fireEvent.click(screen.getByRole('tab', { name: 'Terminal' }));
+  terminal.focus();
+  set({ session: previewOf('a.html'), entry: itemFor('a') });
+  expect(waitingRegion()).toBeTruthy();
+  expect(screen.queryByRole('region', { name: 'Session preview' })).toBeNull();
+  expect(document.activeElement).toBe(terminal);
+});
+
+it.each(layouts)('$layout: a preview registered while the item is shown keeps the item', ({ width }) => {
+  resizeTo(width);
+  const { set } = mountPane({ entry: itemFor('a') });
+  set({ session: previewOf('a.html'), entry: itemFor('a') });
+  expect(waitingRegion()).toBeTruthy();
+  const selector = within(screen.getByRole('tablist', { name: 'Side pane view' })).getAllByRole('tab');
+  expect(selector.map(tab => [tab.textContent, tab.getAttribute('aria-selected')])).toEqual([['Waiting for you', 'true'], ['a.html', 'false']]);
+});
+
+it('lists the waiting entry first: tablist up to five entries, native select beyond', () => {
+  resizeTo(900);
+  const { spies, set } = mountPane({ session: previewOf('a.html', 'b.html', 'c.html', 'd.html'), entry: itemFor('a') });
+  const tabs = within(screen.getByRole('tablist', { name: 'Side pane view' })).getAllByRole('tab');
+  expect(tabs.map(tab => tab.textContent)).toEqual(['Waiting for you', 'a.html', 'b.html', 'c.html', 'd.html']);
+  expect(tabs[0].querySelector('.session-attention-dot')).toBeTruthy();
+  expect(screen.queryByRole('tablist', { name: 'Preview file' })).toBeNull();
+  set({ session: previewOf('a.html', 'b.html', 'c.html', 'd.html', 'e.html'), entry: itemFor('a') });
+  const select = screen.getByLabelText('Side pane view') as HTMLSelectElement;
+  expect(select.tagName).toBe('SELECT');
+  expect(Array.from(select.options).map(option => option.textContent)).toEqual(['Waiting for you', 'a.html', 'b.html', 'c.html', 'd.html', 'e.html']);
+  expect(select.selectedIndex).toBe(0);
+  fireEvent.change(select, { target: { value: 'c.html' } });
+  expect(spies.onHide).toHaveBeenCalledExactlyOnceWith(false);
+  expect(waitingRegion()).toBeNull();
+  expect((screen.getByLabelText('Side pane view') as HTMLSelectElement).value).toBe('c.html');
+  fireEvent.change(screen.getByLabelText('Side pane view'), { target: { value: '' } });
+  expect(spies.onShow).toHaveBeenCalledTimes(1);
+  expect(waitingRegion()).toBeTruthy();
+});
+
+it('does not offer the files of a closed preview in the selector', () => {
+  resizeTo(900);
+  mountPane({ session: previewOf('a.html', 'b.html'), entry: itemFor('a'), open: false });
+  expect(waitingRegion()).toBeTruthy();
+  expect(screen.queryByRole('tablist', { name: 'Side pane view' })).toBeNull();
+  expect(screen.queryByText('a.html')).toBeNull();
+});
+
+it.each(layouts)('$layout: choosing a file hides the item without refocusing, keeps the chosen file, and the waiting entry shows it again', ({ width }) => {
+  resizeTo(width);
+  const { spies } = mountPane({ session: previewOf('a.html', 'b.html'), entry: itemFor('a') });
+  const selector = () => within(screen.getByRole('tablist', { name: 'Side pane view' }));
+  fireEvent.click(selector().getByRole('tab', { name: 'b.html' }));
+  expect(spies.onHide).toHaveBeenCalledExactlyOnceWith(false);
+  expect(waitingRegion()).toBeNull();
+  expect(screen.getByRole(width < 640 ? 'tabpanel' : 'region', { name: 'Session preview' })).toBeTruthy();
+  expect(selector().getByRole('tab', { name: 'b.html' }).getAttribute('aria-selected')).toBe('true');
+  expect(selector().getByRole('tab', { name: 'Waiting for you' }).getAttribute('aria-selected')).toBe('false');
+  fireEvent.click(selector().getByRole('tab', { name: 'Waiting for you' }));
+  expect(spies.onShow).toHaveBeenCalledTimes(1);
+  expect(waitingRegion()).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Close waiting' }));
+  expect(selector().getByRole('tab', { name: 'b.html' }).getAttribute('aria-selected')).toBe('true');
+});
+
+it('arrow keys in the selector move between entries, keep focus in the selector and never ask for the terminal', () => {
+  resizeTo(900);
+  const { spies } = mountPane({ session: previewOf('a.html', 'b.html'), entry: itemFor('a') });
+  const list = screen.getByRole('tablist', { name: 'Side pane view' });
+  const tab = (name: string) => within(list).getByRole('tab', { name });
+  tab('Waiting for you').focus();
+  fireEvent.keyDown(list, { key: 'ArrowRight' });
+  expect(document.activeElement).toBe(tab('a.html'));
+  expect(tab('a.html').getAttribute('aria-selected')).toBe('true');
+  expect(tab('a.html').tabIndex).toBe(0);
+  expect(tab('Waiting for you').tabIndex).toBe(-1);
+  expect(spies.onHide.mock.calls).toEqual([[false]]);
+  fireEvent.keyDown(list, { key: 'End' });
+  expect(document.activeElement).toBe(tab('b.html'));
+  fireEvent.keyDown(list, { key: 'Home' });
+  expect(document.activeElement).toBe(tab('Waiting for you'));
+  expect(waitingRegion()).toBeTruthy();
+  fireEvent.keyDown(list, { key: 'ArrowLeft' });
+  expect(document.activeElement).toBe(tab('b.html'));
+  expect(spies.onHide.mock.calls).toEqual([[false], [false]]);
+});
+
+it('Close and Escape inside the item hide it and ask for the terminal; Escape elsewhere does nothing', () => {
+  resizeTo(900);
+  const { spies } = mountPane({ session: previewOf('a.html'), entry: itemFor('a') });
+  fireEvent.keyDown(screen.getByRole('tablist', { name: 'Side pane view' }), { key: 'Escape' });
+  fireEvent.keyDown(screen.getByTestId('terminal-node'), { key: 'Escape' });
+  expect(spies.onHide).not.toHaveBeenCalled();
+  fireEvent.keyDown(within(waitingRegion()!).getByLabelText('Reply to one'), { key: 'Escape' });
+  expect(spies.onHide.mock.calls).toEqual([[true]]);
+  expect(waitingRegion()).toBeNull();
+  expect(screen.getByRole('region', { name: 'Session preview' })).toBeTruthy();
+  fireEvent.click(within(screen.getByRole('tablist', { name: 'Side pane view' })).getByRole('tab', { name: 'Waiting for you' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Close waiting' }));
+  expect(spies.onHide.mock.calls).toEqual([[true], [true]]);
+  expect(spies.onClose).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: 'Close preview' }));
+  expect(spies.onClose).toHaveBeenCalledTimes(1);
+});
+
+it.each(layouts)('$layout: closing the item of a session without preview closes the pane and shows the terminal', ({ width }) => {
+  resizeTo(width);
+  mountPane({ entry: itemFor('a') });
+  fireEvent.click(screen.getByRole('button', { name: 'Close waiting' }));
+  expect(waitingRegion()).toBeNull();
+  expect(document.querySelector('.session-aux-pane:not([hidden])')).toBeNull();
+  expect(screen.queryByRole('tablist')).toBeNull();
+  expect(screen.getByTestId('terminal-node').parentElement?.hidden).toBe(false);
+});
+
+it.each(layouts)('$layout: after the item is hidden the preview it falls back to can be expanded', ({ width }) => {
+  resizeTo(width);
+  mountPane({ session: previewOf('a.html'), entry: itemFor('a') });
+  fireEvent.click(screen.getByRole('button', { name: 'Close waiting' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Expand preview' }));
+  expect(screen.getByRole('button', { name: 'Collapse preview' })).toBeTruthy();
+  expect(screen.getByTestId('terminal-node').parentElement?.hidden).toBe(true);
+});
+
+it('an item arriving over an expanded preview collapses it and shows the item beside the terminal', () => {
+  resizeTo(900);
+  const { set } = mountPane({ session: previewOf('a.html') });
+  fireEvent.click(screen.getByRole('button', { name: 'Expand preview' }));
+  expect(screen.getByTestId('terminal-node').parentElement?.hidden).toBe(true);
+  set({ session: previewOf('a.html'), entry: itemFor('a') });
+  expect(waitingRegion()).toBeTruthy();
+  expect(screen.getByTestId('terminal-node').parentElement?.hidden).toBe(false);
+  fireEvent.click(screen.getByRole('button', { name: 'Close waiting' }));
+  expect(screen.getByRole('button', { name: 'Expand preview' })).toBeTruthy();
+  expect(screen.getByTestId('terminal-node').parentElement?.hidden).toBe(false);
+});
+
+it('never commits the item over an expanded preview: the terminal is beside it from the first frame', () => {
+  resizeTo(900);
+  const commits: { item: boolean; terminalHidden: boolean }[] = [];
+  function Probe(): ReactNode {
+    useLayoutEffect(() => { commits.push({ item: !!document.querySelector('[role="region"][aria-label="Waiting for you"]'), terminalHidden: !!document.getElementById('session-terminal-panel')?.hidden }); });
+    return <div>Terminal</div>;
+  }
+  const workspace = (entry: InboxEntry | null) => <SessionWorkspace session={previewOf('a.html')} client={null} userId="user" readable={false} sendCommand={vi.fn()} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}
+    attention={entry ? { entry, shown: true, onShow: vi.fn(), onHide: vi.fn(), onDismiss: vi.fn(async () => {}), onReply: vi.fn(async () => {}), onAnswer: vi.fn(async () => ({ ok: true, message: 'Answered' }) as const) } : undefined}><Probe /></SessionWorkspace>;
+  const { rerender } = render(workspace(null));
+  fireEvent.click(screen.getByRole('button', { name: 'Expand preview' }));
+  expect(document.getElementById('session-terminal-panel')?.hidden).toBe(true);
+  commits.length = 0;
+  rerender(workspace(itemFor('a')));
+  expect(commits.length).toBeGreaterThan(0);
+  expect(commits.filter(commit => commit.item)).toEqual(commits);
+  expect(commits.some(commit => commit.terminalHidden)).toBe(false);
+});
+
+it('compact: when the item resolves onto the PR review, that review is the selected tab and can be expanded', () => {
+  resizeTo(500);
+  const session = { ...plainSession, pullRequestUrl: 'https://github.com/owner/repo/pull/1' };
+  const { set } = mountPane({ session, entry: itemFor('a'), reviewOpen: true });
+  const tabs = () => within(screen.getByRole('tablist', { name: 'Session view' }));
+  expect(tabs().getByRole('tab', { name: 'Waiting' }).getAttribute('aria-selected')).toBe('true');
+  set({ session, reviewOpen: true });
+  expect(tabs().getAllByRole('tab').map(tab => [tab.textContent, tab.getAttribute('aria-selected')])).toEqual([['Terminal', 'false'], ['PR review', 'true']]);
+  fireEvent.click(screen.getByRole('button', { name: 'Expand PR review' }));
+  expect(screen.getByRole('button', { name: 'Collapse PR review' })).toBeTruthy();
+});
+
+it('desktop: a shown waiting item does not steal an explicitly opened PR review in the same commit (session re-select)', () => {
+  resizeTo(900);
+  const session = { ...plainSession, pullRequestUrl: 'https://github.com/owner/repo/pull/1' };
+  const { set } = mountPane({ session, entry: itemFor('a') });
+  expect(waitingRegion()).toBeTruthy();
+  // Dashboard.handleReviewPullRequest selects the session and opens review together (F4).
+  set({ session, entry: itemFor('a'), reviewOpen: true, reviewActivation: 1, sessionActivation: 1 });
+  const aux = within(screen.getByRole('tablist', { name: 'Auxiliary view' }));
+  expect(aux.getByRole('tab', { name: 'PR review' }).getAttribute('aria-selected')).toBe('true');
+  expect(aux.getByRole('tab', { name: 'Waiting' }).getAttribute('aria-selected')).toBe('false');
+  expect(screen.getByRole('tabpanel', { name: 'PR review' }).hidden).toBe(false);
+  expect(waitingRegion()).toBeNull();
+});
+
+it('desktop: a shown item appearing with PR review in the same commit keeps review selected (shown-key change)', () => {
+  resizeTo(900);
+  const session = { ...plainSession, pullRequestUrl: 'https://github.com/owner/repo/pull/1' };
+  const { set } = mountPane({ session });
+  set({ session, entry: itemFor('a'), reviewOpen: true, reviewActivation: 1 });
+  const aux = within(screen.getByRole('tablist', { name: 'Auxiliary view' }));
+  expect(aux.getByRole('tab', { name: 'PR review' }).getAttribute('aria-selected')).toBe('true');
+  expect(aux.getByRole('tab', { name: 'Waiting' }).getAttribute('aria-selected')).toBe('false');
+  expect(screen.getByRole('tabpanel', { name: 'PR review' }).hidden).toBe(false);
+  expect(waitingRegion()).toBeNull();
+});
+
+it('wide: a new item is shown after the owner moved to a file, but not after moving to the PR review', () => {
+  resizeTo(900);
+  const session = { ...previewOf('a.html'), pullRequestUrl: 'https://github.com/owner/repo/pull/1' };
+  const { set } = mountPane({ session, entry: itemFor('a') });
+  fireEvent.click(within(screen.getByRole('tablist', { name: 'Side pane view' })).getByRole('tab', { name: 'a.html' }));
+  expect(waitingRegion()).toBeNull();
+  set({ session, entry: itemFor('b') });
+  expect(within(waitingRegion()!).getByText('Message b')).toBeTruthy();
+  set({ session, entry: itemFor('b'), reviewOpen: true, reviewActivation: 1 });
+  const aux = () => within(screen.getByRole('tablist', { name: 'Auxiliary view' }));
+  expect(aux().getAllByRole('tab').map(tab => tab.textContent)).toEqual(['Waiting', 'PR review']);
+  expect(aux().getByRole('tab', { name: 'PR review' }).getAttribute('aria-selected')).toBe('true');
+  expect(waitingRegion()).toBeNull();
+  // F4: attention auto-switch never overrides the explicitly opened PR review.
+  set({ session, entry: itemFor('c'), reviewOpen: true, reviewActivation: 1 });
+  expect(aux().getByRole('tab', { name: 'PR review' }).getAttribute('aria-selected')).toBe('true');
+  expect(aux().getByRole('tab', { name: 'Waiting' }).getAttribute('aria-selected')).toBe('false');
+  expect(waitingRegion()).toBeNull();
+});
+
+it('compact: a new item is shown after the owner moved to the Terminal tab, the same item is not forced back', () => {
+  resizeTo(500);
+  const { set } = mountPane({ entry: itemFor('a') });
+  const tabs = () => within(screen.getByRole('tablist', { name: 'Session view' }));
+  fireEvent.click(tabs().getByRole('tab', { name: 'Terminal' }));
+  expect(waitingRegion()).toBeNull();
+  set({ entry: itemFor('a', 'Message a, edited') });
+  expect(tabs().getByRole('tab', { name: 'Terminal' }).getAttribute('aria-selected')).toBe('true');
+  set({ entry: itemFor('b') });
+  expect(tabs().getByRole('tab', { name: 'Waiting' }).getAttribute('aria-selected')).toBe('true');
+  expect(within(waitingRegion()!).getByText('Message b')).toBeTruthy();
+});
+
+it('compact: the side-pane tab is labelled by what the pane shows and disappears with the last view', () => {
+  resizeTo(500);
+  const { set } = mountPane({ session: previewOf('a.html'), entry: itemFor('a') });
+  const names = () => within(screen.getByRole('tablist', { name: 'Session view' })).getAllByRole('tab').map(tab => tab.textContent);
+  expect(names()).toEqual(['Terminal', 'Waiting']);
+  fireEvent.click(screen.getByRole('button', { name: 'Close waiting' }));
+  expect(names()).toEqual(['Terminal', 'Preview']);
+  expect(screen.getByRole('tab', { name: 'Preview' }).getAttribute('aria-selected')).toBe('true');
+  set({ session: previewOf('a.html') });
+  expect(names()).toEqual(['Terminal', 'Preview']);
+  set({ entry: itemFor('b') });
+  expect(names()).toEqual(['Terminal', 'Waiting']);
+  set({});
+  expect(screen.queryByRole('tablist')).toBeNull();
+  expect(screen.getByTestId('terminal-node').parentElement?.hidden).toBe(false);
+});
+
+it.each([
+  { name: 'compact with an item only', width: 500, props: { entry: itemFor('a') } },
+  { name: 'compact with item, preview and review', width: 500, props: { session: { ...previewOf('a.html'), pullRequestUrl: 'https://github.com/owner/repo/pull/1' }, entry: itemFor('a'), reviewOpen: true } },
+  { name: 'wide with item and review', width: 900, props: { session: { ...plainSession, pullRequestUrl: 'https://github.com/owner/repo/pull/1' }, entry: itemFor('a'), reviewOpen: true } },
+])('every view tab controls a tabpanel ($name)', ({ width, props }) => {
+  resizeTo(width);
+  mountPane(props);
+  const tabs = screen.getAllByRole('tab').filter(tab => tab.hasAttribute('aria-controls'));
+  expect(tabs.length).toBeGreaterThan(1);
+  for (const tab of tabs) expect(document.getElementById(tab.getAttribute('aria-controls')!)?.getAttribute('role')).toBe('tabpanel');
+  expect(document.getElementById('session-waiting-panel')).toBeNull();
+});
+
+it('wide without tabs: the item is one labelled region and the file view keeps the preview region', () => {
+  resizeTo(900);
+  mountPane({ session: previewOf('a.html'), entry: itemFor('a') });
+  expect(screen.getAllByRole('region').map(region => region.getAttribute('aria-label'))).toEqual(['Waiting for you']);
+  fireEvent.click(screen.getByRole('button', { name: 'Close waiting' }));
+  expect(screen.getAllByRole('region').map(region => region.getAttribute('aria-label'))).toEqual(['Session preview']);
+});
+
+it('the pane wires Reply, Dismiss and Answer to the item and surfaces a failed dismiss', async () => {
+  resizeTo(900);
+  const entry = itemFor('a');
+  const { spies, set } = mountPane({ entry });
+  fireEvent.change(within(waitingRegion()!).getByLabelText('Reply to one'), { target: { value: 'go ahead' } });
+  fireEvent.click(within(waitingRegion()!).getByRole('button', { name: 'Send reply' }));
+  await waitFor(() => expect(spies.onReply).toHaveBeenCalledExactlyOnceWith(entry, 'go ahead'));
+  expect(await within(waitingRegion()!).findByText('Reply queued.')).toBeTruthy();
+  spies.onDismiss.mockRejectedValueOnce(new Error('Bridge refused the dismiss'));
+  fireEvent.click(within(waitingRegion()!).getByRole('button', { name: 'Dismiss' }));
+  expect((await within(waitingRegion()!).findByRole('alert')).textContent).toBe('Bridge refused the dismiss');
+  expect(spies.onDismiss).toHaveBeenCalledExactlyOnceWith(entry);
+  fireEvent.click(within(waitingRegion()!).getByRole('button', { name: 'Dismiss' }));
+  await waitFor(() => expect(spies.onDismiss).toHaveBeenCalledTimes(2));
+  const question: InboxEntry = { ...entry, notice: { ...entry.notice, attentionId: 'q', prompt: { channel: 'mail', questions: [{ question: 'Which path?', options: [{ label: 'Fast' }, { label: 'Safe' }], multiSelect: false, allowText: false }] } } };
+  set({ entry: question });
+  fireEvent.click(within(waitingRegion()!).getByLabelText('Safe'));
+  fireEvent.click(within(waitingRegion()!).getByRole('button', { name: 'Send answer' }));
+  await waitFor(() => expect(spies.onAnswer).toHaveBeenCalledExactlyOnceWith(question, [{ selected: [1] }]));
+});
+
+it.each(layouts)('$layout: when the item is resolved the pane returns to the preview, or closes without one', ({ width }) => {
+  resizeTo(width);
+  const { set } = mountPane({ session: previewOf('a.html'), entry: itemFor('a') });
+  set({ session: previewOf('a.html') });
+  expect(waitingRegion()).toBeNull();
+  expect(screen.getByRole(width < 640 ? 'tabpanel' : 'region', { name: 'Session preview' })).toBeTruthy();
+  set({ entry: itemFor('b') });
+  expect(waitingRegion()).toBeTruthy();
+  set({});
+  expect(document.querySelector('.session-aux-pane')).toBeNull();
+  expect(screen.getByTestId('terminal-node').parentElement?.hidden).toBe(false);
+});
+
+it('phone: the preview tab carries the item, the terminal tab hides it, and a vanished side pane asks for the terminal tab', () => {
+  resizeTo(390);
+  const { spies, set } = mountPane({ isDesktop: false, mobileTab: 'terminal', entry: itemFor('a') });
+  expect(waitingRegion()).toBeNull();
+  expect(screen.getByTestId('terminal-node').parentElement?.hidden).toBe(false);
+  expect(screen.queryByRole('tablist', { name: 'Session view' })).toBeNull();
+  set({ isDesktop: false, mobileTab: 'preview', entry: itemFor('a') });
+  expect(waitingRegion()).toBeTruthy();
+  expect(document.getElementById('session-preview-panel')?.getAttribute('role')).toBe('tabpanel');
+  expect(screen.getByTestId('terminal-node').parentElement?.hidden).toBe(true);
+  expect(spies.onMobileTab).not.toHaveBeenCalled();
+  set({ isDesktop: false, mobileTab: 'preview' });
+  expect(spies.onMobileTab).toHaveBeenLastCalledWith('terminal');
+  expect(screen.getByTestId('terminal-node').parentElement?.hidden).toBe(false);
+});
+
+it('unmounts the preview frame while the item is shown and brings back the chosen file at its scroll position', async () => {
+  resizeTo(900);
+  const originalSubtle = Object.getOwnPropertyDescriptor(globalThis.crypto, 'subtle');
+  Object.defineProperty(globalThis.crypto, 'subtle', { configurable: true, value: { digest: async () => Uint8Array.from({ length: 32 }, () => 0x99).buffer } });
+  const html = '<p>preview</p>'; const revision = '9'.repeat(64);
+  const sendCommand = vi.fn((command: Command): Promise<CommandResponse> => {
+    const payload = command.payload as Record<string, unknown>;
+    const ids = { previewId: String(payload.previewId), fileId: String(payload.fileId) };
+    return Promise.resolve(command.type === 'session_preview_chunk'
+      ? { requestId: 'c', success: true, data: { state: 'chunk', ...ids, revision, totalBytes: html.length, offset: 0, dataBase64: btoa(html), done: true } }
+      : { requestId: 's', success: true, data: { state: 'ready', ...ids, revision, totalBytes: html.length } });
+  });
+  const session = previewOf('a.html', 'notes.html');
+  const client = {} as unknown as MessageClient;
+  const workspace = (entry: InboxEntry | null) => <SessionWorkspace session={session} client={client} userId="user" readable sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}
+    attention={entry ? { entry, shown: true, onShow: vi.fn(), onHide: vi.fn(), onDismiss: vi.fn(async () => {}), onReply: vi.fn(async () => {}), onAnswer: vi.fn(async () => ({ ok: true, message: 'Answered' }) as const) } : undefined}><div>Terminal</div></SessionWorkspace>;
+  const channel = 'ftown-preview-scroll-v1';
+  const documentId = (frame: HTMLIFrameElement) => /"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})", max = /.exec(frame.srcdoc)![1];
+  const fromFrame = (frame: HTMLIFrameElement, data: Record<string, unknown>) => act(() => { window.dispatchEvent(new MessageEvent('message', { data: { channel, documentId: documentId(frame), ...data }, source: frame.contentWindow, origin: 'null' })); });
+  try {
+    const { rerender } = render(workspace(null));
+    await screen.findByTitle('Preview: a.html');
+    fireEvent.click(within(screen.getByRole('tablist', { name: 'Preview file' })).getByRole('tab', { name: 'notes.html' }));
+    const first = await screen.findByTitle('Preview: notes.html') as HTMLIFrameElement;
+    fromFrame(first, { kind: 'ready' });
+    fromFrame(first, { kind: 'restored', x: 0, y: 0 });
+    fromFrame(first, { kind: 'position', x: 3, y: 420 });
+    rerender(workspace(itemFor('a')));
+    expect(waitingRegion()).toBeTruthy();
+    expect(document.querySelector('iframe')).toBeNull();
+    expect(first.isConnected).toBe(false);
+    expect(Array.from(document.querySelectorAll('.session-preview-content')).map(node => node.getAttribute('aria-label'))).toEqual(['Waiting for you']);
+    expect(screen.queryByText('Loading preview…')).toBeNull();
+    rerender(workspace(null));
+    const second = await screen.findByTitle('Preview: notes.html') as HTMLIFrameElement;
+    expect(second).not.toBe(first);
+    expect(within(screen.getByRole('tablist', { name: 'Preview file' })).getByRole('tab', { name: 'notes.html' }).getAttribute('aria-selected')).toBe('true');
+    const restore = vi.spyOn(second.contentWindow!, 'postMessage');
+    fromFrame(second, { kind: 'ready' });
+    expect(restore).toHaveBeenCalledExactlyOnceWith({ channel, documentId: documentId(second), kind: 'restore', x: 3, y: 420 }, '*');
+  } finally {
+    if (originalSubtle) Object.defineProperty(globalThis.crypto, 'subtle', originalSubtle); else Reflect.deleteProperty(globalThis.crypto, 'subtle');
+  }
+});
+
+it('keeps a half-filled answer for the item across a hide and show, and starts clean for another item', () => {
+  resizeTo(900);
+  const prompted = (attentionId: string): InboxEntry => { const entry = itemFor(attentionId); return { ...entry, notice: { ...entry.notice, prompt: { channel: 'mail', questions: [{ question: 'Which path?', options: [{ label: 'Fast' }, { label: 'Safe' }], multiSelect: false, allowText: false }] } } }; };
+  const { set } = mountPane({ session: previewOf('a.html'), entry: prompted('a') });
+  const safe = () => within(waitingRegion()!).getByLabelText('Safe') as HTMLInputElement;
+  fireEvent.click(safe());
+  expect(safe().checked).toBe(true);
+  fireEvent.click(within(screen.getByRole('tablist', { name: 'Side pane view' })).getByRole('tab', { name: 'a.html' }));
+  expect(waitingRegion()).toBeNull();
+  expect(document.querySelectorAll('[aria-label="Waiting for you"][role="region"]')).toHaveLength(0);
+  fireEvent.click(within(screen.getByRole('tablist', { name: 'Side pane view' })).getByRole('tab', { name: 'Waiting for you' }));
+  expect(safe().checked).toBe(true);
+  set({ session: previewOf('a.html'), entry: prompted('b') });
+  expect(safe().checked).toBe(false);
+});
+
+it('stops reading the preview while the item is shown and reads it again when the file comes back', async () => {
+  resizeTo(900);
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  const originalSubtle = Object.getOwnPropertyDescriptor(globalThis.crypto, 'subtle');
+  Object.defineProperty(globalThis.crypto, 'subtle', { configurable: true, value: { digest: async () => Uint8Array.from({ length: 32 }, () => 0x99).buffer } });
+  const html = '<p>preview</p>'; const revision = '9'.repeat(64);
+  const sendCommand = vi.fn((command: Command): Promise<CommandResponse> => {
+    const payload = command.payload as Record<string, unknown>;
+    const ids = { previewId: String(payload.previewId), fileId: String(payload.fileId) };
+    return Promise.resolve(command.type === 'session_preview_chunk'
+      ? { requestId: 'c', success: true, data: { state: 'chunk', ...ids, revision, totalBytes: html.length, offset: 0, dataBase64: btoa(html), done: true } }
+      : { requestId: 's', success: true, data: { state: 'ready', ...ids, revision, totalBytes: html.length } });
+  });
+  const client = {} as unknown as MessageClient;
+  const workspace = (entry: InboxEntry | null) => <SessionWorkspace session={previewOf('a.html')} client={client} userId="user" readable sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="preview" onMobileTab={vi.fn()} onRefit={vi.fn()}
+    attention={entry ? { entry, shown: true, onShow: vi.fn(), onHide: vi.fn(), onDismiss: vi.fn(async () => {}), onReply: vi.fn(async () => {}), onAnswer: vi.fn(async () => ({ ok: true, message: 'Answered' }) as const) } : undefined}><div>Terminal</div></SessionWorkspace>;
+  const elapse = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+  try {
+    const { rerender } = render(workspace(null));
+    await screen.findByTitle('Preview: a.html');
+    const loaded = sendCommand.mock.calls.length;
+    await elapse(60_000);
+    const polling = sendCommand.mock.calls.length;
+    expect(polling).toBeGreaterThan(loaded);
+    rerender(workspace(itemFor('a')));
+    await elapse(0);
+    const behindItem = sendCommand.mock.calls.length;
+    await elapse(60_000);
+    expect(sendCommand.mock.calls.length).toBe(behindItem);
+    rerender(workspace(null));
+    await elapse(60_000);
+    expect(sendCommand.mock.calls.length).toBeGreaterThan(behindItem);
+  } finally {
+    vi.useRealTimers();
     if (originalSubtle) Object.defineProperty(globalThis.crypto, 'subtle', originalSubtle); else Reflect.deleteProperty(globalThis.crypto, 'subtle');
   }
 });

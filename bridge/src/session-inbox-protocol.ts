@@ -3,6 +3,8 @@ export interface SendSessionMessagePayload {
   bridgeId: string;
   sessionId: string;
   message: string;
+  /** Attention item being replied to; on durable accept the bridge resolves exactly it. */
+  eventId?: string;
 }
 
 /** Acceptance means durable enqueue, not that the agent has read the reply. */

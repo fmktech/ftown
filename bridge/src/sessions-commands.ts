@@ -139,6 +139,7 @@ interface SessionsOptions {
   children?: boolean; siblings?: boolean; keys?: boolean; type?: string; thread?: string;
   peek?: boolean; all?: boolean; sessionId?: string; message?: string; messageFile?: string; id?: string; title?: string; clear?: boolean;
   option?: string[]; multi?: boolean; text?: boolean; questionsJson?: string; wait?: boolean; timeout?: string;
+  add?: string[]; remove?: string[];
 }
 type SessionCommand = 'preview-reply' | 'preview' | 'list' | 'create' | 'get' | 'screen' | 'grep' | 'keys' | 'tell'
   | 'inbox' | 'mail' | 'running' | 'usage' | 'remove' | 'archive' | 'revive' | 'attention' | 'attention-status' | 'pr';
@@ -206,10 +207,12 @@ function sessionProgram(): Command {
     .option('--clear', 'Remove the current pull request association')
     .option('--session-id <id>', 'Target session; defaults to FTOWN_SESSION_ID')
     .action((url: string | undefined, _opts, cmd: Command) => run('pr', url === undefined ? [] : [url], cmd));
-  command('preview [path]', 'Register a self-contained HTML preview for this session')
+  command('preview [paths...]', 'Register up to 12 preview files (.html/.htm/.md/.markdown, 1MiB each, duplicate basenames rejected)')
+    .option('--add <paths...>', 'Append files to the current preview set (an already-registered file is re-registered in place with a new file id)')
+    .option('--remove <names...>', 'Remove files by basename (removing the last file clears the preview)')
     .option('--clear', 'Remove the preview registration')
     .option('--session-id <id>', 'Target session; defaults to FTOWN_SESSION_ID')
-    .action((path: string | undefined, _opts, cmd: Command) => run('preview', path === undefined ? [] : [path], cmd));
+    .action((paths: string[], _opts, cmd: Command) => run('preview', paths ?? [], cmd));
   command('preview-reply', 'Reply to this session’s preview conversation')
     .option('--message <text>', 'Reply text').option('--message-file <path>', 'Read UTF-8 reply from a file or - for stdin')
     .option('--session-id <id>', 'Target session; defaults to FTOWN_SESSION_ID').option('--id <uuid>', 'Stable ID for retry')
@@ -368,11 +371,37 @@ async function executeSessionCommand(cmd: SessionCommand, rest: string[], option
       }
       case 'preview': {
         const id = selfSessionId(options.sessionId);
-        const path = rest[0];
-        if ((path !== undefined && options.clear) || (path === undefined && !options.clear) || path === '') throw new Error('Supply an HTML file path or --clear, but not both');
+        const add = options.add;
+        const removed = options.remove;
+        const flagCount = [add !== undefined, removed !== undefined, options.clear === true].filter(Boolean).length;
+        if (flagCount > 1) throw new Error('Supply only one of --add, --remove or --clear');
+        if (options.clear === true) {
+          if (rest.length > 0) throw new Error('Supply preview files or --clear, but not both');
+          await requireSessionCapability(id, 'preview');
+          const { data } = await api('DELETE', `/api/sessions/${id}/preview`);
+          console.log(jsonOut ? JSON.stringify(data, null, 2) : `preview cleared for ${id}`);
+          break;
+        }
+        if (add !== undefined) {
+          if (rest.length > 0) throw new Error('Supply preview files or --add, but not both');
+          if (!Array.isArray(add) || add.length === 0 || add.some((entry) => typeof entry !== 'string' || entry === '')) throw new Error('Supply preview files or --clear, but not both');
+          await requireSessionCapability(id, 'preview');
+          const { data } = await api('PUT', `/api/sessions/${id}/preview`, { paths: add.map((entry) => resolve(entry)), mode: 'add' });
+          console.log(jsonOut ? JSON.stringify(data, null, 2) : `preview registered for ${id}`);
+          break;
+        }
+        if (removed !== undefined) {
+          if (rest.length > 0) throw new Error('Supply preview files or --remove, but not both');
+          if (!Array.isArray(removed) || removed.length === 0 || removed.some((entry) => typeof entry !== 'string' || entry === '')) throw new Error('Supply preview files or --clear, but not both');
+          await requireSessionCapability(id, 'preview');
+          const { data } = await api('DELETE', `/api/sessions/${id}/preview`, { names: removed });
+          console.log(jsonOut ? JSON.stringify(data, null, 2) : `preview updated for ${id}`);
+          break;
+        }
+        if (rest.length === 0 || rest.some((entry) => entry === '')) throw new Error('Supply preview files or --clear, but not both');
         await requireSessionCapability(id, 'preview');
-        const { data } = await api(options.clear ? 'DELETE' : 'PUT', `/api/sessions/${id}/preview`, options.clear ? undefined : { path: resolve(path!) });
-        console.log(jsonOut ? JSON.stringify(data, null, 2) : `preview ${options.clear ? 'cleared' : 'registered'} for ${id}`);
+        const { data } = await api('PUT', `/api/sessions/${id}/preview`, { paths: rest.map((entry) => resolve(entry)), mode: 'replace' });
+        console.log(jsonOut ? JSON.stringify(data, null, 2) : `preview registered for ${id}`);
         break;
       }
       case 'attention': {

@@ -3,7 +3,7 @@ import { ATTENTION_PROMPT_LIMITS as L, type AttentionAnswer, type AttentionPromp
 import { promptFromAskUserQuestionInput } from './attention-prompt.js';
 
 export type AttentionType = 'permission_prompt' | 'elicitation_dialog' | 'agent_needs_input' | 'ask_user';
-export type Resolution = 'manual' | 'user_prompt' | 'elicitation_complete' | 'session_end' | 'answered' | 'tool_complete';
+export type Resolution = 'manual' | 'user_prompt' | 'elicitation_complete' | 'session_end' | 'answered' | 'tool_complete' | 'replied';
 export interface Activity {
   state: 'thinking' | 'tool_use' | 'idle' | 'unknown';
   lastActivityAt?: string;
