@@ -6,12 +6,13 @@ import { runSetup } from './setup.js';
 import { runStart } from './start-commands.js';
 import { runSecurity } from './security-cli.js';
 import { runQuotaCli } from './quota-cli.js';
+import { runBoard, runEvents, runStatus } from './coordination-cli.js';
 import { executeCli, isCliEntry } from './cli-entry.js';
 export { isCliEntry } from './cli-entry.js';
 
 export function usage(): string {
   return `Usage: ftown [bridge options]
-       ftown <setup|start|sessions|harness|env|security|quota> [args...]
+       ftown <setup|start|sessions|harness|env|security|quota|status|board|events> [args...]
 
 With no subcommand, start the bridge. Run setup explicitly before the first start.
 
@@ -22,7 +23,10 @@ Subcommands:
   harness    Inspect and drive the local ftown-bridge harness
   security   Pair browsers and inspect/revoke encrypted endpoints
   env        Manage per-provider machine tokens (~/.ftown/env.json)
-  quota      Subscription quota left, routing advice and model lists per harness (--json for agents)`;
+  quota      Subscription quota left, routing advice and model lists per harness (--json for agents)
+  status     Own status card: show, set or clear
+  board      Child-session board for this session's tree
+  events     Tree event log for this session's tree`;
 }
 
 export async function runFtown(argv: string[], start: (argv: string[]) => Promise<number> = runStart): Promise<number> {
@@ -35,6 +39,9 @@ export async function runFtown(argv: string[], start: (argv: string[]) => Promis
     case 'env': return runEnv(args);
     case 'security': return runSecurity(args);
     case 'quota': return runQuotaCli(args);
+    case 'status': return runStatus(args);
+    case 'board': return runBoard(args);
+    case 'events': return runEvents(args);
     case 'setup': return runSetup(args);
     case 'start': return start(args);
     default: console.error(`ftown: Unknown subcommand "${group}"`); console.error(usage()); return 1;

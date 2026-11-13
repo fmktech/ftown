@@ -64,6 +64,24 @@ test('actual operations determine permission and unknown methods/routes/frames d
   for (const frame of ['screen', 'output', 'arbitrary']) assert.throws(() => classifyTerminal(frame), { code: 'permission_denied' });
 });
 
+test('coordination card, board and events routes classify per method and deny extras', () => {
+  assert.deepEqual(classifyHttp('GET', '/api/sessions/session/card'), { permission: 'read', mutating: false, operation: 'card_get', sessionId: 'session' });
+  assert.deepEqual(classifyHttp('PUT', '/api/sessions/session/card'), { permission: 'control', mutating: true, operation: 'card_set', sessionId: 'session' });
+  assert.deepEqual(classifyHttp('DELETE', '/api/sessions/session/card'), { permission: 'control', mutating: true, operation: 'card_clear', sessionId: 'session' });
+  assert.deepEqual(classifyHttp('GET', '/api/sessions/session/board'), { permission: 'read', mutating: false, operation: 'board_get', sessionId: 'session' });
+  assert.deepEqual(classifyHttp('GET', '/api/sessions/session/board?since=4&ready=1&all=1'), { permission: 'read', mutating: false, operation: 'board_get', sessionId: 'session' });
+  assert.deepEqual(classifyHttp('GET', '/api/sessions/session/events'), { permission: 'read', mutating: false, operation: 'events_get', sessionId: 'session' });
+  assert.deepEqual(classifyHttp('GET', '/api/sessions/session/events?since=2&limit=100&waitSeconds=25'), { permission: 'read', mutating: false, operation: 'events_get', sessionId: 'session' });
+  for (const [method, path] of [
+    ['POST', '/api/sessions/session/card'], ['PATCH', '/api/sessions/session/card'],
+    ['GET', '/api/sessions/session/card?since=1'], ['PUT', '/api/sessions/session/card?x=1'],
+    ['GET', '/api/sessions/session/board/extra'], ['DELETE', '/api/sessions/session/board'], ['GET', '/api/sessions/session/board?cursor=1'],
+    ['POST', '/api/sessions/session/events'], ['GET', '/api/sessions/session/events/extra'],
+    ['GET', '/api/sessions/session/events?cursor=1'], ['GET', '/api/sessions/session/events?since=1&since=2'],
+    ['GET', `/api/sessions/${'e'.repeat(201)}/card`],
+  ]) assert.throws(() => classifyHttp(method, path), { code: 'permission_denied' }, `${method} ${path}`);
+});
+
 test('model routing reads need read authority and saving it needs control', () => {
   assert.deepEqual(classifyCommand('get_model_routing', { bridgeId: 'bridge' }), { permission: 'read', mutating: false, operation: 'get_model_routing', sessionId: null });
   assert.deepEqual(classifyCommand('set_model_routing', { bridgeId: 'bridge', config: {} }), { permission: 'control', mutating: true, operation: 'set_model_routing', sessionId: null });

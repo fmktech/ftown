@@ -2,10 +2,11 @@ import { randomUUID } from 'node:crypto';
 import { normalizePullRequestUrl } from './pull-request-url.js';
 import type { SessionStore } from './session-store.js';
 import type { Session } from './types.js';
-import type { PullRequestStatusService } from './pull-request-status.js';
+import type { PullRequestObservation, PullRequestStatusService } from './pull-request-status.js';
 import type { MailStore } from './mail-store.js';
 
 type Timer = ReturnType<typeof setTimeout>;
+type TreeEventEmitter = (session: Session, kind: 'pr', summary: string, ref?: string) => Promise<void>;
 interface Options {
   bridgeId: string;
   store: Pick<SessionStore, 'listSessions' | 'loadSession' | 'saveSession'>;
@@ -40,6 +41,7 @@ export class PullRequestEventWatcher {
   private baseline = new Map<string, number>();
   private cursor = '';
   private pendingWake = new Map<string, { key: string; linkId: string }>();
+  private treeEventEmitter?: TreeEventEmitter;
   private nextDelay = 60_000;
   private readonly now: () => number;
   private readonly setTimer: (fn: () => void, ms: number) => Timer;
@@ -48,6 +50,21 @@ export class PullRequestEventWatcher {
     this.now = options.now ?? Date.now;
     this.setTimer = options.setTimeout ?? ((fn, ms) => setTimeout(fn, ms));
     this.clearTimer = options.clearTimeout ?? (timer => clearTimeout(timer));
+  }
+  /** Optional sink so each durably committed observation also becomes a tree event (wired by the bridge startup). */
+  setTreeEventEmitter(emit: TreeEventEmitter): void {
+    this.treeEventEmitter = emit;
+  }
+  private emitTreeEvent(session: Session, observation: PullRequestObservation): void {
+    if (!this.treeEventEmitter) return;
+    const state = observation.state;
+    if (state !== 'passed' && state !== 'failed' && state !== 'merged') return;
+    const emit = this.treeEventEmitter;
+    // Fire-and-forget: a broken sink must never fail the scan, the commit or the wake.
+    // Promise.resolve().then(...) keeps a synchronously throwing sink from escaping this method.
+    void Promise.resolve()
+      .then(() => emit(session, 'pr', `PR ${state}: ${observation.url}`, observation.url))
+      .catch(error => console.error(`[PR events] Tree event failed for session ${session.id}:`, error));
   }
   start(): void {
     if (this.started || this.stopped) return;
@@ -144,7 +161,8 @@ export class PullRequestEventWatcher {
           const session = await store.loadSession(link.id);
           if (!eligible(session, bridgeId) || canonical(session.pullRequestUrl)?.toLowerCase() !== link.key || session.pullRequestLinkId !== link.linkId) return;
           attemptingCommit = true;
-          await mailStore.commitPullRequestObservation(session.id, link.linkId, observation);
+          const commit = await mailStore.commitPullRequestObservation(session.id, link.linkId, observation);
+          if (commit.enqueued) this.emitTreeEvent(session, observation);
           if (active()) sessionForWake = session;
         });
       } catch {

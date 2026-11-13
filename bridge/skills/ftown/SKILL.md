@@ -51,6 +51,8 @@ ftown sessions preview --add ./extra.html
 ftown sessions preview --remove notes.md
 ftown sessions preview --clear
 ftown sessions preview-reply --message "The preview is ready."
+ftown status set --state working --headline "Reviewing the API client" --progress 0/1
+ftown board
 ftown harness mail send <session-id> --type task "review the API client"
 ftown harness mail read
 ftown env --help
@@ -95,10 +97,33 @@ ftown harness mail send --parent --type escalation "Blocked: need the API contra
 ```
 
 Mail arrives as `[ftown mail]` context through harness hooks/extensions where
-available. Cursor and shell sessions receive an idle nudge to read their inbox.
-Prefer mail for agent communication; use terminal key injection only when the
-task needs it. Inspect peers with `ftown sessions list` and
-`ftown sessions screen <id> --limit 100`.
+available. Mail is for directed instructions (`--type task`), results
+(`--type result`) and escalations (`--type escalation`). Use `--type fyi` for
+non-urgent notes; `fyi` never wakes the recipient. Progress and status go on
+your card (below), never as mail. Each new batch of mail nudges the recipient
+at most once; un-read mail stays in the inbox — read it with
+`ftown harness mail read`. Prefer mail for agent communication; use terminal
+key injection only when the task needs it. Inspect peers with `ftown board`
+and `ftown sessions list`.
+
+## Status and board
+
+Keep your card current with `ftown status set` at meaningful transitions —
+starting, becoming blocked, finishing — not every turn. Set state
+(`working`, `blocked`, `waiting_review`, `done`, `failed`), a short headline,
+progress and any blocker. Writing a card wakes nobody. Parents read
+`ftown board` (one line per child) instead of screening quiet workers, and
+wait with `ftown board --wait --until any-done|any-blocked|any-ready` or
+`ftown events --wait`. Idle workers show on the board and as an `idle` event.
+
+```bash
+ftown status set --state working --headline "Implementing the card store" --progress 1/4
+ftown status set --state blocked --headline "Need the API contract" --on parent --text "Waiting on the contract decision"
+ftown status set --state done --headline "Card store shipped; checks green"
+ftown board
+ftown board --wait --until any-done --timeout 300
+ftown events --wait
+```
 
 ## Human attention and pull requests
 

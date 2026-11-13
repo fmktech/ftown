@@ -31,6 +31,9 @@ import type { CentrifugoClient } from './centrifugo-client.js';
 import type { CreateFtownSessionDeps } from './create-ftown-session.js';
 import type { ProcessRunner } from './claude-runner.js';
 import type { Session } from './types.js';
+import type { VerifiedApplication } from './security/protocol.js';
+import { createCoordination } from './coordination/wiring.js';
+import type { Board, SessionCard, TreeEventPage } from './coordination/contract.js';
 
 // Tests exercise the real encrypted adapter. Raw requests remain raw in explicit boundary tests.
 const secureFixtures = new Map<number, { pointer: BridgePointer; token: string }>();
@@ -1007,26 +1010,49 @@ it('acceptSessionMail delivers threaded mail and reports an unready mail store',
   assert.equal(messages[0].body, 'Answer');
 });
 
-it('child idle queues one ordinary durable parent message and rejects ineligible targets without a listener', async t => {
+it('child idle emits an idle tree event, sends no mail, and rejects ineligible targets without a listener', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'ftown-idle-parent-'));
   const server = new BaseLocalApiServer(); t.after(() => { server.stop(); rmSync(dir, { recursive: true, force: true }); });
   const base = (id: string): Session => ({ id, name: id, command: 'fake', shellType: 'pi', status: 'running', bridgeId: 'bridge', createdAt: '', updatedAt: '' });
   const child = { ...base('child'), name: 'Worker', parentSessionId: 'parent' };
   const parent = base('parent'); const sessions = new Map<string, Session>([['child', child], ['parent', parent]]);
   let reads = 0; let reparentDuringLookup = false; let cancelDuringLookup = false; let current = true;
-  const store = { listSessions: async () => [], loadSession: async (id: string) => {
-    reads++; if (reparentDuringLookup && reads === 3) sessions.set('child', { ...child, parentSessionId: 'other' });
-    if (cancelDuringLookup && reads === 3) current = false;
-    return sessions.get(id) ?? null;
-  } } as unknown as SessionStore;
+  const store = {
+    listSessions: async () => [],
+    saveSession: async () => {},
+    sessionDir: (id: string) => join(dir, id),
+    loadSession: async (id: string) => {
+      reads++; if (reparentDuringLookup && reads === 3) sessions.set('child', { ...child, parentSessionId: 'other' });
+      if (cancelDuringLookup && reads === 3) current = false;
+      return sessions.get(id) ?? null;
+    },
+  } as unknown as SessionStore;
   const running = new Set(['child', 'parent']);
   const runner = Object.assign(new EventEmitter(), { isRunning: (id: string) => running.has(id), write: () => { throw new Error('unexpected direct terminal write'); } }) as unknown as ProcessRunner;
   const mail = new MailStore(id => join(dir, id));
+  const emitted: Array<{ sessionId: string; kind: string; summary: string }> = [];
+  const coord = createCoordination({
+    store,
+    attention: { list: async () => ({ activity: { state: 'idle' }, openCount: 0 }) },
+    prStatus: async () => null,
+    mail: { unreadCount: async () => 0 },
+    publishSession: () => {},
+    now: Date.now,
+  });
+  const origEmit = coord.emit.bind(coord);
+  coord.emit = async (session, kind, summary, ref) => {
+    emitted.push({ sessionId: session.id, kind, summary });
+    await origEmit(session, kind, summary, ref);
+  };
   server.setDependencies(store, runner, {} as CentrifugoClient, 'user'); server.setMailStore(mail);
+  server.setCoordination(coord);
   server.setSecurity({} as BridgeSecurityService, { bridgeId: 'bridge' } as Parameters<BaseLocalApiServer['setSecurity']>[1], async () => null);
   const signal = { sessionId: 'child', cycleId: 'cycle-1', startedAt: '2026-10-30T12:00:00Z' };
   const attempt = async () => { reads = 0; await server.notifyIdleParent(signal, () => current); };
-  const expectNone = async () => assert.equal((await mail.listAll('parent', 0)).length, 0);
+  const expectNone = async () => {
+    assert.equal((await mail.listAll('parent', 0)).length, 0);
+    assert.equal(emitted.length, 0);
+  };
   for (const invalid of [undefined, { ...child, parentSessionId: undefined }, { ...child, parentSessionId: 'child' }, { ...child, bridgeId: 'other' }, { ...child, status: 'completed' as const }, { ...child, shellType: 'shell' as const }]) {
     if (invalid) sessions.set('child', invalid); else sessions.delete('child');
     await attempt(); await expectNone();
@@ -1042,7 +1068,418 @@ it('child idle queues one ordinary durable parent message and rejects ineligible
   current = false; await attempt(); await expectNone(); current = true;
   cancelDuringLookup = true; await attempt(); await expectNone(); cancelDuringLookup = false; current = true;
   reparentDuringLookup = true; await attempt(); await expectNone(); reparentDuringLookup = false; sessions.set('child', child);
-  await attempt(); const messages = await mail.listAll('parent', 0); assert.equal(messages.length, 1);
-  assert.deepEqual({ from: messages[0].from, fromName: messages[0].fromName, to: messages[0].to, type: messages[0].type, threadId: messages[0].threadId, body: messages[0].body },
-    { from: 'child', fromName: 'Worker', to: 'parent', type: 'message', threadId: 'cycle-1', body: 'Child session Worker (child) has been idle for 120 seconds. Check its status before assigning more work.' });
+  await attempt();
+  assert.equal((await mail.listAll('parent', 0)).length, 0, 'idle no longer sends mail');
+  assert.deepEqual(emitted, [{ sessionId: 'child', kind: 'idle', summary: 'Worker idle for 2m' }]);
+  const page = await coord.events.read('parent');
+  assert.equal(page.events.length, 1);
+  assert.equal(page.events[0].kind, 'idle');
+  assert.equal(page.events[0].summary, 'Worker idle for 2m');
+});
+
+describe('LocalApiServer coordination routes and attention tree events (via dispatchSecure)', () => {
+  async function coordFixture(t: { after: (fn: () => void) => void }) {
+    const home = mkdtempSync(join(tmpdir(), 'ftown-coord-routes-'));
+    const store = new SessionStore(join(home, 'data'));
+    const server = new BaseLocalApiServer();
+    const published: Session[] = [];
+    const attention = new AttentionStore((id) => store.sessionDir(id));
+    const mail = new MailStore((id) => store.sessionDir(id));
+    const runner = { stop: () => false, isRunning: () => true } as unknown as ProcessRunner;
+    const centrifugo = {
+      publishSessionUpdate: async (_user: string, s: Session) => {
+        published.push(structuredClone(s));
+      },
+    } as unknown as CentrifugoClient;
+
+    server.setDependencies(store, runner, centrifugo, 'user-1');
+    server.setAttentionStore(attention);
+    server.setMailStore(mail);
+
+    const coordination = createCoordination({
+      store,
+      attention,
+      prStatus: async (url) => ({
+        state: url.endsWith('/10') ? 'passed' : 'in_progress',
+        stale: false,
+        checkedAt: '2026-11-13T12:00:00.000Z',
+      }),
+      mail: {
+        unreadCount: async (id) => (await mail.listUndelivered(id)).length,
+      },
+      publishSession: (s) => {
+        published.push(structuredClone(s));
+      },
+      now: () => Date.parse('2026-11-13T12:00:00.000Z'),
+    });
+    server.setCoordination(coordination);
+    server.setSecurity(
+      { revalidate: async () => {} } as unknown as BridgeSecurityService,
+      {
+        protocolVersion: 1,
+        ownerId: 'owner-1',
+        bridgeId: 'bridge-1',
+        endpoint: {
+          id: 'ep-1',
+          ownerId: 'owner-1',
+          kind: 'bridge',
+          publicKey: '',
+          createdAt: 0,
+        },
+        relayUserId: 'user-1',
+      },
+      async () => null,
+    );
+
+    t.after(() => {
+      attention.stopNotifications();
+      server.stop();
+      rmSync(home, { recursive: true, force: true });
+    });
+
+    const call = async (
+      method: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH',
+      path: string,
+      body?: unknown,
+      signal?: AbortSignal,
+    ): Promise<{ status: number; body: Record<string, unknown> }> => {
+      const message = {
+        principal: {
+          endpoint: {
+            id: 'cli-1',
+            ownerId: 'owner-1',
+            kind: 'local-cli',
+            publicKey: '',
+            createdAt: 0,
+          },
+          permission: 'admin',
+        },
+        envelope: {
+          type: 'ftown_encrypted',
+          version: 1,
+          senderId: 'cli-1',
+          recipientId: 'ep-1',
+          ownerId: 'owner-1',
+          bridgeId: 'bridge-1',
+          channel: 'local-http:bridge-1',
+          purpose: 'application',
+          messageId: 'req-1',
+          createdAt: 0,
+          expiresAt: 1000,
+          receiverEpoch: null,
+          nonce: '',
+          ciphertext: '',
+        },
+        application: {
+          type: 'application',
+          route: { kind: 'http', requestId: 'req-1', method, path },
+          data: body !== undefined ? { body } : {},
+          mcp: null,
+        },
+      } as unknown as VerifiedApplication;
+      return (await server.dispatchSecure(message, signal)) as unknown as {
+        status: number;
+        body: Record<string, unknown>;
+      };
+    };
+
+    const root: Session = {
+      id: 'root-1',
+      name: 'Orchestrator',
+      command: 'claude',
+      shellType: 'claude',
+      status: 'running',
+      bridgeId: 'bridge-1',
+      createdAt: '2026-11-13T10:00:00.000Z',
+      updatedAt: '2026-11-13T10:00:00.000Z',
+    };
+    const childA: Session = {
+      id: 'child-a',
+      name: 'Worker A',
+      command: 'claude',
+      shellType: 'claude',
+      status: 'running',
+      bridgeId: 'bridge-1',
+      parentSessionId: 'root-1',
+      pullRequestUrl: 'https://github.com/org/repo/pull/10',
+      createdAt: '2026-11-13T10:01:00.000Z',
+      updatedAt: '2026-11-13T10:01:00.000Z',
+    };
+    const childB: Session = {
+      id: 'child-b',
+      name: 'Worker B',
+      command: 'claude',
+      shellType: 'claude',
+      status: 'running',
+      bridgeId: 'bridge-1',
+      parentSessionId: 'root-1',
+      createdAt: '2026-11-13T10:02:00.000Z',
+      updatedAt: '2026-11-13T10:02:00.000Z',
+    };
+    await store.saveSession(root);
+    await store.saveSession(childA);
+    await store.saveSession(childB);
+
+    return { store, server, coordination, call, published, root, childA, childB };
+  }
+
+  it('serves GET, PUT, and DELETE /api/sessions/:id/card with strict validation and 404 handling', async (t) => {
+    const f = await coordFixture(t);
+
+    // 404 on unknown session
+    assert.equal((await f.call('GET', '/api/sessions/missing/card')).status, 404);
+    assert.equal(
+      (await f.call('PUT', '/api/sessions/missing/card', { state: 'working', headline: 'hi' })).status,
+      404,
+    );
+    assert.equal((await f.call('DELETE', '/api/sessions/missing/card')).status, 404);
+
+    // 400 on unknown query parameter
+    assert.equal((await f.call('GET', '/api/sessions/child-a/card?foo=1')).status, 400);
+    assert.equal(
+      (await f.call('PUT', '/api/sessions/child-a/card?foo=1', { state: 'working', headline: 'hi' })).status,
+      400,
+    );
+    assert.equal((await f.call('DELETE', '/api/sessions/child-a/card?foo=1')).status, 400);
+
+    // 405 on unsupported method
+    assert.equal((await f.call('POST', '/api/sessions/child-a/card', {})).status, 405);
+
+    // Initial GET returns declared: null
+    const initial = await f.call('GET', '/api/sessions/child-a/card');
+    assert.equal(initial.status, 200);
+    assert.equal((initial.body as unknown as SessionCard).declared, null);
+    assert.equal((initial.body as unknown as SessionCard).derived.pr?.state, 'passed');
+
+    // PUT validation errors -> 400
+    assert.equal((await f.call('PUT', '/api/sessions/child-a/card', {})).status, 400);
+    assert.equal(
+      (await f.call('PUT', '/api/sessions/child-a/card', { state: 'working' })).status,
+      400,
+    );
+    assert.equal(
+      (await f.call('PUT', '/api/sessions/child-a/card', {
+        state: 'working',
+        headline: 'valid',
+        unknownKey: true,
+      })).status,
+      400,
+    );
+    assert.equal(
+      (await f.call('PUT', '/api/sessions/child-a/card', {
+        state: 'working',
+        headline: 'valid',
+        progress: { done: 5, total: 3 },
+      })).status,
+      400,
+    );
+
+    // PUT happy path (create + partial update)
+    const created = await f.call('PUT', '/api/sessions/child-a/card', {
+      state: 'working',
+      headline: 'Building API routes',
+      progress: { done: 2, total: 4 },
+    });
+    assert.equal(created.status, 200);
+    const createdCard = created.body as unknown as SessionCard;
+    assert.equal(createdCard.declared?.state, 'working');
+    assert.equal(createdCard.declared?.headline, 'Building API routes');
+    assert.deepEqual(createdCard.declared?.progress, { done: 2, total: 4 });
+
+    const updated = await f.call('PUT', '/api/sessions/child-a/card', {
+      state: 'waiting_review',
+      progress: null,
+    });
+    assert.equal(updated.status, 200);
+    const updatedCard = updated.body as unknown as SessionCard;
+    assert.equal(updatedCard.declared?.state, 'waiting_review');
+    assert.equal(updatedCard.declared?.headline, 'Building API routes');
+    assert.equal(updatedCard.declared?.progress, undefined);
+
+    // DELETE rejects unexpected body keys, succeeds with empty body
+    assert.equal(
+      (await f.call('DELETE', '/api/sessions/child-a/card', { unexpected: 1 })).status,
+      400,
+    );
+    const cleared = await f.call('DELETE', '/api/sessions/child-a/card');
+    assert.equal(cleared.status, 200);
+    assert.deepEqual(cleared.body, { ok: true });
+
+    const afterClear = await f.call('GET', '/api/sessions/child-a/card');
+    assert.equal((afterClear.body as unknown as SessionCard).declared, null);
+  });
+
+  it('serves GET /api/sessions/:id/board with query filtering and strict parameter validation', async (t) => {
+    const f = await coordFixture(t);
+
+    // 404 on missing session
+    assert.equal((await f.call('GET', '/api/sessions/missing/board')).status, 404);
+
+    // 405 on non-GET
+    assert.equal((await f.call('POST', '/api/sessions/root-1/board')).status, 405);
+
+    // 400 on invalid query params
+    for (const bad of [
+      'unknown=1',
+      'since=-1',
+      'since=abc',
+      'since=1.5',
+      'since=1234567890123',
+      'since=1&since=2',
+      'ready=2',
+      'ready=yes',
+      'all=invalid',
+    ]) {
+      assert.equal(
+        (await f.call('GET', `/api/sessions/root-1/board?${bad}`)).status,
+        400,
+        `expected 400 for ?${bad}`,
+      );
+    }
+
+    await f.call('PUT', '/api/sessions/child-a/card', {
+      state: 'waiting_review',
+      headline: 'PR up',
+    });
+
+    const boardRes = await f.call('GET', '/api/sessions/root-1/board');
+    assert.equal(boardRes.status, 200);
+    const board = boardRes.body as unknown as Board;
+    assert.equal(board.rootId, 'root-1');
+    assert.equal(board.cards.length, 2);
+    assert.equal(board.rollup.waiting_review, 1);
+    assert.equal(board.rollup.unset, 1);
+
+    const readyRes = await f.call('GET', '/api/sessions/root-1/board?ready=1');
+    assert.equal(readyRes.status, 200);
+    const readyBoard = readyRes.body as unknown as Board;
+    assert.equal(readyBoard.cards.length, 1);
+    assert.equal(readyBoard.cards[0].sessionId, 'child-a');
+
+    const sinceFuture = await f.call('GET', `/api/sessions/root-1/board?since=${board.cursor}&all=1`);
+    assert.equal(sinceFuture.status, 200);
+    assert.equal((sinceFuture.body as unknown as Board).cards.length, 0);
+  });
+
+  it('serves GET /api/sessions/:id/events with pagination, long-poll wait, and abort on disconnect', async (t) => {
+    const f = await coordFixture(t);
+
+    // 404 on missing session
+    assert.equal((await f.call('GET', '/api/sessions/missing/events')).status, 404);
+
+    // 405 on non-GET
+    assert.equal((await f.call('POST', '/api/sessions/root-1/events')).status, 405);
+
+    // 400 on invalid query params
+    for (const bad of [
+      'unknown=1',
+      'since=-1',
+      'since=abc',
+      'since=1234567890123',
+      'limit=0',
+      'limit=501',
+      'limit=abc',
+      'waitSeconds=-1',
+      'waitSeconds=301',
+      'waitSeconds=1.5',
+      'waitSeconds=abc',
+      'since=1&since=2',
+    ]) {
+      assert.equal(
+        (await f.call('GET', `/api/sessions/root-1/events?${bad}`)).status,
+        400,
+        `expected 400 for ?${bad}`,
+      );
+    }
+
+    await f.call('PUT', '/api/sessions/child-a/card', { state: 'working', headline: 'Step 1' });
+    await f.call('PUT', '/api/sessions/child-b/card', { state: 'working', headline: 'Step 2' });
+
+    // Reading from child resolves root's log
+    const page1 = await f.call('GET', '/api/sessions/child-a/events?since=0&limit=1');
+    assert.equal(page1.status, 200);
+    const body1 = page1.body as unknown as TreeEventPage;
+    assert.equal(body1.events.length, 1);
+    assert.equal(body1.cursor, 1);
+
+    // Long-poll wait resolves immediately when new event is appended
+    const waitPromise = f.call('GET', '/api/sessions/root-1/events?since=2&waitSeconds=10');
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await f.coordination.emit(f.childA, 'result', 'Done with A');
+    const waited = await waitPromise;
+    assert.equal(waited.status, 200);
+    const waitedPage = waited.body as unknown as TreeEventPage;
+    assert.equal(waitedPage.events.length, 1);
+    assert.equal(waitedPage.events[0].kind, 'result');
+    assert.equal(waitedPage.cursor, 3);
+
+    // Long-poll wait aborts promptly when clientGone signal fires
+    const abortController = new AbortController();
+    const started = Date.now();
+    const abortedPromise = f.call(
+      'GET',
+      '/api/sessions/root-1/events?since=3&waitSeconds=30',
+      undefined,
+      abortController.signal,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    abortController.abort();
+    const abortedRes = await abortedPromise;
+    assert.ok(Date.now() - started < 2000, 'wait must abort promptly when request closes');
+    assert.equal(abortedRes.status, 200);
+    assert.equal((abortedRes.body as unknown as TreeEventPage).timedOut, true);
+  });
+
+  it('emits attention tree event on POST /attention and /attention/ask only when session has a parent', async (t) => {
+    const f = await coordFixture(t);
+
+    // Root session (no parent) -> does NOT emit attention tree event
+    const rootAtt = await f.call('POST', '/api/sessions/root-1/attention', {
+      title: 'Root question',
+      message: 'Should not emit tree event',
+    });
+    assert.equal(rootAtt.status, 200);
+    assert.equal((await f.coordination.events.read('root-1')).events.length, 0);
+
+    // Child session POST /attention -> emits attention tree event with title and ref = event.id
+    const childAtt = await f.call('POST', '/api/sessions/child-a/attention', {
+      title: 'Need DB password',
+      message: 'Please provide credentials',
+    });
+    assert.equal(childAtt.status, 200);
+    const attEvent = childAtt.body.event as AttentionItem;
+    let treeEvents = (await f.coordination.events.read('root-1')).events;
+    assert.equal(treeEvents.length, 1);
+    assert.equal(treeEvents[0].sessionId, 'child-a');
+    assert.equal(treeEvents[0].kind, 'attention');
+    assert.equal(treeEvents[0].summary, 'Need DB password');
+    assert.equal(treeEvents[0].ref, attEvent.id);
+
+    // Child session POST /attention/ask -> emits attention tree event with title and ref = item.id
+    const askRes = await f.call('POST', '/api/sessions/child-b/attention/ask', {
+      toolName: 'AskUserQuestion',
+      toolUseId: 'toolu_ask_1',
+      toolInput: {
+        questions: [
+          {
+            question: 'Which region?',
+            header: 'Region',
+            multiSelect: false,
+            options: [
+              { label: 'us-east', description: 'East' },
+              { label: 'us-west', description: 'West' },
+            ],
+          },
+        ],
+      },
+    });
+    assert.equal(askRes.status, 200);
+    const askEvent = askRes.body.event as AttentionItem;
+    treeEvents = (await f.coordination.events.read('root-1')).events;
+    assert.equal(treeEvents.length, 2);
+    assert.equal(treeEvents[1].sessionId, 'child-b');
+    assert.equal(treeEvents[1].kind, 'attention');
+    assert.equal(treeEvents[1].summary, askEvent.title);
+    assert.equal(treeEvents[1].ref, askEvent.id);
+  });
 });

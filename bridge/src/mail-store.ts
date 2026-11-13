@@ -4,6 +4,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { PullRequestObservation } from './pull-request-status.js';
 
 import type { MailMessage } from './types.js';
+import { NON_WAKING_MAIL_TYPES } from './coordination/contract.js';
 import { isSettledStamp, sameStamp, toFileStamp, type FileStamp } from './file-stamp.js';
 
 /** Rewrites cap the inbox file at the newest N messages. */
@@ -24,6 +25,10 @@ export function createMailMessage(input: MailMessageInput): MailMessage {
     ts: new Date().toISOString(),
     ...input,
   };
+}
+
+export function createNudgeToken(nowMs: number = Date.now()): string {
+  return `${new Date(nowMs).toISOString()}#${randomBytes(3).toString('hex')}`;
 }
 
 type PrCheckpoint = { _ftown: 'pr-event-checkpoint'; version: 1; linkId: string; headOid?: string; state: 'in_progress' | 'failed' | 'passed' | 'merged'; ordinal: number };
@@ -170,7 +175,7 @@ export class MailStore {
         messageId = `pr-${createHash('sha256').update(JSON.stringify([linkId, ordinal, state, observation.headOid ?? 'merged'])).digest('hex')}`;
         const heading = state === 'merged' ? 'Pull request merged.' : state === 'failed' ? 'GitHub rollup checks failed.' : 'GitHub rollup checks passed.';
         const advice = state === 'failed' ? 'Inspect the checks and reproduce failures before fixing them within your existing task authorization.' : 'Follow your existing task and user instructions; this notification does not authorize merging or other actions.';
-        inbox.messages.push({ id: messageId, ts: new Date().toISOString(), from: 'external', fromName: 'FTown PR updates', to: sessionId, type: 'message', body: `${heading}\nPR: ${observation.url}\nChecks: ${observation.url}/checks\n${observation.headOid ? `Observed head: ${observation.headOid}\n` : ''}Observed at: ${observation.checkedAt}\n${advice}` });
+        inbox.messages.push({ id: messageId, ts: new Date().toISOString(), from: 'external', fromName: 'FTown PR updates', to: sessionId, type: state === 'passed' ? 'fyi' : 'message', body: `${heading}\nPR: ${observation.url}\nChecks: ${observation.url}/checks\n${observation.headOid ? `Observed head: ${observation.headOid}\n` : ''}Observed at: ${observation.checkedAt}\n${advice}` });
       }
       await this.replaceInbox(sessionId, inbox);
       return { enqueued: !!messageId, ...(messageId ? { messageId } : {}) };
@@ -199,10 +204,94 @@ export class MailStore {
     );
   }
 
+  async listUnnudgedWaking(sessionId: string): Promise<MailMessage[]> {
+    return this.withLock(sessionId, async () =>
+      (await this.readAll(sessionId)).filter(
+        (m) => !m.deliveredAt && !m.nudgedAt && !NON_WAKING_MAIL_TYPES.has(m.type),
+      ),
+    );
+  }
+
+  async unreadCount(sessionId: string): Promise<number> {
+    return this.withLock(sessionId, async () =>
+      (await this.readAll(sessionId)).filter((m) => !m.deliveredAt).length,
+    );
+  }
+
   async listAll(sessionId: string, limit: number): Promise<MailMessage[]> {
     return this.withLock(sessionId, async () => {
       const all = await this.readAll(sessionId);
       return limit > 0 ? all.slice(-limit) : all.slice();
+    });
+  }
+
+  /** Stamp nudgedAt = token on the given un-nudged message ids; returns the newly stamped messages. */
+  async markNudged(
+    sessionId: string,
+    ids: string[],
+    token: string = createNudgeToken(this.io.now()),
+  ): Promise<MailMessage[]> {
+    return this.withLock(sessionId, async () => {
+      if (ids.length === 0) {
+        return [];
+      }
+      const inbox = await this.readInbox(sessionId);
+      const all = inbox.messages.map((message) => ({ ...message }));
+      const wanted = new Set(ids);
+      const marked: MailMessage[] = [];
+      for (const msg of all) {
+        if (wanted.has(msg.id) && !msg.nudgedAt) {
+          msg.nudgedAt = token;
+          marked.push(msg);
+        }
+      }
+      if (marked.length === 0) {
+        return [];
+      }
+      let toDrop = all.length - MAX_STORED_MESSAGES;
+      const kept = all.filter((m) => {
+        if (toDrop > 0 && m.deliveredAt) {
+          toDrop--;
+           return false;
+        }
+        return true;
+      });
+      await this.replaceInbox(sessionId, {
+        ...(inbox.checkpoint ? { checkpoint: { ...inbox.checkpoint } } : {}),
+        messages: kept,
+      });
+      return marked;
+    });
+  }
+
+  /** Clear nudgedAt only on messages in ids whose nudgedAt === token; returns the unstamped messages. */
+  async unmarkNudged(
+    sessionId: string,
+    ids: string[],
+    token: string,
+  ): Promise<MailMessage[]> {
+    return this.withLock(sessionId, async () => {
+      if (ids.length === 0 || !token) {
+        return [];
+      }
+      const inbox = await this.readInbox(sessionId);
+      const all = inbox.messages.map((message) => ({ ...message }));
+      const wanted = new Set(ids);
+      const unmarked: MailMessage[] = [];
+      for (const msg of all) {
+        if (wanted.has(msg.id) && msg.nudgedAt === token) {
+          delete msg.nudgedAt;
+          unmarked.push(msg);
+        }
+      }
+      if (unmarked.length === 0) {
+        return [];
+      }
+      await this.replaceInbox(sessionId, {
+        ...(inbox.checkpoint ? { checkpoint: { ...inbox.checkpoint } } : {}),
+        messages: all,
+      });
+      return unmarked;
     });
   }
 

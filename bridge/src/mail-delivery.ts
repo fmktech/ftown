@@ -1,8 +1,20 @@
-import { createMailMessage } from './mail-store.js';
+import { createMailMessage, createNudgeToken } from './mail-store.js';
 import { HOOKED_SHELL_TYPES } from './harness-registry.js';
 import { createNativeMailWaker, type NativeMailWaker } from './native-mail.js';
+import {
+  DIGEST_MAX,
+  MAIL_TYPES_V2,
+  MAX_WAKE_ATTEMPTS,
+  NON_WAKING_MAIL_TYPES,
+  type DigestProvider,
+  type MailCounts,
+  type MailEventSink,
+  type MailTypeV2,
+} from './coordination/contract.js';
 
 import type { MailMessage, Session, ShellType } from './types.js';
+
+export { MAIL_TYPES_V2, MAX_WAKE_ATTEMPTS, NON_WAKING_MAIL_TYPES };
 
 export const MAX_MAIL_BODY_LENGTH = 64 * 1024;
 export const MAX_MAIL_WAIT_SECONDS = 30;
@@ -40,7 +52,35 @@ export function parseNativeWakeRegistration(query: URLSearchParams): NativeWakeR
   return { adapter, nativeSessionId };
 }
 
-export const MAIL_TYPES: ReadonlyArray<MailMessage['type']> = ['message', 'task', 'result', 'escalation'];
+export const MAIL_TYPES: ReadonlyArray<MailMessage['type']> = MAIL_TYPES_V2;
+
+const NUDGE_COUNT_ORDER: ReadonlyArray<MailTypeV2> = ['task', 'escalation', 'result', 'message'];
+
+export function countMailTypes(messages: readonly MailMessage[]): MailCounts {
+  const counts: MailCounts = {};
+  for (const msg of messages) {
+    if (NON_WAKING_MAIL_TYPES.has(msg.type)) continue;
+    counts[msg.type] = (counts[msg.type] ?? 0) + 1;
+  }
+  return counts;
+}
+
+export function formatNudgeText(counts: MailCounts, digest?: string | null): string {
+  const parts: string[] = [];
+  let total = 0;
+  for (const type of NUDGE_COUNT_ORDER) {
+    const count = counts[type] ?? 0;
+    if (count > 0) {
+      total += count;
+      parts.push(`${count} ${type}`);
+    }
+  }
+  const base = `[ftown] ${total} new mail (${parts.join(', ')}) — run: ftown harness mail read`;
+  const trimmedDigest = typeof digest === 'string' ? sanitizeMessageText(digest).slice(0, DIGEST_MAX) : '';
+  return trimmedDigest ? `${base} | ${trimmedDigest}` : base;
+}
+
+export const NUDGE_TEXT = formatNudgeText;
 
 // Composer TUIs detect pastes by input arrival rate; the submit CR must come well
 // after that window or it is treated as a pasted newline.
@@ -83,12 +123,15 @@ export interface MailDeliverySessionStore {
 export interface MailDeliveryMailStore {
   append(msg: MailMessage): Promise<void>;
   listUndelivered(sessionId: string): Promise<MailMessage[]>;
+  listUnnudgedWaking(sessionId: string): Promise<MailMessage[]>;
   listAll(sessionId: string, limit: number): Promise<MailMessage[]>;
   markDelivered(
     sessionId: string,
     ids: string[],
     via: NonNullable<MailMessage['deliveredVia']>,
   ): Promise<MailMessage[]>;
+  markNudged(sessionId: string, ids: string[], token?: string): Promise<MailMessage[]>;
+  unmarkNudged(sessionId: string, ids: string[], token: string): Promise<MailMessage[]>;
 }
 
 /** The slice of ProcessRunner the mail engine needs. */
@@ -140,14 +183,17 @@ export class MailDeliveryService {
   private lastNudgeAt: Map<string, number> = new Map();
   private agentBusySince: Map<string, number> = new Map();
   private nativeLeases = new Map<string, NativeWakeRegistration & { until: number }>();
-  private nativeBatches = new Map<string, { identity: string; ids: Set<string> }>();
   private selectionLocks = new Map<string, Promise<void>>();
-  private codexClaims = new Map<string, string>();
+  private codexClaims = new Map<string, Set<string>>();
   private codexRetryAt = new Map<string, number>();
+  private batchAttempts = new Map<string, { key: string; count: number }>();
+  private museNativeTried = new Map<string, string>();
   private wakeLocks = new Map<string, Promise<void>>();
   private wakeControllers = new Map<string, AbortController>();
   private legacyReadyAt = new Map<string, number>();
   private lastInjection = new Map<string, { text: string; at: number }>();
+  private digestProvider: DigestProvider | null = null;
+  private eventSink: MailEventSink | null = null;
   private stopped = false;
   private dependencyEpoch = 0;
   private readonly nativeWake: NativeMailWaker;
@@ -177,10 +223,20 @@ export class MailDeliveryService {
     this.runner = runner;
   }
 
+  setDigestProvider(p: DigestProvider): void {
+    this.digestProvider = p;
+  }
+
+  setEventSink(s: MailEventSink): void {
+    this.eventSink = s;
+  }
+
   private invalidateRecovery(): void {
     this.dependencyEpoch++;
     for (const timer of this.nudgeTimers.values()) this.clearTimeoutFn(timer);
     this.nudgeTimers.clear();
+    this.batchAttempts.clear();
+    this.museNativeTried.clear();
     for (const controller of this.wakeControllers.values()) controller.abort();
   }
 
@@ -194,7 +250,7 @@ export class MailDeliveryService {
     const session = await store.loadSession(sessionId);
     if (!current() || !session || session.status !== 'running' || session.shellType === 'pi'
       || !runner.isRunning(sessionId)) return;
-    const pending = await mailStore.listUndelivered(sessionId);
+    const pending = await mailStore.listUnnudgedWaking(sessionId);
     if (!current() || !pending.length || !runner.isRunning(sessionId)) return;
     // Reads may have raced deletion/stop or an inbox drain. The wake path checks
     // them again immediately before dispatch, including native capability probes.
@@ -220,9 +276,10 @@ export class MailDeliveryService {
     for (const waiter of [...this.mailWaiters.values()]) waiter.deliver([]);
     this.mailWaiters.clear();
     this.nativeLeases.clear();
-    this.nativeBatches.clear();
     this.legacyReadyAt.clear();
     this.codexRetryAt.clear();
+    this.batchAttempts.clear();
+    this.museNativeTried.clear();
     this.lastInjection.clear();
     for (const controller of this.wakeControllers.values()) controller.abort();
     this.wakeControllers.clear();
@@ -270,7 +327,7 @@ export class MailDeliveryService {
 
   private available(sessionId: string, messages: MailMessage[]): MailMessage[] {
     const claimed = this.codexClaims.get(sessionId);
-    return claimed ? messages.filter(message => message.id !== claimed) : messages;
+    return claimed?.size ? messages.filter(message => !claimed.has(message.id)) : messages;
   }
 
   /** Hook activity (UserPromptSubmit/PreToolUse/PostToolUse): the agent is mid-turn. */
@@ -298,8 +355,48 @@ export class MailDeliveryService {
   }
 
   /** Let the API server record an opencode/claude-mod plugin handoff (mail handed to the plugin). */
-  notePluginHandoff(sessionId: string): void {
+  async notePluginHandoff(sessionId: string): Promise<void> {
     this.recordInjection(sessionId, OPENCODE_MAIL_WAKE_TEXT);
+    const existingTimer = this.nudgeTimers.get(sessionId);
+    if (existingTimer) {
+      this.clearTimeoutFn(existingTimer);
+      this.nudgeTimers.delete(sessionId);
+    }
+    this.pendingNudgeFrom.delete(sessionId);
+    const mailStore = this.mailStore;
+    if (!mailStore) return;
+    const token = createNudgeToken(this.now());
+    try {
+      const snapshot = await mailStore.listUnnudgedWaking(sessionId);
+      const undeliveredWaking = this.wakeLocks.has(sessionId)
+        ? (await mailStore.listUndelivered(sessionId)).filter((m) => !NON_WAKING_MAIL_TYPES.has(m.type))
+        : snapshot;
+      const batchIds = Array.from(new Set([...snapshot.map((m) => m.id), ...undeliveredWaking.map((m) => m.id)]));
+      if (batchIds.length === 0) return;
+      await this.withSelection(sessionId, async () => {
+        await mailStore.markNudged(sessionId, batchIds, token);
+      });
+      const inFlightWake = this.wakeLocks.get(sessionId);
+      if (inFlightWake) {
+        void inFlightWake
+          .then(async () => {
+            const retryTimer = this.nudgeTimers.get(sessionId);
+            if (retryTimer) {
+              this.clearTimeoutFn(retryTimer);
+              this.nudgeTimers.delete(sessionId);
+            }
+            this.pendingNudgeFrom.delete(sessionId);
+            await this.withSelection(sessionId, async () => {
+              await mailStore.markNudged(sessionId, batchIds, token);
+            });
+          })
+          .catch((err) => {
+            console.error('[MailDelivery] Plugin handoff stamp failed:', err instanceof Error ? err.message : String(err));
+          });
+      }
+    } catch (err) {
+      console.error('[MailDelivery] Plugin handoff stamp failed:', err instanceof Error ? err.message : String(err));
+    }
   }
 
   /**
@@ -332,7 +429,12 @@ export class MailDeliveryService {
   // origin 'human' deliveries (dashboard-typed text, if any) must not record an injection.
   // Recorded BEFORE the first write: the prompt hook can fire before the settle
   // delays finish, and a stale record after a failed write is acceptable.
-  async injectPtyLine(session: Session, sender: string, text: string, options?: { origin?: 'injected' | 'human' }): Promise<boolean> {
+  async injectPtyLine(
+    session: Session,
+    sender: string,
+    text: string,
+    options?: { origin?: 'injected' | 'human'; onFirstWrite?: () => void },
+  ): Promise<boolean> {
     if (this.stopped || !this.runner) return false;
     const epoch = this.dependencyEpoch;
     const isAgent = session.shellType && session.shellType !== 'shell';
@@ -342,6 +444,7 @@ export class MailDeliveryService {
       : `: '${INJECTED_PROMPT_PREFIXES[0]}${safeSender}] ${text.replace(/'/g, '')}'`;
     if (options?.origin !== 'human') this.recordInjection(session.id, line);
     if (!this.runner.write(session.id, line)) return false;
+    options?.onFirstWrite?.();
     // Composer TUIs detect pastes by input arrival rate; the submit CR must come well
     // after that window or it is treated as a pasted newline.
     await this.delay(COMPOSER_PASTE_SETTLE_MS);
@@ -390,6 +493,16 @@ export class MailDeliveryService {
 
     const msg = createMailMessage({ from, fromName, to: session.id, type, threadId, body: text });
     await this.mailStore.append(msg);
+    if (this.eventSink) {
+      const sink = this.eventSink;
+      try {
+        void Promise.resolve(sink.onAccepted(msg, session)).catch((err) => {
+          console.error('[MailDelivery] Event sink failed:', err instanceof Error ? err.message : String(err));
+        });
+      } catch (err) {
+        console.error('[MailDelivery] Event sink failed:', err instanceof Error ? err.message : String(err));
+      }
+    }
     await this.notifyCommittedMail(session, fromName ?? from);
     return { ok: true, id: msg.id };
   }
@@ -414,7 +527,7 @@ export class MailDeliveryService {
           waiter.deliver(marked);
         }
       }
-      pending = (await mailStore.listUndelivered(session.id)).length > 0;
+      pending = (await mailStore.listUnnudgedWaking(session.id)).length > 0;
     });
     if (pending && (!hadWaiter || session.shellType === 'codex') && session.shellType !== 'pi') {
       const legacyDelay = HOOKED_SHELL_TYPES.has(session.shellType ?? 'claude')
@@ -567,21 +680,55 @@ export class MailDeliveryService {
     const wait = (this.codexRetryAt.get(sessionId) ?? 0) - this.now();
     if (wait > 0) { this.scheduleMailNudge(sessionId, fromLabel, wait); return; }
     if (!runner || !runner.isRunning(sessionId) || session.status !== 'running') {
-      this.codexRetryAt.set(sessionId, this.now() + MAIL_NUDGE_BUSY_RECHECK_MS);
-      this.scheduleMailNudge(sessionId, fromLabel, MAIL_NUDGE_BUSY_RECHECK_MS);
+      const pending = await this.withSelection(sessionId, async () =>
+        current() ? this.available(sessionId, await mailStore.listUnnudgedWaking(sessionId)) : [],
+      );
+      if (!current() || !pending.length) {
+        this.pendingNudgeFrom.delete(sessionId);
+        this.codexRetryAt.delete(sessionId);
+        this.batchAttempts.delete(sessionId);
+        return;
+      }
+      const batchIds = pending.map((m) => m.id);
+      const batchKey = batchIds.slice().sort().join(',');
+      const prev = this.batchAttempts.get(sessionId);
+      const attempts = (prev?.key === batchKey ? prev.count : 0) + 1;
+      if (attempts >= MAX_WAKE_ATTEMPTS) {
+        const token = createNudgeToken(this.now());
+        await this.withSelection(sessionId, async () => {
+          if (!current()) return;
+          await mailStore.markNudged(sessionId, batchIds, token);
+        });
+        this.batchAttempts.delete(sessionId);
+        this.codexRetryAt.delete(sessionId);
+        this.pendingNudgeFrom.delete(sessionId);
+      } else {
+        this.batchAttempts.set(sessionId, { key: batchKey, count: attempts });
+        this.codexRetryAt.set(sessionId, this.now() + MAIL_NUDGE_BUSY_RECHECK_MS);
+        this.scheduleMailNudge(sessionId, fromLabel, MAIL_NUDGE_BUSY_RECHECK_MS);
+      }
       return;
     }
-    const message = await this.withSelection(sessionId, async () => {
-      if (!current()) return undefined;
-      const pending = this.available(sessionId, await mailStore.listUndelivered(sessionId));
-      if (!current() || !pending.length) return undefined;
-      this.codexClaims.set(sessionId, pending[0].id);
-      return pending[0];
+    let claimSet: Set<string> | undefined;
+    const batch = await this.withSelection(sessionId, async () => {
+      if (!current()) return [];
+      const pending = this.available(sessionId, await mailStore.listUnnudgedWaking(sessionId));
+      if (!current() || !pending.length) return [];
+      claimSet = new Set(pending.map(m => m.id));
+      this.codexClaims.set(sessionId, claimSet);
+      return pending;
     });
-    if (!message) return;
+    if (!batch.length || !claimSet) {
+      this.pendingNudgeFrom.delete(sessionId);
+      this.codexRetryAt.delete(sessionId);
+      this.batchAttempts.delete(sessionId);
+      return;
+    }
+    const batchIds = batch.map(m => m.id);
+    const batchKey = batchIds.slice().sort().join(',');
     if (!current()) {
       await this.withSelection(sessionId, async () => {
-        if (this.codexClaims.get(sessionId) === message.id) this.codexClaims.delete(sessionId);
+        if (this.codexClaims.get(sessionId) === claimSet) this.codexClaims.delete(sessionId);
       });
       return;
     }
@@ -593,21 +740,24 @@ export class MailDeliveryService {
       const isCurrent = async () => {
         if (!current() || controller.signal.aborted) return false;
         const live = await store.loadSession(sessionId);
-        const pending = await mailStore.listUndelivered(sessionId);
+        const pending = await mailStore.listUnnudgedWaking(sessionId);
+        const pendingIds = new Set(pending.map(m => m.id));
         return current() && !controller.signal.aborted && !!live && live.status === 'running'
           && live.shellType === 'codex' && nativeIdentity(live) === identity && runner.isRunning(sessionId)
-          && this.codexClaims.get(sessionId) === message.id && pending.some(m => m.id === message.id);
+          && this.codexClaims.get(sessionId) === claimSet && batchIds.some(id => pendingIds.has(id));
       };
-      const wakeText = codexMailText(message);
+      const wakeText = batch.map(codexMailText).join('\n\n');
       // Recorded BEFORE the wake call: the prompt hook can fire before it resolves.
       this.recordInjection(sessionId, wakeText);
       const result = await this.nativeWake(session, wakeText, controller.signal, isCurrent)
         .catch(() => ({ status: 'unknown' as const }));
       if (result.status === 'accepted' && current() && !controller.signal.aborted) {
+        const token = createNudgeToken(this.now());
         accepted = await this.withSelection(sessionId, async () => {
-          if (!current() || controller.signal.aborted || this.codexClaims.get(sessionId) !== message.id) return false;
-          const marked = await mailStore.markDelivered(sessionId, [message.id], 'cli');
-          return marked.some(m => m.id === message.id);
+          if (!current() || controller.signal.aborted || this.codexClaims.get(sessionId) !== claimSet) return false;
+          const marked = await mailStore.markDelivered(sessionId, batchIds, 'cli');
+          await mailStore.markNudged(sessionId, batchIds, token);
+          return marked.length > 0;
         });
       }
     } catch {
@@ -615,16 +765,38 @@ export class MailDeliveryService {
     } finally {
       if (this.wakeControllers.get(sessionId) === controller) this.wakeControllers.delete(sessionId);
       await this.withSelection(sessionId, async () => {
-        if (this.codexClaims.get(sessionId) === message.id) this.codexClaims.delete(sessionId);
+        if (this.codexClaims.get(sessionId) === claimSet) this.codexClaims.delete(sessionId);
       });
     }
     if (!current()) return;
-    if (!accepted) this.codexRetryAt.set(sessionId, this.now() + MAIL_NUDGE_BUSY_RECHECK_MS);
-    else this.codexRetryAt.delete(sessionId);
-    const pending = await mailStore.listUndelivered(sessionId);
+    if (accepted) {
+      this.codexRetryAt.delete(sessionId);
+      this.batchAttempts.delete(sessionId);
+    } else {
+      const prev = this.batchAttempts.get(sessionId);
+      const attempts = (prev?.key === batchKey ? prev.count : 0) + 1;
+      if (attempts >= MAX_WAKE_ATTEMPTS) {
+        const token = createNudgeToken(this.now());
+        await this.withSelection(sessionId, async () => {
+          if (!current()) return;
+          await mailStore.markNudged(sessionId, batchIds, token);
+        });
+        this.batchAttempts.delete(sessionId);
+        this.codexRetryAt.delete(sessionId);
+      } else {
+        this.batchAttempts.set(sessionId, { key: batchKey, count: attempts });
+        this.codexRetryAt.set(sessionId, this.now() + MAIL_NUDGE_BUSY_RECHECK_MS);
+      }
+    }
+    const remaining = await mailStore.listUnnudgedWaking(sessionId);
     if (!current()) return;
-    if (pending.length) this.scheduleMailNudge(sessionId, fromLabel, accepted ? MAIL_NUDGE_DELAY_MS : MAIL_NUDGE_BUSY_RECHECK_MS);
-    else { this.pendingNudgeFrom.delete(sessionId); this.codexRetryAt.delete(sessionId); }
+    if (remaining.length) {
+      this.scheduleMailNudge(sessionId, fromLabel, accepted ? MAIL_NUDGE_DELAY_MS : MAIL_NUDGE_BUSY_RECHECK_MS);
+    } else {
+      this.pendingNudgeFrom.delete(sessionId);
+      this.codexRetryAt.delete(sessionId);
+      this.batchAttempts.delete(sessionId);
+    }
   }
 
   private async wakeSession(sessionId: string): Promise<void> {
@@ -633,12 +805,12 @@ export class MailDeliveryService {
     if (!current() || !store || !mailStore) return;
 
     const fromLabel = this.pendingNudgeFrom.get(sessionId) ?? 'ftown';
-    const undelivered = await mailStore.listUndelivered(sessionId);
+    const undelivered = await mailStore.listUnnudgedWaking(sessionId);
     if (!current()) return;
     if (undelivered.length === 0) {
       this.pendingNudgeFrom.delete(sessionId);
-      this.nativeBatches.delete(sessionId);
       this.legacyReadyAt.delete(sessionId);
+      this.batchAttempts.delete(sessionId);
       return;
     }
     let session = await store.loadSession(sessionId);
@@ -658,42 +830,82 @@ export class MailDeliveryService {
       return;
     }
 
+    let museStamped: { batch: MailMessage[]; batchIds: string[]; token: string } | undefined;
     if (session.shellType === 'muse') {
-      let identity = nativeIdentity(session);
-      const prior = this.nativeBatches.get(sessionId);
-      if (prior?.identity === identity && undelivered.every((message) => prior.ids.has(message.id))) return;
       // A hook may have drained mail during the session lookup. Never wake for a stale snapshot.
       session = await store.loadSession(sessionId);
-      const pending = await mailStore.listUndelivered(sessionId);
+      const pending = await mailStore.listUnnudgedWaking(sessionId);
       if (!current() || !pending.length || !session || session.status !== 'running' || !runner.isRunning(sessionId)) return;
       if (session.shellType !== 'muse') { this.scheduleMailNudge(sessionId, fromLabel, MAIL_NUDGE_DELAY_MS); return; }
-      identity = nativeIdentity(session);
-      const controller = new AbortController();
-      this.wakeControllers.set(sessionId, controller);
-      const isCurrent = async () => {
-        if (!current() || controller.signal.aborted) return false;
-        const live = await store.loadSession(sessionId);
-        const pending = await mailStore.listUndelivered(sessionId);
-        return current() && !controller.signal.aborted && !!live && live.status === 'running'
-          && nativeIdentity(live) === identity && !this.isAgentRecentlyBusy(sessionId)
-          && runner.isRunning(sessionId) && pending.some(message => undelivered.some(original => original.id === message.id));
-      };
-      let result;
-      // Recorded BEFORE the wake call: the prompt hook can fire before it resolves.
-      this.recordInjection(sessionId, MAIL_WAKE_TEXT);
-      try { result = await this.nativeWake(session, MAIL_WAKE_TEXT, controller.signal, isCurrent).catch(() => ({ status: 'unknown' as const })); }
-      finally { if (this.wakeControllers.get(sessionId) === controller) this.wakeControllers.delete(sessionId); }
-      if (!current()) return;
-      if (result.status === 'accepted' || result.status === 'unknown') {
-        this.nativeBatches.set(sessionId, { identity, ids: new Set(pending.map((message) => message.id)) });
-        return;
+      const batchIds = pending.map((message) => message.id);
+      const batchKey = batchIds.slice().sort().join(',');
+      if (this.museNativeTried.get(sessionId) !== batchKey) {
+        const museToken = createNudgeToken(this.now());
+        const stamped = await mailStore.markNudged(sessionId, batchIds, museToken);
+        if (!stamped.length) {
+          this.pendingNudgeFrom.delete(sessionId);
+          return;
+        }
+        if (!current()) {
+          await mailStore.unmarkNudged(sessionId, batchIds, museToken);
+          return;
+        }
+        this.museNativeTried.set(sessionId, batchKey);
+        const prev = this.batchAttempts.get(sessionId);
+        const museAttempts = (prev?.key === batchKey ? prev.count : 0) + 1;
+        this.batchAttempts.set(sessionId, { key: batchKey, count: museAttempts });
+        const identity = nativeIdentity(session);
+        const controller = new AbortController();
+        this.wakeControllers.set(sessionId, controller);
+        const isCurrent = async () => {
+          if (!current() || controller.signal.aborted) return false;
+          const live = await store.loadSession(sessionId);
+          const currentPending = await mailStore.listUndelivered(sessionId);
+          return current() && !controller.signal.aborted && !!live && live.status === 'running'
+            && nativeIdentity(live) === identity && !this.isAgentRecentlyBusy(sessionId)
+            && runner.isRunning(sessionId) && currentPending.some(message => batchIds.includes(message.id));
+        };
+        let result;
+        // Recorded BEFORE the wake call: the prompt hook can fire before it resolves.
+        this.recordInjection(sessionId, MAIL_WAKE_TEXT);
+        try { result = await this.nativeWake(session, MAIL_WAKE_TEXT, controller.signal, isCurrent).catch(() => ({ status: 'unknown' as const })); }
+        finally { if (this.wakeControllers.get(sessionId) === controller) this.wakeControllers.delete(sessionId); }
+        // Never unstamp after an accepted/unknown native wake, regardless of later busy/isCurrent checks.
+        if (result.status === 'accepted' || result.status === 'unknown') {
+          this.pendingNudgeFrom.delete(sessionId);
+          this.batchAttempts.delete(sessionId);
+          return;
+        }
+        if (museAttempts >= MAX_WAKE_ATTEMPTS) {
+          this.pendingNudgeFrom.delete(sessionId);
+          this.batchAttempts.delete(sessionId);
+          return;
+        }
+        if (!current() || !(await isCurrent())) {
+          await mailStore.unmarkNudged(sessionId, batchIds, museToken);
+          if (current() && runner.isRunning(sessionId)) {
+            const live = await store.loadSession(sessionId);
+            if (current() && live && live.status === 'running' && runner.isRunning(sessionId)) {
+              this.scheduleMailNudge(sessionId, fromLabel, MAIL_NUDGE_BUSY_RECHECK_MS);
+            }
+          }
+          return;
+        }
+        museStamped = { batch: stamped, batchIds: stamped.map((m) => m.id), token: museToken };
       }
     }
 
+    const unstampMuse = async () => {
+      if (museStamped?.batchIds.length) {
+        await mailStore.unmarkNudged(sessionId, museStamped.batchIds, museStamped.token);
+      }
+    };
+
     const legacyWait = (this.legacyReadyAt.get(sessionId) ?? 0) - this.now();
-    if (legacyWait > 0) { this.scheduleMailNudge(sessionId, fromLabel, legacyWait); return; }
+    if (legacyWait > 0) { await unstampMuse(); this.scheduleMailNudge(sessionId, fromLabel, legacyWait); return; }
 
     if (this.isAgentRecentlyBusy(sessionId)) {
+      await unstampMuse();
       this.scheduleMailNudge(sessionId, fromLabel, MAIL_NUDGE_BUSY_RECHECK_MS);
       return;
     }
@@ -706,37 +918,96 @@ export class MailDeliveryService {
       const sinceLast = this.now() - lastNudgeAt;
       if (sinceLast < MAIL_NUDGE_MIN_INTERVAL_MS) {
         // Rate-limited: retry once the window reopens (mail may still be unread).
+        await unstampMuse();
         this.scheduleMailNudge(sessionId, fromLabel, MAIL_NUDGE_MIN_INTERVAL_MS - sinceLast);
         return;
       }
     }
 
-    // The session isn't running (crashed/restarting): don't clear the pending
-    // marker. No timer is armed for this session at this point (the caller
-    // already removed it before invoking us), so clearing it here would lose
-    // the sender label until unrelated new mail happens to call
-    // scheduleMailNudge again. Keeping it means the next opportunity to
-    // re-check this session (new mail via acceptMail, or an external
-    // restart/idle hook re-invoking this nudge check) still knows who to
-    // credit.
+    let digest: string | null = null;
+    if (this.digestProvider) {
+      try {
+        digest = await this.digestProvider.digestFor(sessionId);
+      } catch {
+        digest = null;
+      }
+      if (!current()) { await unstampMuse(); return; }
+    }
+
     // Recheck after native probing/rejection and before each legacy side effect.
-    const pending = await mailStore.listUndelivered(sessionId);
+    let pending: MailMessage[];
+    if (museStamped) {
+      const stillUndelivered = new Set((await mailStore.listUndelivered(sessionId)).map((m) => m.id));
+      pending = museStamped.batch.filter((m) => stillUndelivered.has(m.id));
+    } else {
+      pending = await mailStore.listUnnudgedWaking(sessionId);
+    }
     session = await store.loadSession(sessionId);
-    if (!current() || !pending.length || !session || session.status !== 'running' || !runner.isRunning(sessionId)) return;
-    if (session.shellType === 'codex') { this.scheduleMailNudge(sessionId, fromLabel, MAIL_NUDGE_DELAY_MS); return; }
+    if (!current() || !pending.length || !session || session.status !== 'running' || !runner.isRunning(sessionId)) {
+      await unstampMuse();
+      return;
+    }
+    if (session.shellType === 'codex') { await unstampMuse(); this.scheduleMailNudge(sessionId, fromLabel, MAIL_NUDGE_DELAY_MS); return; }
     const refreshedLease = this.pluginLeaseRemaining(session);
-    if (refreshedLease > 0) { this.scheduleMailNudge(sessionId, fromLabel, refreshedLease); return; }
+    if (refreshedLease > 0) { await unstampMuse(); this.scheduleMailNudge(sessionId, fromLabel, refreshedLease); return; }
     if (this.isAgentRecentlyBusy(sessionId)) {
+      await unstampMuse();
       this.scheduleMailNudge(sessionId, fromLabel, MAIL_NUDGE_BUSY_RECHECK_MS);
       return;
     }
 
+    let activeBatch: MailMessage[];
+    let batchIds: string[];
+    let token: string;
+    if (museStamped) {
+      activeBatch = pending;
+      batchIds = museStamped.batchIds;
+      token = museStamped.token;
+    } else {
+      token = createNudgeToken(this.now());
+      const requestedIds = pending.map((m) => m.id);
+      const stamped = await mailStore.markNudged(sessionId, requestedIds, token);
+      if (!stamped.length) {
+        await mailStore.unmarkNudged(sessionId, requestedIds, token);
+        this.pendingNudgeFrom.delete(sessionId);
+        return;
+      }
+      activeBatch = stamped;
+      batchIds = stamped.map((m) => m.id);
+    }
+    if (!current()) {
+      await mailStore.unmarkNudged(sessionId, batchIds, token);
+      return;
+    }
+
+    const batchKey = batchIds.slice().sort().join(',');
+    const prev = this.batchAttempts.get(sessionId);
+    const attempts = (prev?.key === batchKey ? prev.count : 0) + 1;
+    this.batchAttempts.set(sessionId, { key: batchKey, count: attempts });
+
+    const text = sanitizeMessageText(formatNudgeText(countMailTypes(activeBatch), digest));
+    let wroteToPty = false;
+    const injected = await this.injectPtyLine(session, 'ftown-mail', text, {
+      onFirstWrite: () => {
+        wroteToPty = true;
+      },
+    });
+    const deliveredToPty = wroteToPty || injected;
+    if (!deliveredToPty) {
+      if (attempts >= MAX_WAKE_ATTEMPTS) {
+        this.batchAttempts.delete(sessionId);
+        this.pendingNudgeFrom.delete(sessionId);
+        return;
+      }
+      await mailStore.unmarkNudged(sessionId, batchIds, token);
+      if (current()) this.scheduleMailNudge(sessionId, fromLabel, MAIL_NUDGE_DELAY_MS);
+      return;
+    }
+    this.batchAttempts.delete(sessionId);
     this.pendingNudgeFrom.delete(sessionId);
-    this.lastNudgeAt.set(sessionId, this.now());
-    const text = sanitizeMessageText(
-      `You have new ftown mail from ${fromLabel} — run \`ftown harness mail read\` to read it.`,
-    );
-    await this.injectPtyLine(session, 'ftown-mail', text);
+    if (current()) {
+      this.lastNudgeAt.set(sessionId, this.now());
+    }
   }
 
   private delay(ms: number): Promise<void> {

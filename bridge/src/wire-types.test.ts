@@ -14,8 +14,8 @@ describe('submitSuffix', () => {
 });
 
 describe('MAIL_TYPES', () => {
-  it('lists the four mail types', () => {
-    assert.deepEqual(MAIL_TYPES, ['message', 'task', 'result', 'escalation']);
+  it('lists the five mail types', () => {
+    assert.deepEqual(MAIL_TYPES, ['message', 'task', 'result', 'escalation', 'fyi']);
   });
 });
 

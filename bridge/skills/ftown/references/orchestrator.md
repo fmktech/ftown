@@ -20,16 +20,21 @@ harness's model list. Never route to `exhausted`.
 ftown sessions list
 ftown sessions create --parent --workdir /path/to/repo --name review-auth \
   --prompt "Review auth; read-only. Report concrete findings and validation."
-ftown sessions screen <worker-id> --limit 100
-ftown sessions running <worker-id>
+ftown board --wait --until any-done --timeout 300
+ftown board
 ftown harness mail send <worker-id> --type task "Check the expired-token case too"
-ftown sessions tell --children "Pause and report status"
 ```
 
-Use terminal output to investigate a quiet worker. Mail handles results and
-escalations; read them with `ftown harness mail read`. When waiting, let incoming
-mail resume the conversation rather than repeatedly polling. Parallel tasks need
-disjoint write ownership and serialized shared resources.
+Coordinate in a loop: spawn children, wait with
+`ftown board --wait --until any-done --timeout 300` (or `any-blocked`,
+`any-ready`, `all-done`; `ftown events --wait` waits for the next event), act
+on the board and mail, then repeat until every child is done. Children keep
+their cards current; progress goes on the card, never as mail. Use
+`ftown sessions screen <worker-id> --limit 100` only to investigate terminal
+detail. Mail handles directed instructions, results and escalations; read it
+with `ftown harness mail read`. Each new batch nudges the recipient at most
+once, and a nudge may append a one-line digest of child status. Parallel tasks
+need disjoint write ownership and serialized shared resources.
 
 After accepting a worker's result, request any concrete follow-up before
 explicit cleanup with `ftown sessions remove <worker-id>`.
