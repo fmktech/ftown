@@ -63,6 +63,15 @@ describe('in-process canonical commands', () => {
       rmSync(home, { recursive: true, force: true });
     }
   });
+  it('routes quota to the quota CLI with its own help and usage exit codes', async () => {
+    assert.match(usage(), /setup\|start\|sessions\|harness\|env\|security\|quota/);
+    assert.match(usage(), /quota {6}Subscription quota left, routing advice and model lists per harness \(--json for agents\)/);
+    const text = await capture(async () => {
+      assert.equal(await runFtown(['quota', '--help']), 0);
+      assert.equal(await runFtown(['quota', 'bogus']), 2);
+    });
+    assert.match(text, /quota/i);
+  });
   it('runs repeated harness parsers and env help without import/exit side effects', async () => {
     const text = await capture(async () => {
       assert.equal(await runFtown(['harness', '--help']), 0);
@@ -73,9 +82,13 @@ describe('in-process canonical commands', () => {
     assert.match(text, /Usage: ftown env/);
   });
   it('shares the callers fetch, HOME and process for session commands', async () => {
-    const previous = process.env.HOME; const home = mkdtempSync(join(tmpdir(), 'ftown-cli-'));
+    const previous = process.env.HOME;
+    const previousDataDir = process.env.FTOWN_DATA_DIR;
+    const home = mkdtempSync(join(tmpdir(), 'ftown-cli-'));
     const original = globalThis.fetch;
     process.env.HOME = home;
+    // An inherited data dir would resolve to the production bridge.json.
+    process.env.FTOWN_DATA_DIR = join(home, '.ftown', 'data');
     try {
       const { mkdirSync, writeFileSync } = await import('node:fs');
       mkdirSync(join(home, '.ftown'));
@@ -85,7 +98,12 @@ describe('in-process canonical commands', () => {
       globalThis.fetch = secure.fetch;
       await capture(async () => { assert.equal(await runFtown(['sessions', 'list']), 0); });
       assert.deepEqual(requests, ['http://127.0.0.1:1234/api/sessions']);
-    } finally { globalThis.fetch = original; if (previous === undefined) delete process.env.HOME; else process.env.HOME = previous; rmSync(home, { recursive: true, force: true }); }
+    } finally {
+      globalThis.fetch = original;
+      if (previous === undefined) delete process.env.HOME; else process.env.HOME = previous;
+      if (previousDataDir === undefined) delete process.env.FTOWN_DATA_DIR; else process.env.FTOWN_DATA_DIR = previousDataDir;
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });
 

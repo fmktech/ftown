@@ -11,6 +11,11 @@ bounded task, clear writable files and acceptance checks; save the returned
 set it when the task calls for a different harness. Provider flavors require a
 bridge-host token configured with `ftown env set <flavor>`.
 
+Before picking a CLI, model and effort for delegated work, run `ftown quota --json`
+and follow the decision procedure in `quota.md` (owner tiers first). Pass the
+choice as `--shell <provider>`; add `--model <id>` only with an id from that
+harness's model list. Never route to `exhausted`.
+
 ```bash
 ftown sessions list
 ftown sessions create --parent --workdir /path/to/repo --name review-auth \

@@ -36,6 +36,7 @@ import { bindLedgerIdentity } from './security/bridge/ledger-identity.js';
 import { BridgeSecurityService, applicationJson } from './security/bridge/security.js';
 import type { ApplicationJson, EndpointIdentity, VerifiedApplication } from './security/protocol.js';
 import { createCommandHandler } from './command-rpc.js';
+import { createRealModelRoutingService } from './quota/routing-service.js';
 import { PullRequestStatusService } from './pull-request-status.js';
 import { createPrReviewService } from './pull-request-review.js';
 import { PullRequestEventWatcher } from './pull-request-events.js';
@@ -964,6 +965,7 @@ program
     });
 
     let ready = false;
+    const modelRouting = createRealModelRoutingService(homedir());
     const dispatchCommand = async (message: VerifiedApplication): Promise<ApplicationJson> => {
       if (!ready) return { type: 'command_response', response: { requestId: message.envelope.messageId, success: false, error: 'bridge_offline' } };
       const route = message.application.route;
@@ -976,6 +978,7 @@ program
       }
       let result: CommandResponse | undefined;
       await createCommandHandler({ bridgeId, security, sessionController, attentionStore, updates, updateEffects, pullRequestStatuses, pullRequestReview,
+        modelRouting: () => modelRouting,
         enqueueSessionMessage: (session, message) => localApiServer.enqueueSessionMessage(session, message),
         acceptSessionMail: (session, body) => localApiServer.acceptSessionMail(session, body),
         publishAttentionChanged: (sessionId) => { localApiServer.emit('event', { sessionId, eventName: 'AttentionSnapshot', data: {} }); },

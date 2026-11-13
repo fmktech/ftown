@@ -63,3 +63,9 @@ test('actual operations determine permission and unknown methods/routes/frames d
   for (const command of ['unknown', 'mcp_request', 'security_activity', 'security_activate_mcp', 'security_update_policy', 'security_account_adopt']) assert.throws(() => classifyCommand(command), { code: 'permission_denied' });
   for (const frame of ['screen', 'output', 'arbitrary']) assert.throws(() => classifyTerminal(frame), { code: 'permission_denied' });
 });
+
+test('model routing reads need read authority and saving it needs control', () => {
+  assert.deepEqual(classifyCommand('get_model_routing', { bridgeId: 'bridge' }), { permission: 'read', mutating: false, operation: 'get_model_routing', sessionId: null });
+  assert.deepEqual(classifyCommand('set_model_routing', { bridgeId: 'bridge', config: {} }), { permission: 'control', mutating: true, operation: 'set_model_routing', sessionId: null });
+  for (const command of ['model_routing', 'get_model_routing_x', 'SET_MODEL_ROUTING']) assert.throws(() => classifyCommand(command), { code: 'permission_denied' });
+});
