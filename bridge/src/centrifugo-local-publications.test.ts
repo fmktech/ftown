@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import { secureFixture } from './security/bridge/fixtures.test.js';
 import { test } from 'node:test';
 import { CentrifugoClient } from './centrifugo-client.js';
+import { generateEndpoint } from './security/crypto.js';
+import { LOCAL_RECOVERY_AUTHORITY } from './security/bridge/policy.js';
 import type { Session } from './types.js';
 
 function fixture(disabled = false) {
@@ -63,6 +65,11 @@ test('cloud publish which never acknowledges cannot stall an already committed l
   const { client, transport } = fixture();
   const directory = await mkdtemp(join(tmpdir(), 'ftown-nonblocking-publish-'));
   const secure = await secureFixture(directory, async () => new Response('{}'));
+  // The relay recipient: publications are sealed to enrolled browsers, never to the fixture's local CLI.
+  const browser = await generateEndpoint(secure.pointer.ownerId!, 'browser');
+  const invitation = await secure.security.policy.createInvitation(LOCAL_RECOVERY_AUTHORITY, { label: 'browser' });
+  await secure.security.policy.consumeInvitation({ type: 'enroll', candidate: browser.endpoint, invitationId: invitation.invitationId,
+    invitationSecret: invitation.secret, label: 'browser' });
   client.setSecurity(secure.security);
   let release: () => void = () => {};
   transport.state = 'connected';

@@ -160,7 +160,7 @@ class FakePeerConnection implements DirectPeerConnection {
 }
 
 function makeManager(
-  onAttach: (sessionId: string) => string = () => 'DEFAULT-SCREEN',
+  onAttach: (sessionId: string, deliver: (screen: string) => void) => string | void = () => 'DEFAULT-SCREEN',
   configurePc?: (pc: FakePeerConnection, index: number) => void,
 ) {
   const peers: FakePeerConnection[] = [];
@@ -302,6 +302,50 @@ describe('DirectPeerManager DataChannel protocol', async () => {
     assert.strictEqual(framesForSession[1].seq, 1);
     assert.strictEqual(framesForSession[2].kind, 'output');
     assert.strictEqual(framesForSession[2].seq, 2);
+  });
+
+  it('a deferred attach screen joins the output stream only when it is delivered', async () => {
+    const delivers: Array<(screen: string) => void> = [];
+    const { manager, peers } = makeManager((_sessionId, deliver) => { delivers.push(deliver); });
+    const { dc } = await attachPeer(manager, peers, 'sess-1');
+    assert.strictEqual(delivers.length, 1);
+    assert.strictEqual(manager.hasAttachedPeers('sess-1'), false);
+
+    manager.sendOutput('sess-1', 'BEFORE-THE-SNAPSHOT');
+    delivers[0]('SNAPSHOT');
+    manager.sendOutput('sess-1', 'after');
+    // A second delivery of the same request is ignored.
+    delivers[0]('SNAPSHOT-AGAIN');
+    await manager.drain(); await Promise.all(peers.map(peer => peer.dataChannel.flush()));
+
+    const frames = dc.sent.filter((f) => f.sessionId === 'sess-1').map((f) => [f.kind, f.data, f.seq]);
+    assert.deepStrictEqual(frames, [['screen', 'SNAPSHOT', 0], ['output', 'after', 1]]);
+  });
+
+  it('a detach before the deferred screen is ready cancels the attach', async () => {
+    const delivers: Array<(screen: string) => void> = [];
+    const { manager, peers } = makeManager((_sessionId, deliver) => { delivers.push(deliver); });
+    const { dc } = await attachPeer(manager, peers, 'sess-1');
+    await dc.receive({ kind: 'detach', sessionId: 'sess-1' });
+    delivers[0]('STALE');
+    manager.sendOutput('sess-1', 'after');
+    await manager.drain(); await Promise.all(peers.map(peer => peer.dataChannel.flush()));
+
+    assert.strictEqual(manager.hasAttachedPeers('sess-1'), false);
+    assert.deepStrictEqual(dc.sent.filter((f) => f.sessionId === 'sess-1'), []);
+  });
+
+  it('a deferred screen delivered after the peer was torn down attaches and sends nothing', async () => {
+    const delivers: Array<(screen: string) => void> = [];
+    const { manager, peers } = makeManager((_sessionId, deliver) => { delivers.push(deliver); });
+    const { dc } = await attachPeer(manager, peers, 'sess-1');
+    manager.closeAll();
+    const sentBefore = dc.sent.length;
+
+    assert.doesNotThrow(() => delivers[0]('LATE'));
+    manager.sendOutput('sess-1', 'after');
+    assert.strictEqual(manager.hasAttachedPeers('sess-1'), false);
+    assert.strictEqual(dc.sent.length, sentBefore);
   });
 
   it('re-attaching a session resets seq (screen resync per R1/R7)', async () => {
