@@ -4,6 +4,7 @@ import { join, dirname } from 'node:path';
 import { existsSync } from 'node:fs';
 
 import type { ArchivedSession, Session } from './types.js';
+import { isSettledStamp, sameStamp, toFileStamp, type FileStamp } from './file-stamp.js';
 
 /**
  * Drop the legacy preview shape on load: version !== 2 or a preview without a
@@ -45,18 +46,6 @@ function parseSessionRecord(json: string): Session {
 const DEFAULT_MAX_TERMINAL_LOG_BYTES = 64 * 1024 * 1024;
 const NEWLINE = 0x0a;
 
-/** Identity of one on-disk session.json revision, from a single bigint stat. */
-interface FileStamp {
-  ino: bigint;
-  size: bigint;
-  mtimeNs: bigint;
-  ctimeNs: bigint;
-}
-
-function sameStamp(a: FileStamp, b: FileStamp): boolean {
-  return a.ino === b.ino && a.size === b.size && a.mtimeNs === b.mtimeNs && a.ctimeNs === b.ctimeNs;
-}
-
 /**
  * session.json files stat'ed concurrently while listing. Each batch is awaited,
  * so a listing of any size yields to the event loop between batches instead of
@@ -92,7 +81,9 @@ export class SessionStore {
   private readonly retiredSessionIds = new Set<string>();
   private readonly maxTerminalLogBytes: number;
   // session.json index, keyed by session id. An entry is served only while a
-  // fresh stat of the file still matches its stamp, so it can never be stale.
+  // fresh stat of the file still matches its stamp, and is stored only for a
+  // file that was already quiet when it was read (see file-stamp.ts), so it can
+  // never be stale.
   private readonly recordIndex = new Map<string, IndexedRecord>();
   // Sessions whose directory this process has already created.
   private readonly terminalDirsReady = new Set<string>();
@@ -100,7 +91,10 @@ export class SessionStore {
   private readonly terminalLogSizes = new Map<string, number>();
   private flushPendingTerminalData: ((sessionId: string) => void) | undefined;
 
-  constructor(dataDir: string, options: { maxTerminalLogBytes?: number } = {}) {
+  private readonly now: () => number;
+
+  constructor(dataDir: string, options: { maxTerminalLogBytes?: number; now?: () => number } = {}) {
+    this.now = options.now ?? Date.now;
     this.sessionsDir = join(dataDir, 'sessions');
     this.archivePath = join(dataDir, 'archive.jsonl');
 
@@ -154,28 +148,20 @@ export class SessionStore {
         // field toWireSession strips from the wire. Never world-readable.
         const text = JSON.stringify(session, null, 2);
         const handle = await open(tempFilePath, 'w', 0o600);
-        let written: FileStamp;
         try {
           await handle.writeFile(text, 'utf-8');
-          written = await handle.stat({ bigint: true });
         } finally {
           await handle.close();
         }
         await rename(tempFilePath, filePath);
-        // The rename changes ctime, so the stamp is taken afterwards. It is
-        // indexed only if it still describes the inode written above; anything
-        // else means another writer got in between and the entry is dropped.
-        const published = await this.stampOf(filePath);
-        if (published && published.ino === written.ino && published.size === written.size
-          && published.mtimeNs === written.mtimeNs) {
-          this.recordIndex.set(session.id, { ...published, json: JSON.stringify(JSON.parse(text)) });
-        } else {
-          this.recordIndex.delete(session.id);
-        }
       } catch (error) {
-        this.recordIndex.delete(session.id);
         await rm(tempFilePath, { force: true }).catch(() => undefined);
         throw error;
+      } finally {
+        // A file published just now cannot be validated by its stamp (another
+        // writer in the same timestamp tick would leave it unchanged), so the
+        // record is read back from disk once it has settled.
+        this.recordIndex.delete(session.id);
       }
     });
   }
@@ -183,8 +169,7 @@ export class SessionStore {
   /** One stat of a file, reduced to its stamp; undefined when it cannot be stat'ed. */
   private async stampOf(filePath: string): Promise<FileStamp | undefined> {
     try {
-      const { ino, size, mtimeNs, ctimeNs } = await stat(filePath, { bigint: true });
-      return { ino, size, mtimeNs, ctimeNs };
+      return toFileStamp(await stat(filePath, { bigint: true }));
     } catch {
       return undefined;
     }
@@ -208,6 +193,7 @@ export class SessionStore {
     // The stamp was taken BEFORE the read: if the file is replaced meanwhile,
     // the next stat differs from it and the entry is re-read.
     this.recordIndex.delete(sessionId);
+    const readStartedAt = this.now();
     let raw: string;
     try {
       raw = await readFile(this.sessionFilePath(sessionId), 'utf-8');
@@ -216,7 +202,7 @@ export class SessionStore {
       throw error;
     }
     const json = JSON.stringify(JSON.parse(raw));
-    this.recordIndex.set(sessionId, { ...stamp, json });
+    if (isSettledStamp(stamp, readStartedAt)) this.recordIndex.set(sessionId, { ...stamp, json });
     return json;
   }
 

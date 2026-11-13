@@ -38,9 +38,17 @@ interface Fixture {
   /** What a store with an empty index returns: the uncached scan. */
   uncached(): Promise<Session[]>;
   recordPath(id: string): string;
+  /** Another store on the same directory and clock, with an empty index. */
+  newStore(): SessionStore;
 }
 
-async function fixture(t: TestContext): Promise<Fixture> {
+/**
+ * ctime cannot be backdated, so by default the stores' clock runs a minute ahead: every file
+ * looks quiet for longer than the racy-stamp margin and is cacheable once read. That hides the
+ * margin, so a test that rewrites a record the store has just indexed must change a field that
+ * differs on every filesystem (size, inode, a different mtime), or use `clockAheadMs: 0`.
+ */
+async function fixture(t: TestContext, { clockAheadMs = 60_000 }: { clockAheadMs?: number } = {}): Promise<Fixture> {
   const dir = await fs.mkdtemp(join(tmpdir(), 'ftown-store-index-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const reads: string[] = [];
@@ -72,9 +80,11 @@ async function fixture(t: TestContext): Promise<Fixture> {
   }) as typeof fs.stat);
   syncBuiltinESMExports();
   t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const newStore = (): SessionStore => new SessionStore(dir, { now: () => Date.now() + clockAheadMs });
   return {
     dir,
-    store: new SessionStore(dir),
+    store: newStore(),
+    newStore,
     reads,
     fakeStats,
     beforeRead,
@@ -98,7 +108,7 @@ async function assertMatchesUncached(f: Fixture): Promise<Session[]> {
 test('an unchanged session directory is listed without reading any session.json', async (t) => {
   const f = await fixture(t);
   for (const id of ['a', 'bb', 'ccc']) await f.store.saveSession(makeSession(id));
-  const fresh = new SessionStore(f.dir);
+  const fresh = f.newStore();
   const first = await fresh.listSessions();
   assert.equal(f.reads.length, 3);
   f.reads.length = 0;
@@ -108,18 +118,20 @@ test('an unchanged session directory is listed without reading any session.json'
   assert.deepStrictEqual(second.map((s) => s.id), ['ccc', 'bb', 'a']);
 });
 
-test('creates and updates through the store refresh the index in the same call', async (t) => {
+test('creates and updates through the store are visible in the same call, read back once', async (t) => {
   const f = await fixture(t);
   await f.store.saveSession(makeSession('a'));
   await f.store.saveSession(makeSession('bb'));
   assert.equal((await assertMatchesUncached(f)).length, 2);
-  assert.deepStrictEqual(f.reads, [], 'records saved by this store are not read back');
+  assert.deepStrictEqual(f.reads.sort(), [f.recordPath('a'), f.recordPath('bb')]);
+  f.reads.length = 0;
+  await f.store.listSessions();
+  assert.deepStrictEqual(f.reads, []);
 
   await f.store.saveSession(makeSession('a', { status: 'completed', name: 'renamed' }));
   await f.store.saveSession(makeSession('ccc'));
-  f.reads.length = 0;
   const listed = await assertMatchesUncached(f);
-  assert.deepStrictEqual(f.reads, []);
+  assert.deepStrictEqual(f.reads.sort(), [f.recordPath('a'), f.recordPath('ccc')], 'only the saved records are re-read');
   assert.equal(listed.find((s) => s.id === 'a')?.name, 'renamed');
   assert.equal(listed.length, 3);
   assert.deepStrictEqual(await f.store.loadSession('a'), makeSession('a', { status: 'completed', name: 'renamed' }));
@@ -349,7 +361,7 @@ test('listing 900 sessions keeps yielding to the event loop, cached or not', asy
 test('a session removed while a cold listing is in flight is skipped, not fatal', async (t) => {
   const f = await fixture(t);
   for (const id of ['a', 'bb', 'ccc']) await f.store.saveSession(makeSession(id));
-  const cold = new SessionStore(f.dir);
+  const cold = f.newStore();
   // Stat'ed with its batch, gone by the time it is read.
   f.beforeRead.set(f.recordPath('bb'), () => fs.rm(join(f.dir, 'sessions', 'bb'), { recursive: true }));
   assert.deepStrictEqual((await cold.listSessions()).map((s) => s.id), ['ccc', 'a']);
@@ -360,7 +372,7 @@ test('a session removed while a cold listing is in flight is skipped, not fatal'
     await fs.rm(join(f.dir, 'sessions', 'a'), { recursive: true });
     await fs.writeFile(join(f.dir, 'sessions', 'a'), 'now a file');
   });
-  const again = new SessionStore(f.dir);
+  const again = f.newStore();
   assert.deepStrictEqual((await again.listSessions()).map((s) => s.id), ['ccc']);
   assert.equal(await again.loadSession('a'), null);
 });
@@ -370,13 +382,63 @@ test('a save overtaken by another writer does not index its own content', async 
   await f.store.saveSession(makeSession('a'));
   const path = f.recordPath('a');
   const theirs = makeSession('a', { name: 'written by another process, and longer' });
-  // Between this store's rename and its stat of the published file.
-  f.beforeStat.set(path, () => fs.writeFile(path, JSON.stringify(theirs)));
   await f.store.saveSession(makeSession('a', { name: 'ours' }));
-  assert.equal(f.beforeStat.size, 0, 'the other writer ran inside the save');
+  await fs.writeFile(path, JSON.stringify(theirs));
 
   assert.deepStrictEqual(await f.store.loadSession('a'), theirs);
   assert.deepStrictEqual(await f.store.listSessions(), [theirs]);
+});
+
+/**
+ * Linux takes ctime from a coarse clock, so a same-size in-place rewrite within one tick of the
+ * previous change reports exactly the stamp the store last saw. These force that collision on
+ * every platform by reporting the earlier stamp again, with the store on the real clock.
+ */
+test('a just-read record rewritten in place with an identical stamp is never served stale', async (t) => {
+  const f = await fixture(t, { clockAheadMs: 0 });
+  await fs.mkdir(join(f.dir, 'sessions', 'a'), { recursive: true });
+  const path = f.recordPath('a');
+  await fs.writeFile(path, JSON.stringify(makeSession('a'), null, 2));
+  assert.equal((await f.store.loadSession('a'))?.name, 'session a');
+  // Every later stat reports this same stamp.
+  f.fakeStats.set(path, await fs.stat(path, { bigint: true }));
+
+  for (const name of ['session b', 'session c', 'session d']) {
+    const current = await fs.readFile(path, 'utf-8');
+    const rewritten = JSON.stringify(makeSession('a', { name }), null, 2);
+    assert.equal(rewritten.length, current.length);
+    await fs.writeFile(path, rewritten);
+    assert.equal((await f.store.loadSession('a'))?.name, name);
+    assert.equal((await f.store.listSessions())[0]?.name, name);
+  }
+});
+
+test('a just-saved record rewritten in place with an identical stamp is never served stale', async (t) => {
+  const f = await fixture(t, { clockAheadMs: 0 });
+  await f.store.saveSession(makeSession('a', { name: 'ours' }));
+  const path = f.recordPath('a');
+  const published = await fs.stat(path, { bigint: true });
+  const theirs = makeSession('a', { name: 'them' });
+  await fs.writeFile(path, JSON.stringify(theirs, null, 2));
+  assert.equal((await fs.stat(path)).size, Number(published.size));
+  f.fakeStats.set(path, published);
+  assert.deepStrictEqual(await f.store.loadSession('a'), theirs);
+  assert.deepStrictEqual(await f.store.listSessions(), [theirs]);
+});
+
+test('with the real clock, a record quiet for longer than the margin is indexed', async (t) => {
+  const f = await fixture(t, { clockAheadMs: 0 });
+  await f.store.saveSession(makeSession('a'));
+  const path = f.recordPath('a');
+  const real = await fs.stat(path, { bigint: true });
+  const old = BigInt(Date.now() - 60_000) * BigInt(1_000_000);
+  const quiet = Object.assign(Object.create(Object.getPrototypeOf(real)) as BigIntStats, real, { mtimeNs: old, ctimeNs: old });
+  f.fakeStats.set(path, quiet);
+  assert.equal((await f.store.loadSession('a'))?.name, 'session a');
+  f.reads.length = 0;
+  assert.equal((await f.store.loadSession('a'))?.name, 'session a');
+  assert.equal((await f.store.listSessions())[0]?.name, 'session a');
+  assert.deepStrictEqual(f.reads, []);
 });
 
 test('listing prunes index entries of directories that are gone', async (t) => {

@@ -4,6 +4,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { PullRequestObservation } from './pull-request-status.js';
 
 import type { MailMessage } from './types.js';
+import { isSettledStamp, sameStamp, toFileStamp, type FileStamp } from './file-stamp.js';
 
 /** Rewrites cap the inbox file at the newest N messages. */
 const MAX_STORED_MESSAGES = 500;
@@ -30,12 +31,9 @@ type Inbox = { messages: MailMessage[]; checkpoint?: PrCheckpoint };
 /** Deep-frozen parse result shared between readers; mutators copy before changing it. */
 type CachedInbox = { readonly messages: readonly MailMessage[]; readonly checkpoint?: Readonly<PrCheckpoint> };
 
-/** File identity from one bigint `stat`; any difference invalidates the cached parse. */
-type InboxStamp = { ino: bigint; size: bigint; mtimeNs: bigint; ctimeNs: bigint; mtimeMs: bigint; ctimeMs: bigint };
-
 /** Filesystem seam so tests can count the calls a read performs. */
 export interface MailStoreIo {
-  stat(path: string): Promise<InboxStamp>;
+  stat(path: string): Promise<FileStamp>;
   readFile(path: string): Promise<string>;
   now(): number;
 }
@@ -46,16 +44,10 @@ const defaultIo: MailStoreIo = {
   now: () => Date.now(),
 };
 
-/**
- * A file changed in the same timestamp tick as our read could keep an identical stamp, so a
- * parse is only cached once the file has been quiet for longer than any filesystem's timestamp
- * granularity. Younger files are simply re-read.
- */
-const RACY_STAMP_MARGIN_MS = 2_000;
 const MAX_CACHED_INBOXES = 256;
 const EMPTY_INBOX: CachedInbox = Object.freeze({ messages: Object.freeze([]) as readonly MailMessage[] });
 
-type CacheEntry = { ino: bigint; size: bigint; mtimeNs: bigint; ctimeNs: bigint; inbox: CachedInbox };
+type CacheEntry = { stamp: FileStamp; inbox: CachedInbox };
 /** Keyed by inbox path and shared by every MailStore in the process. */
 const inboxCache = new Map<string, CacheEntry>();
 
@@ -130,17 +122,18 @@ export class MailStore {
   private async readInbox(sessionId: string): Promise<CachedInbox> {
     const filePath = this.inboxPath(sessionId);
     const startedAt = this.io.now();
-    let stamp: InboxStamp;
+    let stamp: FileStamp;
     // Any stat failure reads as "no inbox", exactly like the previous existsSync check.
-    try { stamp = await this.io.stat(filePath); } catch { inboxCache.delete(filePath); return EMPTY_INBOX; }
+    try { stamp = toFileStamp(await this.io.stat(filePath)); } catch { inboxCache.delete(filePath); return EMPTY_INBOX; }
     const cached = inboxCache.get(filePath);
-    if (cached && cached.ino === stamp.ino && cached.size === stamp.size && cached.mtimeNs === stamp.mtimeNs && cached.ctimeNs === stamp.ctimeNs) return cached.inbox;
+    if (cached && sameStamp(cached.stamp, stamp)) return cached.inbox;
     inboxCache.delete(filePath);
     const inbox: CachedInbox = deepFreeze(await this.parseInbox(filePath));
-    const newest = Math.max(Number(stamp.mtimeMs), Number(stamp.ctimeMs));
-    if (startedAt - newest > RACY_STAMP_MARGIN_MS) {
+    // A file changed within a timestamp tick of this read could keep its stamp through a later
+    // rewrite, so only a file that has been quiet for a while is cached; younger files are re-read.
+    if (isSettledStamp(stamp, startedAt)) {
       if (inboxCache.size >= MAX_CACHED_INBOXES) for (const oldest of inboxCache.keys()) { inboxCache.delete(oldest); break; }
-      inboxCache.set(filePath, { ino: stamp.ino, size: stamp.size, mtimeNs: stamp.mtimeNs, ctimeNs: stamp.ctimeNs, inbox });
+      inboxCache.set(filePath, { stamp, inbox });
     }
     return inbox;
   }

@@ -11,28 +11,34 @@ type Stamp = Awaited<ReturnType<MailStoreIo['stat']>>;
 
 /**
  * Real filesystem with call counters. ctime cannot be backdated, so the clock runs ahead instead:
- * every file looks quiet for longer than the racy-stamp margin and is therefore cacheable.
+ * every file looks quiet for longer than the racy-stamp margin and is therefore cacheable. That
+ * also hides the margin, so a test that rewrites a file the store has just cached must change a
+ * field that differs on every filesystem (size, inode), or set `clock.aheadMs = 0` first.
  */
 function countingIo() {
   const calls = { stat: 0, read: 0 };
+  const clock = { aheadMs: 60_000 };
   const io: MailStoreIo = {
     stat: (path) => { calls.stat++; return stat(path, { bigint: true }); },
     readFile: (path) => { calls.read++; return readFile(path, 'utf-8'); },
-    now: () => Date.now() + 60_000,
+    now: () => Date.now() + clock.aheadMs,
   };
-  return { calls, io };
+  return { calls, clock, io };
 }
 
 async function fixture(t: Context) {
   const dir = await mkdtemp(join(tmpdir(), 'ftown-mail-cache-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   await mkdir(join(dir, 's'));
-  const { calls, io } = countingIo();
-  return { dir, calls, file: join(dir, 's', 'inbox.jsonl'), store: new MailStore((id) => join(dir, id), io) };
+  const { calls, clock, io } = countingIo();
+  return { dir, calls, clock, file: join(dir, 's', 'inbox.jsonl'), store: new MailStore((id) => join(dir, id), io) };
 }
 
 const message = (body: string, extra: Partial<MailMessage> = {}): MailMessage => ({ ...createMailMessage({ from: 'a', to: 's', type: 'message', body }), ...extra });
 const lines = (messages: MailMessage[]) => messages.map((item) => JSON.stringify(item)).join('\n') + '\n';
+const NS_PER_MS = BigInt(1_000_000);
+/** A stamp whose mtime and ctime are both `ms` (milliseconds since the epoch). */
+const stampAt = (ms: number, ino = 7, size = 100): Stamp => ({ ino: BigInt(ino), size: BigInt(size), mtimeNs: BigInt(ms) * NS_PER_MS, ctimeNs: BigInt(ms) * NS_PER_MS });
 
 /** Independent uncached reference for files that hold only messages. */
 async function uncached(file: string): Promise<MailMessage[]> {
@@ -100,8 +106,7 @@ test('a write through the store drops the cached parse even when the stat would 
   const file = join(dir, 's', 'inbox.jsonl');
   await writeFile(file, lines([message('one')]));
   const frozen = await stat(file, { bigint: true });
-  const old = frozen.mtimeMs - BigInt(60_000);
-  const stamp: Stamp = { ino: frozen.ino, size: frozen.size, mtimeNs: frozen.mtimeNs, ctimeNs: frozen.ctimeNs, mtimeMs: old, ctimeMs: old };
+  const stamp: Stamp = { ...stampAt(Date.now() - 60_000), ino: frozen.ino, size: frozen.size };
   let reads = 0;
   const store = new MailStore((id) => join(dir, id), { stat: async () => stamp, readFile: (path) => { reads++; return readFile(path, 'utf-8'); }, now: () => Date.now() });
   assert.equal((await store.listAll('s', 0)).length, 1);
@@ -114,7 +119,7 @@ test('a write through the store drops the cached parse even when the stat would 
 });
 
 test('changes made by another process are never served stale', async (t) => {
-  const { store, file, calls } = await fixture(t);
+  const { store, file, calls, clock } = await fixture(t);
   const original = [message('aaaa'), message('bbbb')];
   await writeFile(file, lines(original));
   const mtime = await age(file);
@@ -126,13 +131,18 @@ test('changes made by another process are never served stale', async (t) => {
   await assertCurrent(store, file);
   assert.equal((await store.listAll('s', 0)).length, 3);
 
-  // Truncation.
+  // Truncation, read with the real clock: the file changed moments ago (its ctime is now), so it
+  // must not be cached; the same-size rewrite below may land in the same ctime tick.
+  clock.aheadMs = 0;
   await writeFile(file, lines(original));
   await age(file, 90);
+  const readsBefore = calls.read;
   await assertCurrent(store, file);
   assert.equal((await store.listAll('s', 0)).length, 2);
+  assert.equal(calls.read, readsBefore + 3, 'a file changed moments ago is re-read on every call');
 
-  // In-place rewrite with the same size and a restored mtime: only ctime tells.
+  // In-place rewrite with the same size and a restored mtime, moments after the last change and
+  // read. Only ctime could tell, and on Linux it often has not moved to a new tick yet.
   const before = await stat(file, { bigint: true });
   await writeFile(file, lines([{ ...original[0], body: 'cccc' }, original[1]]));
   await utimes(file, new Date(Number(before.mtimeMs)), new Date(Number(before.mtimeMs)));
@@ -141,6 +151,7 @@ test('changes made by another process are never served stale', async (t) => {
   assert.equal(after.ino, before.ino);
   await assertCurrent(store, file);
   assert.equal((await store.listAll('s', 0))[0].body, 'cccc');
+  clock.aheadMs = 60_000;
 
   // Deletion.
   await rm(file);
@@ -172,7 +183,7 @@ test('a file modified too recently to trust its stamp is re-read every time', as
   let modifiedAt = now - 500;
   const io: MailStoreIo = {
     // Identical identity on every call: the worst case for stamp comparison.
-    stat: async () => ({ ino: BigInt(7), size: BigInt(100), mtimeNs: BigInt(1), ctimeNs: BigInt(1), mtimeMs: BigInt(modifiedAt), ctimeMs: BigInt(modifiedAt) }),
+    stat: async () => stampAt(modifiedAt),
     readFile: async () => { reads++; return content; },
     now: () => now,
   };
@@ -190,6 +201,51 @@ test('a file modified too recently to trust its stamp is re-read every time', as
   await store.listAll('s', 0); await store.listAll('s', 0); await store.listAll('s', 0);
   assert.equal(reads, 5);
 });
+
+test('a same-size rewrite that keeps the whole stamp is never served stale (real clock)', async (t) => {
+  // Linux takes ctime from a coarse clock: a same-size in-place rewrite within one tick of the
+  // previous change reports exactly the stamp the store last saw. Force that on every platform.
+  const dir = await mkdtemp(join(tmpdir(), 'ftown-mail-cache-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await mkdir(join(dir, 's'));
+  const file = join(dir, 's', 'inbox.jsonl');
+  await writeFile(file, lines([message('aaaa'), message('bbbb')]));
+  let frozen: Stamp | undefined;
+  const store = new MailStore((id) => join(dir, id), {
+    stat: async (path) => (frozen ??= await stat(path, { bigint: true })),
+    readFile: (path) => readFile(path, 'utf-8'),
+    now: () => Date.now(),
+  });
+  await assertCurrent(store, file);
+  for (const body of ['cccc', 'dddd', 'eeee']) {
+    const [first, second] = await uncached(file);
+    await writeFile(file, lines([{ ...first, body }, second]));
+    assert.equal((await store.listAll('s', 0))[0].body, body);
+    await assertCurrent(store, file);
+  }
+});
+
+for (const field of ['ino', 'size', 'mtimeNs', 'ctimeNs'] as const) {
+  test(`a change of ${field} alone invalidates a cached inbox`, async (t) => {
+    const dir = await mkdtemp(join(tmpdir(), 'ftown-mail-cache-'));
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    let content = lines([message('first')]);
+    let reads = 0;
+    let reported = stampAt(Date.now() - 60_000);
+    const store = new MailStore((id) => join(dir, id), {
+      stat: async () => reported,
+      readFile: async () => { reads++; return content; },
+      now: () => Date.now(),
+    });
+    assert.equal((await store.listAll('s', 0))[0].body, 'first');
+    assert.equal((await store.listAll('s', 0))[0].body, 'first');
+    assert.equal(reads, 1);
+    content = lines([message('second')]);
+    reported = { ...reported, [field]: reported[field] + BigInt(1) };
+    assert.equal((await store.listAll('s', 0))[0].body, 'second');
+    assert.equal(reads, 2);
+  });
+}
 
 test('callers cannot change what later reads return', async (t) => {
   const { store, file, calls } = await fixture(t);
