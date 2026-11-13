@@ -1,3 +1,4 @@
+import type { AttentionRoutingFields } from "./coordination/contract-b.js";
 import { z } from 'zod';
 import { ATTENTION_PROMPT_LIMITS as L, type AttentionAnswer, type AttentionPrompt } from './attention-prompt-protocol.js';
 import { promptFromAskUserQuestionInput } from './attention-prompt.js';
@@ -8,7 +9,7 @@ export interface Activity {
   state: 'thinking' | 'tool_use' | 'idle' | 'unknown';
   lastActivityAt?: string;
 }
-export interface AttentionItem {
+export interface AttentionItem extends AttentionRoutingFields {
   id: string;
   sequence: number;
   type: AttentionType;

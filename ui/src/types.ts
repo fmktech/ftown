@@ -34,6 +34,8 @@ export interface Session {
   usage?: SessionUsage;
   preview?: SessionPreviewDescriptor;
   card?: SessionCard;
+  brief?: { text?: string; notes: { ts: string; text: string }[]; updatedAt: string };
+  worktree?: { repoRoot: string; path: string; branch: string; base: string; createdByBridge: true; retained?: { reason: string; at: string } };
 }
 
 /** Mirrors bridge SessionCardDeclared (bridge/src/coordination/contract.ts). */
@@ -141,6 +143,9 @@ export interface ResolveSessionAttentionPayload extends GetSessionAttentionPaylo
 export interface PersistedSessionAttention {
   id: string; sequence: number; type: 'agent_needs_input' | 'ask_user'; title: string; message: string; createdAt: string;
   prompt?: AttentionPrompt;
+  /** Parent-first routing (coordination phase B). */
+  route?: 'parent' | 'human'; routedTo?: string; escalatedAt?: string; escalationNote?: string;
+  answeredBy?: { kind: 'human' | 'session'; sessionId?: string; name?: string };
 }
 export interface SessionAttentionResponse { sessionId: string; attention: PersistedSessionAttention | null; sequence: number }
 export type AnswerSessionAttentionResponse = SessionAttentionResponse & { delivery: AttentionAnswerDelivery };
