@@ -64,7 +64,7 @@ PATH=/opt/chaos-bin:/home/ftown/.ftown/bin:/usr/local/bin:/usr/bin:/bin`, run vi
 
 - Create root: `ftown sessions create --shell claude --command /run/chaos/scripts/sleeper.sh --name root --workdir /work/repo`
 - Create child: same plus `--parent-id <rootId>` (`bridge/src/sessions-commands.ts:160-172`).
-  Output: `{"session":{"id","name","command","status":"running","bridgeId","createdAt","updatedAt","workingDir","shellType","parentSessionId"?,"runtime":"tmux"}}`.
+  Output (pretty-printed, multi-line JSON — parse the whole stdout, not one line): `{"session":{"id","name","command","status":"running","bridgeId","createdAt","updatedAt","workingDir","shellType","parentSessionId"?,"runtime":"tmux"}}`.
 - `--command` with `--shell claude` is used VERBATIM; `--plugin-dir` is added only when the
   command equals the generated `claude --allow-dangerously-skip-permissions[ --resume <id>]`
   (`bridge/src/agent-commands.ts:40-58`). Verified: list shows `"command":"/run/chaos/scripts/sleeper.sh"`.
@@ -74,10 +74,11 @@ PATH=/opt/chaos-bin:/home/ftown/.ftown/bin:/usr/local/bin:/usr/bin:/bin`, run vi
 - Mail to parent: `env FTOWN_SESSION_ID=<child> FTOWN_PARENT_SESSION_ID=<root> ftown harness mail send --parent --type result "…"`
   → stdout `mail <mailId> sent to <rootId>`. Without `FTOWN_PARENT_SESSION_ID`: exit 1
   `--parent requires FTOWN_PARENT_SESSION_ID to be set`.
-- Mail read: `env FTOWN_SESSION_ID=<root> ftown harness mail read` prints
-  `[<ts>] <fromName> (<type>): <body>` per message and marks them delivered; second read prints
-  `(no mail)`. Flags `--peek`, `--all`, `--limit <n>`. There is NO JSON output for `mail read`;
-  read `inbox.jsonl` for structure. `ftown sessions inbox` is the same with `--json` default.
+- Mail read (agent form): `env FTOWN_SESSION_ID=<id> ftown harness --json mail read` (global
+  `--json` BEFORE `mail`) prints pretty-printed JSON
+  `{"sessionId":"<id>","messages":[{"id","ts","from","to","type","body","deliveredAt","deliveredVia":"drain"}]}`
+  and marks the messages delivered. Smoke step `mail-read-json`. Without `--json` it prints
+  `[<ts>] <fromName> (<type>): <body>` lines, then `(no mail)` once drained. Flags `--peek`, `--all`, `--limit <n>`.
 - Ask: `env FTOWN_SESSION_ID=<child> FTOWN_PARENT_SESSION_ID=<root> ftown sessions attention --title CHAOS-Q-1 --message pick --option yes --option no --wait --timeout 30`
   → routed to the parent as an `escalation` mail whose body starts
   `[ftown question id=<eventId> from=<childName> (<childId>)] CHAOS-Q-1`; on answer prints
@@ -119,3 +120,11 @@ The bridge log under `--network none` shows no network error; startup reaches
 - `/run/chaos` is root:root 0755 (so `t0` and `ids.json` written by the root supervisor are
   readable by ftown); `agents/`, `scripts/`, `tmux/` are owned by ftown. Smoke step
   `run-chaos-layout` checks both.
+
+- Hook acceptance: smoke step `hook-script-run` pipes `{"hook_event_name":"Stop","session_id":"<id>"}`
+  into `$CHAOS_HOOK_SCRIPT` with `FTOWN_SESSION_ID`, `FTOWN_HOOK_PORT`, `FTOWN_HOOK_TOKEN` (the vars
+  the bridge injects into sessions, `bridge/src/claude-runner.ts:245,250`; values = `.port`/`.token`
+  of `/data/bridge.json`); exit 0. `hook-accepted-200` repeats the same POST to
+  `http://localhost:<port>/hook` with curl and gets HTTP 200.
+- Installed hook paths: `/opt/ftown/bridge/hooks/notify.sh` (what the fake agent defaults to; exists)
+  and setup's identical copy `/home/ftown/.ftown/notify.sh`.
