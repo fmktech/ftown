@@ -4,9 +4,9 @@ import { join } from 'node:path';
 import { EXIT } from '../contract.ts';
 import { parseArgs, USAGE, UsageError, type Command, type VmOptions } from './args.ts';
 import { build, readBuildInfo } from './build.ts';
-import { boot, qemuArgs, type GuestParams } from './qemu.ts';
+import { boot, cleanupContainers, qemuArgs, RTC_BASE, type GuestParams } from './qemu.ts';
 import { OUT_DIR } from './paths.ts';
-import { differingKeys, formatSeedLine, normalizeConsole, sha256, summarizeSeed, worstExit, type BootResult, type SeedSummary } from './summary.ts';
+import { selftestAssertions, differingKeys, formatSeedLine, normalizeConsole, sha256, summarizeSeed, worstExit, type BootResult, type SeedSummary } from './summary.ts';
 
 /** Runs tasks with at most `jobs` in flight; results keep input order. */
 async function pool<T>(jobs: number, tasks: (() => Promise<T>)[]): Promise<T[]> {
@@ -62,9 +62,9 @@ async function selftest(times: number, vm: VmOptions): Promise<number> {
       code = EXIT.reproDiverged;
     } else console.log(`console run${k + 1}: ${rawSame ? 'byte-identical' : 'identical modulo printk timestamps'} to run1`);
   }
-  const rep = JSON.parse(jsons[0]) as { hasNetworkInterfaceOtherThanLo: boolean; cpuHasRdrand: boolean; cpuHasRdseed: boolean };
-  for (const k of ['hasNetworkInterfaceOtherThanLo', 'cpuHasRdrand', 'cpuHasRdseed'] as const) {
-    if (rep[k] !== false) { console.log(`selftest: ${k} must be false`); code = worstExit([code, EXIT.infra]); }
+  for (const failed of selftestAssertions(JSON.parse(jsons[0]) as Record<string, unknown>, RTC_BASE.slice(0, 10))) {
+    console.log(`selftest: ASSERTION FAILED: ${failed}`);
+    code = worstExit([code, EXIT.infra]);
   }
   console.log(code === EXIT.ok ? `selftest: ${times} boots byte-identical` : `selftest: exit ${code}`);
   return code;
@@ -104,7 +104,7 @@ async function main(argv: string[]): Promise<number> {
   switch (c.cmd) {
     case 'help': console.log(USAGE); return EXIT.ok;
     case 'build': {
-      const info = await build(c.image);
+      const info = await build(c.image, c.checkRepro);
       console.log(JSON.stringify(info, null, 2));
       return EXIT.ok;
     }
@@ -112,6 +112,16 @@ async function main(argv: string[]): Promise<number> {
     case 'run':
     case 'campaign': return runSeeds(c);
   }
+}
+
+let stopping = false;
+for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+  process.on(sig, () => {
+    if (stopping) return;
+    stopping = true;
+    console.error(`${sig}: removing chaos containers`);
+    void cleanupContainers().finally(() => process.exit(EXIT.infra));
+  });
 }
 
 try {

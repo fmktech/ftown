@@ -112,3 +112,29 @@ export function formatSeedLine(s: SeedSummary): string {
 export function normalizeConsole(text: string): string {
   return text.replace(/\r/g, '').replace(/^\[\s*\d+\.\d+\] /gm, '');
 }
+
+/** Reason a guest died, read from its console log, or null. Pure. */
+export function consoleFailure(consoleText: string): string | null {
+  const lines = normalizeConsole(consoleText).split('\n');
+  const find = (re: RegExp) => lines.find((l) => re.test(l));
+  const failed = find(/^chaos-init: FAILED /);
+  if (failed) return failed.trim();
+  const panic = find(/Kernel panic/);
+  if (panic) return panic.trim();
+  const oom = find(/Out of memory|oom-kill|invoked oom-killer/);
+  if (oom) return `guest out of memory: ${oom.trim()}`;
+  return null;
+}
+
+/** Assertions a selftest report must satisfy; returns the failed ones. Pure. */
+export function selftestAssertions(rep: Record<string, unknown>, rtcBaseDate: string): string[] {
+  const failed: string[] = [];
+  for (const k of ['hasNetworkInterfaceOtherThanLo', 'cpuHasRdrand', 'cpuHasRdseed']) {
+    if (rep[k] !== false) failed.push(`${k} must be false, got ${JSON.stringify(rep[k])}`);
+  }
+  if (rep.clocksource !== 'tsc') failed.push(`clocksource must be tsc, got ${JSON.stringify(rep.clocksource)}`);
+  if (typeof rep.wallClockAtStart !== 'string' || !rep.wallClockAtStart.startsWith(rtcBaseDate)) {
+    failed.push(`wallClockAtStart must start with ${rtcBaseDate}, got ${JSON.stringify(rep.wallClockAtStart)}`);
+  }
+  return failed;
+}

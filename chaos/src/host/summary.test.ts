@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EXIT } from '../contract.ts';
-import { differingKeys, firstDiffLine, formatSeedLine, normalizeConsole, sha256, summarizeSeed, violatedProps, worstExit, type BootResult } from './summary.ts';
+import { consoleFailure, selftestAssertions, differingKeys, firstDiffLine, formatSeedLine, normalizeConsole, sha256, summarizeSeed, violatedProps, worstExit, type BootResult } from './summary.ts';
 
 const boot = (content: string, exitCode = 0, wallMs = 1000): BootResult => ({ exitCode, infraError: null, hash: sha256(content), content, wallMs });
 const CANON = '{"k":"run","seed":1}\n{"k":"verdict","prop":"M1","kind":"always","status":"violated","evidence":[]}\n{"k":"verdict","prop":"A1","kind":"always","status":"pass","evidence":[]}\n';
@@ -47,4 +47,19 @@ test('helpers', () => {
   assert.deepEqual(differingKeys({ a: 1, b: [1], c: 2 }, { a: 1, b: [2], d: 3 }), ['b', 'c', 'd']);
   assert.deepEqual(violatedProps('garbage\n' + CANON), ['M1']);
   assert.equal(normalizeConsole('[    1.234567] hello\r\nx'), 'hello\nx');
+});
+
+test('console failure reasons', () => {
+  assert.equal(consoleFailure('[ 1.0] booting\nchaos-init: cmd=run\n'), null);
+  assert.equal(consoleFailure('chaos-init: FAILED mount proc\n'), 'chaos-init: FAILED mount proc');
+  assert.match(consoleFailure('[   3.100000] Kernel panic - not syncing: VFS\n')!, /^Kernel panic/);
+  assert.match(consoleFailure('[ 9.0] Out of memory: Killed process 12 (node)\n')!, /^guest out of memory: Out of memory/);
+});
+
+test('selftest assertions', () => {
+  const good = { hasNetworkInterfaceOtherThanLo: false, cpuHasRdrand: false, cpuHasRdseed: false, clocksource: 'tsc', wallClockAtStart: '2026-01-01T00:00:23.537Z' };
+  assert.deepEqual(selftestAssertions(good, '2026-01-01'), []);
+  const bad = selftestAssertions({ ...good, clocksource: 'hpet', cpuHasRdrand: true, wallClockAtStart: '2031-05-02T00:00:00Z' }, '2026-01-01');
+  assert.equal(bad.length, 3);
+  assert.match(bad.join('|'), /cpuHasRdrand.*clocksource must be tsc.*wallClockAtStart/);
 });

@@ -2,7 +2,8 @@
 import { closeSync, openSync, writeFileSync, writeSync } from 'node:fs';
 import { HOST_PROTOCOL } from '../contract.ts';
 
-export const FRAME_PORT = '/dev/ttyS1';
+/** The frame port; CHAOS_FRAMES overrides it (tests write to a plain file). */
+export const FRAME_PORT = process.env.CHAOS_FRAMES ?? '/dev/ttyS1';
 /** Marker file the guest init checks to know main already sent CHAOS-EXIT. */
 export const EXIT_SENT_MARKER = '/run/chaos-exit-sent';
 const NAME_RE = /^[A-Za-z0-9._-]+$/;
@@ -23,7 +24,7 @@ export function encodeExit(code: number): string {
 }
 
 function writeAll(text: string, port: string): void {
-  const fd = openSync(port, 'w');
+  const fd = openSync(port, 'a');
   try {
     const buf = Buffer.from(text, 'utf8');
     let off = 0;

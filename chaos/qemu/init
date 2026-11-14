@@ -5,24 +5,41 @@ export HOME=/root LANG=C.UTF-8 TZ=UTC NODE_OPTIONS=
 BB=/bin/busybox
 [ -x "$BB" ] || BB=/usr/bin/busybox
 
-mkdir -p /proc /sys /dev /run /tmp
-mount -t proc proc /proc
-mount -t sysfs sysfs /sys
-mount -t devtmpfs devtmpfs /dev 2>/dev/null
-[ -e /dev/console ] || mknod -m 600 /dev/console c 5 1
-[ -e /dev/ttyS1 ] || mknod -m 660 /dev/ttyS1 c 4 65
-mkdir -p /dev/pts /dev/shm
-mount -t devpts devpts /dev/pts
-mount -t tmpfs -o mode=1777 tmpfs /dev/shm
-mount -t tmpfs -o mode=755 tmpfs /run
-mount -t tmpfs -o mode=1777 tmpfs /tmp
-mount -t cgroup2 cgroup2 /sys/fs/cgroup 2>/dev/null
+halt_now() {
+  sync
+  $BB sleep 1
+  $BB poweroff -f
+  echo o > /proc/sysrq-trigger
+  exit 1
+}
+# Runs one setup step; on failure reports it on the console and the frame port, then powers off.
+step() {
+  desc=$1; shift
+  if ! "$@"; then
+    echo "chaos-init: FAILED $desc" > /dev/console 2>/dev/null || echo "chaos-init: FAILED $desc"
+    printf 'CHAOS-EXIT 3\n' > /dev/ttyS1 2>/dev/null
+    halt_now
+  fi
+}
+
+step "mkdir base dirs" mkdir -p /proc /sys /dev /run /tmp
+step "mount proc" mount -t proc proc /proc
+step "mount sysfs" mount -t sysfs sysfs /sys
+$BB mountpoint -q /dev || step "mount devtmpfs" mount -t devtmpfs devtmpfs /dev
+[ -e /dev/console ] || step "mknod console" $BB mknod -m 600 /dev/console c 5 1
+[ -e /dev/ttyS1 ] || step "mknod ttyS1" $BB mknod -m 660 /dev/ttyS1 c 4 65
+step "mkdir pts shm" mkdir -p /dev/pts /dev/shm
+step "mount devpts" mount -t devpts devpts /dev/pts
+step "mount /dev/shm" mount -t tmpfs -o mode=1777 tmpfs /dev/shm
+step "mount /run" mount -t tmpfs -o mode=755 tmpfs /run
+step "mount /tmp" mount -t tmpfs -o mode=1777 tmpfs /tmp
+step "mount cgroup2" mount -t cgroup2 cgroup2 /sys/fs/cgroup
 exec 0</dev/console 1>/dev/console 2>&1
 
-$BB ip link set lo up
-$BB hostname chaos
+step "ip link set lo up" $BB ip link set lo up
+step "hostname" $BB hostname chaos
 # Raw output on the frame port: no \n -> \r\n translation.
-$BB stty -F /dev/ttyS1 raw -echo 115200
+step "stty ttyS1" $BB stty -F /dev/ttyS1 raw -echo 115200
 
 CHAOS_CMD=selftest; CHAOS_SEED=0; CHAOS_LEVEL=off
 for a in $(cat /proc/cmdline); do
@@ -55,8 +72,5 @@ if [ ! -e /run/chaos-exit-sent ]; then
   [ "$code" -eq 0 ] && code=3
   printf 'CHAOS-EXIT %s\n' "$code" > /dev/ttyS1
 fi
-sync
-# Let the UART drain (virtual time under icount, so this costs no wall time).
-$BB sleep 1
-$BB poweroff -f
-echo o > /proc/sysrq-trigger
+# halt_now sleeps 1 s so the UART drains (virtual time under icount: costs no wall time).
+halt_now
