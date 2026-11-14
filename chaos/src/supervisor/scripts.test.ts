@@ -10,38 +10,51 @@ import {
   IDLE_MARGIN_MS,
   IDLE_SLEEP_MIN_MS,
   MAX_START_OFFSET_MS,
-  sleepTotal,
   stepCostMs,
 } from './scripts.ts';
 
-function maxTurnBusyMs(script: AgentScript): number {
+function validateTurns(script: AgentScript): number {
+  assert.deepEqual(script.steps.at(-1), { do: 'hook', event: 'Stop' }, `${script.role}: last step must be Stop`);
   let inTurn = false;
+  let actionsInTurn = 0;
   let busy = 0;
   let maxBusy = 0;
   for (const st of script.steps) {
     const cost = stepCostMs(st);
     if (st.do === 'hook' && st.event === 'UserPromptSubmit') {
+      assert.ok(!inTurn, `${script.role}: UserPromptSubmit while already in a turn`);
       inTurn = true;
+      actionsInTurn = 0;
       busy = cost;
     } else if (st.do === 'hook' && st.event === 'Stop') {
       assert.ok(inTurn, `${script.role}: Stop without UserPromptSubmit`);
+      assert.ok(actionsInTurn >= 1, `${script.role}: empty turn (no actions between UserPromptSubmit and Stop)`);
       busy += cost;
       if (busy > maxBusy) maxBusy = busy;
       inTurn = false;
       busy = 0;
     } else if (inTurn) {
+      actionsInTurn++;
       busy += cost;
+    } else {
+      assert.equal(st.do, 'sleep', `${script.role}: non-sleep step '${st.do}' outside a turn`);
     }
   }
   assert.ok(!inTurn, `${script.role}: unclosed turn`);
   return maxBusy;
 }
 
-function hasFaultWindowIdleSleep(script: AgentScript, role: Role, profile: RunProfile): boolean {
+function hasFaultWindowIdleSleep(
+  script: AgentScript,
+  role: Role,
+  profile: RunProfile,
+  startOffsetMs: number,
+  zeroCliCost = false,
+): boolean {
   const { faultWindowStartMs, faultWindowEndMs } = PROFILE[profile];
   const minIdle = IDLE_SLEEP_MIN_MS[profile];
   let inTurn = false;
-  let t = MAX_START_OFFSET_MS[role] / 2;
+  let t = startOffsetMs;
   for (const st of script.steps) {
     if (st.do === 'hook' && st.event === 'UserPromptSubmit') inTurn = true;
     else if (st.do === 'hook' && st.event === 'Stop') inTurn = false;
@@ -49,7 +62,7 @@ function hasFaultWindowIdleSleep(script: AgentScript, role: Role, profile: RunPr
       const overlap = Math.min(t + st.ms, faultWindowEndMs) - Math.max(t, faultWindowStartMs);
       if (overlap >= minIdle) return true;
     }
-    t += stepCostMs(st);
+    t += st.do === 'sleep' ? st.ms : (zeroCliCost ? 0 : stepCostMs(st));
   }
   return false;
 }
@@ -75,18 +88,30 @@ test('every seed and profile: turns, busy cap, idle sleep, asks, overlap, and wo
       for (const role of ROLES) {
         assert.equal(s[role].role, role);
         assert.ok(!s[role].steps.some((x) => x.do === 'exit'));
-        assert.deepEqual(s[role].steps.at(-1), { do: 'hook', event: 'Stop' });
 
         if (profile === 'short') {
           assert.ok(!s[role].steps.some((x) => x.do === 'status'), `short ${role} must not have status steps`);
         }
 
-        const maxBusy = maxTurnBusyMs(s[role]);
+        const maxBusy = validateTurns(s[role]);
         assert.ok(maxBusy <= BUSY_TURN_LIMIT_MS, `${profile} seed ${seed} ${role} busy=${maxBusy} > ${BUSY_TURN_LIMIT_MS}`);
-        assert.ok(
-          hasFaultWindowIdleSleep(s[role], role, profile),
-          `${profile} seed ${seed} ${role} missing >=${IDLE_SLEEP_MIN_MS[profile]} ms idle sleep in fault window`,
-        );
+
+        if (profile === 'soak') {
+          assert.ok(
+            hasFaultWindowIdleSleep(s[role], role, profile, 0, true),
+            `soak seed ${seed} ${role} missing >=${IDLE_SLEEP_MIN_MS[profile]} ms idle sleep at (0, 0)`,
+          );
+          assert.ok(
+            hasFaultWindowIdleSleep(s[role], role, profile, MAX_START_OFFSET_MS[role], false),
+            `soak seed ${seed} ${role} missing >=${IDLE_SLEEP_MIN_MS[profile]} ms idle sleep at (MAX, STEP_COST_MS)`,
+          );
+        } else {
+          // Short keeps the 170_000 end bound, so idle sleep is checked at MAX/2 with STEP_COST_MS.
+          assert.ok(
+            hasFaultWindowIdleSleep(s[role], role, profile, MAX_START_OFFSET_MS[role] / 2, false),
+            `short seed ${seed} ${role} missing >=${IDLE_SLEEP_MIN_MS[profile]} ms idle sleep at MAX/2`,
+          );
+        }
 
         const endAt = MAX_START_OFFSET_MS[role] + estimatedDuration(s[role]);
         assert.ok(endAt <= workloadEndMs, `${profile} seed ${seed} ${role} endAt=${endAt} > ${workloadEndMs}`);
@@ -117,7 +142,7 @@ test('every seed and profile: turns, busy cap, idle sleep, asks, overlap, and wo
           assert.equal(s[role].answerRoutedQuestions, false);
           assert.ok(s[role].steps.some((x) => x.do === 'mail_send' && x.to === 'parent'));
           asks += s[role].steps.filter((x) => x.do === 'ask').length;
-          if (s[role].steps[1]?.do === 'ask') early += 1;
+          if (beginTimes.some((x) => x.do === 'ask' && x.t < faultWindowStartMs)) early += 1;
         }
       }
       assert.equal(early, 1, `${profile} seed ${seed}: early asks`);
@@ -126,11 +151,47 @@ test('every seed and profile: turns, busy cap, idle sleep, asks, overlap, and wo
   }
 });
 
-test('bounds helpers reject violating scripts and accept valid ones', () => {
+test('turn and bound helpers reject violating scripts and accept valid ones', () => {
   const valid = buildScripts(1, 'soak', deriveRng).child1;
-  assert.ok(maxTurnBusyMs(valid) <= BUSY_TURN_LIMIT_MS);
-  assert.ok(hasFaultWindowIdleSleep(valid, 'child1', 'soak'));
+  assert.ok(validateTurns(valid) <= BUSY_TURN_LIMIT_MS);
+  assert.ok(hasFaultWindowIdleSleep(valid, 'child1', 'soak', 0, true));
+  assert.ok(hasFaultWindowIdleSleep(valid, 'child1', 'soak', MAX_START_OFFSET_MS.child1, false));
   assert.ok(MAX_START_OFFSET_MS.child1 + estimatedDuration(valid) <= PROFILE.soak.workloadEndMs);
+
+  // Out-of-turn action
+  assert.throws(() => validateTurns({
+    role: 'child1',
+    readMailOnNudge: true,
+    answerRoutedQuestions: false,
+    steps: [
+      { do: 'mail_send', to: 'parent', type: 'message', body: 'CHAOS-M-2000 from=child1 to=root' },
+      { do: 'hook', event: 'UserPromptSubmit' },
+      { do: 'hook', event: 'Stop' },
+    ],
+  }), /outside a turn/);
+
+  // Double UserPromptSubmit
+  assert.throws(() => validateTurns({
+    role: 'child1',
+    readMailOnNudge: true,
+    answerRoutedQuestions: false,
+    steps: [
+      { do: 'hook', event: 'UserPromptSubmit' },
+      { do: 'hook', event: 'UserPromptSubmit' },
+      { do: 'hook', event: 'Stop' },
+    ],
+  }), /already in a turn/);
+
+  // Empty turn
+  assert.throws(() => validateTurns({
+    role: 'child1',
+    readMailOnNudge: true,
+    answerRoutedQuestions: false,
+    steps: [
+      { do: 'hook', event: 'UserPromptSubmit' },
+      { do: 'hook', event: 'Stop' },
+    ],
+  }), /empty turn/);
 
   const overBusy: AgentScript = {
     role: 'child1',
@@ -143,7 +204,7 @@ test('bounds helpers reject violating scripts and accept valid ones', () => {
       { do: 'hook', event: 'Stop' },
     ],
   };
-  assert.ok(maxTurnBusyMs(overBusy) > BUSY_TURN_LIMIT_MS);
+  assert.ok(validateTurns(overBusy) > BUSY_TURN_LIMIT_MS);
 
   const noIdle: AgentScript = {
     role: 'child1',
@@ -151,11 +212,13 @@ test('bounds helpers reject violating scripts and accept valid ones', () => {
     answerRoutedQuestions: false,
     steps: [
       { do: 'hook', event: 'UserPromptSubmit' },
+      { do: 'mail_send', to: 'parent', type: 'result', body: 'CHAOS-M-2000 from=child1 to=root' },
       { do: 'hook', event: 'Stop' },
       { do: 'sleep', ms: 1_000 },
     ],
   };
-  assert.equal(hasFaultWindowIdleSleep(noIdle, 'child1', 'short'), false);
+  assert.equal(hasFaultWindowIdleSleep(noIdle, 'child1', 'short', 0, true), false);
+  assert.equal(hasFaultWindowIdleSleep(noIdle, 'child1', 'short', MAX_START_OFFSET_MS.child1, false), false);
 
   const overEnd: AgentScript = {
     role: 'root',
@@ -164,6 +227,7 @@ test('bounds helpers reject violating scripts and accept valid ones', () => {
     steps: [
       { do: 'sleep', ms: PROFILE.short.workloadEndMs },
       { do: 'hook', event: 'UserPromptSubmit' },
+      { do: 'mail_send', to: 'child1', type: 'task', body: 'CHAOS-M-1999 from=root to=child1' },
       { do: 'hook', event: 'Stop' },
     ],
   };
@@ -200,7 +264,6 @@ test('every seed: root sends a waking mail (after >=8s idle in short, after all 
         const childEnd = Math.max(estimatedDuration(s.child1), estimatedDuration(s.child2), estimatedDuration(s.child3));
         assert.ok(sentAt >= childEnd + IDLE_MARGIN_MS, `${profile} seed ${seed}: sentAt=${sentAt} < ${childEnd + IDLE_MARGIN_MS}`);
       }
-      assert.ok(sleepTotal(s.root) > 0);
     }
   }
 });

@@ -23,12 +23,18 @@ function acceptedSends(log: readonly Rec[]): Send[] {
   return out;
 }
 
-function finalSnapshot(log: readonly Rec[]): Snapshot | null {
-  let snap: Snapshot | null = null;
+export const SETTLE_MS = 75_000;
+
+function finalCheckpoint(log: readonly Rec[]): { t: number; snap: Snapshot } | null {
+  let out: { t: number; snap: Snapshot } | null = null;
   for (const r of log) {
-    if (r.k === 'checkpoint' && r.final) snap = r.snap;
+    if (r.k === 'checkpoint' && r.final) out = { t: r.t, snap: r.snap };
   }
-  return snap;
+  return out;
+}
+
+function finalSnapshot(log: readonly Rec[]): Snapshot | null {
+  return finalCheckpoint(log)?.snap ?? null;
 }
 
 function sessionOf(snap: Snapshot, role: Role): SessionObs | undefined {
@@ -137,19 +143,49 @@ const M5: Property = {
   source: 'bridge/src/mail-delivery.ts:253-270',
   title: 'pending mail is recovered after heal',
   check(log): PropResult {
-    const snap = finalSnapshot(log);
-    if (snap === null) return { status: 'unexercised', evidence: [] };
-    const live = snap.sessions.filter((s) => s.status === 'running' && s.tmuxAlive && s.procAlive);
+    const cp = finalCheckpoint(log);
+    if (cp === null) return { status: 'unexercised', evidence: [] };
+    const live = cp.snap.sessions.filter((s) => s.status === 'running' && s.tmuxAlive && s.procAlive);
     if (live.length === 0) return { status: 'unexercised', evidence: [] };
-    const evidence: string[] = [];
-    for (const s of live) {
-      for (const m of s.inbox) {
-        if (!m.delivered && !m.nudged && m.type !== 'fyi') evidence.push(`pending ${m.tag} to=${s.role}`);
+
+    const acceptedAt = new Map<string, number>();
+    const lastHook = new Map<Role, { t: number; event: string }>();
+    const startedAt = new Map<Role, number>();
+    for (const r of log) {
+      if (r.k === 'op' && r.t <= cp.t && r.op.op === 'mail_send' && r.ok) {
+        acceptedAt.set(`${r.op.to}\u0000${r.op.tag}`, r.t);
+      } else if (r.k === 'agent' && r.t <= cp.t) {
+        if (r.e.ev === 'mail_sent' && r.e.accepted) {
+          acceptedAt.set(`${r.e.to}\u0000${r.e.tag}`, r.t);
+        } else if (r.e.ev === 'hook_sent' && r.e.ok) {
+          lastHook.set(r.role, { t: r.t, event: r.e.event });
+        } else if (r.e.ev === 'start' && !startedAt.has(r.role)) {
+          startedAt.set(r.role, r.t);
+        }
       }
     }
-    return evidence.length === 0
-      ? { status: 'pass', evidence: [] }
-      : { status: 'violated', evidence: sorted(evidence) };
+
+    const violated: string[] = [];
+    const info: string[] = [];
+    for (const s of live) {
+      const hk = lastHook.get(s.role);
+      const idleSettled = hk === undefined
+        ? cp.t - (startedAt.get(s.role) ?? 0) >= SETTLE_MS
+        : hk.event === 'Stop' && cp.t - hk.t >= SETTLE_MS;
+      for (const m of s.inbox) {
+        if (m.delivered || m.nudged || m.type === 'fyi') continue;
+        const acc = acceptedAt.get(`${s.role}\u0000${m.tag}`);
+        const mailSettled = acc !== undefined && cp.t - acc >= SETTLE_MS;
+        if (mailSettled && idleSettled) {
+          violated.push(`pending ${m.tag} to=${s.role}`);
+        } else {
+          info.push(`pending, recipient not settled: ${m.tag} to=${s.role}`);
+        }
+      }
+    }
+    return violated.length === 0
+      ? { status: 'pass', evidence: sorted(info) }
+      : { status: 'violated', evidence: sorted(violated) };
   },
 };
 

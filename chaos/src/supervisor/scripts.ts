@@ -34,13 +34,13 @@ export const BUSY_TURN_LIMIT_MS = 45_000;
 /** Per-profile turn/action counts, sized to the current STEP_COST_MS. */
 export const ROOT_ORDINARY_MAILS: Record<RunProfile, readonly [number, number]> = {
   short: [1, 1],
-  soak: [2, 4],
+  soak: [2, 3],
 };
 
 /** Per-profile in-loop action turn count for children (excludes bring-up and final result turn), sized to STEP_COST_MS. */
 export const CHILD_ACTION_TURNS: Record<RunProfile, readonly [number, number]> = {
   short: [1, 1],
-  soak: [1, 2],
+  soak: [1, 1],
 };
 
 /** Minimum required idle sleep inside the fault window, by profile. */
@@ -100,7 +100,7 @@ export const MAX_START_OFFSET_MS: Readonly<Record<Role, number>> = {
 /** Per-action sleep range for children, by profile (spreads actions across fault window within workloadEndMs). */
 export const CHILD_ACTION_SLEEP_MS: Record<RunProfile, readonly [number, number]> = {
   short: [500, 1_200],
-  soak: [3_000, 6_000],
+  soak: [500, 1_500],
 };
 
 function pushTurn(steps: AgentStep[], actions: readonly AgentStep[]): void {
@@ -122,18 +122,24 @@ function chooseAsks(rng: Rng): { early: Role; later: Record<Role, number> } {
 function rootScript(rng: Rng, profile: RunProfile): AgentScript {
   const nextMail = counter('root');
   // Children are created after root; under QEMU four creates take ~16 s, so root waits far longer.
-  const bringUp: AgentStep[] = profile === 'soak' ? [{ do: 'status', state: 'working', headline: 'root working' }] : [];
   const steps: AgentStep[] = [sleep(rng, ROOT_FIRST_SLEEP_MS[0], ROOT_FIRST_SLEEP_MS[1])];
-  pushTurn(steps, bringUp);
-
-  // Hold until faultWindowStartMs (assuming half of MAX_START_OFFSET_MS.root), then idle inside fault window.
-  const hold = Math.max(0, PROFILE[profile].faultWindowStartMs - MAX_START_OFFSET_MS.root / 2 - stepsEstimatedMs(steps));
-  const idle = rng.int(IDLE_SLEEP_MIN_MS[profile], IDLE_SLEEP_MIN_MS[profile] + (profile === 'short' ? 500 : 5_000));
-  steps.push({ do: 'sleep', ms: hold + idle });
+  if (profile === 'soak') {
+    pushTurn(steps, [{ do: 'status', state: 'working', headline: 'root working' }]);
+    // Size hold+idle so the >=20 s idle sleep overlaps [faultWindowStartMs, faultWindowEndMs]
+    // for both (startOffset=0, cliCost=0) and (startOffset=MAX, cliCost=STEP_COST_MS).
+    const minSleep = PROFILE.soak.faultWindowStartMs + IDLE_SLEEP_MIN_MS.soak - stepsSleepTotal(steps);
+    const idle = Math.max(IDLE_SLEEP_MIN_MS.soak, minSleep);
+    steps.push({ do: 'sleep', ms: idle });
+  } else {
+    // In short, keep within workloadEndMs=170_000: hold to faultWindowStartMs at MAX/2, then >= 8 s idle.
+    const hold = Math.max(0, PROFILE.short.faultWindowStartMs - MAX_START_OFFSET_MS.root / 2 - stepsEstimatedMs(steps));
+    const idle = rng.int(IDLE_SLEEP_MIN_MS.short, IDLE_SLEEP_MIN_MS.short + 500);
+    steps.push({ do: 'sleep', ms: hold + idle });
+  }
 
   const [minMails, maxMails] = ROOT_ORDINARY_MAILS[profile];
   const mails = rng.int(minMails, maxMails);
-  const mailSleep: readonly [number, number] = profile === 'short' ? [500, 1_000] : [3_000, 6_000];
+  const mailSleep: readonly [number, number] = profile === 'short' ? [500, 1_000] : [1_000, 2_000];
   for (let i = 0; i < mails; i++) {
     const to = rng.pick(CHILDREN);
     pushTurn(steps, [{ do: 'mail_send', to, type: rng.pick(ROOT_MAIL_TYPES), body: mailBody(nextMail(), 'root', to) }]);
@@ -150,14 +156,15 @@ function childScript(role: Role, rng: Rng, early: boolean, asks: number, profile
     return { do: 'ask', title, message: title, options: ['yes', 'no'] };
   };
   const steps: AgentStep[] = [];
-  // The early ask goes out once every session exists (ids.json complete) and well before the
-  // fault window opens at faultWindowStartMs, so root can answer it unfaulted.
-  if (early) steps.push({ do: 'sleep', ms: EARLY_ASK_DELAY_MS }, ask());
-  steps.push(sleep(rng, 2_000, 6_000));
-  const bringUp: AgentStep[] = profile === 'soak' ? [{ do: 'status', state: 'working', headline: `${role} working` }] : [];
-  pushTurn(steps, bringUp);
+  // The early ask goes out in its own turn once every session exists (ids.json complete)
+  // and well before faultWindowStartMs, so root can answer it unfaulted.
+  if (early) {
+    steps.push({ do: 'sleep', ms: EARLY_ASK_DELAY_MS });
+    pushTurn(steps, [ask()]);
+  }
 
   if (profile === 'short') {
+    steps.push(sleep(rng, 2_000, 6_000));
     // Hold so Turn 1's mail_send/ask begins at >= faultWindowStartMs under MAX/2 start offset.
     const hold = Math.max(
       0,
@@ -175,10 +182,12 @@ function childScript(role: Role, rng: Rng, early: boolean, asks: number, profile
     return { role, steps, readMailOnNudge: true, answerRoutedQuestions: false };
   }
 
-  // Soak profile: hold until faultWindowStartMs (at MAX/2), then >= 20 s idle sleep inside fault window.
-  const hold = Math.max(0, PROFILE.soak.faultWindowStartMs - MAX_START_OFFSET_MS[role] / 2 - stepsEstimatedMs(steps));
-  const idle = rng.int(IDLE_SLEEP_MIN_MS.soak, IDLE_SLEEP_MIN_MS.soak + 2_000);
-  steps.push({ do: 'sleep', ms: hold + idle });
+  steps.push(sleep(rng, 2_000, 6_000));
+  pushTurn(steps, [{ do: 'status', state: 'working', headline: `${role} working` }]);
+  // Size hold+idle so the >=20 s idle sleep overlaps [faultWindowStartMs, faultWindowEndMs]
+  // for both (startOffset=0, cliCost=0) and (startOffset=MAX, cliCost=STEP_COST_MS).
+  const minSleep = PROFILE.soak.faultWindowStartMs + IDLE_SLEEP_MIN_MS.soak - stepsSleepTotal(steps);
+  steps.push({ do: 'sleep', ms: Math.max(IDLE_SLEEP_MIN_MS.soak, minSleep) });
 
   const turns = rng.int(...CHILD_ACTION_TURNS.soak);
   const askAt = new Set<number>();
@@ -187,24 +196,23 @@ function childScript(role: Role, rng: Rng, early: boolean, asks: number, profile
   for (let i = 0; i < turns; i++) {
     const turnActions: AgentStep[] = [];
     if (askAt.has(i)) turnActions.push(ask());
-    switch (rng.int(0, 2)) {
-      case 0:
-        if (turnActions.length === 0) {
+    const pick = rng.int(0, 2);
+    if (turns === 1 && asks === 0 && pick !== 0) {
+      turnActions.push({ do: 'mail_send', to: 'parent', type: rng.pick(CHILD_MAIL_TYPES), body: mailBody(nextMail(), role, 'root') });
+      sentInLoop++;
+    } else {
+      switch (pick) {
+        case 0:
           turnActions.push({ do: 'hook', event: 'PreToolUse' }, { do: 'hook', event: 'PostToolUse' });
-        } else {
-          // Pair ask (8.75s) with PreToolUse+PostToolUse (7.5s) -> <= 23.75s busy.
-          turnActions.push({ do: 'hook', event: 'PreToolUse' }, { do: 'hook', event: 'PostToolUse' });
-        }
-        break;
-      case 1:
-        turnActions.push({ do: 'mail_send', to: 'parent', type: rng.pick(CHILD_MAIL_TYPES), body: mailBody(nextMail(), role, 'root') });
-        sentInLoop++;
-        break;
-      case 2:
-        if (turnActions.length === 0 || STEP_COST_MS.hook * 2 + STEP_COST_MS.ask + STEP_COST_MS.status <= BUSY_TURN_LIMIT_MS) {
+          break;
+        case 1:
+          turnActions.push({ do: 'mail_send', to: 'parent', type: rng.pick(CHILD_MAIL_TYPES), body: mailBody(nextMail(), role, 'root') });
+          sentInLoop++;
+          break;
+        case 2:
           turnActions.push({ do: 'status', state: rng.pick(['working', 'blocked'] as const), headline: `${role} step ${i + 1}` });
-        }
-        break;
+          break;
+      }
     }
     pushTurn(steps, turnActions);
     steps.push(sleep(rng, ...CHILD_ACTION_SLEEP_MS.soak));

@@ -18,7 +18,7 @@ import type { FaultActions } from './faults.ts';
 import { canonicalOrder } from './order.ts';
 import type { Seq } from './order.ts';
 import { judge } from './props.ts';
-import { buildScripts, sleepTotal } from './scripts.ts';
+import { buildScripts } from './scripts.ts';
 import { agentPids, asFtown, down, exec, FTOWN_ENV, ftown, isAlive, readBridgePid, up } from './target.ts';
 import { normaliseError, planWorkload, runWorkload, WORKLOAD_START_MS } from './workload.ts';
 import { sanitizeAgentEvent } from './agentcanon.ts';

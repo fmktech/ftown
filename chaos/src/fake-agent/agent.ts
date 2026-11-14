@@ -194,13 +194,23 @@ export async function runAgent(deps: AgentDeps): Promise<AgentResult> {
     }
   };
 
-  const ask = async (): Promise<void> => {
+  const startAsk = (): { sent: Promise<void>; done: Promise<void> } => {
     const title = `CHAOS-Q-${nextTag++} from=${role}`;
     persist();
     const askTag = askTagOf(title) ?? title;
     let seen = '';
     let sent = false;
-    const r = await cli(
+    let resolveSent!: () => void;
+    const sentPromise = new Promise<void>((r) => {
+      resolveSent = r;
+    });
+    const markSent = (accepted: boolean, error: string | null): void => {
+      if (sent) return;
+      sent = true;
+      log({ ev: 'ask_sent', askTag, accepted, error });
+      resolveSent();
+    };
+    const done = cli(
       [
         'sessions', 'attention',
         '--title', title,
@@ -216,26 +226,32 @@ export async function runAgent(deps: AgentDeps): Promise<AgentResult> {
           if (sent) return;
           seen += chunk;
           if (parseWaitEventId(seen) !== null) {
-            sent = true;
-            log({ ev: 'ask_sent', askTag, accepted: true, error: null });
+            markSent(true, null);
           }
         },
       },
+    ).then(
+      (r) => {
+        if (!sent) {
+          if (parseWaitEventId(r.stderr) !== null) markSent(true, null);
+          else markSent(false, failure(r));
+        }
+        if (r.code === 0) {
+          const answer = parseWaitAnswer(r.stdout) ?? r.stdout.trim();
+          log({ ev: 'answer_received', askTag, answer, via: 'waiter' });
+        } else {
+          cliError('attention', r);
+        }
+      },
+      () => {
+        if (!sent) {
+          sent = true;
+          resolveSent();
+        }
+        log({ ev: 'cli_error', cmd: 'attention', error: 'exception' });
+      },
     );
-    if (!sent) {
-      if (parseWaitEventId(r.stderr) !== null) {
-        sent = true;
-        log({ ev: 'ask_sent', askTag, accepted: true, error: null });
-      } else {
-        log({ ev: 'ask_sent', askTag, accepted: false, error: failure(r) });
-      }
-    }
-    if (r.code === 0) {
-      const answer = parseWaitAnswer(r.stdout) ?? r.stdout.trim();
-      log({ ev: 'answer_received', askTag, answer, via: 'waiter' });
-    } else {
-      cliError('attention', r);
-    }
+    return { sent: sentPromise, done };
   };
 
   const runStep = async (step: AgentStep): Promise<void> => {
@@ -249,13 +265,12 @@ export async function runAgent(deps: AgentDeps): Promise<AgentResult> {
       case 'mail_read':
         await enqueueRead();
         return;
-      case 'ask':
-        background.push(
-          ask().catch(() => {
-            log({ ev: 'cli_error', cmd: 'attention', error: 'exception' });
-          }),
-        );
+      case 'ask': {
+        const { sent, done } = startAsk();
+        background.push(done);
+        await sent;
         return;
+      }
       case 'answer_routed': {
         const q = pendingRouted.shift();
         if (!q) {
