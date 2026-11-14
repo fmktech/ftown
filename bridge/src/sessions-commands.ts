@@ -5,6 +5,7 @@
  */
 import { Command, CommanderError } from 'commander';
 import { normalizePullRequestUrl } from './pull-request-url.js';
+import { normalizeShellType } from './harness-registry.js';
 import { sanitizeAttentionText } from './attention-events.js';
 import { resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -487,7 +488,8 @@ async function executeSessionCommand(cmd: SessionCommand, rest: string[], option
       }
 
       case 'create': {
-        const shellType = options.shell;
+        const rawShell = options.shell;
+        const shellType = rawShell !== undefined ? normalizeShellType(rawShell) : undefined;
         const prompt = options.prompt;
         const workingDir = options.workdir;
         const name = options.name;

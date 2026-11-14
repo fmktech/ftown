@@ -1,4 +1,11 @@
-import { HARNESSES, shellQuote } from './harness-registry.js';
+import {
+  HARNESSES,
+  InvalidShellTypeError,
+  normalizeShellType,
+  resolveShellType,
+  SHELL_ALIASES,
+  shellQuote,
+} from './harness-registry.js';
 import { claudeModLaunchPath } from './claude-mod-installer.js';
 
 import type { HarnessSpec } from './harness-registry.js';
@@ -16,6 +23,10 @@ export {
   buildAntigravityCommand,
   buildPiCommand,
   buildKimiCodeCommand,
+  normalizeShellType,
+  resolveShellType,
+  SHELL_ALIASES,
+  InvalidShellTypeError,
 } from './harness-registry.js';
 
 export interface BuildSessionCommandInput {
@@ -38,10 +49,10 @@ export interface BuildSessionCommandInput {
 }
 
 export function buildSessionCommand(input: BuildSessionCommandInput): string {
+  const resolvedType = input.shellType !== undefined ? normalizeShellType(input.shellType) ?? 'claude' : 'claude';
   if (input.command?.trim()) {
     const command = input.command.trim();
-    const type = input.shellType ?? 'claude';
-    const spec: HarnessSpec | undefined = (HARNESSES as Record<string, HarnessSpec>)[type];
+    const spec: HarnessSpec | undefined = (HARNESSES as Record<string, HarnessSpec>)[resolvedType];
     const base = 'claude --allow-dangerously-skip-permissions';
     const nativeId = input.claudeSessionId?.trim();
     // Existing/cached dashboards send these exact generated commands. Decorate
@@ -50,16 +61,16 @@ export function buildSessionCommand(input: BuildSessionCommandInput): string {
     const generatedResume = nativeId && /^[a-zA-Z0-9_-]+$/.test(nativeId) && (
       command === `${base} --resume ${nativeId}` || command === `${base} --resume ${shellQuote(nativeId)}`
     );
-    if ((type === 'claude' || spec?.providerBase === 'claude') && (command === base || generatedResume)) {
+    if ((resolvedType === 'claude' || spec?.providerBase === 'claude') && (command === base || generatedResume)) {
       const mod = claudeModLaunchPath();
       if (mod) return `${base} --plugin-dir ${shellQuote(mod)}${command.slice(base.length)}`;
     }
     return command;
   }
 
-  const shellType = input.shellType ?? 'claude';
-  // Runtime shellType may come from unvalidated JSON — unknown values fall back
-  // to the claude launch, exactly like the old if/else chain's final branch.
-  const spec: HarnessSpec = (HARNESSES as Record<string, HarnessSpec>)[shellType] ?? HARNESSES.claude;
+  const spec: HarnessSpec | undefined = (HARNESSES as Record<string, HarnessSpec>)[resolvedType];
+  if (!spec) {
+    throw new InvalidShellTypeError(input.shellType);
+  }
   return spec.buildCommand(input);
 }
