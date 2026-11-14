@@ -1,0 +1,6 @@
+{"seq":1,"ts":"2026-01-01T00:00:01.000Z","sessionId":"root-0001","sessionName":"root","kind":"status","summary":"working"}
+{"seq":2,"ts":"2026-01-01T00:00:12.000Z","sessionId":"child-0001","sessionName":"child1","kind":"mail","summary":"sent CHAOS-M-1001"}
+{"seq":3,"ts":"2026-01-01T00:00:13.0
+{"seq":3,"ts":"2026-01-01T00:00:14.000Z","sessionId":"child-0002","sessionName":"child2","kind":"attention","summary":"question"}
+{"seq":4,"ts":"2026-01-01T00:00:15.000Z","sessionId":"gone-9999","sessionName":"ghost","kind":"exit","summary":"exited"}
+{"seq":4,"ts":"2026-01-01T00:00:16.000Z","sessionId":"root-0001","sessionName":"root","kind":"idle","summary":"idle"}
