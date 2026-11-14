@@ -17,8 +17,15 @@ export function cleanLine(raw: string): string {
  * Nudge line. Source: bridge/src/mail-delivery.ts formatNudgeText (74-87):
  *   `[ftown] ${total} new mail (${parts}) — run: ftown harness mail read` + optional ` | digest`.
  */
+// The bridge types the nudge into the session's PTY with a sender prefix
+// (bridge/src/mail-delivery.ts:455-456, injectPtyLine; prefix text at :40):
+//   agent shells: `[ftown msg from <sender>] <nudge>`
+//   plain shells: `: '[ftown msg from <sender>] <nudge>'`
+// Only the start of the line is accepted, so a line that merely quotes the text mid-line is not a nudge.
+const NUDGE_RE = /^(?:: ')?(?:\[ftown msg from [^\]]*\] )?\[ftown\] (\d+) new mail \(/;
+
 export function parseNudge(line: string): { n: number } | null {
-  const m = /^\[ftown\] (\d+) new mail \(/.exec(cleanLine(line));
+  const m = NUDGE_RE.exec(cleanLine(line));
   if (!m) return null;
   return { n: Number(m[1]) };
 }
