@@ -28,7 +28,7 @@ export const USAGE = `usage: npm run test:chaos -- <command> [flags]
   repro --seed N [--profile short|soak] [--times 5] [--level low]     (also: --repro N) one seed, several times
   run/repro: --drop-faults f2,f4|<kind>         guest skips these faults; output in out/<seed>-<profile>[-drop-<list>]/
   campaign --seeds 1-20 [--profile short|soak] [--times 2]            run + chaos/out/campaign.json
-common: --jobs 1  --mem 3072 (selftest 1536)  --timeout <s> (short 2000, soak 3000)  --icount-shift 1`;
+common: --jobs 1  --mem 3072 (selftest 1536)  --timeout <s> (short 2000, soak 3000)  --icount-shift 1  --no-build`;
 
 /** Seed list per core/seeds.ts (e.g. "1-3,2,7"); its errors become usage errors (exit 64). */
 export function parseSeedRange(spec: string): number[] {

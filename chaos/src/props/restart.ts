@@ -57,9 +57,9 @@ const r2: Property = {
         intervals.push(inv);
         openById.set(r.id, inv);
       } else if (r.phase === 'heal') {
-        heals.push({ id: r.id, doneT: r.doneT });
         const inv = openById.get(r.id);
         if (inv !== undefined) {
+          heals.push({ id: r.id, doneT: r.doneT });
           inv.endT = r.doneT + GRACE_MS;
           openById.delete(r.id);
         }

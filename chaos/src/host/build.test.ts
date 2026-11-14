@@ -1,11 +1,15 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
-import { computeSourceFingerprint, hasDirtyInput, isChaosFingerprintInput, isFingerprintInput, type FingerprintDeps } from './build.ts';
+import { computeSourceFingerprint, defaultFingerprintDeps, hasDirtyInput, isChaosFingerprintInput, isFingerprintInput, type FingerprintDeps } from './build.ts';
 import { sha256 } from './summary.ts';
 
 function fakeDeps(
   files: Record<string, string | null>,
-  opts: { head?: string; dirty?: boolean; chaosDirty?: boolean; listed?: string[] } = {},
+  opts: { head?: string; dirty?: boolean; chaosDirty?: boolean; boxDirty?: boolean; listed?: string[] } = {},
 ): FingerprintDeps {
   const listed = opts.listed ?? Object.keys(files);
   return {
@@ -20,9 +24,11 @@ function fakeDeps(
     async getHead() {
       return opts.head ?? '0123456789abcdef0123456789abcdef01234567';
     },
-    async isDirty(inputPaths: readonly string[]) {
-      const hasBridge = inputPaths.some((p) => p.startsWith('bridge/'));
-      return hasBridge ? (opts.dirty ?? false) : (opts.chaosDirty ?? opts.dirty ?? false);
+    async isDirty(pred: (relPath: string) => boolean) {
+      if (pred('bridge/src/index.ts')) return opts.dirty ?? false;
+      if (pred('chaos/src/guest/main.ts')) return opts.chaosDirty ?? opts.dirty ?? false;
+      if (pred('chaos/box/Dockerfile')) return opts.boxDirty ?? opts.dirty ?? false;
+      return false;
     },
   };
 }
@@ -54,6 +60,11 @@ test('isFingerprintInput accepts bridge and non-test chaos inputs (including hos
 
   assert.equal(isChaosFingerprintInput('chaos/src/guest/main.ts'), true);
   assert.equal(isChaosFingerprintInput('chaos/src/host/build.ts'), true);
+  assert.equal(isChaosFingerprintInput('chaos/package.json'), true);
+  assert.equal(isChaosFingerprintInput('chaos/qemu/init'), true);
+  assert.equal(isChaosFingerprintInput('chaos/box/Dockerfile'), false);
+  assert.equal(isChaosFingerprintInput('chaos/box/up.sh'), false);
+  assert.equal(isChaosFingerprintInput('chaos/src/guest/main.test.ts'), false);
   assert.equal(isChaosFingerprintInput('bridge/src/index.ts'), false);
 
   assert.equal(isFingerprintInput('chaos/src/guest/main.test.ts'), false);
@@ -67,10 +78,43 @@ test('hasDirtyInput detects ??, D, and renamed/copied entries and ignores unrela
   assert.equal(hasDirtyInput(' M ui/src/App.tsx\0?? ui/New.tsx\0'), false);
   assert.equal(hasDirtyInput('?? bridge/src/untracked.ts\0'), true);
   assert.equal(hasDirtyInput(' D bridge/src/index.ts\0'), true);
+  assert.equal(hasDirtyInput('D  bridge/src/x.ts\0'), true);
   assert.equal(hasDirtyInput(' D chaos/src/guest/main.ts\0'), true);
   assert.equal(hasDirtyInput('R  ui/new.ts\0bridge/old.ts\0'), true);
   assert.equal(hasDirtyInput('C  bridge/copy.ts\0bridge/src/index.ts\0'), true);
   assert.equal(hasDirtyInput('R  ui/new.ts\0ui/old.ts\0'), false);
+});
+
+test('defaultFingerprintDeps.isDirty detects staged deletion and rename in a real git repo', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'chaos-dirty-'));
+  try {
+    const git = (...args: string[]) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' });
+    git('init', '-q');
+    git('config', 'user.email', 'test@example.com');
+    git('config', 'user.name', 'Test');
+    mkdirSync(join(dir, 'bridge/src'), { recursive: true });
+    mkdirSync(join(dir, 'ui'), { recursive: true });
+    writeFileSync(join(dir, 'bridge/src/x.ts'), 'export const x = 1;\n');
+    writeFileSync(join(dir, 'bridge/src/old.ts'), 'export const old = 1;\n');
+    git('add', '.');
+    git('commit', '-q', '-m', 'init');
+
+    const deps = defaultFingerprintDeps(dir);
+    assert.equal(await deps.isDirty(isFingerprintInput), false);
+
+    // Staged deletion: 'D  bridge/src/x.ts'
+    git('rm', '-q', 'bridge/src/x.ts');
+    assert.equal(await deps.isDirty(isFingerprintInput), true);
+    git('reset', '-q', 'HEAD');
+    git('checkout', '-q', '--', 'bridge/src/x.ts');
+    assert.equal(await deps.isDirty(isFingerprintInput), false);
+
+    // Staged rename: 'R  bridge/src/old.ts -> ui/new.ts'
+    git('mv', 'bridge/src/old.ts', 'ui/new.ts');
+    assert.equal(await deps.isDirty(isFingerprintInput), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('computeSourceFingerprint is deterministic across file listing order', async () => {
@@ -116,6 +160,18 @@ test('computeSourceFingerprint changes when a chaos guest or host file changes',
   assert.notEqual(base.chaosSha256, guestEdited.chaosSha256);
   assert.notEqual(base.sha256, hostEdited.sha256);
   assert.notEqual(base.chaosSha256, hostEdited.chaosSha256);
+});
+
+test('computeSourceFingerprint: chaos/box edit changes sha256 (default image) but NOT chaosSha256 (custom image)', async () => {
+  const base = await computeSourceFingerprint(fakeDeps(BASE_FILES));
+  const boxEdited = await computeSourceFingerprint(fakeDeps({
+    ...BASE_FILES,
+    'chaos/box/up.sh': '#!/bin/sh\necho changed\n',
+  }, { dirty: true, chaosDirty: false, boxDirty: true }));
+  assert.notEqual(base.sha256, boxEdited.sha256);
+  assert.equal(base.chaosSha256, boxEdited.chaosSha256);
+  assert.equal(boxEdited.boxDirty, true);
+  assert.equal(boxEdited.chaosDirty, false);
 });
 
 test('computeSourceFingerprint changes when HEAD or dirty flag changes', async () => {

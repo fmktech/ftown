@@ -48,16 +48,32 @@ export async function ensureBuild(noBuild: boolean, deps: EnsureBuildDeps = defa
     deps.log('no cached build: building');
     info = await deps.build(null);
   } else if (cached.sourceFingerprint.startsWith('custom-image:')) {
+    if (current.boxDirty) {
+      deps.log(`notice: chaos/box changes do not apply to custom image ${cached.image}`);
+    }
     const currentImageId = await deps.inspectImageId(cached.image);
     const chaosMatch = cached.chaosFingerprint === current.chaosSha256;
     const imageMatch = currentImageId !== null && currentImageId === cached.imageId;
     if (!chaosMatch || !imageMatch) {
-      const cachedHex = (cached.chaosFingerprint || 'unknown').slice(0, 8);
-      const currentHex = current.chaosSha256.slice(0, 8);
-      if (noBuild) {
-        throw new Error(`chaos build is stale (cached ${cachedHex} != current ${currentHex}): run \`npm run test:chaos -- build --image ${cached.image}\` first`);
+      const parts: string[] = [];
+      if (!chaosMatch) {
+        const cachedHex = (cached.chaosFingerprint || 'unknown').slice(0, 8);
+        const currentHex = current.chaosSha256.slice(0, 8);
+        parts.push(`cached ${cachedHex} != current ${currentHex}`);
       }
-      deps.log(`chaos build is stale (cached ${cachedHex} != current ${currentHex}): rebuilding`);
+      if (!imageMatch) {
+        const shortId = (id: string) => id.slice(0, 19);
+        parts.push(
+          currentImageId === null
+            ? `image ${cached.image} missing (cached ${shortId(cached.imageId)})`
+            : `imageId ${shortId(cached.imageId)} != ${shortId(currentImageId)}`,
+        );
+      }
+      const reason = parts.join(', ');
+      if (noBuild) {
+        throw new Error(`chaos build is stale (${reason}): run \`npm run test:chaos -- build --image ${cached.image}\` first`);
+      }
+      deps.log(`chaos build is stale (${reason}): rebuilding`);
       info = await deps.build(cached.image);
     } else {
       info = cached;
