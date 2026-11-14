@@ -346,6 +346,17 @@ export async function main({ env = process.env, retryDelaysMs = [5000, 15000], t
       } catch (error) {
         if (error.code !== "ssh_key_exists") throw error;
       }
+      // Registered keys are not injected into this template, so install this
+      // run's key through the exec API (runs as root). Best effort: a template
+      // that does inject keys simply receives the same key again.
+      try {
+        const home = sshUser === "root" ? "/root" : `/home/${sshUser}`;
+        const install = `mkdir -p ${home}/.ssh; grep -qxF '${publicKey}' ${home}/.ssh/authorized_keys 2>/dev/null || echo '${publicKey}' >> ${home}/.ssh/authorized_keys; chmod 700 ${home}/.ssh; chmod 600 ${home}/.ssh/authorized_keys; chown -R ${sshUser}:${sshUser} ${home}/.ssh; usermod -p '*' ${sshUser} 2>/dev/null || true`;
+        const { status, text } = await api("POST", `/v1/instances/${id}/exec`, { sandbox: true, body: { command: install }, timeout: 60000 });
+        if (status < 200 || status >= 300) console.error(`Agent37 SSH key install on instance ${id} returned HTTP ${status} ${apiErrorCode(text)}; continuing to the SSH probe`);
+      } catch (error) {
+        console.error(`Agent37 SSH key install on instance ${id} failed: ${redact(error.message)}; continuing to the SSH probe`);
+      }
       const tunnel = env.A37_TUNNEL || "npx --yes agent37 tunnel %h";
       sshConfig = join(temp, "ssh_config");
       await writeFile(sshConfig, [

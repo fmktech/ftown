@@ -27,6 +27,7 @@ RUN curl --fail --location --retry 3 --connect-timeout 15 --max-time 300 \
 # Unprivileged CI user (the platform's default SSH user) with passwordless sudo:
 # run-job.sh uses sudo for apt installs and binding port 443.
 RUN useradd -m -s /bin/bash node \
+    && usermod -p '*' node \
     && echo 'node ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/node \
     && chmod 0440 /etc/sudoers.d/node \
     && usermod -aG docker node || true \

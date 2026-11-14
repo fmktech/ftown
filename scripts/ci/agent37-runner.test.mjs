@@ -126,7 +126,7 @@ test("artifact and cleanup failure fail successful jobs", async () => {
 
 // Drives the real main() against a fake Agent37 API (local HTTP server) and fake
 // ssh/scp binaries, so the actual HTTP, wake, upload, lock and cleanup code runs.
-async function apiRun({ instances = [], startFailures = 0, execExit = 0, job = "centrifugo", shard, key = "test-key-123" } = {}) {
+async function apiRun({ instances = [], startFailures = 0, execExit = 0, job = "centrifugo", shard, key = "test-key-123", sshRequiresKeyInstall = false } = {}) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "agent37-runner-test-")));
   const bin = join(dir, "bin"); mkdirSync(bin);
   const state = { instances: instances.map(i => ({ ...i })), requests: [], starts: 0, creates: 0, deletes: 0, execs: 0 };
@@ -154,7 +154,11 @@ async function apiRun({ instances = [], startFailures = 0, execExit = 0, job = "
         return send(200, found || {});
       }
       const exec = /^\/v1\/instances\/([^/]+)\/exec$/.exec(req.url || "");
-      if (req.method === "POST" && exec) { state.execs++; return send(200, { stdout: "", stderr: "" }); }
+      if (req.method === "POST" && exec) {
+        state.execs++;
+        if (typeof parsed.command === "string" && parsed.command.includes("authorized_keys")) writeFileSync(join(dir, "key-installed"), "1");
+        return send(200, { stdout: "", stderr: "" });
+      }
       const get = /^\/v1\/instances\/([^/]+)$/.exec(req.url || "");
       if (req.method === "GET" && get) {
         const found = state.instances.find(i => i.id === get[1]);
@@ -167,8 +171,10 @@ async function apiRun({ instances = [], startFailures = 0, execExit = 0, job = "
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   const url = `http://127.0.0.1:${server.address().port}`;
   writeFileSync(join(dir, "exec-exit"), `${execExit}\n`);
+  if (sshRequiresKeyInstall) writeFileSync(join(dir, "ssh-mode"), "1\n");
   const ssh = `#!/bin/sh
 echo "$@" >> "${dir}/ssh-calls"
+if [ -f "${dir}/ssh-mode" ] && [ ! -f "${dir}/key-installed" ]; then exit 255; fi
 case "$*" in
   *" rm -rf "*) echo clean >> "${dir}/cleanup-count"; exit 0 ;;
   *" node "*) echo '[]'; exit 0 ;;
@@ -234,6 +240,12 @@ test("main succeeds for e2e with an empty artifact set", async () => {
   const r = await apiRun({ instances: [{ id: "inst-e2e-1", name: "ftown-ci-e2e-1", status: "running" }], job: "e2e", shard: "1/3" });
   assert.equal(r.error, undefined, r.error?.message);
   assert.match(r.sshCalls, /E2E_SHARD=1\/3/);
+  assert.equal(r.cleanups, 1);
+});
+test("main installs its key through the exec API when the template injects none", async () => {
+  const r = await apiRun({ instances: [{ id: "inst-unit-1", name: "ftown-ci-unit", status: "running" }], sshRequiresKeyInstall: true });
+  assert.equal(r.error, undefined, r.error?.message);
+  assert(r.state.execs >= 1, "expected an exec-API key install");
   assert.equal(r.cleanups, 1);
 });
 test("main without a key fails before any API call with the secret action", async () => {
