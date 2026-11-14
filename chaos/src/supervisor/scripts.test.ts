@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { deriveRng } from '../core/rng.ts';
 import { ROLES } from '../contract.ts';
-import { buildScripts } from './scripts.ts';
+import { buildScripts, IDLE_MARGIN_MS, sleepTotal } from './scripts.ts';
 
 test('scripts are a pure function of the seed', () => {
   assert.deepEqual(buildScripts(7, deriveRng), buildScripts(7, deriveRng));
@@ -20,7 +20,7 @@ test('every seed: one first-step ask plus 1–2 later asks, root answers, both m
     for (const role of ROLES) {
       assert.equal(s[role].role, role);
       assert.ok(!s[role].steps.some((x) => x.do === 'exit'));
-      for (const st of s[role].steps) if (st.do === 'sleep') assert.ok(st.ms >= 1_000 && st.ms <= 20_000);
+      if (role !== 'root') for (const st of s[role].steps) if (st.do === 'sleep') assert.ok(st.ms >= 1_000 && st.ms <= 20_000);
       if (role === 'root') continue;
       assert.equal(s[role].answerRoutedQuestions, false);
       assert.ok(s[role].steps.some((x) => x.do === 'mail_send' && x.to === 'parent'));
@@ -30,6 +30,20 @@ test('every seed: one first-step ask plus 1–2 later asks, root answers, both m
     }
     assert.equal(early, 1, `seed ${seed}: early asks`);
     assert.ok(asks >= 2 && asks <= 3, `seed ${seed}: ${asks} asks`);
+  }
+});
+
+test('every seed: root sends a waking mail to a child after all children have gone idle', () => {
+  for (let seed = 1; seed <= 200; seed++) {
+    const s = buildScripts(seed, deriveRng);
+    const steps = s.root.steps;
+    const i = steps.length - 2;
+    const last = steps[i];
+    assert.ok(last.do === 'mail_send' && last.type === 'task' && last.to !== 'root' && last.to !== 'parent');
+    assert.deepEqual(steps.at(-1), { do: 'hook', event: 'Stop' });
+    const sentAt = steps.slice(0, i).reduce((n, x) => n + (x.do === 'sleep' ? x.ms : 0), 0);
+    const childEnd = Math.max(sleepTotal(s.child1), sleepTotal(s.child2), sleepTotal(s.child3));
+    assert.ok(sentAt >= childEnd + IDLE_MARGIN_MS, `seed ${seed}`);
   }
 });
 

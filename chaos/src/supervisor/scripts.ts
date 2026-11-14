@@ -39,9 +39,18 @@ function rootScript(rng: Rng): AgentScript {
     steps.push({ do: 'mail_send', to, type: rng.pick(ROOT_MAIL_TYPES), body: mailBody(nextMail(), 'root', to) });
     steps.push(sleep(rng, 1_000, 10_000));
   }
-  steps.push({ do: 'hook', event: 'Stop' });
   return { role: 'root', steps, readMailOnNudge: true, answerRoutedQuestions: true };
 }
+
+/** Sum of the script's sleeps: a lower bound on when its last step runs, relative to its start. */
+export function sleepTotal(script: AgentScript): number {
+  return script.steps.reduce((n, s) => n + (s.do === 'sleep' ? s.ms : 0), 0);
+}
+
+/** Children start after root (they are created later), so this margin covers creation skew plus CLI time. */
+export const IDLE_MARGIN_MS = 30_000;
+/** Last tag of root's range (root's ordinary mails use 1000–1003). */
+export const ROOT_IDLE_NUDGE_TAG = 1999;
 
 function childScript(role: Role, rng: Rng, early: boolean, asks: number): AgentScript {
   const nextMail = counter(role);
@@ -85,5 +94,14 @@ export function buildScripts(seed: number, deriveRng: DeriveRng): Scripts {
   const asks = chooseAsks(rootRng);
   const out = { root } as Scripts;
   for (const role of CHILDREN) out[role] = childScript(role, deriveRng(seed, `agent.${role}`), asks.early === role, asks.later[role]);
+  // Guaranteed nudge: once every child has finished its script (and sent Stop, so it is idle),
+  // root sends one waking 'task' mail to a child, then goes idle itself.
+  const childEnd = Math.max(...CHILDREN.map((r) => sleepTotal(out[r])));
+  const to = rootRng.pick(CHILDREN);
+  root.steps.push(
+    { do: 'sleep', ms: Math.max(1_000, childEnd + IDLE_MARGIN_MS - sleepTotal(root)) },
+    { do: 'mail_send', to, type: 'task', body: mailBody(ROOT_IDLE_NUDGE_TAG, 'root', to) },
+    { do: 'hook', event: 'Stop' },
+  );
   return out;
 }

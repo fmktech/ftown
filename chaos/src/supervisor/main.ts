@@ -1,7 +1,7 @@
 // In-guest supervisor: runs one seed end to end and writes the canonical log.
 //   node /opt/chaos/src/supervisor/main.ts --seed N --level off|low|high
 import { existsSync } from 'node:fs';
-import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { CONTRACT_VERSION, EXIT, FAULT_WINDOW_END_MS, GUEST, PARENT_OF, ROLES, RUN_QUIESCE_MS } from '../contract.ts';
@@ -18,9 +18,10 @@ import type { FaultActions } from './faults.ts';
 import { canonicalOrder } from './order.ts';
 import type { Seq } from './order.ts';
 import { judge } from './props.ts';
-import { buildScripts } from './scripts.ts';
+import { buildScripts, sleepTotal } from './scripts.ts';
 import { agentPids, asFtown, down, exec, FTOWN_ENV, ftown, isAlive, readBridgePid, up } from './target.ts';
-import { normaliseError, planWorkload, runWorkload } from './workload.ts';
+import { normaliseError, planWorkload, runWorkload, WORKLOAD_START_MS } from './workload.ts';
+import { sanitizeAgentEvent } from './agentcanon.ts';
 
 const CONTROL_TIMEOUT_MS = 20_000;
 const CREATE_TIMEOUT_MS = 60_000;
@@ -48,22 +49,29 @@ export function parseCreatedId(stdout: string): string | null {
 
 /**
  * Agent log lines for the canonical log: a truncated last line (kill -9) is dropped, raw
- * 'stdin_line' events are left out (they carry ids and wall times; they stay in side-agents.jsonl)
- * and the 'start' pid is zeroed.
+ * 'stdin_line' events are left out (they stay in side-agents.jsonl), and every event is rebuilt
+ * through the whitelist (sanitizeAgentEvent). invalid counts the fields replaced by 'invalid'.
  */
-export function parseAgentLog(text: string, role: Role): AgentLogLine[] {
-  const out: AgentLogLine[] = [];
+export function parseAgentLog(text: string, role: Role): { lines: AgentLogLine[]; invalid: number } {
+  const lines: AgentLogLine[] = [];
+  let invalid = 0;
   for (const line of text.split('\n')) {
     if (line.trim() === '') continue;
+    let j: { t?: unknown; e?: unknown };
     try {
-      const j = JSON.parse(line) as AgentLogLine;
-      if (typeof j.t !== 'number' || !j.e || typeof j.e !== 'object' || j.e.ev === 'stdin_line') continue;
-      out.push({ t: j.t, role, e: j.e.ev === 'start' ? { ev: 'start', pid: 0 } : j.e });
+      j = JSON.parse(line) as { t?: unknown; e?: unknown };
     } catch {
-      /* partial line */
+      continue; // partial line
     }
+    if (typeof j.t !== 'number' || !Number.isSafeInteger(j.t)) {
+      invalid++;
+      continue;
+    }
+    const s = sanitizeAgentEvent(j.e);
+    invalid += s.invalid;
+    if (s.e !== null) lines.push({ t: j.t, role, e: s.e });
   }
-  return out;
+  return { lines, invalid };
 }
 
 class Recorder {
@@ -78,7 +86,7 @@ class Recorder {
   }
 }
 
-function makeActions(): FaultActions & { pid(): number | null } {
+function makeActions(clock: Clock): FaultActions & { pid(): number | null } {
   let pid: number | null = null;
   const refresh = async (): Promise<number | null> => (pid = await readBridgePid());
   const sigAll = async (role: Role, sig: NodeJS.Signals): Promise<boolean> => {
@@ -107,9 +115,10 @@ function makeActions(): FaultActions & { pid(): number | null } {
       }
     },
     async waitBridgeExit(boundMs) {
-      for (let waited = 0; waited < boundMs; waited += EXIT_POLL_MS) {
+      const start = clock.now();
+      while (clock.now() - start < boundMs) {
         if (!(await isAlive(pid))) return true;
-        await new Promise((r) => setTimeout(r, EXIT_POLL_MS));
+        await clock.sleep(EXIT_POLL_MS);
       }
       return !(await isAlive(pid));
     },
@@ -167,16 +176,129 @@ async function writeSideFiles(): Promise<void> {
 
 const OUT_FILES = ['canon.jsonl', 'verdicts.json', 'side-bridge.log', 'side-tmux.txt', 'side-agents.jsonl', ...ROLES.map((r) => `side-${r}.stderr.log`)];
 
-async function finish(rec: Recorder, verdicts: Extract<Rec, { k: 'verdict' }>[], exitCode: number, error: string | null): Promise<number> {
-  const canon = encodeLog([...rec.canonical(), ...verdicts]);
-  await mkdir(GUEST.outDir, { recursive: true });
-  await writeFile(join(GUEST.outDir, 'canon.jsonl'), canon);
-  const report = { verdicts, exitCode, H_run: hashLog(canon), ...(error === null ? {} : { error }) };
-  await writeFile(join(GUEST.outDir, 'verdicts.json'), `${JSON.stringify(report, null, 2)}\n`);
-  await writeSideFiles().catch(() => undefined);
-  await down().catch(() => undefined);
-  await emitOut(OUT_FILES.filter((name) => existsSync(join(GUEST.outDir, name))));
-  return exitCode;
+interface Outcome {
+  verdicts: Extract<Rec, { k: 'verdict' }>[];
+  exitCode: number;
+  error: string | null;
+  invalidAgentFields: number;
+}
+
+/** Writes outputs, stops the bridge and emits frames. Each step is isolated; it never throws. */
+async function finish(rec: Recorder, o: Outcome): Promise<number> {
+  const step = async (name: string, f: () => Promise<unknown>): Promise<void> => {
+    try {
+      await f();
+    } catch (e) {
+      process.stderr.write(`supervisor: finish ${name}: ${e instanceof Error ? e.message : String(e)}\n`);
+    }
+  };
+  let canon = '';
+  await step('canon', async () => {
+    canon = encodeLog([...rec.canonical(), ...o.verdicts]);
+    await mkdir(GUEST.outDir, { recursive: true });
+    await writeFile(join(GUEST.outDir, 'canon.jsonl'), canon);
+  });
+  await step('verdicts', async () => {
+    const report = { verdicts: o.verdicts, exitCode: o.exitCode, H_run: hashLog(canon), invalidAgentFields: o.invalidAgentFields, ...(o.error === null ? {} : { error: o.error }) };
+    await writeFile(join(GUEST.outDir, 'verdicts.json'), `${JSON.stringify(report, null, 2)}\n`);
+  });
+  await step('side', writeSideFiles);
+  await step('down', down);
+  await step('emit', () => emitOut(OUT_FILES.filter((name) => existsSync(join(GUEST.outDir, name)))));
+  return o.exitCode;
+}
+
+class Infra extends Error {}
+
+/** Bound for the ids file to list every role before root's first mail is due. */
+export function idsDeadline(rootCreateStartMs: number, rootFirstSleepMs: number): number {
+  return rootCreateStartMs + rootFirstSleepMs;
+}
+
+async function drive(seed: number, level: ChaosLevel, clock: Clock, rec: Recorder, schedule: ReturnType<typeof buildSchedule>): Promise<Outcome> {
+  const actions = makeActions(clock);
+  if (!(await actions.bridgeUp())) throw new Infra('infra:bridge_up');
+
+  const scripts = buildScripts(seed, deriveRng);
+  await mkdir(GUEST.agentScriptDir, { recursive: true });
+  for (const role of ROLES) await writeFile(join(GUEST.agentScriptDir, `${role}.json`), `${JSON.stringify(scripts[role])}\n`);
+
+  const ids: Record<Role, string | null> = { root: null, child1: null, child2: null, child3: null };
+  const writeIds = async (): Promise<void> => {
+    const known: Record<string, string> = {};
+    for (const r of ROLES) if (ids[r] !== null) known[r] = ids[r] as string;
+    await writeFile(`${GUEST.idsFile}.tmp`, JSON.stringify(known));
+    await rename(`${GUEST.idsFile}.tmp`, GUEST.idsFile);
+  };
+  await writeIds();
+  const firstStep = scripts.root.steps[0];
+  const rootFirstSleep = firstStep?.do === 'sleep' ? firstStep.ms : 0;
+  let rootCreateAt = 0;
+  for (const role of ROLES) {
+    const parent = PARENT_OF[role];
+    const t = clock.now();
+    if (role === 'root') rootCreateAt = t;
+    const r = await ftown(createArgs(role, parent === null ? null : ids[parent]), { timeoutMs: CREATE_TIMEOUT_MS });
+    const id = r.code === 0 ? parseCreatedId(r.stdout) : null;
+    rec.log({ k: 'op', t, op: { op: 'session_create', role }, ok: id !== null, error: id !== null ? null : normaliseError(r.code, r.stderr, r.stdout) });
+    if (id === null) throw new Infra(`infra:session_create:${role}`);
+    ids[role] = id;
+    await writeIds();
+  }
+  // Root's first mail comes after its first sleep; the ids file must be complete before then.
+  if (clock.now() > idsDeadline(rootCreateAt, rootFirstSleep)) throw new Infra('infra:ids_late');
+
+  const take = () =>
+    takeSnapshot({
+      dataDir: GUEST.dataDir,
+      ids,
+      bridgePid: actions.pid(),
+      bridgeResponsive: async () => (await ftown(['sessions', 'list'], { timeoutMs: CONTROL_TIMEOUT_MS })).code === 0,
+      tmux: { user: GUEST.user, env: { HOME: FTOWN_ENV.HOME, TMUX_TMPDIR: FTOWN_ENV.TMUX_TMPDIR } },
+    });
+  const cpDeps = { clock, take, log: rec.log };
+  let stop = false;
+  const stopped = () => stop;
+  // Every loop gets its handler at creation: the first failure stops the others.
+  const guard = <T>(p: Promise<T>): Promise<T> =>
+    p.catch((e: unknown) => {
+      stop = true;
+      throw e;
+    });
+  const checkpoints = guard(runCheckpoints(cpDeps, stopped));
+  checkpoints.catch(() => undefined);
+  const work = guard(
+    runWorkload({
+      clock,
+      plan: planWorkload(seed, deriveRng, WORKLOAD_START_MS, FAULT_WINDOW_END_MS),
+      idOf: (r) => ids[r],
+      send: (id: string, type: MailType, body: string) => ftown(['harness', 'mail', 'send', id, '--type', type, body], { timeoutMs: CONTROL_TIMEOUT_MS }),
+      log: rec.log,
+      stopped,
+    }),
+  );
+  const faults = guard(runFaults({ clock, schedule, actions, roles: ROLES, log: rec.log, stopped }));
+  // Rejects as soon as any loop (checkpoints included) rejects.
+  await Promise.race([Promise.all([work, faults]), checkpoints.then(() => new Promise<never>(() => undefined))]);
+  await clock.sleep(RUN_QUIESCE_MS);
+  stop = true;
+  await checkpoints;
+  await checkpoint(cpDeps, 'final', true);
+
+  let invalid = 0;
+  for (const role of ROLES) {
+    let text = '';
+    try {
+      text = await readFile(join(GUEST.agentLogDir, `${role}.jsonl`), 'utf8');
+    } catch {
+      /* agent never logged */
+    }
+    const parsed = parseAgentLog(text, role);
+    invalid += parsed.invalid;
+    for (const l of parsed.lines) rec.log({ k: 'agent', t: l.t, role, e: l.e });
+  }
+  const { verdicts, exitCode } = judge(rec.canonical());
+  return { verdicts, exitCode, error: null, invalidAgentFields: invalid };
 }
 
 export async function runSeed({ seed, level }: { seed: number; level: ChaosLevel }): Promise<number> {
@@ -186,76 +308,14 @@ export async function runSeed({ seed, level }: { seed: number; level: ChaosLevel
   const schedule = buildSchedule(seed, level, deriveRng(seed, 'faults'));
   rec.log({ k: 'run', seed, level, contract: CONTRACT_VERSION });
   rec.log({ k: 'schedule', faults: schedule });
-
-  const actions = makeActions();
-  if (!(await actions.bridgeUp())) return finish(rec, [], EXIT.infra, 'infra:bridge_up');
-
+  let outcome: Outcome;
   try {
-    const scripts = buildScripts(seed, deriveRng);
-    await mkdir(GUEST.agentScriptDir, { recursive: true });
-    for (const role of ROLES) await writeFile(join(GUEST.agentScriptDir, `${role}.json`), `${JSON.stringify(scripts[role])}\n`);
-
-    const ids: Record<Role, string | null> = { root: null, child1: null, child2: null, child3: null };
-    const writeIds = async (): Promise<void> => {
-      const known: Record<string, string> = {};
-      for (const r of ROLES) if (ids[r] !== null) known[r] = ids[r] as string;
-      await writeFile(`${GUEST.idsFile}.tmp`, JSON.stringify(known));
-      await exec('mv', [`${GUEST.idsFile}.tmp`, GUEST.idsFile], { timeoutMs: 5_000 });
-    };
-    await writeIds();
-    for (const role of ROLES) {
-      const parent = PARENT_OF[role];
-      const r = await ftown(createArgs(role, parent === null ? null : ids[parent]), { timeoutMs: CREATE_TIMEOUT_MS });
-      const id = r.code === 0 ? parseCreatedId(r.stdout) : null;
-      rec.log({ k: 'op', t: clock.now(), op: { op: 'session_create', role }, ok: id !== null, error: id !== null ? null : normaliseError(r.code, r.stderr, r.stdout) });
-      if (id === null) return await finish(rec, [], EXIT.infra, `infra:session_create:${role}`);
-      ids[role] = id;
-      await writeIds();
-    }
-
-    const take = () =>
-      takeSnapshot({
-        dataDir: GUEST.dataDir,
-        ids,
-        bridgePid: actions.pid(),
-        bridgeResponsive: async () => (await ftown(['sessions', 'list'], { timeoutMs: CONTROL_TIMEOUT_MS })).code === 0,
-        tmux: { user: GUEST.user, env: { HOME: FTOWN_ENV.HOME, TMUX_TMPDIR: FTOWN_ENV.TMUX_TMPDIR } },
-      });
-    const cpDeps = { clock, take, log: rec.log };
-    let stop = false;
-    const checkpoints = runCheckpoints(cpDeps, () => stop);
-
-    const workload = runWorkload({
-      clock,
-      plan: planWorkload(seed, deriveRng, clock.now(), FAULT_WINDOW_END_MS),
-      idOf: (r) => ids[r],
-      send: (id: string, type: MailType, body: string) => ftown(['harness', 'mail', 'send', id, '--type', type, body], { timeoutMs: CONTROL_TIMEOUT_MS }),
-      log: rec.log,
-    });
-    const faults = runFaults({ clock, schedule, actions, roles: ROLES, log: rec.log });
-    await Promise.all([workload, faults]);
-    // Quiesce after the last heal (and the end of the workload), then the final checkpoint.
-    await clock.sleep(RUN_QUIESCE_MS);
-    stop = true;
-    await checkpoints;
-    await checkpoint(cpDeps, 'final', true);
-
-    for (const role of ROLES) {
-      let text = '';
-      try {
-        text = await readFile(join(GUEST.agentLogDir, `${role}.jsonl`), 'utf8');
-      } catch {
-        /* agent never logged */
-      }
-      for (const l of parseAgentLog(text, role)) rec.log({ k: 'agent', t: l.t, role, e: l.e });
-    }
-    const body = rec.canonical();
-    const { verdicts, exitCode } = judge(body);
-    return await finish(rec, verdicts, exitCode, null);
+    outcome = await drive(seed, level, clock, rec, schedule);
   } catch (e) {
     process.stderr.write(`supervisor: ${e instanceof Error ? e.stack : String(e)}\n`);
-    return finish(rec, [], EXIT.infra, 'infra:drive');
+    outcome = { verdicts: [], exitCode: EXIT.infra, error: e instanceof Infra ? e.message : 'infra:drive', invalidAgentFields: 0 };
   }
+  return finish(rec, outcome);
 }
 
 export function parseCli(argv: readonly string[]): { seed: number; level: ChaosLevel } | null {
