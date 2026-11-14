@@ -64,8 +64,13 @@ export function violatedProps(canon: string): string[] {
   return [...out].sort();
 }
 
-/** Worst exit code (core worst(): infra > reproDiverged > violation > ok); unknown guest codes count as infra. */
+/**
+ * Worst exit code. usage (64) wins outright: the guest rejected its input (e.g. a bad
+ * --drop-faults token), so no other result is meaningful. Otherwise core worst():
+ * infra > reproDiverged > violation > ok; unknown guest codes count as infra.
+ */
 export function worstExit(codes: readonly number[]): number {
+  if (codes.includes(EXIT.usage)) return EXIT.usage;
   const known: readonly number[] = [EXIT.ok, EXIT.violation, EXIT.reproDiverged, EXIT.infra];
   return worst(codes.map((c) => (known.includes(c) ? c : EXIT.infra)));
 }
