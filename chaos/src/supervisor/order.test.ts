@@ -10,7 +10,7 @@ const recs: Rec[] = [
   { k: 'agent', t: 10, role: 'child2', e: { ev: 'start', pid: 1 } },
   { k: 'agent', t: 10, role: 'root', e: { ev: 'start', pid: 2 } },
   { k: 'op', t: 10, op: { op: 'mail_send', tag: 'CHAOS-M-1', to: 'child1', type: 'task' }, ok: true, error: null },
-  { k: 'fault', t: 10, id: 'f1', phase: 'start', kind: 'bridge_kill9', target: 'bridge', ok: true },
+  { k: 'fault', t: 10, doneT: 10, id: 'f1', phase: 'start', kind: 'bridge_kill9', target: 'bridge', ok: true },
   { k: 'agent', t: 5, role: 'child3', e: { ev: 'start', pid: 3 } },
   { k: 'agent', t: 10, role: 'root', e: { ev: 'exit', code: 0 } },
 ];

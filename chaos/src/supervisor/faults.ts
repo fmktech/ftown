@@ -136,7 +136,8 @@ export async function runFaults(deps: ExecutorDeps): Promise<void> {
       const apply = async (): Promise<number> => {
         const t = clock.now();
         const ok = s.phase === 'start' ? await applyStart(s.fault, actions) : await applyHeal(s.fault, actions);
-        log({ k: 'fault', t, id: s.fault.id, phase: s.phase, kind: s.fault.kind, target: s.fault.target, ok });
+        const doneT = clock.now();
+        log({ k: 'fault', t, doneT, id: s.fault.id, phase: s.phase, kind: s.fault.kind, target: s.fault.target, ok });
         return t;
       };
       return BRIDGE_KINDS.includes(s.fault.kind) ? withBridge(apply) : apply();
@@ -150,6 +151,7 @@ export async function runFaults(deps: ExecutorDeps): Promise<void> {
   await withBridge(async () => {
     const t = clock.now();
     const ok = await finalHeal(actions, deps.roles);
-    log({ k: 'fault', t, id: 'heal', phase: 'heal', kind: last, target: 'all', ok });
+    const doneT = clock.now();
+    log({ k: 'fault', t, doneT, id: 'heal', phase: 'heal', kind: last, target: 'all', ok });
   });
 }

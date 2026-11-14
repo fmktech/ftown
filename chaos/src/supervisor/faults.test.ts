@@ -65,17 +65,17 @@ test('executes start/heal per kind and ends with the final heal', async () => {
     'bridge SIGCONT', 'root SIGCONT', 'child1 SIGCONT', 'child2 SIGCONT', 'child3 SIGCONT',
   ]);
   assert.deepEqual(
-    recs.map((r) => (r.k === 'fault' ? `${r.t} ${r.id} ${r.phase} ${r.kind} ${r.target} ${r.ok}` : '')),
+    recs.map((r) => (r.k === 'fault' ? `${r.t} ${r.doneT} ${r.id} ${r.phase} ${r.kind} ${r.target} ${r.ok}` : '')),
     [
-      '20000 f1 start bridge_kill9 bridge true',
-      '23000 f1 heal bridge_kill9 bridge true',
-      '30000 f2 start agent_sigstop child2 true',
-      '33000 f2 heal agent_sigstop child2 true',
-      '40000 f3 start bridge_sigterm bridge true',
-      '42000 f3 heal bridge_sigterm bridge true',
-      '50000 f4 start parent_kill9 root true',
-      '60000 f5 start clock_jump_fwd clock false',
-      '60000 heal heal clock_jump_fwd all true',
+      '20000 20000 f1 start bridge_kill9 bridge true',
+      '23000 23000 f1 heal bridge_kill9 bridge true',
+      '30000 30000 f2 start agent_sigstop child2 true',
+      '33000 33000 f2 heal agent_sigstop child2 true',
+      '40000 40000 f3 start bridge_sigterm bridge true',
+      '42000 42000 f3 heal bridge_sigterm bridge true',
+      '50000 50000 f4 start parent_kill9 root true',
+      '60000 60000 f5 start clock_jump_fwd clock false',
+      '60000 60000 heal heal clock_jump_fwd all true',
     ],
   );
 });
@@ -136,8 +136,15 @@ test('a slow heal does not delay other faults; a bridge step waits for the runni
   await clock.advance(100_000);
   await done;
   assert.deepEqual(
-    recs.map((r) => (r.k === 'fault' ? `${r.t} ${r.id} ${r.phase}` : '')),
-    ['20000 f1 start', '30000 f2 start', '23000 f1 heal', '49000 f3 start', '51000 f3 heal', '51000 heal heal'],
+    recs.map((r) => (r.k === 'fault' ? `${r.t} ${r.doneT} ${r.id} ${r.phase}` : '')),
+    [
+      '20000 20000 f1 start',
+      '30000 30000 f2 start',
+      '23000 49000 f1 heal',
+      '49000 49000 f3 start',
+      '51000 51000 f3 heal',
+      '51000 51000 heal heal',
+    ],
   );
   assert.deepEqual(calls.slice(0, 6), ['bridge SIGKILL', 'up begin', 'child1 SIGKILL', 'up end', 'up', 'bridge SIGSTOP']);
 });
