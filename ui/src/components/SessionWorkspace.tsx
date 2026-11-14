@@ -245,6 +245,8 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
     ...(slotOpen ? (['preview'] as const) : []),
     ...(reviewOpen ? (['review'] as const) : []),
   ];
+  // The desktop aux column never lists Terminal: the terminal is already the centre pane.
+  const auxTabs = tabs.filter(tab => tab !== 'terminal');
   const tabLabel = (tab: WorkspaceTab) => tab === 'terminal' ? 'Terminal' : tab === 'overview' ? 'Overview' : tab === 'preview' ? (attentionShown ? 'Waiting' : 'Preview') : 'PR review';
   const choose = (tab: WorkspaceTab) => { setAuxTab(tab); setCompactTab(tab); if (compact && !isDesktop && (tab === 'preview' || tab === 'review')) onMobileTab(tab); };
   const tabKeys = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -328,7 +330,8 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
       </div>
       {(hasAux || switcherColumn) && !compact && !activeExpanded && <div role="separator" aria-label="Resize terminal and preview" aria-orientation="vertical" aria-valuemin={Number(min.toFixed(1))} aria-valuemax={Number(max.toFixed(1))} aria-valuenow={Number(actualRatio.toFixed(1))} tabIndex={0} className="session-preview-separator" onPointerDown={start} onPointerMove={move} onPointerUp={finish} onPointerCancel={finish} onLostPointerCapture={finish} onKeyDown={keyDown} onDoubleClick={() => setSplit(50)} />}
       {(hasAux || attention || switcherColumn) && <div className="session-aux-pane" hidden={(!hasAux && !switcherColumn) || (compact && (view === 'terminal' || view === 'overview'))}>
-      {!compact && (hasChildSessions || (slotOpen && reviewOpen)) && <div role="tablist" aria-label="Auxiliary view" onKeyDown={tabKeys} className="session-preview-tabs">{tabs.map(tab => <button key={tab} data-preview-tab={tab} role="tab" aria-selected={view === tab} aria-controls={`session-${tab}-panel`} tabIndex={view === tab ? 0 : -1} onClick={() => choose(tab)} className={`mobile-tab ${view === tab ? 'mobile-tab-active' : ''}`}>{tabLabel(tab)}</button>)}</div>}
+      {!compact && auxTabs.length > 1 && <div role="tablist" aria-label="Auxiliary view" onKeyDown={tabKeys} className="session-preview-tabs">{auxTabs.map(tab => <button key={tab} data-preview-tab={tab} role="tab" aria-selected={view === tab} aria-controls={`session-${tab}-panel`} tabIndex={view === tab ? 0 : -1} onClick={() => choose(tab)} className={`mobile-tab ${view === tab ? 'mobile-tab-active' : ''}`}>{tabLabel(tab)}</button>)}</div>}
+      {!compact && auxTabs.length === 1 && auxTabs[0] === 'overview' && <div className="session-preview-tabs" style={{ padding: '6px 12px', fontWeight: 600 }}>Overview</div>}
       {(slotOpen || attention) && <section id="session-preview-panel" role={!slotOpen ? undefined : tabbed ? 'tabpanel' : attentionShown ? undefined : 'region'} aria-label={!slotOpen ? undefined : attentionShown ? (tabbed ? 'Waiting' : undefined) : 'Session preview'} hidden={!slotOpen || view !== 'preview'} className="session-preview-pane">
         <div className="session-preview-toolbar">
           {viewSelector}

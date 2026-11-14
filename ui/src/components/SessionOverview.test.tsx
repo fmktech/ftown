@@ -477,20 +477,16 @@ describe("SessionWorkspace overview toggle", () => {
         <div data-testid="terminal-node">Terminal content</div>
       </SessionWorkspace>,
     );
-    expect(screen.getByRole("tab", { name: "Overview" }).getAttribute("aria-selected")).toBe("true");
     const panel = screen.getByRole("tabpanel", { name: "Overview" });
     expect(panel.closest(".session-aux-pane")).toBeTruthy();
-    expect(screen.getByRole("tablist", { name: "Auxiliary view" }).textContent).toBe("OverviewTerminal");
+    // The terminal is already the centre pane: the aux column has no tab strip and no Terminal tab.
+    expect(screen.queryByRole("tablist", { name: "Auxiliary view" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Terminal" })).toBeNull();
+    expect(panel.closest(".session-aux-pane")?.textContent).toContain("Overview");
     const terminal = screen.getByTestId("terminal-node");
     expect((terminal.closest("[aria-label='Terminal']") as HTMLElement).hidden).toBe(false);
     expect(onRefit).toHaveBeenCalled();
-    onRefit.mockClear();
-    fireEvent.click(screen.getByRole("tab", { name: "Terminal" }));
-    expect(screen.queryByRole("tabpanel", { name: "Overview" })).toBeNull();
-    expect(screen.getByTestId("terminal-node")).toBe(terminal);
-    expect(screen.getByRole("tab", { name: "Terminal" }).getAttribute("aria-selected")).toBe("true");
-    fireEvent.click(screen.getByRole("tab", { name: "Overview" }));
-    expect(screen.getByRole("tabpanel", { name: "Overview" })).toBeTruthy();
+    // The Overview stays up beside the terminal; the terminal node is the same one.
     expect(screen.getByTestId("terminal-node")).toBe(terminal);
   });
 
