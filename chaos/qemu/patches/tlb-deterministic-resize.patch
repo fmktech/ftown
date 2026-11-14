@@ -1,3 +1,6 @@
+SPDX-License-Identifier: GPL-2.0-or-later
+Derived from QEMU 1:7.2+dfsg-7+deb12u18, accel/tcg/cputlb.c
+
 Subject: tcg/cputlb: size the softmmu TLB from a flush count, not host time
 
 tlb_mmu_resize_locked() grows and shrinks the per-mmu-idx TLB on a 100 ms window of

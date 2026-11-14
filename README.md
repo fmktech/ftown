@@ -585,3 +585,5 @@ cd bridge && npm run dev -- --api-url http://localhost:3000
 ## License
 
 [MIT](LICENSE)
+
+chaos/qemu/patches is GPL-2.0-or-later (derived from QEMU); everything else is MIT.
