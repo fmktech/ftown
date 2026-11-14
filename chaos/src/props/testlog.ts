@@ -42,6 +42,6 @@ export function checkpoint(t: number, sessions: SessionObs[], final = false, nam
   return { k: 'checkpoint', t, name, final, snap: snapshot(sessions) };
 }
 
-export function faultStart(t: number, kind: FaultKind, id = 'f1'): Rec {
-  return { k: 'fault', t, id, phase: 'start', kind, target: 'bridge', ok: true };
+export function faultStart(t: number, kind: FaultKind, id = 'f1', doneT = t): Rec {
+  return { k: 'fault', t, doneT, id, phase: 'start', kind, target: 'bridge', ok: true };
 }

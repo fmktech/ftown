@@ -1,4 +1,5 @@
 import {
+  BRIDGE_RESTART_BUDGET_MS,
   FAULTS,
   PROFILE,
   RUN_PROFILES,
@@ -10,6 +11,8 @@ import {
 
 const CHILDREN: readonly Role[] = ['child1', 'child2', 'child3'];
 const MAX_ATTEMPTS = 2_000;
+const BRIDGE_RETRY_LIMIT = 64;
+const NON_BRIDGE_FAULTS: readonly FaultSpec[] = FAULTS.filter((f) => f.target !== 'bridge');
 
 function checkRange(name: string, r: readonly [number, number]): void {
   if (!Number.isFinite(r[0]) || !Number.isFinite(r[1]) || r[0] < 0 || r[1] < r[0]) {
@@ -55,7 +58,14 @@ function fits(cand: ScheduledFault, placed: readonly ScheduledFault[], startMs: 
       if (candKill && endOf(p) >= cand.atMs) return false;
       if (pKill && cand.atMs >= p.atMs) return false;
     }
-    if (cand.target === 'bridge' && p.target === 'bridge' && overlapsInTime) return false;
+    if (cand.target === 'bridge' && p.target === 'bridge') {
+      // A bridge fault must not overlap another or start within BRIDGE_RESTART_BUDGET_MS
+      // of the previous bridge fault's scheduled heal (atMs + durationMs).
+      const spaced =
+        endOf(cand) + BRIDGE_RESTART_BUDGET_MS <= p.atMs ||
+        endOf(p) + BRIDGE_RESTART_BUDGET_MS <= cand.atMs;
+      if (!spaced) return false;
+    }
   }
   return true;
 }
@@ -114,10 +124,15 @@ export const buildSchedule: BuildSchedule = (_seed, level, profile, rng) => {
     if (!ok) throw new Error('schedule: could not place the long fault');
   }
 
+  // If a fault cannot be placed after BRIDGE_RETRY_LIMIT attempts (for example, a second
+  // bridge fault cannot fit the 40 s short window with BRIDGE_RESTART_BUDGET_MS spacing),
+  // redraw from NON_BRIDGE_FAULTS for the remaining attempts of this slot so the level's
+  // fault count still fits deterministically without looping.
   for (let i = 0; i < shortCount; i++) {
     let ok = false;
     for (let a = 0; a < MAX_ATTEMPTS && !ok; a++) {
-      const cand = drawFault(rng, FAULTS, false, faultWindowStartMs, faultWindowEndMs);
+      const pool = a < BRIDGE_RETRY_LIMIT ? FAULTS : NON_BRIDGE_FAULTS;
+      const cand = drawFault(rng, pool, false, faultWindowStartMs, faultWindowEndMs);
       if (fits(cand, placed, faultWindowStartMs, faultWindowEndMs)) {
         placed.push(cand);
         ok = true;

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { FAULTS, PROFILE, type ChaosLevel, type FaultSpec, type RunProfile } from '../contract.ts';
+import { BRIDGE_RESTART_BUDGET_MS, FAULTS, PROFILE, type ChaosLevel, type FaultSpec, type RunProfile } from '../contract.ts';
 import { deriveRng } from './rng.ts';
 import { buildSchedule, validateFaults } from './schedule.ts';
 
@@ -28,9 +28,9 @@ test('ids f1..fn in atMs order', () => {
 });
 
 for (const [level, profile] of [['low', 'short'], ['low', 'soak'], ['high', 'soak']] as const) {
-  test(`property over seeds 1..200 for level ${level}, profile ${profile}`, () => {
+  test(`property over seeds 1..500 for level ${level}, profile ${profile}`, () => {
     const { faultWindowStartMs, faultWindowEndMs } = PROFILE[profile];
-    for (let seed = 1; seed <= 200; seed++) {
+    for (let seed = 1; seed <= 500; seed++) {
       const s = build(seed, level, profile);
       const longs = s.filter((f) => f.long);
       if (level === 'low') {
@@ -63,7 +63,13 @@ for (const [level, profile] of [['low', 'short'], ['low', 'soak'], ['high', 'soa
           const b = s[j]!;
           const overlap = a.atMs <= b.atMs + b.durationMs && b.atMs <= a.atMs + a.durationMs;
           if (a.target === b.target) assert.ok(!overlap, `seed ${seed}: ${a.id}/${b.id} overlap on ${a.target}`);
-          if (a.target === 'bridge' && b.target === 'bridge') assert.ok(!overlap);
+          if (a.target === 'bridge' && b.target === 'bridge') {
+            assert.ok(!overlap);
+            assert.ok(
+              a.atMs + a.durationMs + BRIDGE_RESTART_BUDGET_MS <= b.atMs,
+              `seed ${seed}: ${a.id}/${b.id} bridge gap ${b.atMs - (a.atMs + a.durationMs)} < ${BRIDGE_RESTART_BUDGET_MS}`,
+            );
+          }
         }
       }
       const kills = s.filter((f) => f.kind === 'parent_kill9' || f.kind === 'agent_kill9');
@@ -117,7 +123,7 @@ test('unknown level, unknown profile, and (short, high) throw', () => {
 
 // Golden schedules. Any change to the FAULTS table or to the drawing order changes every seed's
 // schedule; this test is what catches it. Update deliberately, never to make a run green.
-const GOLDEN_SHORT_LOW = [{"id":"f1","kind":"bridge_kill9","target":"bridge","atMs":75980,"durationMs":1392,"jumpMs":null,"long":false},{"id":"f2","kind":"bridge_sigterm","target":"bridge","atMs":78949,"durationMs":2162,"jumpMs":null,"long":false},{"id":"f3","kind":"agent_kill9","target":"child3","atMs":81327,"durationMs":0,"jumpMs":null,"long":false},{"id":"f4","kind":"clock_jump_back","target":"clock","atMs":89820,"durationMs":0,"jumpMs":-30000,"long":false}];
+const GOLDEN_SHORT_LOW = [{"id":"f1","kind":"bridge_sigterm","target":"bridge","atMs":78949,"durationMs":2162,"jumpMs":null,"long":false},{"id":"f2","kind":"agent_kill9","target":"child3","atMs":81327,"durationMs":0,"jumpMs":null,"long":false},{"id":"f3","kind":"clock_jump_back","target":"clock","atMs":89820,"durationMs":0,"jumpMs":-30000,"long":false},{"id":"f4","kind":"agent_kill9","target":"child2","atMs":106275,"durationMs":0,"jumpMs":null,"long":false}];
 const GOLDEN_SOAK_HIGH = [{"id":"f1","kind":"bridge_kill9","target":"bridge","atMs":120951,"durationMs":1392,"jumpMs":null,"long":false},{"id":"f2","kind":"clock_jump_fwd","target":"clock","atMs":137427,"durationMs":0,"jumpMs":90000,"long":false},{"id":"f3","kind":"agent_sigstop","target":"child3","atMs":142049,"durationMs":3000,"jumpMs":null,"long":false},{"id":"f4","kind":"clock_jump_fwd","target":"clock","atMs":214820,"durationMs":0,"jumpMs":2100000,"long":true},{"id":"f5","kind":"bridge_sigterm","target":"bridge","atMs":269171,"durationMs":2162,"jumpMs":null,"long":false},{"id":"f6","kind":"agent_kill9","target":"child2","atMs":283604,"durationMs":0,"jumpMs":null,"long":false}];
 
 test('golden schedule for seed 1, short, low', () => {

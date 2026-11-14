@@ -65,17 +65,17 @@ test('executes start/heal per kind and ends with the final heal', async () => {
     'bridge SIGCONT', 'root SIGCONT', 'child1 SIGCONT', 'child2 SIGCONT', 'child3 SIGCONT',
   ]);
   assert.deepEqual(
-    recs.map((r) => (r.k === 'fault' ? `${r.t} ${r.id} ${r.phase} ${r.kind} ${r.target} ${r.ok}` : '')),
+    recs.map((r) => (r.k === 'fault' ? `${r.t} ${r.doneT} ${r.id} ${r.phase} ${r.kind} ${r.target} ${r.ok}` : '')),
     [
-      '20000 f1 start bridge_kill9 bridge true',
-      '23000 f1 heal bridge_kill9 bridge true',
-      '30000 f2 start agent_sigstop child2 true',
-      '33000 f2 heal agent_sigstop child2 true',
-      '40000 f3 start bridge_sigterm bridge true',
-      '42000 f3 heal bridge_sigterm bridge true',
-      '50000 f4 start parent_kill9 root true',
-      '60000 f5 start clock_jump_fwd clock false',
-      '60000 heal heal clock_jump_fwd all true',
+      '20000 20000 f1 start bridge_kill9 bridge true',
+      '23000 23000 f1 heal bridge_kill9 bridge true',
+      '30000 30000 f2 start agent_sigstop child2 true',
+      '33000 33000 f2 heal agent_sigstop child2 true',
+      '40000 40000 f3 start bridge_sigterm bridge true',
+      '42000 42000 f3 heal bridge_sigterm bridge true',
+      '50000 50000 f4 start parent_kill9 root true',
+      '60000 60000 f5 start clock_jump_fwd clock false',
+      '60000 60000 heal heal clock_jump_fwd all true',
     ],
   );
 });
@@ -136,8 +136,52 @@ test('a slow heal does not delay other faults; a bridge step waits for the runni
   await clock.advance(100_000);
   await done;
   assert.deepEqual(
-    recs.map((r) => (r.k === 'fault' ? `${r.t} ${r.id} ${r.phase}` : '')),
-    ['20000 f1 start', '30000 f2 start', '23000 f1 heal', '49000 f3 start', '51000 f3 heal', '51000 heal heal'],
+    recs.map((r) => (r.k === 'fault' ? `${r.t} ${r.doneT} ${r.id} ${r.phase}` : '')),
+    [
+      '20000 20000 f1 start',
+      '30000 30000 f2 start',
+      '23000 49000 f1 heal',
+      '49000 49000 f3 start',
+      '51000 51000 f3 heal',
+      '51000 51000 heal heal',
+    ],
   );
   assert.deepEqual(calls.slice(0, 6), ['bridge SIGKILL', 'up begin', 'child1 SIGKILL', 'up end', 'up', 'bridge SIGSTOP']);
+});
+
+test('bridge faults run strictly sequentially even when fault 1 heal outlasts gap to fault 2', async () => {
+  const clock = fakeClock();
+  const calls: string[] = [];
+  const recs: Rec[] = [];
+  const base = fakeActions(calls);
+  const actions: FaultActions = {
+    ...base,
+    async signalBridge(sig) {
+      if (sig === 'SIGCONT') {
+        calls.push('sigcont begin');
+        await clock.sleep(10_000);
+        calls.push('sigcont end');
+      }
+      return base.signalBridge(sig);
+    },
+  };
+  // f1 heal is at 22_000 and takes 10_000 ms (doneT=32_000).
+  // f2 start is scheduled at 25_000, inside f1's heal; it must wait until f1 heal logs doneT.
+  const schedule = [
+    f('f1', 'bridge_sigstop', 'bridge', 20_000, 2_000),
+    f('f2', 'bridge_sigterm', 'bridge', 25_000, 2_000),
+  ];
+  const done = runFaults({ clock, schedule, actions, roles: ROLES, log: (r) => recs.push(r) });
+  await clock.advance(100_000);
+  await done;
+  assert.deepEqual(
+    recs.map((r) => (r.k === 'fault' ? `${r.id}:${r.phase}@${r.t}..${r.doneT}` : '')),
+    [
+      'f1:start@20000..20000',
+      'f1:heal@22000..32000',
+      'f2:start@32000..32000',
+      'f2:heal@34000..34000',
+      'heal:heal@34000..44000',
+    ],
+  );
 });
