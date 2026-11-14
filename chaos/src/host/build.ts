@@ -21,6 +21,7 @@ export interface SourceFingerprint {
   head: string;
   dirty: boolean;
   chaosDirty: boolean;
+  boxDirty: boolean;
   fileCount: number;
 }
 
@@ -31,8 +32,8 @@ export interface FingerprintDeps {
   hashFile(relPath: string): Promise<string | null>;
   /** Returns the git commit hash of HEAD. */
   getHead(): Promise<string>;
-  /** Returns whether any of the given repo-relative paths have uncommitted changes. */
-  isDirty(inputPaths: readonly string[]): Promise<boolean>;
+  /** Returns whether any uncommitted path matches `pred`. */
+  isDirty(pred: (relPath: string) => boolean): Promise<boolean>;
 }
 
 export interface BuildInfo {
@@ -68,9 +69,18 @@ export function isFingerprintInput(relPath: string): boolean {
   return false;
 }
 
-/** Returns true if a repo-relative path is a chaos-side (non-bridge) input. */
+/**
+ * Returns true if a repo-relative path is a chaos-side input overlaid by pack() on top of any image
+ * (chaos/src non-test files, chaos/package.json, chaos/qemu/). Excludes chaos/box/, which comes from
+ * inside a custom image and is identified by imageId instead.
+ */
 export function isChaosFingerprintInput(relPath: string): boolean {
-  return isFingerprintInput(relPath) && !relPath.startsWith('bridge/');
+  if (relPath === 'chaos/package.json') return true;
+  if (relPath.startsWith('chaos/qemu/')) return true;
+  if (relPath.startsWith('chaos/src/')) {
+    return !relPath.endsWith('.test.ts');
+  }
+  return false;
 }
 
 /** Parses `git status --porcelain -z` output and returns true if any path matching `pred` is dirty. */
@@ -106,11 +116,9 @@ export function defaultFingerprintDeps(repoRoot = REPO_ROOT): FingerprintDeps {
     async getHead(): Promise<string> {
       return (await mustRun('git', ['-C', repoRoot, 'rev-parse', 'HEAD'])).trim();
     },
-    async isDirty(inputPaths: readonly string[]): Promise<boolean> {
-      if (inputPaths.length === 0) return false;
+    async isDirty(pred: (relPath: string) => boolean): Promise<boolean> {
       const out = await mustRun('git', ['-C', repoRoot, 'status', '--porcelain', '-z', '--', ...FINGERPRINT_INPUT_ROOTS]);
-      const set = new Set(inputPaths);
-      return hasDirtyInput(out, (p) => set.has(p));
+      return hasDirtyInput(out, pred);
     },
   };
 }
@@ -119,18 +127,19 @@ export function defaultFingerprintDeps(repoRoot = REPO_ROOT): FingerprintDeps {
 export async function computeSourceFingerprint(deps: FingerprintDeps = defaultFingerprintDeps()): Promise<SourceFingerprint> {
   const listed = await deps.listFiles();
   const inputFiles = [...new Set(listed.filter(isFingerprintInput))].sort();
-  const chaosFiles = inputFiles.filter(isChaosFingerprintInput);
   const entries = await Promise.all(inputFiles.map(async (p) => [p, await deps.hashFile(p)] as const));
   const chaosEntries = entries.filter(([p]) => isChaosFingerprintInput(p));
   const head = await deps.getHead();
-  const dirty = await deps.isDirty(inputFiles);
-  const chaosDirty = await deps.isDirty(chaosFiles);
+  const dirty = await deps.isDirty(isFingerprintInput);
+  const chaosDirty = await deps.isDirty(isChaosFingerprintInput);
+  const boxDirty = await deps.isDirty((p) => p.startsWith('chaos/box/'));
   return {
     sha256: sha256(JSON.stringify({ head, dirty, files: entries })),
     chaosSha256: sha256(JSON.stringify({ head, dirty: chaosDirty, files: chaosEntries })),
     head,
     dirty,
     chaosDirty,
+    boxDirty,
     fileCount: entries.length,
   };
 }

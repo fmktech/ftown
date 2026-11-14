@@ -37,6 +37,7 @@ Flags and defaults:
 - `--mem <mb>`: Guest memory in MiB (default: `1536`, minimum: `1536`).
 - `--timeout <s>`: Watchdog per boot in seconds (default: `300`, or `3600` with `--long`).
 - `--icount-shift <n>`: Instruction-count shift where ns per instruction = 2^shift (default: `1`).
+- `--no-build`: Fail instead of rebuilding if `chaos/.cache/` is missing or stale (default: false).
 
 ### 3. Run one seed
 Executes the workload and fault schedule for a seed, comparing runs for determinism:
@@ -57,13 +58,14 @@ Flags and defaults:
 - `--mem <mb>`: Guest RAM in MiB (default: `3072`, minimum: `1536`).
 - `--timeout <s>`: Watchdog per boot in seconds (default: `2000` for `short`, `3000` for `soak`).
 - `--icount-shift <n>`: Instruction-count shift (default: `1`).
+- `--no-build`: Fail instead of rebuilding if `chaos/.cache/` is missing or stale (default: false).
 
 ### 4. Run a campaign
 Runs a sequence of seeds and writes aggregated summaries to `chaos/out/campaign.json`:
 ```bash
 npm run test:chaos -- campaign --seeds 1-20
 ```
-Flags and defaults: Accepts `--seeds`, `--profile`, `--level`, `--times`, `--jobs`, `--mem`, `--timeout`, and `--icount-shift` with the same defaults as `run`. Does not accept `--drop-faults`.
+Flags and defaults: Accepts `--seeds`, `--profile`, `--level`, `--times`, `--jobs`, `--mem`, `--timeout`, `--icount-shift`, and `--no-build` with the same defaults as `run`. Does not accept `--drop-faults`.
 
 ### 5. Reproduce a seed (`--repro`)
 Runs a single seed repeatedly (default 5 boots) to verify determinism:
@@ -74,7 +76,7 @@ Or equivalently:
 ```bash
 npm run test:chaos -- --repro 1
 ```
-Flags and defaults: Accepts `--seed <N>` (or `--repro <N>`), `--profile`, `--level`, `--times` (default: `5`), `--drop-faults`, `--jobs`, `--mem`, `--timeout`, and `--icount-shift`.
+Flags and defaults: Accepts `--seed <N>` (or `--repro <N>`), `--profile`, `--level`, `--times` (default: `5`), `--drop-faults`, `--jobs`, `--mem`, `--timeout`, `--icount-shift`, and `--no-build`.
 
 ## Profiles and Levels
 

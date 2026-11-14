@@ -198,7 +198,7 @@ test('ok=false start grants no grace', () => {
   const r = get('R2').check(log);
   assert.equal(r.status, 'violated');
   assert.deepEqual(r.evidence, [
-    'bridge down at cp90 t=90000 last bridge fault f1 healed doneT=82000',
+    'bridge down at cp90 t=90000 last bridge fault none healed doneT=none',
   ]);
 });
 

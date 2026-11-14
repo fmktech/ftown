@@ -128,13 +128,26 @@ test('buildVerdictsReport records source fingerprint without altering canon.json
     };
     const withFp = await buildVerdictsReport(outcome, canonBefore, fpPath);
     const withoutFp = await buildVerdictsReport(outcome, canonBefore, join(dir, 'missing.json'));
+    const corruptFpPath = join(dir, 'corrupt.json');
+    writeFileSync(corruptFpPath, '{not valid json');
+    const corruptFp = await buildVerdictsReport(outcome, canonBefore, corruptFpPath);
+    const wrongTypedPath = join(dir, 'wrong-typed.json');
+    writeFileSync(wrongTypedPath, JSON.stringify({ sha256: 123, head: true, dirty: 'yes' }));
+    const wrongTypedFp = await buildVerdictsReport(outcome, canonBefore, wrongTypedPath);
+    const nullFpPath = join(dir, 'null.json');
+    writeFileSync(nullFpPath, 'null');
+    const nullFp = await buildVerdictsReport(outcome, canonBefore, nullFpPath);
     const canonAfter = encodeLog(records);
     assert.equal(canonAfter, canonBefore);
     assert.equal(withFp.sourceFingerprint, 'abc123');
     assert.equal(withFp.sourceHead, 'deadbeef');
     assert.equal(withFp.sourceDirty, true);
-    assert.equal('sourceFingerprint' in withoutFp, false);
-    assert.equal(withFp.H_run, withoutFp.H_run);
+    for (const report of [withoutFp, corruptFp, wrongTypedFp, nullFp]) {
+      assert.equal('sourceFingerprint' in report, false);
+      assert.equal('sourceHead' in report, false);
+      assert.equal('sourceDirty' in report, false);
+      assert.equal(report.H_run, withoutFp.H_run);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -28,6 +28,7 @@ function sampleFp(overrides: Partial<SourceFingerprint> = {}): SourceFingerprint
     head: 'head1234',
     dirty: false,
     chaosDirty: false,
+    boxDirty: false,
     fileCount: 10,
     ...overrides,
   };
@@ -121,4 +122,78 @@ test('ensureBuild checks only chaosFingerprint and imageId for custom-image buil
   await ensureBuild(false, deps);
   assert.equal(builtWith, 'my-custom:latest');
   assert.equal(logs[1], 'chaos build is stale (cached 22222222 != current 33333333): rebuilding');
+});
+
+test('ensureBuild custom-image: reports imageId mismatch, missing image, --no-build, and chaos/box dirty notice', async () => {
+  const cached = sampleBuild({
+    image: 'my-custom:latest',
+    imageId: 'sha256:custom999',
+    sourceFingerprint: 'custom-image:sha256:custom999',
+    chaosFingerprint: '22222222bbbb',
+  });
+
+  // 1. chaos/box dirty -> logs notice, does NOT rebuild
+  {
+    const logs: string[] = [];
+    let built = 0;
+    const deps: EnsureBuildDeps = {
+      readBuildInfo: () => cached,
+      computeFingerprint: async () => sampleFp({ boxDirty: true }),
+      build: async () => { built++; return cached; },
+      inspectImageId: async () => 'sha256:custom999',
+      log: (m) => logs.push(m),
+    };
+    await ensureBuild(false, deps);
+    assert.equal(built, 0);
+    assert.match(logs[0], /notice: chaos\/box changes do not apply to custom image my-custom:latest/);
+  }
+
+  // 2. imageId changed (chaosFingerprint matches) -> explicit imageId mismatch, rebuilds
+  {
+    const logs: string[] = [];
+    let builtWith: string | null | undefined;
+    const deps: EnsureBuildDeps = {
+      readBuildInfo: () => cached,
+      computeFingerprint: async () => sampleFp(),
+      build: async (img) => { builtWith = img; return cached; },
+      inspectImageId: async () => 'sha256:custom000',
+      log: (m) => logs.push(m),
+    };
+    await ensureBuild(false, deps);
+    assert.equal(builtWith, 'my-custom:latest');
+    assert.equal(logs[0], 'chaos build is stale (imageId sha256:custom999 != sha256:custom000): rebuilding');
+  }
+
+  // 3. image missing (null) -> explicit missing message, rebuilds
+  {
+    const logs: string[] = [];
+    let builtWith: string | null | undefined;
+    const deps: EnsureBuildDeps = {
+      readBuildInfo: () => cached,
+      computeFingerprint: async () => sampleFp(),
+      build: async (img) => { builtWith = img; return cached; },
+      inspectImageId: async () => null,
+      log: (m) => logs.push(m),
+    };
+    await ensureBuild(false, deps);
+    assert.equal(builtWith, 'my-custom:latest');
+    assert.equal(logs[0], 'chaos build is stale (image my-custom:latest missing (cached sha256:custom999)): rebuilding');
+  }
+
+  // 4. --no-build on stale custom-image build -> rejects with --image hint and does not rebuild
+  {
+    let built = 0;
+    const deps: EnsureBuildDeps = {
+      readBuildInfo: () => cached,
+      computeFingerprint: async () => sampleFp({ chaosSha256: '33333333cccc' }),
+      build: async () => { built++; return cached; },
+      inspectImageId: async () => 'sha256:custom999',
+      log: () => {},
+    };
+    await assert.rejects(
+      ensureBuild(true, deps),
+      /chaos build is stale \(cached 22222222 != current 33333333\): run `npm run test:chaos -- build --image my-custom:latest` first/,
+    );
+    assert.equal(built, 0);
+  }
 });
