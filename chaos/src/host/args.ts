@@ -15,14 +15,14 @@ export interface VmOptions {
 
 export type Command =
   | { cmd: 'help' }
-  | { cmd: 'build'; image: string | null }
+  | { cmd: 'build'; image: string | null; checkRepro: boolean }
   | { cmd: 'selftest'; times: number; vm: VmOptions }
   | { cmd: 'run' | 'campaign'; seeds: number[]; level: ChaosLevel; times: number; vm: VmOptions };
 
 export class UsageError extends Error {}
 
 export const USAGE = `usage: npm run test:chaos -- <command> [flags]
-  build [--image <tag>]                         build kernel, initramfs and qemu container into chaos/.cache/
+  build [--image <tag>] [--check-repro]         build kernel, initramfs and qemu container into chaos/.cache/
   selftest [--times 2]                          boot N times, require byte-identical selftest.json
   run --seeds 1-4 [--level high] [--times 2]    run seeds, compare runs of each seed
   repro --seed N [--times 5] [--level high]     (also: --repro N) one seed, several times
@@ -36,6 +36,7 @@ export function parseSeedRange(spec: string): number[] {
   }
 }
 
+const BOOL_FLAGS = new Set(['check-repro']);
 const VALUE_FLAGS = new Set(['image', 'times', 'seeds', 'seed', 'repro', 'level', 'jobs', 'mem', 'timeout', 'icount-shift']);
 
 function posInt(flag: string, v: string, min = 1): number {
@@ -52,6 +53,11 @@ export function parseArgs(argv: readonly string[]): Command {
     if (a.startsWith('--')) {
       const eq = a.indexOf('=');
       const name = eq === -1 ? a.slice(2) : a.slice(2, eq);
+      if (BOOL_FLAGS.has(name) && eq === -1) {
+        if (flags.has(name)) throw new UsageError(`--${name} given twice`);
+        flags.set(name, 'true');
+        continue;
+      }
       if (!VALUE_FLAGS.has(name)) throw new UsageError(`unknown flag --${name}`);
       const value = eq === -1 ? argv[++i] : a.slice(eq + 1);
       if (value === undefined) throw new UsageError(`--${name} needs a value`);
@@ -65,7 +71,7 @@ export function parseArgs(argv: readonly string[]): Command {
   if (sub === undefined || sub === 'help') return { cmd: 'help' };
 
   const allowed: Record<string, string[]> = {
-    build: ['image'],
+    build: ['image', 'check-repro'],
     selftest: ['times', 'jobs', 'mem', 'timeout', 'icount-shift'],
     run: ['seeds', 'level', 'times', 'jobs', 'mem', 'timeout', 'icount-shift'],
     campaign: ['seeds', 'level', 'times', 'jobs', 'mem', 'timeout', 'icount-shift'],
@@ -75,13 +81,13 @@ export function parseArgs(argv: readonly string[]): Command {
   if (ok === undefined) throw new UsageError(`unknown command ${sub}`);
   for (const f of flags.keys()) if (!ok.includes(f)) throw new UsageError(`--${f} is not valid for ${sub}`);
 
-  if (sub === 'build') return { cmd: 'build', image: flags.get('image') ?? null };
+  if (sub === 'build') return { cmd: 'build', image: flags.get('image') ?? null, checkRepro: flags.has('check-repro') };
 
   const isSelftest = sub === 'selftest';
   const vm: VmOptions = {
     memMb: flags.has('mem') ? posInt('mem', flags.get('mem')!, 1536) : isSelftest ? 1536 : 3072,
     icountShift: flags.has('icount-shift') ? posInt('icount-shift', flags.get('icount-shift')!, 0) : 1,
-    timeoutSec: flags.has('timeout') ? posInt('timeout', flags.get('timeout')!) : isSelftest ? 900 : 3600,
+    timeoutSec: flags.has('timeout') ? posInt('timeout', flags.get('timeout')!) : isSelftest ? 300 : 1500,
     jobs: flags.has('jobs') ? posInt('jobs', flags.get('jobs')!) : 1,
   };
   if (vm.icountShift > 10) throw new UsageError('--icount-shift must be 0..10');

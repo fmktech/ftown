@@ -1,5 +1,5 @@
 // Builds chaos/.cache/: vmlinuz, initramfs.cpio.gz, build.json, and the qemu container image.
-import { copyFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { BUILD_INFO, CACHE_DIR, CHAOS_DIR, DEFAULT_BOX_IMAGE, DEVBOX_IMAGE, QEMU_DIR, QEMU_IMAGE } from './paths.ts';
 import { mustRun, run } from './proc.ts';
@@ -35,10 +35,28 @@ export const PACK_SCRIPT = [
   'chown -R 0:0 /r/opt/chaos && chmod -R a+rX,go-w /r/opt/chaos',
   'find /r -exec touch -h -d @0 {} +',
   'cd /r',
-  'find . -mindepth 1 -print0 | LC_ALL=C sort -z | cpio --null -o -H newc --reproducible --quiet | gzip -n -6 > /out/initramfs.cpio.gz',
+  'find . -mindepth 1 -print0 | LC_ALL=C sort -z | cpio --null -o -H newc --reproducible --quiet | gzip -n -6',
 ].join('\n');
 
-export async function build(imageArg: string | null): Promise<BuildInfo> {
+/** Packs `image` into a reproducible initramfs at dest. The archive comes back on stdout
+ * (no bind-mounted output: Docker Desktop file sharing may lag behind container exit). */
+async function pack(image: string, dest: string): Promise<void> {
+  const cid = (await mustRun('docker', ['create', '--platform', 'linux/amd64', image, '/init'])).trim();
+  const tmp = `${dest}.tmp`;
+  try {
+    const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+    const pipeline = `docker export ${q(cid)} | docker run -i --rm --network none ` +
+      `-v ${q(join(QEMU_DIR, 'init'))}:/init.sh:ro -v ${q(join(CHAOS_DIR, 'src'))}:/chaos/src:ro ` +
+      `-v ${q(join(CHAOS_DIR, 'package.json'))}:/chaos/package.json:ro ${q(QEMU_IMAGE)} sh -c ${q(PACK_SCRIPT)} > ${q(tmp)}`;
+    await mustRun('bash', ['-o', 'pipefail', '-c', pipeline], { echo: true });
+    renameSync(tmp, dest);
+  } finally {
+    rmSync(tmp, { force: true });
+    await run('docker', ['rm', '-f', cid]);
+  }
+}
+
+export async function build(imageArg: string | null, checkRepro = false): Promise<BuildInfo> {
   mkdirSync(CACHE_DIR, { recursive: true });
 
   log(`qemu container ${QEMU_IMAGE} (native arch)`);
@@ -63,18 +81,18 @@ export async function build(imageArg: string | null): Promise<BuildInfo> {
   }
   const imageId = (await mustRun('docker', ['image', 'inspect', '-f', '{{.Id}}', image])).trim();
   log(`initramfs from ${image} (${imageId})`);
-  const cid = (await mustRun('docker', ['create', '--platform', 'linux/amd64', image, '/init'])).trim();
-  try {
-    const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
-    const pipeline = `docker export ${q(cid)} | docker run -i --rm --network none -v ${q(CACHE_DIR)}:/out ` +
-      `-v ${q(join(QEMU_DIR, 'init'))}:/init.sh:ro -v ${q(join(CHAOS_DIR, 'src'))}:/chaos/src:ro ` +
-      `-v ${q(join(CHAOS_DIR, 'package.json'))}:/chaos/package.json:ro ${q(QEMU_IMAGE)} sh -c ${q(PACK_SCRIPT)}`;
-    await mustRun('bash', ['-o', 'pipefail', '-c', pipeline], { echo: true });
-  } finally {
-    await run('docker', ['rm', '-f', cid]);
+  const initrd = join(CACHE_DIR, 'initramfs.cpio.gz');
+  await pack(image, initrd);
+  if (checkRepro) {
+    const second = join(CACHE_DIR, 'initramfs.repro-check.cpio.gz');
+    await pack(image, second);
+    const a = sha256(readFileSync(initrd));
+    const b = sha256(readFileSync(second));
+    rmSync(second, { force: true });
+    if (a !== b) throw new Error(`initramfs is not reproducible: ${a} vs ${b}`);
+    log(`check-repro: two packs identical (${a})`);
   }
 
-  const initrd = join(CACHE_DIR, 'initramfs.cpio.gz');
   const info: BuildInfo = {
     image,
     imageId,

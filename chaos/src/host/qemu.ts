@@ -1,8 +1,10 @@
 // Boots the guest once under QEMU (inside the qemu container) and collects its outputs.
+import { randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { EXIT, type ChaosLevel } from '../contract.ts';
 import { FrameError, parseFrames } from './frames.ts';
+import { consoleFailure } from './summary.ts';
 import { CACHE_DIR, QEMU_IMAGE } from './paths.ts';
 import { run } from './proc.ts';
 
@@ -54,12 +56,21 @@ export interface BootOutcome {
 }
 
 let counter = 0;
+/** Containers started by this process and not yet removed. */
+const live = new Set<string>();
+
+/** Kills and removes every container this process started (SIGINT/SIGTERM path). */
+export async function cleanupContainers(): Promise<void> {
+  await Promise.all([...live].map((n) => run('docker', ['rm', '-f', n])));
+  live.clear();
+}
 
 /** Boots once. Writes console.log, frames.txt and every received file into outDir. */
 export async function boot(p: GuestParams, outDir: string, timeoutSec: number): Promise<BootOutcome> {
   rmSync(outDir, { recursive: true, force: true });
   mkdirSync(outDir, { recursive: true });
-  const name = `ftown-chaos-${process.pid}-${++counter}`;
+  const name = `ftown-chaos-${process.pid}-${++counter}-${randomBytes(4).toString('hex')}`;
+  live.add(name);
   // Outputs stay inside the container and are fetched with `docker cp` after it exits:
   // a bind-mounted /out is not guaranteed to be visible on the host (Docker Desktop file
   // sharing) at the moment the container exits.
@@ -69,9 +80,10 @@ export async function boot(p: GuestParams, outDir: string, timeoutSec: number): 
   ];
   const started = performance.now();
   let timedOut = false;
+  let killing: Promise<unknown> = Promise.resolve();
   const watchdog = setTimeout(() => {
     timedOut = true;
-    void run('docker', ['kill', name]);
+    killing = run('docker', ['kill', name]);
   }, timeoutSec * 1000);
   let r;
   let oom = false;
@@ -79,11 +91,14 @@ export async function boot(p: GuestParams, outDir: string, timeoutSec: number): 
   try {
     r = await run('docker', dockerArgs);
     clearTimeout(watchdog);
+    await killing;
     oom = (await run('docker', ['inspect', '-f', '{{.State.OOMKilled}}', name])).stdout.trim() === 'true';
     copied = await run('docker', ['cp', `${name}:/out/.`, outDir]);
   } finally {
     clearTimeout(watchdog);
+    await killing;
     await run('docker', ['rm', '-f', name]);
+    live.delete(name);
   }
   const wallMs = performance.now() - started;
   const infra = (msg: string): BootOutcome => ({ exitCode: EXIT.infra, infraError: msg, files: new Map(), wallMs });
@@ -96,7 +111,12 @@ export async function boot(p: GuestParams, outDir: string, timeoutSec: number): 
     for (const [file, data] of parsed.files) writeFileSync(join(outDir, file), data);
     return { exitCode: parsed.exitCode, infraError: null, files: parsed.files, wallMs };
   } catch (err) {
-    if (err instanceof FrameError) return infra(`frames: ${err.message}`);
+    if (err instanceof FrameError) {
+      let cons = '';
+      try { cons = readFileSync(join(outDir, 'console.log'), 'latin1'); } catch { cons = ''; }
+      const why = consoleFailure(cons);
+      return infra(why !== null ? `guest: ${why}` : `frames: ${err.message}`);
+    }
     throw err;
   }
 }
