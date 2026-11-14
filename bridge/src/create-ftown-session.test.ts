@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 import { buildSessionCommand } from './agent-commands.js';
+import { HOOKED_SHELL_TYPES } from './harness-registry.js';
 import { TerminalManager } from './terminal-manager.js';
 import type { PlanItem, PlanState, SessionPlan } from './coordination/contract-c.js';
 import {
@@ -13,8 +14,9 @@ import {
   canResumeStoredSession,
   createFtownSession,
   deriveRelaunchCommand,
-  nextAvailableGeneratedName,
   findMissingProviderAuth,
+  InvalidShellTypeError,
+  nextAvailableGeneratedName,
   parseCreateSessionBody,
   PlanItemError,
   prepareWorkingDir,
@@ -1001,6 +1003,33 @@ describe('relaunchFtownSession — entry-point parity with createFtownSession', 
     }
   });
 
+  it('resumes a legacy stored agy session as antigravity using antigravitySessionId', async () => {
+    const harness = fakeDeps();
+    const legacySession: Session = {
+      ...fakeSession('legacy-agy'),
+      command: 'agy --dangerously-skip-permissions',
+      shellType: 'agy' as unknown as Session['shellType'],
+      antigravitySessionId: 'conv-legacy-123',
+      status: 'error',
+      errorReason: 'stale',
+      runtime: 'tmux',
+    };
+
+    assert.strictEqual(canResumeStoredSession(legacySession), true);
+    const { command: derivedCmd, isCustom } = deriveRelaunchCommand(legacySession);
+    assert.strictEqual(isCustom, false);
+    assert.strictEqual(derivedCmd, "agy --dangerously-skip-permissions --conversation 'conv-legacy-123'");
+
+    const command = await relaunchFtownSession(harness.deps, legacySession, 'resume');
+    assert.strictEqual(command, "agy --dangerously-skip-permissions --conversation 'conv-legacy-123'");
+    assert.strictEqual(legacySession.shellType, 'antigravity');
+    assert.strictEqual(HOOKED_SHELL_TYPES.has(legacySession.shellType), true);
+    assert.strictEqual(legacySession.status, 'running');
+    assert.strictEqual(legacySession.errorReason, undefined);
+    assert.strictEqual(harness.runs[0].command, command);
+    assert.strictEqual(harness.saved[0].shellType, 'antigravity');
+  });
+
   it('refuses to retry a session with no stored command (pre-v0.2.0 records)', async () => {
     const harness = fakeDeps();
     const session: Session = { ...fakeSession('no-cmd'), command: '', status: 'error' };
@@ -1598,5 +1627,76 @@ describe('requireGreenPr plumbing and briefing', () => {
     assert.equal(created.requireGreenPr, true);
     assert.equal(harness.saved[0].requireGreenPr, true);
     assert.match(harness.runs[0].command, /not done until its PR is green/i);
+  });
+});
+
+describe('parseCreateSessionBody — shellType alias and validation', () => {
+  it('maps alias agy to canonical harness key antigravity', () => {
+    const input = parseCreateSessionBody({ shellType: 'agy', prompt: 'test' });
+    assert.strictEqual(input.shellType, 'antigravity');
+  });
+
+  it('preserves canonical shellType antigravity', () => {
+    const input = parseCreateSessionBody({ shellType: 'antigravity', prompt: 'test' });
+    assert.strictEqual(input.shellType, 'antigravity');
+  });
+
+  it('leaves shellType undefined when omitted', () => {
+    const input = parseCreateSessionBody({ prompt: 'test' });
+    assert.strictEqual(input.shellType, undefined);
+  });
+
+  it('rejects unknown shellType with 400 InvalidShellTypeError listing valid values', () => {
+    assert.throws(
+      () => parseCreateSessionBody({ shellType: 'bogus', prompt: 'test' }),
+      (err: unknown) => {
+        assert.ok(err instanceof InvalidShellTypeError);
+        assert.strictEqual(err.status, 400);
+        assert.strictEqual(err.code, 'invalid_shell_type');
+        assert.match(err.message, /Invalid shellType "bogus"/);
+        assert.match(err.message, /Valid values:/);
+        assert.match(err.message, /antigravity/);
+        assert.match(err.message, /agy/);
+        return true;
+      },
+    );
+  });
+});
+
+describe('createFtownSession — shellType alias, rejection, and canonical storage', () => {
+  it('resolves alias agy to canonical antigravity, stores it, and launches agy CLI', async () => {
+    const harness = fakeDeps();
+    const session = await createFtownSession(harness.deps, {
+      shellType: 'agy' as any,
+      model: 'gemini-4-hydrogen-medium',
+      prompt: 'hello world',
+    });
+
+    assert.strictEqual(session.shellType, 'antigravity');
+    assert.strictEqual(harness.saved[0].shellType, 'antigravity');
+    assert.strictEqual(session.command, "agy --dangerously-skip-permissions --model 'gemini-4-hydrogen-medium'");
+    assert.doesNotMatch(session.command, /claude/);
+    assert.strictEqual(
+      harness.runs[0].command,
+      "agy --dangerously-skip-permissions --model 'gemini-4-hydrogen-medium' -i 'hello world'",
+    );
+  });
+
+  it('rejects unknown shellType and creates no session record', async () => {
+    const harness = fakeDeps();
+    await assert.rejects(
+      () => createFtownSession(harness.deps, {
+        shellType: 'bogus' as any,
+        prompt: 'hello world',
+      }),
+      (err: unknown) => {
+        assert.ok(err instanceof InvalidShellTypeError);
+        assert.strictEqual((err as InvalidShellTypeError).status, 400);
+        assert.match((err as InvalidShellTypeError).message, /Valid values:/);
+        return true;
+      },
+    );
+    assert.strictEqual(harness.saved.length, 0);
+    assert.strictEqual(harness.runs.length, 0);
   });
 });

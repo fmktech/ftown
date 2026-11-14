@@ -5,7 +5,14 @@ import { basename, resolve } from 'node:path';
 
 import { buildPiCommand, buildSessionCommand } from './agent-commands.js';
 import { ensureCodexWorkdirTrust } from './codex-installer.js';
-import { HARNESSES, harnessAcceptsPromptAsCliArg, type HarnessSpec } from './harness-registry.js';
+import {
+  HARNESSES,
+  harnessAcceptsPromptAsCliArg,
+  InvalidShellTypeError,
+  normalizeShellType,
+  SHELL_ALIASES,
+  type HarnessSpec,
+} from './harness-registry.js';
 import { staggerSpawn } from './spawn-stagger.js';
 import { PROVIDER_AUTH_ENV, PROVIDER_RUNTIME_ENV, loadProviderEnv } from './provider-env-store.js';
 import { registerSessionWorkspace } from './session-registry.js';
@@ -19,7 +26,7 @@ import type { UpdateAdmission } from './update-admission.js';
 import type { SessionStore } from './session-store.js';
 import type { CreateSessionPayload, Session, ShellType } from './types.js';
 
-export { WorktreeError };
+export { WorktreeError, InvalidShellTypeError, normalizeShellType, SHELL_ALIASES };
 
 export type CreateSessionWorktreeInput = true | { branch?: string; base?: string };
 
@@ -315,8 +322,14 @@ export function deriveRelaunchCommand(session: RelaunchCommandSource): {
   command: string;
   isCustom: boolean;
 } {
+  let shellType = session.shellType;
+  try {
+    shellType = normalizeShellType(shellType);
+  } catch {
+    // Keep un-normalized if invalid
+  }
   const builderBase = {
-    shellType: session.shellType,
+    shellType,
     workingDir: session.workingDir,
     model: session.model,
   };
@@ -336,7 +349,7 @@ export function deriveRelaunchCommand(session: RelaunchCommandSource): {
     // fields.
     resume: true,
   });
-  const isLegacyPiBuilder = session.shellType === 'pi' && [
+  const isLegacyPiBuilder = shellType === 'pi' && [
     buildPiCommand({ model: session.model, includeFtownExtension: false }),
     buildPiCommand({ model: session.model, resume: true, includeFtownExtension: false }),
   ].includes(session.command);
@@ -362,7 +375,12 @@ export function canResumeStoredSession(
     | 'antigravitySessionId'
   >,
 ): boolean {
-  const shellType = session.shellType ?? 'claude';
+  let shellType = session.shellType ?? 'claude';
+  try {
+    shellType = normalizeShellType(shellType) ?? 'claude';
+  } catch {
+    // Keep un-normalized if invalid
+  }
   if (shellType === 'cursor') return Boolean(session.cursorSessionId?.trim());
   if (shellType === 'codex') return Boolean(session.codexSessionId?.trim());
   // opencode resumes by captured session id (`--session`), recorded from the
@@ -407,6 +425,13 @@ async function relaunchFtownSessionImpl(
   mode: RelaunchMode,
 ): Promise<string> {
   assertSessionCanLaunch(session);
+  if (session.shellType !== undefined) {
+    try {
+      session.shellType = normalizeShellType(session.shellType);
+    } catch {
+      // Keep un-normalized if invalid
+    }
+  }
   const command = mode === 'retry' ? session.command : deriveRelaunchCommand(session).command;
   if (!command) {
     throw new Error('Session has no command to relaunch');
@@ -480,7 +505,12 @@ async function createFtownSessionImpl(
     }
   }
 
-  const isAgent = input.shellType !== 'shell';
+  const shellType = input.shellType !== undefined ? normalizeShellType(input.shellType) : undefined;
+  const effectiveBaseInput: CreateFtownSessionInput = {
+    ...input,
+    ...(shellType !== undefined ? { shellType } : {}),
+  };
+  const isAgent = shellType !== 'shell';
   // Provider API tokens are read from the bridge's environment, the
   // ~/.ftown/env.json store, and the per-create input (last-wins) and mapped
   // onto the Anthropic auth var here — so the UI-supplied env (base URL, model
@@ -491,9 +521,9 @@ async function createFtownSessionImpl(
     storeEnv: loadProviderEnv(),
     inputEnv: input.env,
   };
-  assertProviderAuthAvailable(input.shellType, sources);
-  const providerRuntime = resolveProviderRuntimeEnv(input.shellType);
-  const providerAuth = resolveProviderAuthEnv(input.shellType, sources);
+  assertProviderAuthAvailable(shellType, sources);
+  const providerRuntime = resolveProviderRuntimeEnv(shellType);
+  const providerAuth = resolveProviderAuthEnv(shellType, sources);
   const shouldSetSessionEnv =
     Boolean(input.env)
     || Object.keys(providerRuntime).length > 0
@@ -508,7 +538,7 @@ async function createFtownSessionImpl(
       : undefined;
 
   let workingDir = prepareWorkingDir(input.workingDir, input.createMissingWorkingDir);
-  const initialCommand = buildSessionCommand({ ...input, workingDir });
+  const initialCommand = buildSessionCommand({ ...effectiveBaseInput, workingDir });
 
   const explicitName = input.name?.trim();
   const shouldSuffixGeneratedName = !explicitName && Boolean(workingDir);
@@ -538,7 +568,7 @@ async function createFtownSessionImpl(
   }
 
   try {
-    const effectiveInput: CreateFtownSessionInput = { ...input, workingDir };
+    const effectiveInput: CreateFtownSessionInput = { ...effectiveBaseInput, workingDir };
     // Base command (no prompt arg) — persisted on the session and used for the
     // default name; the prompt-bearing launch command must not be replayed on revive.
     const command = buildSessionCommand(effectiveInput);
@@ -554,7 +584,7 @@ async function createFtownSessionImpl(
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       workingDir,
-      shellType: input.shellType,
+      shellType,
       model: input.model,
       claudeSessionId: input.claudeSessionId,
       cursorSessionId: input.cursorSessionId,
@@ -718,7 +748,7 @@ export function parseCreateSessionBody(
   body: Record<string, unknown>,
   callerSessionId?: string,
 ): CreateFtownSessionInput {
-  const shellType = body.shellType as ShellType | undefined;
+  const shellType = body.shellType !== undefined ? normalizeShellType(body.shellType) : undefined;
   const env = body.env as Record<string, string> | undefined;
 
   let parentSessionId =

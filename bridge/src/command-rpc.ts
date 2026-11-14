@@ -13,6 +13,7 @@ import { normalizePullRequestUrl } from './pull-request-url.js';
 import type { PullRequestStatusService } from './pull-request-status.js';
 import type { PrReviewService, PrReviewRequest, PrReviewChunkRequest } from './pull-request-review-protocol.js';
 import { PR_REVIEW_CHUNK_BYTES } from './pull-request-review-protocol.js';
+import { InvalidShellTypeError, normalizeShellType } from './harness-registry.js';
 import { PlanItemError, WorkingDirMissingError } from './create-ftown-session.js';
 import { WorktreeError } from './coordination/contract-b.js';
 import { BOARD_SNAPSHOT_EVENTS, type BoardSnapshot } from './coordination/contract-c.js';
@@ -436,13 +437,14 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
         }
         case 'create_session': {
           const payload = command.payload as CreateSessionPayload;
+          const shellType = payload.shellType !== undefined ? normalizeShellType(payload.shellType) : undefined;
           const session = await sessionController.create(
             {
               command: payload.command,
               prompt: payload.prompt,
               name: payload.name,
               workingDir: payload.workingDir,
-              shellType: payload.shellType,
+              shellType,
               model: payload.model,
               claudeSessionId: payload.claudeSessionId,
               cursorSessionId: payload.cursorSessionId,
@@ -661,6 +663,8 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
         ? { requestId: command.requestId, success: false, error: errorMessage, data: { code: err.code } }
         : err instanceof PlanItemError
         ? { requestId: command.requestId, success: false, error: errorMessage }
+        : err instanceof InvalidShellTypeError
+        ? { requestId: command.requestId, success: false, error: errorMessage, data: { code: err.code } }
         : err instanceof BridgeSecurityError
         ? { requestId: command.requestId, success: false, error: err.message, data: { code: err.code } }
         : err instanceof WorkingDirMissingError
