@@ -58,7 +58,10 @@ it('Solo keeps invitation pins and never touches the ledger', async () => {
   expect(await screen.findByRole('region', { name: 'Encrypted dashboard' })).toBeTruthy();
   expect(mocks.useLedger).not.toHaveBeenCalled(); expect(ledger.load).not.toHaveBeenCalled();
   expect(mocks.readPins).toHaveBeenCalledWith(soloOwner);
-  expect(mocks.runtime).toHaveBeenCalledWith(soloIdentity, soloPins); expect(mocks.replacePins).toHaveBeenCalledWith(soloPins);
+  expect(mocks.runtime).toHaveBeenCalledWith(soloIdentity, soloPins);
+  // replacePins runs in a passive effect after the dashboard commits; findByRole can resolve before React
+  // flushes it under load, so await the pin-sync signal instead of racing the effect.
+  await waitFor(() => expect(mocks.replacePins).toHaveBeenCalledWith(soloPins));
   const options = mocks.connection.mock.calls.at(-1)?.[3] as Record<string, unknown>;
   expect(options).toMatchObject({ tokenRefresher: solo.tokenRefresher, onUnauthorized: solo.onUnauthorized }); expect(options.ledger).toBeUndefined();
   expect(mocks.dashboard.mock.calls.at(-1)?.[0]).toEqual(expect.objectContaining({ userId: 'solo', accountId: null }));
