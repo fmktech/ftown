@@ -31,6 +31,7 @@ test('snapshot combines disk, tmux and proc truth in ROLES order', async () => {
     assert.deepEqual(snap.sessions.map((s) => s.tmuxAlive), [false, true, false, false]);
     assert.deepEqual(snap.sessions.map((s) => s.procAlive), [false, true, false, false]);
     assert.equal(snap.sessions[0].inbox.length, 6);
+    assert.deepEqual(snap.sessions.map((x) => x.untaggedWakingMail), [2, 0, 0, 0]);
     assert.equal(snap.sessions[1].inboxParses, false);
     assert.equal(snap.sessions[2].attentionParses, false);
     assert.equal(snap.treeEvents.length, 5);
