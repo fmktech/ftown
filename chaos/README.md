@@ -9,7 +9,7 @@ The `chaos/` harness runs deterministic chaos testing for `ftown`. A pseudorando
 - **Node.js**: Node 24 (`>=24.12.0`), executing TypeScript directly via type stripping.
 - **Docker**: Docker daemon running on the host, used to build container images and run headless QEMU.
 - **First Build Downloads**: The initial build downloads hermetic dependencies pinned by version or digest:
-  - Base container images: `debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc` and `node:24.22.1-bookworm-slim@sha256:be8204d4bd327363357f532187b752ff62759c31bedf98e9e18fc08c9cbd605c` (or devbox `node:24-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54`).
+  - Base container images: `debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc` and `node:24.22.1-bookworm-slim@sha256:be8204d4bd327363357f532187b752ff62759c31bedf98e9e18fc08c9cbd605c`.
   - Pinned Debian packages: `qemu=1:7.2+dfsg-7+deb12u18` (source), `qemu-system-x86=1:7.2+dfsg-7+deb12u18+b3` (runtime and SeaBIOS firmware), and `linux-image-6.1.0-54-cloud-amd64=6.1.190-1` (guest kernel).
   - Pinned Centrifugo archive: `v6.10.2` linux-amd64 verified against `CENTRIFUGO_SHA256['linux-amd64']` from `bridge/src/solo/contract.ts` via `sha256sum -c`.
 - **Build Time**: Approximate build time on arbitrary machines is unknown. Factsheet records show ~84 s for a clean `--no-cache` build on developer hardware with base layers pulled, and ~5 s cached.
@@ -22,7 +22,7 @@ Builds the kernel (`vmlinuz`), initramfs (`initramfs.cpio.gz`), and QEMU contain
 npm run test:chaos -- build
 ```
 Flags and defaults:
-- `--image <tag>`: Custom container image tag (default: uses `ftown-chaos-box:dev` if present, otherwise builds `ftown-chaos-devbox:dev`).
+- `--image <tag>`: Custom container image tag (default: builds `ftown-chaos-box:dev` from `chaos/box/Dockerfile`).
 - `--check-repro`: Builds initramfs twice and asserts identical SHA-256 digests (default: false).
 
 ### 2. Run guest selftest
