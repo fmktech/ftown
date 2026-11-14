@@ -406,7 +406,7 @@ test('C1 not_hit: all delivered, other fault kind, heal phase, or checkpoint aft
   const pending = checkpoint(10, [session('child1', [mail('CHAOS-M-1', { delivered: false })])]);
   assert.equal(run('C1', [checkpoint(10, [session('child1', [mail('CHAOS-M-1')])]), faultStart(20, 'bridge_kill9')]).status, 'not_hit');
   assert.equal(run('C1', [pending, faultStart(20, 'bridge_sigstop')]).status, 'not_hit');
-  assert.equal(run('C1', [pending, { k: 'fault', t: 20, id: 'f1', phase: 'heal', kind: 'bridge_kill9', target: 'bridge', ok: true }]).status, 'not_hit');
+  assert.equal(run('C1', [pending, { k: 'fault', t: 20, doneT: 20, id: 'f1', phase: 'heal', kind: 'bridge_kill9', target: 'bridge', ok: true }]).status, 'not_hit');
   assert.equal(run('C1', [faultStart(5, 'bridge_kill9'), pending]).status, 'not_hit');
   assert.equal(run('C1', []).status, 'not_hit');
 });

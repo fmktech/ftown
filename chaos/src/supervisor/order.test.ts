@@ -10,7 +10,7 @@ const recs: Rec[] = [
   { k: 'agent', t: 10, role: 'child2', e: { ev: 'start', pid: 1 } },
   { k: 'agent', t: 10, role: 'root', e: { ev: 'start', pid: 2 } },
   { k: 'op', t: 10, op: { op: 'mail_send', tag: 'CHAOS-M-1', to: 'child1', type: 'task' }, ok: true, error: null },
-  { k: 'fault', t: 10, id: 'f1', phase: 'start', kind: 'bridge_kill9', target: 'bridge', ok: true },
+  { k: 'fault', t: 10, doneT: 10, id: 'f1', phase: 'start', kind: 'bridge_kill9', target: 'bridge', ok: true },
   { k: 'agent', t: 5, role: 'child3', e: { ev: 'start', pid: 3 } },
   { k: 'agent', t: 10, role: 'root', e: { ev: 'exit', code: 0 } },
 ];
@@ -40,4 +40,16 @@ test('run and schedule sort before everything', () => {
     { rec: { k: 'run', seed: 1, level: 'off', profile: 'short', contract: 7 }, seq: 2 },
   ];
   assert.deepEqual(canonicalOrder(head).map((r) => r.k), ['run', 'schedule', 'op']);
+});
+
+test('fault records with equal t and non-role targets break ties by id then phase before seq', () => {
+  const faults: Seq[] = [
+    { rec: { k: 'fault', t: 100, doneT: 100, id: 'f2', phase: 'start', kind: 'bridge_kill9', target: 'bridge', ok: true }, seq: 0 },
+    { rec: { k: 'fault', t: 100, doneT: 100, id: 'f1', phase: 'start', kind: 'bridge_sigterm', target: 'bridge', ok: true }, seq: 1 },
+    { rec: { k: 'fault', t: 100, doneT: 100, id: 'f1', phase: 'heal', kind: 'bridge_sigterm', target: 'bridge', ok: true }, seq: 2 },
+  ];
+  assert.deepEqual(
+    canonicalOrder(faults).map((r) => (r.k === 'fault' ? `${r.id}:${r.phase}` : '')),
+    ['f1:heal', 'f1:start', 'f2:start'],
+  );
 });

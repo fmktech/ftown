@@ -136,7 +136,12 @@ export interface ScheduledFault {
  *    a long fault outlasts bridge timeouts of 40–150 s and does not fit a short run. The scheduler
  *    throws on (profile 'short', level 'high'); the host CLI rejects it as a usage error.
  *  - Faults are drawn from FAULTS in table order using only the 'faults' stream.
- *  - Faults never overlap on the same target. Bridge faults never overlap each other.
+ *  - Faults never overlap on the same target. Bridge faults never overlap each other, and a
+ *    bridge fault never starts less than BRIDGE_RESTART_BUDGET_MS after the scheduled heal
+ *    (atMs + durationMs) of the previous bridge fault: restarting the bridge takes tens of
+ *    seconds of guest time, and a fault that arrives while the previous heal is still running
+ *    is delayed behind it and hits nothing. Clock faults are exempt: a clock jump during a
+ *    restart is a case worth testing.
  *  - Every fault starts inside [faultWindowStartMs, faultWindowEndMs] of the run's profile and
  *    is healed by faultWindowEndMs, so the quiesce period that follows has no active fault.
  *  - The same (seed, level, profile) always yields the same schedule.
@@ -146,6 +151,9 @@ export interface ScheduledFault {
  *    still stopped and start the bridge if it is not running. It is logged as a fault record with
  *    id 'heal', phase 'heal', kind of the last fault, target 'all'.
  */
+/** Minimum gap between a bridge fault's scheduled heal and the start of the next bridge fault. */
+export const BRIDGE_RESTART_BUDGET_MS = 30_000;
+
 export type BuildSchedule = (seed: number, level: ChaosLevel, profile: RunProfile, rng: Rng) => ScheduledFault[];
 
 /**
@@ -331,13 +339,18 @@ export interface Snapshot {
 export type Rec =
   | { k: 'run'; seed: number; level: ChaosLevel; profile: RunProfile; contract: number }
   | { k: 'schedule'; faults: ScheduledFault[] }
-  | { k: 'fault'; t: number; id: string; phase: 'start' | 'heal'; kind: FaultKind; target: string; ok: boolean }
+  /**
+   * t is when the action began, doneT when it finished (for a bridge heal: when the start script
+   * returned). ok on a start means the fault hit a live target; ok on a heal means the target was
+   * verified running again when the heal returned.
+   */
+  | { k: 'fault'; t: number; doneT: number; id: string; phase: 'start' | 'heal'; kind: FaultKind; target: string; ok: boolean }
   | { k: 'op'; t: number; op: WorkloadOp; ok: boolean; error: string | null }
   | { k: 'agent'; t: number; role: Role; e: AgentEvent }
   | { k: 'checkpoint'; t: number; name: string; final: boolean; snap: Snapshot }
   | { k: 'verdict'; prop: string; kind: PropKind; status: PropStatus; evidence: string[] };
 
-export const CONTRACT_VERSION = 8;
+export const CONTRACT_VERSION = 9;
 
 /** Operations the supervisor's workload driver performs through the real ftown CLI. */
 export type WorkloadOp =

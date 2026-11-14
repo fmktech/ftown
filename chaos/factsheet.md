@@ -10,7 +10,8 @@ the commit this file was added on.
   satisfies `bridge/package.json` engines `^24.22.1`). linux/amd64 only.
 - Bridge built from source at `/opt/ftown/bridge` (`npm ci && npm run build && npm prune --omit=dev`;
   node-pty compiled in a builder stage with python3/make/g++ and load-tested at build time).
-- `/opt/chaos` = copy of `chaos/` (no node_modules). `/opt/chaos-bin/ftown` = wrapper for
+- `/opt/chaos` = `chaos/box/`, `chaos/src/` (non-test), `chaos/package.json`, and
+  `source-fingerprint.json` (no node_modules). `/opt/chaos-bin/ftown` = wrapper for
   `node /opt/ftown/bridge/dist/ftown-cli.js` (first on PATH).
 - Centrifugo `v6.10.2` linux-amd64 archive downloaded at build time and verified against
   `CENTRIFUGO_SHA256['linux-amd64']` (`bridge/src/solo/contract.ts:79-91`); the build fails on

@@ -40,6 +40,6 @@ export function answered(t: number, role: Role, askTag: string): Rec {
   return agent(t, role, { ev: 'answer_received', askTag, answer: 'yes', via: 'waiter' });
 }
 
-export function faultStart(t: number, kind: FaultKind, target = 'root'): Rec {
-  return { k: 'fault', t, id: 'f1', phase: 'start', kind, target, ok: true };
+export function faultStart(t: number, kind: FaultKind, target = 'root', doneT = t): Rec {
+  return { k: 'fault', t, doneT, id: 'f1', phase: 'start', kind, target, ok: true };
 }
