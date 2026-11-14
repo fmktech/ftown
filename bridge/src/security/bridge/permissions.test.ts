@@ -127,6 +127,24 @@ test('phase-B worktree routes classify list as read and prune as control', () =>
   ]) assert.throws(() => classifyHttp(method, path), { code: 'permission_denied' }, `${method} ${path}`);
 });
 
+test('phase-C plan routes classify per method, validate the item id and deny extras', () => {
+  assert.deepEqual(classifyHttp('GET', '/api/sessions/session/plan'), { permission: 'read', mutating: false, operation: 'plan_get', sessionId: 'session' });
+  assert.deepEqual(classifyHttp('POST', '/api/sessions/session/plan'), { permission: 'control', mutating: true, operation: 'plan_add', sessionId: 'session' });
+  assert.deepEqual(classifyHttp('PATCH', '/api/sessions/session/plan/p12'), { permission: 'control', mutating: true, operation: 'plan_patch', sessionId: 'session' });
+  assert.deepEqual(classifyHttp('DELETE', '/api/sessions/session/plan/p123456'), { permission: 'control', mutating: true, operation: 'plan_remove', sessionId: 'session' });
+  assert.deepEqual(classifyCommand('get_session_board', { bridgeId: 'bridge', sessionId: 'session' }), { permission: 'read', mutating: false, operation: 'get_session_board', sessionId: 'session' });
+  for (const [method, path] of [
+    ['PUT', '/api/sessions/session/plan'], ['PATCH', '/api/sessions/session/plan'], ['DELETE', '/api/sessions/session/plan'],
+    ['GET', '/api/sessions/session/plan/p1'], ['POST', '/api/sessions/session/plan/p1'], ['PUT', '/api/sessions/session/plan/p1'],
+    ['GET', '/api/sessions/session/plan?x=1'], ['POST', '/api/sessions/session/plan?x=1'],
+    ['PATCH', '/api/sessions/session/plan/p1?x=1'], ['DELETE', '/api/sessions/session/plan/p1?x=1'],
+    ['GET', '/api/sessions/session/plan/extra'], ['PATCH', '/api/sessions/session/plan/x1'],
+    ['PATCH', '/api/sessions/session/plan/P1'], ['PATCH', '/api/sessions/session/plan/p'],
+    ['PATCH', '/api/sessions/session/plan/p1234567'], ['PATCH', '/api/sessions/session/plan/p1a'],
+    ['PATCH', '/api/sessions/session/plan/p1/extra'], ['GET', `/api/sessions/${'e'.repeat(201)}/plan`],
+  ]) assert.throws(() => classifyHttp(method, path), { code: 'permission_denied' }, `${method} ${path}`);
+});
+
 test('session removal allows the worktree query once with keep or force', () => {
   assert.equal(classifyHttp('DELETE', '/api/sessions/session').operation, 'sessions_remove');
   assert.equal(classifyHttp('DELETE', '/api/sessions/session?worktree=keep').permission, 'control');

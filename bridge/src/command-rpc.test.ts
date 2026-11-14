@@ -4,7 +4,9 @@ import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AttentionStore } from './attention-store.js';
+import { PlanItemError } from './create-ftown-session.js';
 import { WorktreeError } from './coordination/contract-b.js';
+import type { Board, SessionCard, TreeEvent } from './coordination/contract.js';
 import type { AttentionItem } from './attention-events.js';
 
 import type { CommandRpcDeps } from './command-rpc.js';
@@ -497,4 +499,190 @@ test('model routing RPC revalidates before any service call and writes nothing w
   assert.equal(touched, false);
   assert.deepEqual(responses.map(response => response.success), [false, false]);
   assert.deepEqual(responses.map(response => (response.data as { code?: string }).code), ['permission_denied', 'permission_denied']);
+});
+
+function boardCard(sessionId: string, archived = false): SessionCard {
+  return {
+    sessionId,
+    name: sessionId,
+    declared: null,
+    derived: { status: 'running', activity: 'idle', openAttention: 1, unreadMail: 0, previews: [] },
+    stale: false,
+    ...(archived ? { archived: true } : {}),
+  };
+}
+
+function attentionItem(id: string, route: 'parent' | 'human', resolved = false): AttentionItem {
+  return {
+    id,
+    sequence: 1,
+    type: 'agent_needs_input',
+    title: id,
+    message: id,
+    createdAt: '2026-11-13T10:00:00.000Z',
+    lastSeenAt: '2026-11-13T10:00:00.000Z',
+    occurrences: 1,
+    route,
+    ...(resolved ? { resolvedAt: '2026-11-13T11:00:00.000Z' } : {}),
+  };
+}
+
+test('get_session_board returns a read-only snapshot and rejects a bad payload', async () => {
+  const responses: CommandResponse[] = [];
+  const queries: unknown[] = [];
+  const attentionCalls: string[] = [];
+  const mutations: string[] = [];
+  const events: TreeEvent[] = Array.from({ length: 55 }, (_, index) => ({
+    seq: index + 1,
+    ts: '2026-11-13T12:00:00.000Z',
+    sessionId: index % 2 === 0 ? 'child-a' : 'child-b',
+    sessionName: 'Worker',
+    kind: 'status',
+    summary: `event ${index + 1}`,
+  }));
+  const board: Board = {
+    rootId: 'root',
+    cursor: 55,
+    plan: { items: [], ready: [] },
+    cards: [boardCard('child-a'), boardCard('child-b'), boardCard('old', true)],
+    rollup: { working: 0, blocked: 0, waiting_review: 0, done: 0, failed: 0, unset: 2 },
+  };
+  const sessionController = {
+    get: async (id: string) => id === 'root' || id === 'other-bridge'
+      ? { id, bridgeId: id === 'other-bridge' ? 'elsewhere' : 'bridge', name: id, command: 'claude', status: 'running', createdAt: '', updatedAt: '' }
+      : null,
+    create: async () => { mutations.push('create'); throw new Error('must not create'); },
+    remove: async () => { mutations.push('remove'); throw new Error('must not remove'); },
+    stop: async () => { mutations.push('stop'); throw new Error('must not stop'); },
+  } as unknown as SessionController;
+  const handler = createCommandHandler({
+    bridgeId: 'bridge',
+    sessionController,
+    sessionBoard: {
+      board: async (query) => { queries.push(query); return board; },
+      events: {
+        head: async () => events.length,
+        read: async (_rootId, opts) => {
+          const since = opts?.since ?? 0;
+          const limit = opts?.limit ?? 100;
+          const page = events.filter((event) => event.seq > since).slice(0, limit);
+          return { events: page, cursor: page.at(-1)?.seq ?? since };
+        },
+      },
+      openAttention: async (sessionId) => {
+        attentionCalls.push(sessionId);
+        if (sessionId === 'child-b') throw new Error('ledger missing');
+        return [attentionItem('parent-q', 'parent'), attentionItem('human-q', 'human'), attentionItem('done-q', 'parent', true)];
+      },
+    },
+    publishCommandResponse: async (response) => { responses.push(response); },
+  });
+  const send = async (requestId: string, payload: Record<string, unknown>) => {
+    await handler({ type: 'get_session_board' as Command['type'], requestId, payload });
+    return responses.at(-1);
+  };
+
+  const ok = await send('ok', { bridgeId: 'bridge', sessionId: 'root' });
+  assert.equal(ok?.success, true);
+  const data = ok?.data as { board: Board; events: TreeEvent[]; attention: Array<{ sessionId: string; event: AttentionItem }> };
+  assert.equal(data.board.rootId, 'root');
+  assert.deepEqual(queries, [{ sessionId: 'root', all: true }]);
+  assert.equal(data.events.length, 50);
+  assert.equal(data.events[0].seq, 6);
+  assert.equal(data.events.at(-1)?.seq, 55);
+  assert.deepEqual(data.events.map((event) => event.seq), data.events.map((event) => event.seq).sort((a, b) => a - b));
+  assert.deepEqual(attentionCalls, ['child-a', 'child-b']);
+  assert.deepEqual(data.attention.map((item) => ({ sessionId: item.sessionId, id: item.event.id, route: item.event.route })), [
+    { sessionId: 'child-a', id: 'parent-q', route: 'parent' },
+    { sessionId: 'child-a', id: 'human-q', route: 'human' },
+  ]);
+  assert.deepEqual(mutations, []);
+
+  for (const payload of [
+    { bridgeId: 'bridge', sessionId: 'root', extra: true },
+    { bridgeId: 'bridge' },
+    { sessionId: 'root' },
+    { bridgeId: 'bridge', sessionId: '../root' },
+    null,
+  ]) {
+    const response = await send(`bad-${JSON.stringify(payload)}`, payload as Record<string, unknown>);
+    assert.equal(response?.success, false);
+    assert.equal(response?.error, 'Invalid board request');
+  }
+  assert.equal(queries.length, 1);
+
+  const missing = await send('missing', { bridgeId: 'bridge', sessionId: 'nope' });
+  assert.equal(missing?.success, false);
+  assert.equal(missing?.error, 'Unknown session');
+  const foreignSession = await send('foreign-session', { bridgeId: 'bridge', sessionId: 'other-bridge' });
+  assert.equal(foreignSession?.success, false);
+  assert.equal(foreignSession?.error, 'Unknown session');
+
+  const before = responses.length;
+  await handler({ type: 'get_session_board' as Command['type'], requestId: 'foreign', payload: { bridgeId: 'other', sessionId: 'root' } });
+  assert.equal(responses.length, before);
+
+  const bare = createCommandHandler({
+    bridgeId: 'bridge',
+    sessionController,
+    publishCommandResponse: async (response) => { responses.push(response); },
+  });
+  await bare({ type: 'get_session_board' as Command['type'], requestId: 'bare', payload: { bridgeId: 'bridge', sessionId: 'root' } });
+  assert.equal(responses.at(-1)?.success, false);
+  assert.deepEqual(responses.at(-1)?.data, { code: 'unavailable' });
+
+  let read = false;
+  const security = {
+    revalidate: async () => {},
+    policy: { revalidate: async () => { throw new BridgeSecurityError('permission_denied'); } },
+  } as unknown as BridgeSecurityService;
+  const denied = createCommandHandler({
+    bridgeId: 'bridge',
+    security,
+    sessionController,
+    sessionBoard: {
+      board: async () => { read = true; return board; },
+      events: { head: async () => 0, read: async () => { read = true; return { events: [], cursor: 0 }; } },
+      openAttention: async () => { read = true; return []; },
+    },
+    publishCommandResponse: async (response) => { responses.push(response); },
+  });
+  await denied(
+    { type: 'get_session_board' as Command['type'], requestId: 'denied', payload: { bridgeId: 'bridge', sessionId: 'root' } },
+    { principal: {} } as VerifiedApplication,
+  );
+  assert.equal(read, false);
+  assert.equal(responses.at(-1)?.success, false);
+  assert.equal((responses.at(-1)?.data as { code?: string } | undefined)?.code, 'permission_denied');
+});
+
+test('create_session forwards planItem and maps PlanItemError to a client error', async () => {
+  const responses: CommandResponse[] = [];
+  const inputs: Array<{ planItem?: string }> = [];
+  const handler = createCommandHandler({
+    bridgeId: 'bridge',
+    sessionController: {
+      create: async (input: { planItem?: string }) => {
+        inputs.push(input);
+        if (input.planItem === 'p2') throw new PlanItemError('Plan item p2 is started, not todo');
+        return { id: 'child', name: 'child', command: 'claude', status: 'running', bridgeId: 'bridge', createdAt: '', updatedAt: '' };
+      },
+    } as unknown as SessionController,
+    publishCommandResponse: async (response) => { responses.push(response); },
+  });
+  const send = async (requestId: string, payload: Record<string, unknown>) => {
+    await handler({ type: 'create_session', requestId, payload });
+    return responses.at(-1);
+  };
+
+  const created = await send('ok', { command: 'claude', bridgeId: 'bridge', parentSessionId: 'parent', planItem: 'p1' });
+  assert.equal(created?.success, true);
+  assert.equal(inputs[0]?.planItem, 'p1');
+
+  const rejected = await send('bad', { command: 'claude', bridgeId: 'bridge', parentSessionId: 'parent', planItem: 'p2' });
+  assert.equal(rejected?.success, false);
+  assert.equal(rejected?.error, 'Plan item p2 is started, not todo');
+
+  await send('drop', { command: 'claude', bridgeId: 'bridge', planItem: 'not-an-id' });
+  assert.equal(inputs.at(-1)?.planItem, undefined);
 });

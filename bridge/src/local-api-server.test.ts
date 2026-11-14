@@ -1888,6 +1888,31 @@ describe('LocalApiServer coordination routes and attention tree events (via disp
     );
     assert.equal(f.pushes.filter((key) => key === `question:${event.id}`).length, 1);
   });
+
+  it('serves plan routes beside brief and worktrees', async (t) => {
+    const f = await coordFixture(t);
+
+    const missing = await f.call('GET', '/api/sessions/missing/plan');
+    assert.equal(missing.status, 404);
+
+    const listed = await f.call('GET', '/api/sessions/root-1/plan');
+    assert.equal(listed.status, 200);
+    assert.ok(Array.isArray(listed.body.items));
+    assert.ok(Array.isArray(listed.body.ready));
+
+    const created = await f.call('POST', '/api/sessions/root-1/plan', { title: 'Ship the board' });
+    assert.equal(created.status, 200);
+    const item = created.body.item as { id: string; title: string; state: string };
+    assert.equal(item.title, 'Ship the board');
+    assert.equal(item.state, 'todo');
+    assert.match(item.id, /^p\d+$/);
+
+    const unknownKey = await f.call('POST', '/api/sessions/root-1/plan', { title: 'Nope', extra: true });
+    assert.equal(unknownKey.status, 400);
+
+    const wrongMethod = await f.call('PUT', '/api/sessions/root-1/plan', { title: 'Nope' });
+    assert.equal(wrongMethod.status, 405);
+  });
 });
 
 describe('LocalApiServer worktree create', () => {
@@ -1945,5 +1970,88 @@ describe('LocalApiServer worktree create', () => {
     assert.equal(failed.status, 400);
     assert.equal(failed.data.error, 'not a git repository');
     assert.equal((await store.listSessions()).length, 0);
+  });
+
+  it('maps PlanItemError on POST /api/sessions to 400 and creates no session', async (t) => {
+    const home = mkdtempSync(join(tmpdir(), 'ftw-plan-item-create-'));
+    const server = new LocalApiServer();
+    const token = 'plan-item-token';
+    const store = new SessionStore(join(home, 'data'));
+    const runner = {
+      getPreferredRuntime: () => 'direct',
+      run: () => { throw new Error('must not launch'); },
+      stop: () => false,
+      isRunning: () => false,
+    } as unknown as ProcessRunner;
+    const centrifugo = { publishSessionUpdate: async () => {} } as unknown as CentrifugoClient;
+    await store.saveSession({
+      id: 'parent-1',
+      name: 'Parent',
+      command: 'claude',
+      status: 'running',
+      bridgeId: 'bridge-1',
+      createdAt: '2026-11-13T10:00:00.000Z',
+      updatedAt: '2026-11-13T10:00:00.000Z',
+    });
+    server.setAuthToken(token);
+    server.setDependencies(store, runner, centrifugo, 'user-1');
+    server.setSessionFactory({
+      store,
+      runner,
+      centrifugo,
+      userId: 'user-1',
+      bridgeId: 'bridge-1',
+      hookPort: 4321,
+      hookToken: 'hook-token',
+      notifyScriptPath: '/tmp/notify.sh',
+      wireTerminalInput: () => {},
+      planStore: {
+        get: async () => ({
+          seq: 1,
+          items: [{
+            id: 'p1',
+            title: 'Already going',
+            after: [],
+            priority: 2,
+            state: 'started',
+            createdAt: '2026-11-13T10:00:00.000Z',
+            updatedAt: '2026-11-13T10:00:00.000Z',
+          }],
+        }),
+        startForChild: async () => { throw new Error('must not start'); },
+      },
+    });
+    const port = await server.start();
+    t.after(() => {
+      server.stop();
+      rmSync(home, { recursive: true, force: true });
+    });
+
+    const started = await api(port, token, 'POST', '/api/sessions', {
+      shellType: 'claude',
+      prompt: 'work',
+      parentSessionId: 'parent-1',
+      planItem: 'p1',
+    });
+    assert.equal(started.status, 400);
+    assert.match(String(started.data.error), /not todo/);
+
+    const missing = await api(port, token, 'POST', '/api/sessions', {
+      shellType: 'claude',
+      prompt: 'work',
+      parentSessionId: 'parent-1',
+      planItem: 'p9',
+    });
+    assert.equal(missing.status, 400);
+    assert.match(String(missing.data.error), /does not exist/);
+
+    const noParent = await api(port, token, 'POST', '/api/sessions', {
+      shellType: 'claude',
+      prompt: 'work',
+      planItem: 'p1',
+    });
+    assert.equal(noParent.status, 400);
+    assert.match(String(noParent.data.error), /requires a parent/);
+    assert.deepEqual((await store.listSessions()).map((session) => session.id), ['parent-1']);
   });
 });

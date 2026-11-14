@@ -20,7 +20,7 @@ export function cardStateLabel(state: CardState): string {
  * tokens already used elsewhere in the UI (▸ collapse arrows, ✓/✗ stream status,
  * ⚠ warning badges, --accent, --status-* and --shell-generic tokens).
  */
-const CHIP_ICONS: Record<CardState, string> = {
+export const CHIP_ICONS: Record<CardState, string> = {
   working: "▸",
   blocked: "⚠",
   waiting_review: "◷",
@@ -28,7 +28,7 @@ const CHIP_ICONS: Record<CardState, string> = {
   failed: "✗",
 };
 
-const CHIP_COLORS: Record<CardState, string> = {
+export const CHIP_COLORS: Record<CardState, string> = {
   working: "var(--accent)",
   blocked: "var(--status-pending)",
   // Blue is already themed for generic badges (--shell-generic); keeps review distinct from blocked amber.
@@ -36,6 +36,11 @@ const CHIP_COLORS: Record<CardState, string> = {
   done: "var(--text-secondary)",
   failed: "var(--status-error)",
 };
+
+/** Glyph + colour token for a card state, shared by the chip and the Overview rows. */
+export function cardStateStyle(state: CardState): { icon: string; color: string } {
+  return { icon: CHIP_ICONS[state], color: CHIP_COLORS[state] };
+}
 
 export interface SessionCardChipProps {
   card?: SessionCard;

@@ -13,8 +13,11 @@ import { normalizePullRequestUrl } from './pull-request-url.js';
 import type { PullRequestStatusService } from './pull-request-status.js';
 import type { PrReviewService, PrReviewRequest, PrReviewChunkRequest } from './pull-request-review-protocol.js';
 import { PR_REVIEW_CHUNK_BYTES } from './pull-request-review-protocol.js';
-import { WorkingDirMissingError } from './create-ftown-session.js';
+import { PlanItemError, WorkingDirMissingError } from './create-ftown-session.js';
 import { WorktreeError } from './coordination/contract-b.js';
+import { BOARD_SNAPSHOT_EVENTS, type BoardSnapshot } from './coordination/contract-c.js';
+import type { BoardQuery, TreeEvent, TreeEventLogApi } from './coordination/contract.js';
+import type { AttentionItem } from './attention-events.js';
 import { AUTOMATION_REMOVED_CODE, AUTOMATION_REMOVED_MESSAGE, AutomationRemovedError, RETIRED_AUTOMATION_COMMANDS } from './retired-automation.js';
 import type { SessionController } from './session-controller.js';
 import type { Session } from './types.js';
@@ -81,7 +84,81 @@ export interface CommandRpcDeps {
   updateEffects?: UpdateEffects;
   /** The bridge's long-lived model-routing service (get_model_routing / set_model_routing); resolved only when one of those commands runs. */
   modelRouting?: () => ModelRoutingService;
+  /** Read-only board snapshot for `get_session_board`. Absent → unavailable. */
+  sessionBoard?: SessionBoardSource;
   publishCommandResponse: (response: CommandResponse, verified?: VerifiedApplication) => Promise<void>;
+}
+
+/** Reads used to build a BoardSnapshot. Must not mutate sessions, plans, or attention. */
+export interface SessionBoardSource {
+  board(query: BoardQuery): Promise<BoardSnapshot['board']>;
+  events: Pick<TreeEventLogApi, 'head' | 'read'>;
+  openAttention(sessionId: string): Promise<AttentionItem[]>;
+}
+
+const PLAN_ITEM_ID = /^p\d{1,6}$/;
+
+function planItemFromPayload(payload: { planItem?: unknown }): string | undefined {
+  return typeof payload.planItem === 'string' && PLAN_ITEM_ID.test(payload.planItem) ? payload.planItem : undefined;
+}
+
+async function newestRootEvents(
+  events: Pick<TreeEventLogApi, 'head' | 'read'>,
+  rootId: string,
+): Promise<TreeEvent[]> {
+  const head = await events.head(rootId);
+  if (head <= 0) return [];
+  const since = Math.max(0, head - Math.max(BOARD_SNAPSHOT_EVENTS, 500));
+  const page = await events.read(rootId, { since, limit: 500 });
+  return page.events.slice(-BOARD_SNAPSHOT_EVENTS);
+}
+
+async function handleGetSessionBoard(
+  deps: CommandRpcDeps,
+  command: Command,
+  verified: VerifiedApplication | undefined,
+): Promise<CommandResponse> {
+  const payload = command.payload as Record<string, unknown> | null;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+    || payload.bridgeId !== deps.bridgeId
+    || typeof payload.sessionId !== 'string'
+    || !/^[A-Za-z0-9_-]+$/.test(payload.sessionId)
+    || Object.keys(payload).some((key) => key !== 'bridgeId' && key !== 'sessionId')) {
+    throw new Error('Invalid board request');
+  }
+  if (deps.security && verified) {
+    await deps.security.policy.revalidate(verified.principal, 'read');
+  }
+  if (!deps.sessionBoard) {
+    return {
+      requestId: command.requestId,
+      success: false,
+      error: 'Board is not available on this bridge',
+      data: { code: 'unavailable' },
+    };
+  }
+  const session = await deps.sessionController.get(payload.sessionId);
+  if (!session || session.bridgeId !== deps.bridgeId) throw new Error('Unknown session');
+  const board = await deps.sessionBoard.board({ sessionId: payload.sessionId, all: true });
+  const events = await newestRootEvents(deps.sessionBoard.events, board.rootId);
+  const attention: BoardSnapshot['attention'] = [];
+  for (const card of board.cards) {
+    if (card.archived) continue;
+    try {
+      const items = await deps.sessionBoard.openAttention(card.sessionId);
+      for (const event of items) {
+        if (event.resolvedAt) continue;
+        attention.push({ sessionId: card.sessionId, event });
+      }
+    } catch (error) {
+      console.warn(
+        '[Bridge] Could not read child attention for board snapshot:',
+        error instanceof Error ? error.message : error,
+      );
+    }
+  }
+  const snapshot: BoardSnapshot = { board, events, attention };
+  return { requestId: command.requestId, success: true, data: snapshot };
 }
 
 /**
@@ -108,6 +185,10 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
       if (deps.security && !verified) throw new Error('approval_required');
       if (deps.security && verified) await deps.security.revalidate(verified.principal);
       switch (command.type) {
+        case 'get_session_board': {
+          response = await handleGetSessionBoard(deps, command, verified);
+          break;
+        }
         case 'preview_chat_list':
         case 'preview_chat_send':
         case 'preview_chat_reply': {
@@ -376,6 +457,7 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
               initialInputDelay: payload.initialInputDelay,
               suppressBriefing: payload.suppressBriefing,
               createMissingWorkingDir: payload.createMissingWorkingDir,
+              planItem: planItemFromPayload(payload as { planItem?: unknown }),
             },
           );
           response = { requestId: command.requestId, success: true, data: { session: toWireSession(session) } };
@@ -576,6 +658,8 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
         ? { requestId: command.requestId, success: false, error: AUTOMATION_REMOVED_MESSAGE, data: { code: AUTOMATION_REMOVED_CODE } }
         : err instanceof WorktreeError
         ? { requestId: command.requestId, success: false, error: errorMessage, data: { code: err.code } }
+        : err instanceof PlanItemError
+        ? { requestId: command.requestId, success: false, error: errorMessage }
         : err instanceof BridgeSecurityError
         ? { requestId: command.requestId, success: false, error: err.message, data: { code: err.code } }
         : err instanceof WorkingDirMissingError

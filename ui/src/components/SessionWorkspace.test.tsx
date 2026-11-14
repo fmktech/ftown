@@ -1371,3 +1371,59 @@ it('stops reading the preview while the item is shown and reads it again when th
     if (originalSubtle) Object.defineProperty(globalThis.crypto, 'subtle', originalSubtle); else Reflect.deleteProperty(globalThis.crypto, 'subtle');
   }
 });
+
+it('fetches the board snapshot while the Overview is visible and passes it through', async () => {
+  class TestResizeObserver implements ResizeObserver {
+    constructor(private callback: ResizeObserverCallback) {}
+    observe(target: Element) { this.callback([{ target, contentRect: DOMRect.fromRect({ width: 900 }), borderBoxSize: [], contentBoxSize: [], devicePixelContentBoxSize: [] }], this); }
+    unobserve() {} disconnect() {}
+  }
+  vi.stubGlobal('ResizeObserver', TestResizeObserver);
+  const snapshot = {
+    board: {
+      rootId: 'manager', cursor: 3, cards: [], rollup: {},
+      plan: { items: [{ id: 'p1', title: 'first item', after: [], priority: 2, state: 'todo' as const, createdAt: '2026-11-13T09:00:00.000Z', updatedAt: '2026-11-13T09:00:00.000Z' }], ready: ['p1'] },
+    },
+    events: [
+      { seq: 1, ts: '2026-11-13T09:30:00.000Z', sessionId: 'child', sessionName: 'child', kind: 'status', summary: 'working: row' },
+      { seq: 2, ts: '2026-11-13T09:31:00.000Z', sessionId: 'child', sessionName: 'child', kind: 'result', summary: 'ok' },
+    ],
+    attention: [],
+  };
+  const boardCalls: Array<{ bridgeId: unknown; sessionId: unknown }> = [];
+  const sendCommand = vi.fn((command: Command): Promise<CommandResponse> => {
+    if ((command.type as string) === 'get_session_board') {
+      const payload = command.payload as { bridgeId: string; sessionId: string };
+      boardCalls.push(payload);
+      return Promise.resolve({ requestId: command.requestId, success: true, data: snapshot });
+    }
+    return new Promise(() => {});
+  });
+  const manager: Session = { id: 'manager', bridgeId: 'bridge', name: 'manager', status: 'running', createdAt: '', updatedAt: '', brief: { notes: [], updatedAt: '' } };
+  const child: Session = { id: 'child', bridgeId: 'bridge', name: 'child', status: 'running', createdAt: '', updatedAt: '', parentSessionId: 'manager' };
+  const workspace = (selected: Session, sessions: Session[]) => (
+    <SessionWorkspace session={selected} sessions={sessions} client={null} userId="user" readable={false} sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="terminal" onMobileTab={vi.fn()} onRefit={vi.fn()} idleSince={{ child: '2026-11-13T09:00:00.000Z' }}>
+      <div>Terminal content</div>
+    </SessionWorkspace>
+  );
+  const { rerender } = render(workspace(manager, [manager, child]));
+  // A manager without a side-pane slot shows its Overview by default: the snapshot is fetched.
+  const planned = await screen.findByRole('region', { name: 'planned' });
+  fireEvent.click(within(planned).getByRole('button'));
+  expect(within(planned).getByText('first item')).toBeTruthy();
+  expect(boardCalls).toEqual([{ bridgeId: 'bridge', sessionId: 'manager' }]);
+  // A re-render with unchanged tree content does not refetch.
+  rerender(workspace(manager, [manager, { ...child }]));
+  await act(async () => {});
+  expect(boardCalls).toHaveLength(1);
+  // A tree session update refetches and the snapshot reaches the overview.
+  rerender(workspace(manager, [manager, { ...child, updatedAt: '2026-11-13T09:35:00.000Z' }]));
+  await act(async () => {});
+  expect(boardCalls).toHaveLength(2);
+  expect(within(await screen.findByRole('region', { name: 'events' })).getByText('events · 2')).toBeTruthy();
+  // A session without children never fetches (its overview does not exist).
+  const plain: Session = { id: 'plain', bridgeId: 'bridge', name: 'plain', status: 'running', createdAt: '', updatedAt: '' };
+  rerender(workspace(plain, [plain]));
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 5)); });
+  expect(boardCalls).toHaveLength(2);
+});

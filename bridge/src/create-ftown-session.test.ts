@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path';
 
 import { buildSessionCommand } from './agent-commands.js';
 import { TerminalManager } from './terminal-manager.js';
+import type { PlanItem, PlanState, SessionPlan } from './coordination/contract-c.js';
 import {
   assertProviderAuthAvailable,
   buildChildBriefing,
@@ -15,6 +16,7 @@ import {
   nextAvailableGeneratedName,
   findMissingProviderAuth,
   parseCreateSessionBody,
+  PlanItemError,
   prepareWorkingDir,
   ProviderAuthMissingError,
   relaunchFtownSession,
@@ -23,7 +25,7 @@ import {
   WorkingDirMissingError,
   WorktreeError,
 } from './create-ftown-session.js';
-import type { CreateFtownSessionDeps } from './create-ftown-session.js';
+import type { CreatePlanStoreDep, CreateFtownSessionDeps } from './create-ftown-session.js';
 import type { SessionWorktree, WorktreeCreateRequest } from './coordination/contract-b.js';
 import type { Session } from './types.js';
 
@@ -1380,5 +1382,176 @@ describe('createFtownSession — bridge-owned worktree creation', () => {
     assert.strictEqual(removed[1].wt.path, '/tmp/wt/spawn-fail');
     assert.deepEqual(removed[1].opts, { force: false, deleteBranch: true });
     assert.ok(warnings.some((w) => w.includes('/tmp/wt/spawn-fail')));
+  });
+});
+
+// ─────────────── plan-item create plumbing (phase C, contract-c) ───────────────
+
+describe('parseCreateSessionBody — planItem plumbing', () => {
+  it('accepts p<n> ids and ignores anything else', () => {
+    assert.strictEqual(parseCreateSessionBody({ planItem: 'p1' }).planItem, 'p1');
+    assert.strictEqual(parseCreateSessionBody({ planItem: 'p123456' }).planItem, 'p123456');
+    assert.strictEqual(parseCreateSessionBody({}).planItem, undefined);
+    assert.strictEqual(parseCreateSessionBody({ planItem: 'item1' }).planItem, undefined);
+    assert.strictEqual(parseCreateSessionBody({ planItem: 'p' }).planItem, undefined);
+    assert.strictEqual(parseCreateSessionBody({ planItem: 'p1234567' }).planItem, undefined);
+    assert.strictEqual(parseCreateSessionBody({ planItem: 42 }).planItem, undefined);
+  });
+});
+
+describe('createFtownSession — plan-item binding', () => {
+  function parentPlanSession(): Session {
+    return { ...fakeSession('parent'), parentSessionId: undefined };
+  }
+
+  function planItem(id: string, state: string): PlanItem {
+    return {
+      id,
+      title: `item ${id}`,
+      after: [],
+      priority: 2,
+      state: state as PlanState,
+      createdAt: new Date(0).toISOString(),
+      updatedAt: new Date(0).toISOString(),
+    };
+  }
+
+  interface PlanRecorder { calls: Array<{ parentId: string; itemId: string; childId: string }> }
+  function planStore(
+    plan: SessionPlan | null,
+    recorder?: PlanRecorder,
+    failStart?: Error,
+  ): CreatePlanStoreDep {
+    return {
+      get: async () => plan,
+      startForChild: async (parentId: string, itemId: string, childId: string) => {
+        if (failStart) throw failStart;
+        recorder?.calls.push({ parentId, itemId, childId });
+      },
+    };
+  }
+
+  it('starts a todo item after the child is created', async () => {
+    const harness = fakeDeps([parentPlanSession()]);
+    const recorder: PlanRecorder = { calls: [] };
+    harness.deps.planStore = planStore({ items: [planItem('p1', 'todo')], seq: 1 }, recorder);
+    const session = await createFtownSession(harness.deps, {
+      shellType: 'claude', prompt: 'do p1', parentSessionId: 'parent', planItem: 'p1',
+    });
+    assert.equal(harness.runs.length, 1, 'session launched');
+    assert.deepEqual(recorder.calls, [{ parentId: 'parent', itemId: 'p1', childId: session.id }]);
+    assert.equal(harness.saved.length, 1);
+  });
+
+  it('fails 400-mapped BEFORE creating the session for an unknown item', async () => {
+    const harness = fakeDeps([parentPlanSession()]);
+    const recorder: PlanRecorder = { calls: [] };
+    harness.deps.planStore = planStore({ items: [planItem('p1', 'todo')], seq: 1 }, recorder);
+    await assert.rejects(
+      createFtownSession(harness.deps, {
+        shellType: 'claude', prompt: 'task', parentSessionId: 'parent', planItem: 'p9',
+      }),
+      (err: unknown) => err instanceof PlanItemError && /p9 does not exist/.test(err.message),
+    );
+    assert.equal(harness.saved.length, 0, 'no session record');
+    assert.equal(harness.runs.length, 0, 'no launch');
+    assert.deepEqual(recorder.calls, []);
+  });
+
+  it('fails 400-mapped when the item is not todo', async () => {
+    const harness = fakeDeps([parentPlanSession()]);
+    const recorder: PlanRecorder = { calls: [] };
+    harness.deps.planStore = planStore({ items: [planItem('p1', 'started')], seq: 1 }, recorder);
+    await assert.rejects(
+      createFtownSession(harness.deps, {
+        shellType: 'claude', prompt: 'task', parentSessionId: 'parent', planItem: 'p1',
+      }),
+      (err: unknown) => err instanceof PlanItemError && /p1 is started, not todo/.test(err.message),
+    );
+    assert.equal(harness.saved.length, 0);
+    assert.equal(harness.runs.length, 0);
+  });
+
+  it('requires a parent session', async () => {
+    const harness = fakeDeps();
+    const recorder: PlanRecorder = { calls: [] };
+    harness.deps.planStore = planStore({ items: [planItem('p1', 'todo')], seq: 1 }, recorder);
+    await assert.rejects(
+      createFtownSession(harness.deps, { shellType: 'claude', prompt: 'task', planItem: 'p1' }),
+      (err: unknown) => err instanceof PlanItemError && /requires a parent/.test(err.message),
+    );
+    assert.equal(harness.saved.length, 0);
+    assert.equal(harness.runs.length, 0);
+  });
+
+  it('keeps the session when startForChild fails, warning only', async () => {
+    const harness = fakeDeps([parentPlanSession()]);
+    const warnings: string[] = [];
+    const prevWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(' ')); };
+    try {
+      harness.deps.planStore = planStore(
+        { items: [planItem('p1', 'todo')], seq: 1 },
+        undefined,
+        new Error('plan save race'),
+      );
+      const session = await createFtownSession(harness.deps, {
+        shellType: 'claude', prompt: 'task', parentSessionId: 'parent', planItem: 'p1',
+      });
+      assert.equal(harness.saved.length, 1, 'session stays');
+      assert.equal(session.id, harness.saved[0].id);
+      assert.equal(harness.runs.length, 1, 'session launched');
+      assert.ok(warnings.some((w) => w.includes('plan item p1') && w.includes('plan save race')));
+    } finally {
+      console.warn = prevWarn;
+    }
+  });
+
+  it('fails when the parent has no plan yet', async () => {
+    const harness = fakeDeps([parentPlanSession()]);
+    harness.deps.planStore = planStore(null);
+    await assert.rejects(
+      createFtownSession(harness.deps, {
+        shellType: 'claude', prompt: 'task', parentSessionId: 'parent', planItem: 'p1',
+      }),
+      (err: unknown) => err instanceof PlanItemError && /p1 does not exist/.test(err.message),
+    );
+    assert.equal(harness.saved.length, 0);
+  });
+
+  it('never creates a worktree when plan-item validation fails', async () => {
+    const worktreeCalls: unknown[] = [];
+    const worktrees = {
+      create: async (req: WorktreeCreateRequest): Promise<SessionWorktree> => {
+        worktreeCalls.push(req);
+        return {
+          repoRoot: req.fromDir,
+          path: join(req.fromDir, '.claude', 'worktrees', req.name),
+          branch: req.branch ?? `ftown/${req.name}`,
+          base: req.base ?? 'main',
+          createdByBridge: true,
+        };
+      },
+      remove: async () => {},
+    };
+    for (const case_ of [
+      { label: 'unknown item', plan: { items: [planItem('p1', 'todo')], seq: 1 } as SessionPlan, planItem: 'p9' },
+      { label: 'non-todo item', plan: { items: [planItem('p1', 'started')], seq: 1 } as SessionPlan, planItem: 'p1' },
+      { label: 'no plan yet', plan: null, planItem: 'p1' },
+    ]) {
+      const harness = fakeDeps([parentPlanSession()]);
+      harness.deps.worktrees = worktrees;
+      harness.deps.planStore = planStore(case_.plan);
+      await assert.rejects(
+        createFtownSession(harness.deps, {
+          shellType: 'claude', prompt: 'task', worktree: true,
+          parentSessionId: 'parent', planItem: case_.planItem,
+        }),
+        PlanItemError,
+        case_.label,
+      );
+      assert.equal(harness.saved.length, 0, `${case_.label}: no session record`);
+    }
+    assert.equal(worktreeCalls.length, 0, 'worktree api create never called');
   });
 });

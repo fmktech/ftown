@@ -20,6 +20,7 @@ import { ProcessRunner } from './claude-runner.js';
 import { SessionStore } from './session-store.js';
 import { MailStore } from './mail-store.js';
 import { AttentionStore } from './attention-store.js';
+import type { AttentionItem } from './attention-events.js';
 import { PreviewChatStore } from './preview-chat.js';
 import { BridgePushNotifier } from './push-notifier.js';
 import { LocalApiServer } from './local-api-server.js';
@@ -80,6 +81,23 @@ import type { UpdateRestartContext } from './update-runtime-contract.js';
 const BRIDGE_VERSION = JSON.parse(
   readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8'),
 ).version as string;
+
+/** Open attention items for one session, any route. Pages until the ledger is exhausted. */
+async function openBoardAttention(store: AttentionStore, sessionId: string): Promise<AttentionItem[]> {
+  const items: AttentionItem[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < 20; page += 1) {
+    const result = await store.list(sessionId, {
+      ...(cursor !== undefined ? { cursor } : {}),
+      limit: 100,
+      includeResolved: false,
+    });
+    items.push(...result.events);
+    if (!result.hasMore || result.cursor === cursor) break;
+    cursor = result.cursor;
+  }
+  return items;
+}
 
 /** LAN IPv4 addresses for the solo banner (loopback excluded). */
 function networkInterfacesForBanner(): string[] {
@@ -819,6 +837,7 @@ program
       notifyScriptPath,
       wireTerminalInput,
       getTerminalSize: (sid) => terminalManager.getSize(sid),
+      planStore: coordination.plan,
     };
     localApiServer.setSessionFactory(sessionFactoryDeps);
 
@@ -995,6 +1014,13 @@ program
       let result: CommandResponse | undefined;
       await createCommandHandler({ bridgeId, security, sessionController, attentionStore, updates, updateEffects, pullRequestStatuses, pullRequestReview,
         modelRouting: () => modelRouting,
+        sessionBoard: {
+          board: (query) => coordination.board.board(query),
+          // Read when get_session_board asks. An eager property would touch
+          // coordination while every other command is building its handler.
+          get events() { return coordination.events; },
+          openAttention: (sessionId) => openBoardAttention(attentionStore, sessionId),
+        },
         enqueueSessionMessage: (session, message) => localApiServer.enqueueSessionMessage(session, message),
         acceptSessionMail: (session, body) => localApiServer.acceptSessionMail(session, body),
         publishAttentionChanged: (sessionId) => { localApiServer.emit('event', { sessionId, eventName: 'AttentionSnapshot', data: {} }); },
