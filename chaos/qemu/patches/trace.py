@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
 # Investigation-only instrumentation (build arg TRACE=1, image ftown-chaos-qemu:trace).
 # Logs every QEMU_CLOCK_VIRTUAL timer callback and every icount warp to $QEMU_CHAOS_TRACE.
 import sys
