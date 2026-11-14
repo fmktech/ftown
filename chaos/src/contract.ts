@@ -146,8 +146,13 @@ export interface ScheduledFault {
  */
 export type BuildSchedule = (seed: number, level: ChaosLevel, rng: Rng) => ScheduledFault[];
 
-export const FAULT_WINDOW_START_MS = 20_000;
-export const FAULT_WINDOW_END_MS = 240_000;
+/**
+ * The window opens only after bring-up is complete: under the instruction-counted guest, creating
+ * the four sessions through the CLI takes about 30 s of guest time. Everything that must exist
+ * before the first fault (all sessions, the first ask and its answer) happens before this.
+ */
+export const FAULT_WINDOW_START_MS = 90_000;
+export const FAULT_WINDOW_END_MS = 330_000;
 /** After the last heal the supervisor waits this long with no faults before the final checkpoint. */
 export const RUN_QUIESCE_MS = 150_000;
 /** Bound used by "after heal" properties: violations are judged at the final checkpoint. */
@@ -296,7 +301,7 @@ export type Rec =
   | { k: 'checkpoint'; t: number; name: string; final: boolean; snap: Snapshot }
   | { k: 'verdict'; prop: string; kind: PropKind; status: PropStatus; evidence: string[] };
 
-export const CONTRACT_VERSION = 4;
+export const CONTRACT_VERSION = 5;
 
 /** Operations the supervisor's workload driver performs through the real ftown CLI. */
 export type WorkloadOp =
