@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { AgentEvent, AgentScript, AgentStep, Clock, Role } from '../contract.ts';
 import { runAgent } from './agent.ts';
-import type { CliOpts, CliResult } from './agent.ts';
+import type { AgentState, CliOpts, CliResult, StateStore } from './agent.ts';
 
 function fakeClock(): Clock {
   let t = 0;
@@ -274,4 +274,215 @@ test('a throwing mail read is a cli_error; later reads still run and the agent f
     { ev: 'cli_error', cmd: 'mail read', error: 'exception' },
   ]);
   assert.equal(t.calls.length, 3);
+});
+
+function memStore(initial: AgentState | null = null): { store: StateStore; saved: AgentState[]; current: () => AgentState | null } {
+  let state: AgentState | null = initial ? { ...initial } : null;
+  const saved: AgentState[] = [];
+  return {
+    saved,
+    current: () => state,
+    store: {
+      load: () => (state ? { ...state } : null),
+      save: (s) => {
+        state = { ...s };
+        saved.push({ ...s });
+      },
+    },
+  };
+}
+
+test('resume after kill at each point never reuses a tag and never skips a step', async () => {
+  const script: AgentScript = {
+    role: 'child1',
+    readMailOnNudge: false,
+    answerRoutedQuestions: false,
+    steps: [
+      { do: 'mail_send', to: 'parent', type: 'message', body: 'a' },
+      { do: 'mail_send', to: 'parent', type: 'message', body: 'b' },
+      { do: 'ask', title: 't', message: 'm', options: ['yes', 'no'] },
+      { do: 'mail_send', to: 'parent', type: 'result', body: 'c' },
+    ],
+  };
+
+  // 1. Kill BEFORE tag is persisted (state is still null / initial { nextTag: 2000, cursor: 0 }).
+  //    On resume, step 0 runs with CHAOS-M-2000 (never used before).
+  {
+    const mem = memStore(null);
+    const events: AgentEvent[] = [];
+    const stdin = lineQueue();
+    stdin.end();
+    await runAgent({
+      script,
+      clock: fakeClock(),
+      cli: async () => ok('{}'),
+      hook: async () => true,
+      log: (e) => events.push(e),
+      stdinLines: stdin,
+      state: mem.store,
+      pid: 101,
+    });
+    const tags = events.filter((e) => e.ev === 'mail_sent').map((e) => e.tag);
+    assert.deepEqual(tags, ['CHAOS-M-2000', 'CHAOS-M-2001', 'CHAOS-M-2003']);
+    assert.deepEqual(mem.current(), { nextTag: 2004, cursor: 4 });
+  }
+
+  // 2. Kill AFTER tag is persisted, BEFORE CLI call returns (step 0 was in flight with 2000;
+  //    state file has { nextTag: 2001, cursor: 0 }).
+  //    On resume, step 0 re-runs with CHAOS-M-2001 (never reuses 2000), and all 4 steps complete.
+  {
+    const mem = memStore({ nextTag: 2001, cursor: 0 });
+    const events: AgentEvent[] = [];
+    const calls: string[][] = [];
+    const stdin = lineQueue();
+    stdin.end();
+    await runAgent({
+      script,
+      clock: fakeClock(),
+      cli: async (args) => {
+        calls.push(args);
+        return ok('{}');
+      },
+      hook: async () => true,
+      log: (e) => events.push(e),
+      stdinLines: stdin,
+      state: mem.store,
+      pid: 102,
+    });
+    assert.equal(events[0].ev, 'start');
+    const mailTags = events.filter((e) => e.ev === 'mail_sent').map((e) => e.tag);
+    assert.deepEqual(mailTags, ['CHAOS-M-2001', 'CHAOS-M-2002', 'CHAOS-M-2004']);
+    const askTags = events.filter((e) => e.ev === 'ask_sent').map((e) => e.askTag);
+    assert.deepEqual(askTags, ['CHAOS-Q-2003']);
+    assert.equal(calls.length, 4);
+    assert.deepEqual(mem.current(), { nextTag: 2005, cursor: 4 });
+  }
+
+  // 3. Kill AFTER step 0 completes (state file has { nextTag: 2001, cursor: 1 }).
+  //    On resume, step 0 is NOT re-run; continues at step 1 with CHAOS-M-2001.
+  {
+    const mem = memStore({ nextTag: 2001, cursor: 1 });
+    const events: AgentEvent[] = [];
+    const calls: string[][] = [];
+    const stdin = lineQueue();
+    stdin.end();
+    await runAgent({
+      script,
+      clock: fakeClock(),
+      cli: async (args) => {
+        calls.push(args);
+        return ok('{}');
+      },
+      hook: async () => true,
+      log: (e) => events.push(e),
+      stdinLines: stdin,
+      state: mem.store,
+      pid: 103,
+    });
+    const mailTags = events.filter((e) => e.ev === 'mail_sent').map((e) => e.tag);
+    assert.deepEqual(mailTags, ['CHAOS-M-2001', 'CHAOS-M-2003']);
+    const askTags = events.filter((e) => e.ev === 'ask_sent').map((e) => e.askTag);
+    assert.deepEqual(askTags, ['CHAOS-Q-2002']);
+    assert.equal(calls.length, 3);
+    assert.deepEqual(mem.current(), { nextTag: 2004, cursor: 4 });
+  }
+
+  // 4. Verify persistence order during a single run: nextTag is persisted BEFORE cli() is called,
+  //    and cursor is persisted AFTER the step completes.
+  {
+    const mem = memStore(null);
+    const snapshotsAtCli: (AgentState | null)[] = [];
+    const stdin = lineQueue();
+    stdin.end();
+    await runAgent({
+      script: { role: 'child1', readMailOnNudge: false, answerRoutedQuestions: false, steps: [script.steps[0]] },
+      clock: fakeClock(),
+      cli: async () => {
+        snapshotsAtCli.push(mem.current());
+        return ok('{}');
+      },
+      hook: async () => true,
+      log: () => undefined,
+      stdinLines: stdin,
+      state: mem.store,
+      pid: 104,
+    });
+    assert.deepEqual(snapshotsAtCli, [{ nextTag: 2001, cursor: 0 }]);
+    assert.deepEqual(mem.saved, [
+      { nextTag: 2001, cursor: 0 },
+      { nextTag: 2001, cursor: 1 },
+    ]);
+  }
+});
+
+test('resume during sleep re-runs the sleep in full', async () => {
+  let slept = 0;
+  const clock: Clock = {
+    now: () => slept,
+    sleep: async (ms) => {
+      slept += ms;
+    },
+  };
+  const mem = memStore({ nextTag: 2000, cursor: 0 });
+  const stdin = lineQueue();
+  stdin.end();
+  await runAgent({
+    script: {
+      role: 'child1',
+      readMailOnNudge: false,
+      answerRoutedQuestions: false,
+      steps: [{ do: 'sleep', ms: 500 }, { do: 'hook', event: 'Stop' }],
+    },
+    clock,
+    cli: async () => ok('{}'),
+    hook: async () => true,
+    log: () => undefined,
+    stdinLines: stdin,
+    state: mem.store,
+    pid: 105,
+  });
+  assert.equal(slept, 500);
+  assert.deepEqual(mem.current(), { nextTag: 2000, cursor: 2 });
+});
+
+test('corrupt state logs cli_error, writes stderr, and exits non-zero without running steps', async () => {
+  const events: AgentEvent[] = [];
+  const stderrOut: string[] = [];
+  const exits: number[] = [];
+  const calls: string[][] = [];
+  const stdin = lineQueue();
+  stdin.end();
+  const res = await runAgent({
+    script: {
+      role: 'child2',
+      readMailOnNudge: false,
+      answerRoutedQuestions: false,
+      steps: [{ do: 'mail_send', to: 'parent', type: 'message', body: 'should-not-run' }],
+    },
+    clock: fakeClock(),
+    cli: async (args) => {
+      calls.push(args);
+      return ok('{}');
+    },
+    hook: async () => true,
+    log: (e) => events.push(e),
+    stdinLines: stdin,
+    state: {
+      load: () => {
+        throw new SyntaxError('Unexpected end of JSON input');
+      },
+      save: () => undefined,
+    },
+    stderr: (m) => stderrOut.push(m),
+    exit: (c) => exits.push(c),
+    pid: 106,
+  });
+  assert.equal(res.exitCode, 1);
+  assert.deepEqual(exits, [1]);
+  assert.equal(calls.length, 0);
+  assert.deepEqual(events, [
+    { ev: 'start', pid: 106 },
+    { ev: 'cli_error', cmd: 'state', error: 'corrupt state file' },
+  ]);
+  assert.ok(stderrOut.join('').includes('corrupt state file'));
 });

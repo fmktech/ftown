@@ -81,14 +81,25 @@ test('M4 pass: nudges within waking count', () => {
   ];
   assert.deepEqual(run('M4', log), { status: 'pass', evidence: [] });
 });
-test('M4 violated: double nudge for one mail (agent-side send counts, duplicates collapse)', () => {
+test('M4 violated: double nudge for one mail (agent-side send counts)', () => {
   const log = [
     agentSent(1, 'root', 'CHAOS-M-1000', 'child1', 'task'),
-    opSend(2, 'CHAOS-M-1000', 'child1', 'task'),
     nudge(3, 'child1', 1),
     nudge(9, 'child1', 1),
   ];
   assert.deepEqual(run('M4', log), { status: 'violated', evidence: ['nudge excess to=child1 nudged=2 waking=1 untagged=0'] });
+});
+test('M4 pass: 12 sends + 4 untagged with 16 nudges where two sends share a tag; fails when nudges exceed W + U', () => {
+  const sends: Rec[] = [];
+  for (let i = 1; i <= 11; i++) sends.push(opSend(i, `CHAOS-M-${i}`, 'child1', 'task'));
+  sends.push(agentSent(12, 'root', 'CHAOS-M-1', 'child1', 'task'));
+  const log = (n: number): Rec[] => [
+    ...sends,
+    checkpoint(13, [session('child1', [], { untaggedWakingMail: 4 })]),
+    nudge(14, 'child1', n),
+  ];
+  assert.deepEqual(run('M4', log(16)), { status: 'pass', evidence: [] });
+  assert.deepEqual(run('M4', log(17)), { status: 'violated', evidence: ['nudge excess to=child1 nudged=17 waking=12 untagged=4'] });
 });
 test('M4 violated: fyi-only role nudged', () => {
   const log = [

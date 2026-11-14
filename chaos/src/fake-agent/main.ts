@@ -4,7 +4,7 @@ import { createInterface } from 'node:readline';
 import { GUEST } from '../contract.ts';
 import type { AgentScript } from '../contract.ts';
 import { runAgent } from './agent.ts';
-import { epochClock, parseArgs, fileLogger, idsFromFile, isRole, rawFailureWriter, realCli, realHook } from './cli.ts';
+import { epochClock, parseArgs, fileLogger, fileStateStore, idsFromFile, isRole, rawFailureWriter, realCli, realHook } from './cli.ts';
 
 async function main(): Promise<void> {
   const { role, script: scriptPath } = parseArgs(process.argv.slice(2));
@@ -34,6 +34,7 @@ async function main(): Promise<void> {
     rawFailure: rawFailureWriter(logDir, role, clock),
     stdinLines: rl,
     resolveId: idsFromFile(process.env.CHAOS_IDS_FILE || GUEST.idsFile),
+    state: fileStateStore(logDir, role),
   });
   if (result.exitCode !== null) return;
   // Steps done (and stdin closed): stay alive, idle, until killed.
