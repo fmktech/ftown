@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fakeClock } from '../core/clock.ts';
+import { PROPERTY_IDS } from '../contract.ts';
 import type { Rec, Snapshot } from '../contract.ts';
 import { runCheckpoints } from './checkpoints.ts';
 import { agentCommand, createArgs, idsDeadline, parseAgentLog, parseCli, parseCreatedId } from './main.ts';
@@ -51,8 +52,8 @@ test('agent log merge drops stdin_line and keeps other events', () => {
   ]);
 });
 
-test('all eleven properties are declared', () => {
-  assert.equal(allProperties.length, 11);
+test('every declared property is in the set', () => {
+  assert.deepEqual(allProperties.map((p) => p.id).sort(), [...PROPERTY_IDS].sort());
 });
 
 test('checkpoints every 30 s until stopped', async () => {
