@@ -488,4 +488,83 @@ describe('annotateTiers order and isolation', () => {
     result[0].picks[0].scopedLimits.push({ scope: 'Y', kind: 'weekly', usedPercent: null, resetsAt: null });
     assert.equal(quota[0].scopedLimits?.length, 1);
   });
+
+  it('computes per-pick availability for agy picks from their pool windows when the three pools are at different levels', () => {
+    const fiveHourReset = '2026-11-13T15:00:00.000Z';
+    const weeklyReset = '2026-11-19T22:00:00.000Z';
+    const agyQuota = quotaRow({
+      provider: 'agy',
+      windows: [
+        {
+          kind: 'five_hour',
+          usedPercent: 100,
+          resetsAt: fiveHourReset,
+          windowMinutes: 300,
+          note: 'tightest: Gemini Models',
+        },
+        {
+          kind: 'weekly',
+          usedPercent: 60,
+          resetsAt: weeklyReset,
+          windowMinutes: 10080,
+          note: 'tightest: Gemini Models',
+        },
+      ],
+      scopedLimits: [
+        { scope: 'Gemini Models', kind: 'five_hour', usedPercent: 100, resetsAt: fiveHourReset },
+        { scope: 'Gemini Models', kind: 'weekly', usedPercent: 60, resetsAt: weeklyReset },
+        { scope: 'Claude and GPT models', kind: 'five_hour', usedPercent: 90, resetsAt: fiveHourReset },
+        { scope: 'Claude and GPT models', kind: 'weekly', usedPercent: 20, resetsAt: weeklyReset },
+        { scope: 'Gemini 4 Argon', kind: 'weekly', usedPercent: 1, resetsAt: weeklyReset },
+      ],
+    });
+    const agyRouting = routingRow({
+      provider: 'agy',
+      availability: 'exhausted',
+      leftPercent: 0,
+      bindingWindow: 'five_hour',
+      resetsAt: fiveHourReset,
+      reason: '5-hour window used up, resets in 3h 0m (tightest: Gemini Models)',
+    });
+    const agyModels = modelList({
+      provider: 'agy',
+      models: [
+        model({ id: 'gemini-4-argon-medium', name: 'Gemini 4 Argon (Medium)', efforts: ['medium'] }),
+        model({ id: 'claude-opus-5-5-high', name: 'Claude Opus 5.5 (Thinking)', efforts: ['high'] }),
+        model({ id: 'gpt-oss-120b-medium', name: 'GPT-OSS 120B (Medium)', efforts: ['medium'] }),
+        model({ id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', efforts: [] }),
+        model({ id: 'unknown-future-model', name: 'Unknown Future Model', efforts: [] }),
+      ],
+    });
+    const config: ModelRoutingConfig = {
+      version: 1,
+      steering: '',
+      tiers: [
+        {
+          name: 'complex',
+          description: 'All agy pools',
+          guidance: '',
+          picks: [
+            pick({ provider: 'agy', model: 'gemini-4-argon-medium', effort: 'medium' }),
+            pick({ provider: 'agy', model: 'claude-opus-5-5-high', effort: 'high' }),
+            pick({ provider: 'agy', model: 'gpt-oss-120b-medium', effort: 'medium' }),
+            pick({ provider: 'agy', model: 'gemini-3.8-flash', effort: null }),
+            pick({ provider: 'agy', model: 'unknown-future-model', effort: null }),
+          ],
+        },
+      ],
+    };
+
+    const [tier] = annotateTiers(config, [agyQuota], [agyRouting], [agyModels], new Date(NOW));
+    assert.deepEqual(
+      tier.picks.map((entry) => [entry.model, entry.availability, entry.leftPercent, entry.resetsAt]),
+      [
+        ['gemini-4-argon-medium', 'available', 99, weeklyReset],
+        ['claude-opus-5-5-high', 'low', 10, fiveHourReset],
+        ['gpt-oss-120b-medium', 'low', 10, fiveHourReset],
+        ['gemini-3.8-flash', 'exhausted', 0, fiveHourReset],
+        ['unknown-future-model', 'exhausted', 0, fiveHourReset],
+      ],
+    );
+  });
 });

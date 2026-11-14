@@ -914,6 +914,78 @@ describe('runQuota model routing in table mode', () => {
 
     assert.equal(modelCalls.length, 0);
   });
+
+  it('prints per-pick agy pool availability and labels the provider-level route with the tightest pool', async () => {
+    const { adviseQuotaRouting } = await import('./quota/routing.js');
+    const { annotateTiers } = await import('./quota/annotate.js');
+    const fiveHourReset = '2026-11-13T15:00:00.000Z';
+    const weeklyReset = '2026-11-19T22:00:00.000Z';
+    const agyRow: ProviderQuota = {
+      provider: 'agy',
+      status: 'ok',
+      plan: null,
+      source: 'live',
+      observedAt: NOW.toISOString(),
+      message: null,
+      windows: [
+        { kind: 'five_hour', usedPercent: 100, resetsAt: fiveHourReset, windowMinutes: 300, note: 'tightest: Gemini Models' },
+        { kind: 'weekly', usedPercent: 60, resetsAt: weeklyReset, windowMinutes: 10080, note: 'tightest: Gemini Models' },
+      ],
+      scopedLimits: [
+        { scope: 'Gemini Models', kind: 'five_hour', usedPercent: 100, resetsAt: fiveHourReset },
+        { scope: 'Gemini Models', kind: 'weekly', usedPercent: 60, resetsAt: weeklyReset },
+        { scope: 'Claude and GPT models', kind: 'five_hour', usedPercent: 90, resetsAt: fiveHourReset },
+        { scope: 'Claude and GPT models', kind: 'weekly', usedPercent: 20, resetsAt: weeklyReset },
+        { scope: 'Gemini 4 Argon', kind: 'weekly', usedPercent: 1, resetsAt: weeklyReset },
+      ],
+    };
+    const agyConfig: ModelRoutingConfig = {
+      version: 1,
+      steering: '',
+      tiers: [
+        {
+          name: 'complex',
+          description: 'Agy pools',
+          guidance: '',
+          picks: [
+            { provider: 'agy', model: 'gemini-4-argon-medium', effort: null },
+            { provider: 'agy', model: 'claude-opus-5-5-high', effort: null },
+            { provider: 'agy', model: 'gemini-3.8-flash', effort: null },
+          ],
+        },
+      ],
+    };
+    const { deps } = fakeDeps({
+      quota: { agy: async () => agyRow },
+      models: {
+        agy: async () => ({
+          ...okModels('agy'),
+          models: [
+            { id: 'gemini-4-argon-medium', name: null, isDefault: false, description: null, contextTokens: null, efforts: [], defaultEffort: null },
+            { id: 'claude-opus-5-5-high', name: null, isDefault: false, description: null, contextTokens: null, efforts: [], defaultEffort: null },
+            { id: 'gemini-3.8-flash', name: null, isDefault: false, description: null, contextTokens: null, efforts: [], defaultEffort: null },
+          ],
+        }),
+      },
+      advise: adviseQuotaRouting,
+      routing: okRouting(agyConfig),
+      annotate: annotateTiers,
+    });
+    const result = await runQuota(['agy'], deps);
+
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.stdout, [
+      'TABLE(agy)',
+      '',
+      'Route first: agy (exhausted, tightest: Gemini Models)',
+      '',
+      'Your tiers:',
+      'complex - Agy pools',
+      '  1. agy gemini-4-argon-medium  available 99% left',
+      '  2. agy claude-opus-5-5-high  low 10% left',
+      '  3. agy gemini-3.8-flash  exhausted 0% left',
+    ].join('\n'));
+  });
 });
 
 describe('runQuota JSON mode', () => {

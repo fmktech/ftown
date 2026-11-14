@@ -5,7 +5,15 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { fetchAgyQuota, parseAgyUsage, resolveAgyBinary } from './agy.js';
+import {
+  AGY_QUOTA_POOLS,
+  agyPoolForModel,
+  agyQuotaPool,
+  agyWindowsForModel,
+  fetchAgyQuota,
+  parseAgyUsage,
+  resolveAgyBinary,
+} from './agy.js';
 
 const NOW = new Date('2026-11-13T10:00:00.000Z');
 const NOT_FOUND = 'agy CLI not found';
@@ -313,5 +321,115 @@ describe('resolveAgyBinary and fetchAgyQuota', () => {
     assert.equal(quota.status, 'error');
     assert.equal(quota.message, UNEXPECTED);
     assert.equal(quota.message?.includes('GARBAGE'), false);
+  });
+});
+
+describe('agyQuotaPool and agyWindowsForModel', () => {
+  it('lists the three rate-limit pool names', () => {
+    assert.deepEqual(AGY_QUOTA_POOLS, ['Gemini Models', 'Gemini 4 Argon', 'Claude and GPT models']);
+    assert.equal(agyPoolForModel, agyQuotaPool);
+  });
+
+  it('maps gemini-4-argon* models to Gemini 4 Argon (case-insensitive)', () => {
+    assert.equal(agyQuotaPool('gemini-4-argon-low'), 'Gemini 4 Argon');
+    assert.equal(agyQuotaPool('gemini-4-argon-medium'), 'Gemini 4 Argon');
+    assert.equal(agyQuotaPool('gemini-4-argon-high'), 'Gemini 4 Argon');
+    assert.equal(agyQuotaPool('  GEMINI-4-ARGON-MEDIUM  '), 'Gemini 4 Argon');
+  });
+
+  it('maps models containing claude or gpt to Claude and GPT models', () => {
+    assert.equal(agyQuotaPool('claude-opus-5-5-low'), 'Claude and GPT models');
+    assert.equal(agyQuotaPool('claude-sonnet-5-5-high'), 'Claude and GPT models');
+    assert.equal(agyQuotaPool('gpt-oss-120b-medium'), 'Claude and GPT models');
+    assert.equal(agyQuotaPool('agy-claude-custom'), 'Claude and GPT models');
+    assert.equal(agyQuotaPool('custom-gpt-5'), 'Claude and GPT models');
+  });
+
+  it('maps other gemini* models to Gemini Models', () => {
+    assert.equal(agyQuotaPool('gemini-3.8-flash'), 'Gemini Models');
+    assert.equal(agyQuotaPool('gemini-3.8-flash-high'), 'Gemini Models');
+    assert.equal(agyQuotaPool('gemini-4-hydrogen-high'), 'Gemini Models');
+    assert.equal(agyQuotaPool('gemini-pro-orchestrator-g1-pro'), 'Gemini Models');
+  });
+
+  it('returns null for unknown or blank model ids', () => {
+    assert.equal(agyQuotaPool(''), null);
+    assert.equal(agyQuotaPool('   '), null);
+    assert.equal(agyQuotaPool('mystery-model-x'), null);
+    assert.equal(agyQuotaPool('llama-4-maverick'), null);
+  });
+
+  it('extracts per-pool windows when the three pools are at different levels, and falls back to tightest for unknown', () => {
+    const quota = parseAgyUsage(
+      usageBody([
+        {
+          name: 'Gemini Models',
+          buckets: [
+            { id: 'gemini-5h', window: '5h', remaining_fraction: 0, reset_time: '2026-11-13T15:00:00Z' },
+            { id: 'gemini-weekly', window: 'weekly', remaining_fraction: 0.4, reset_time: '2026-11-20T15:00:00Z' },
+          ],
+        },
+        {
+          name: 'Claude and GPT models',
+          buckets: [
+            { id: '3p-5h', window: '5h', remaining_fraction: 0.1, reset_time: '2026-11-13T16:00:00Z' },
+            { id: '3p-weekly', window: 'weekly', remaining_fraction: 0.8, reset_time: '2026-11-20T16:00:00Z' },
+          ],
+        },
+        {
+          name: 'Gemini 4 Argon',
+          buckets: [
+            { id: 'argon-weekly', window: 'weekly', remaining_fraction: 0.99, reset_time: '2026-11-20T17:00:00Z' },
+          ],
+        },
+      ]),
+      NOW.toISOString(),
+    );
+
+    assert.deepEqual(agyWindowsForModel(quota, 'gemini-4-argon-medium'), [
+      {
+        kind: 'weekly',
+        usedPercent: 1,
+        resetsAt: '2026-11-20T17:00:00.000Z',
+        windowMinutes: 10080,
+        note: 'Gemini 4 Argon',
+      },
+    ]);
+
+    assert.deepEqual(agyWindowsForModel(quota, 'claude-opus-5-5-high'), [
+      {
+        kind: 'five_hour',
+        usedPercent: 90,
+        resetsAt: '2026-11-13T16:00:00.000Z',
+        windowMinutes: 300,
+        note: 'Claude and GPT models',
+      },
+      {
+        kind: 'weekly',
+        usedPercent: 20,
+        resetsAt: '2026-11-20T16:00:00.000Z',
+        windowMinutes: 10080,
+        note: 'Claude and GPT models',
+      },
+    ]);
+
+    assert.deepEqual(agyWindowsForModel(quota, 'gemini-3.8-flash'), [
+      {
+        kind: 'five_hour',
+        usedPercent: 100,
+        resetsAt: '2026-11-13T15:00:00.000Z',
+        windowMinutes: 300,
+        note: 'Gemini Models',
+      },
+      {
+        kind: 'weekly',
+        usedPercent: 60,
+        resetsAt: '2026-11-20T15:00:00.000Z',
+        windowMinutes: 10080,
+        note: 'Gemini Models',
+      },
+    ]);
+
+    assert.deepEqual(agyWindowsForModel(quota, 'unknown-model'), quota.windows);
   });
 });
