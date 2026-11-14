@@ -30,7 +30,7 @@ export async function takeSnapshot(opts: SnapshotOpts): Promise<Snapshot> {
         id === null ? Promise.resolve(false) : tmuxAlive(id, opts.tmux),
         procAlive(role, procOpts),
       ]);
-      return { role, status: disk.status, tmuxAlive: tmux, procAlive: proc, inbox: disk.inbox, inboxParses: disk.inboxParses, attention: disk.attention, attentionParses: disk.attentionParses };
+      return { role, status: disk.status, tmuxAlive: tmux, procAlive: proc, inbox: disk.inbox, inboxParses: disk.inboxParses, untaggedWakingMail: disk.untaggedWakingMail, attention: disk.attention, attentionParses: disk.attentionParses };
     }),
   );
   const tree = await readTree(opts.dataDir, opts.ids);

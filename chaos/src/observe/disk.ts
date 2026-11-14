@@ -17,6 +17,7 @@ export interface SessionDisk {
   status: SessionObs['status'];
   inbox: MailObs[];
   inboxParses: boolean;
+  untaggedWakingMail: number;
   attention: AttentionObs[];
   attentionParses: boolean;
 }
@@ -84,13 +85,14 @@ function nonEmpty(value: unknown): boolean {
  * Lines that are valid JSON objects but not messages (the PR checkpoint line, `_ftown`) are skipped,
  * as the bridge does. Mail without a CHAOS tag is not workload mail and is left out of inbox[].
  */
-export async function readInbox(dataDir: string, id: string | null): Promise<{ inbox: MailObs[]; inboxParses: boolean }> {
-  if (id === null) return { inbox: [], inboxParses: true };
+export async function readInbox(dataDir: string, id: string | null): Promise<{ inbox: MailObs[]; inboxParses: boolean; untaggedWakingMail: number }> {
+  if (id === null) return { inbox: [], inboxParses: true, untaggedWakingMail: 0 };
   const read = await readText(join(sessionDir(dataDir, id), 'inbox.jsonl'));
-  if (read.kind === 'missing') return { inbox: [], inboxParses: true };
-  if (read.kind === 'error') return { inbox: [], inboxParses: false };
+  if (read.kind === 'missing') return { inbox: [], inboxParses: true, untaggedWakingMail: 0 };
+  if (read.kind === 'error') return { inbox: [], inboxParses: false, untaggedWakingMail: 0 };
   const inbox: MailObs[] = [];
   let parses = true;
+  let untaggedWaking = 0;
   for (const line of read.text.split('\n')) {
     if (!line.trim()) continue;
     let value: unknown;
@@ -106,9 +108,12 @@ export async function readInbox(dataDir: string, id: string | null): Promise<{ i
     }
     if (typeof value._ftown === 'string') continue;
     if (typeof value.id !== 'string' || typeof value.body !== 'string') continue;
-    const tag = MAIL_TAG_RE.exec(value.body);
-    if (!tag) continue;
     if (typeof value.type !== 'string' || !MAIL_TYPES.includes(value.type)) continue;
+    const tag = MAIL_TAG_RE.exec(value.body);
+    if (!tag) {
+      if (value.type !== 'fyi') untaggedWaking++;
+      continue;
+    }
     const via = typeof value.deliveredVia === 'string' && DELIVERED_VIA.includes(value.deliveredVia)
       ? (value.deliveredVia as MailObs['deliveredVia'])
       : null;
@@ -121,7 +126,7 @@ export async function readInbox(dataDir: string, id: string | null): Promise<{ i
       nudged: nonEmpty(value.nudgedAt),
     });
   }
-  return { inbox, inboxParses: parses };
+  return { inbox, inboxParses: parses, untaggedWakingMail: untaggedWaking };
 }
 
 function askTagOf(item: Record<string, unknown>): string | null {

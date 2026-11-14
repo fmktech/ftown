@@ -106,17 +106,26 @@ const M4: Property = {
       if (set === undefined) waking.set(s.to, (set = new Set()));
       set.add(s.tag);
     }
-    if (waking.size === 0) return { status: 'unexercised', evidence: [] };
     const nudged = new Map<Role, number>();
     for (const r of log) {
       if (r.k === 'agent' && r.e.ev === 'nudge') nudged.set(r.role, (nudged.get(r.role) ?? 0) + r.e.n);
     }
+    const untagged = new Map<Role, number>();
+    for (const r of log) {
+      if (r.k !== 'checkpoint') continue;
+      for (const s of r.snap.sessions) {
+        untagged.set(s.role, Math.max(untagged.get(s.role) ?? 0, s.untaggedWakingMail));
+      }
+    }
+    const roles = new Set<Role>([...waking.keys(), ...untagged.keys()]);
+    if (![...roles].some((r) => (waking.get(r)?.size ?? 0) + (untagged.get(r) ?? 0) > 0)) {
+      return { status: 'unexercised', evidence: [] };
+    }
     const evidence: string[] = [];
-    const fyiTargets = new Set(sends.filter((s) => s.type === 'fyi').map((s) => s.to));
     for (const [role, n] of nudged) {
       const w = waking.get(role)?.size ?? 0;
-      if (w === 0 && fyiTargets.has(role)) evidence.push(`nudge for fyi-only to=${role}`);
-      else if (n > w) evidence.push(`nudge excess to=${role} nudged=${n} waking=${w}`);
+      const u = untagged.get(role) ?? 0;
+      if (n > w + u) evidence.push(`nudge excess to=${role} nudged=${n} waking=${w} untagged=${u}`);
     }
     return evidence.length === 0
       ? { status: 'pass', evidence: [] }

@@ -37,8 +37,18 @@ echo "chaos-init: cmd=$CHAOS_CMD seed=$CHAOS_SEED level=$CHAOS_LEVEL"
 
 rm -f /run/chaos-exit-sent
 cd /
-node /opt/chaos/src/guest/main.ts
-code=$?
+# PID 1 must reap orphans (killed bridge/agent trees reparent to us). Run node as a background
+# job and block in `wait`: dash's wait calls waitpid(-1), so every exited orphan is reaped while
+# we wait for node, and no zombie accumulates during the run.
+node /opt/chaos/src/guest/main.ts &
+node_pid=$!
+code=
+while [ -z "$code" ]; do
+  wait "$node_pid"; rc=$?
+  # wait returns >128 when interrupted by a signal; node is then still running.
+  if kill -0 "$node_pid" 2>/dev/null; then continue; fi
+  code=$rc
+done
 echo "chaos-init: main exited $code"
 if [ ! -e /run/chaos-exit-sent ]; then
   # main did not report; that is an infrastructure failure unless it exited cleanly with a code.

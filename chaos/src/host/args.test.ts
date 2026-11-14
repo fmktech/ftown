@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { defaultJobs, parseArgs, parseSeedRange, UsageError } from './args.ts';
+import { parseArgs, parseSeedRange, UsageError } from './args.ts';
 
 test('seed ranges', () => {
   assert.deepEqual(parseSeedRange('1-4'), [1, 2, 3, 4]);
@@ -21,14 +21,14 @@ test('selftest defaults and flags', () => {
   assert.deepEqual(c, { cmd: 'selftest', times: 3, vm: { memMb: 2048, icountShift: 1, timeoutSec: 900, jobs: 1 } });
   const d = parseArgs(['selftest']);
   assert.ok(d.cmd === 'selftest');
-  assert.deepEqual([d.vm.memMb, d.vm.jobs], [1536, null]);
+  assert.deepEqual([d.vm.memMb, d.vm.jobs], [1536, 1]);
   assert.equal(parseArgs(['selftest']).cmd === 'selftest' && (parseArgs(['selftest']) as { times: number }).times, 2);
 });
 
 test('run, campaign and repro', () => {
   const r = parseArgs(['run', '--seeds', '1-4']);
   assert.ok(r.cmd === 'run');
-  assert.deepEqual([r.seeds, r.level, r.times, r.vm.jobs], [[1, 2, 3, 4], 'high', 2, null]);
+  assert.deepEqual([r.seeds, r.level, r.times, r.vm.jobs], [[1, 2, 3, 4], 'high', 2, 1]);
   const c = parseArgs(['campaign', '--seeds', '1-20', '--times', '2', '--level', 'low']);
   assert.ok(c.cmd === 'campaign');
   assert.deepEqual([c.seeds.length, c.level], [20, 'low']);
@@ -53,10 +53,3 @@ test('usage errors', () => {
   assert.deepEqual(parseArgs(['run', '-h']), { cmd: 'help' });
 });
 
-test('default jobs fit Docker memory', () => {
-  const GiB = 1024 ** 3;
-  assert.equal(defaultJobs(4 * GiB, 3072), 1);
-  assert.equal(defaultJobs(4 * GiB, 1024), 2);
-  assert.equal(defaultJobs(64 * GiB, 3072), 2);
-  assert.equal(defaultJobs(1 * GiB, 3072), 1);
-});

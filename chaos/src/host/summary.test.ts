@@ -12,7 +12,7 @@ test('identical runs pass with the guest exit code', () => {
   assert.equal(s.nondeterminism, null);
   assert.deepEqual(s.violated, ['M1']);
   assert.equal(s.wallSec, 3);
-  assert.match(formatSeedLine(s), /^seed 3  H_run=[0-9a-f]{12}  violated=M1  wall=3\.0s  exit=1$/);
+  assert.match(formatSeedLine(s), /^seed 3  H_run=[0-9a-f]{12}  violated=M1  wall=3\.0s \(1\.0\+2\.0\)  exit=1$/);
 });
 
 test('differing runs are nondeterminism with the first differing line', () => {

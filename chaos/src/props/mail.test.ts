@@ -88,7 +88,7 @@ test('M4 violated: double nudge for one mail (agent-side send counts, duplicates
     nudge(3, 'child1', 1),
     nudge(9, 'child1', 1),
   ];
-  assert.deepEqual(run('M4', log), { status: 'violated', evidence: ['nudge excess to=child1 nudged=2 waking=1'] });
+  assert.deepEqual(run('M4', log), { status: 'violated', evidence: ['nudge excess to=child1 nudged=2 waking=1 untagged=0'] });
 });
 test('M4 violated: fyi-only role nudged', () => {
   const log = [
@@ -96,11 +96,28 @@ test('M4 violated: fyi-only role nudged', () => {
     opSend(2, 'CHAOS-M-2', 'child2', 'fyi'),
     nudge(3, 'child2', 1),
   ];
-  assert.deepEqual(run('M4', log), { status: 'violated', evidence: ['nudge for fyi-only to=child2'] });
+  assert.deepEqual(run('M4', log), { status: 'violated', evidence: ['nudge excess to=child2 nudged=1 waking=0 untagged=0'] });
 });
 test('M4 unexercised: only fyi or refused', () => {
   const log = [opSend(1, 'CHAOS-M-1', 'child1', 'fyi'), opSend(2, 'CHAOS-M-2', 'child1', 'task', false)];
   assert.equal(run('M4', log).status, 'unexercised');
+});
+
+test('M4 untagged bridge mail: W=4 U=1 nudged=5 passes, 6 violates', () => {
+  const base = (n: number): Rec[] => [
+    opSend(1, 'CHAOS-M-1', 'root', 'task'), opSend(2, 'CHAOS-M-2', 'root', 'task'),
+    opSend(3, 'CHAOS-M-3', 'root', 'message'), opSend(4, 'CHAOS-M-4', 'root', 'result'),
+    checkpoint(5, [session('root', [], { untaggedWakingMail: 0 })]),
+    checkpoint(6, [session('root', [], { untaggedWakingMail: 1 })]),
+    checkpoint(7, [session('root', [], { untaggedWakingMail: 0 })]),
+    nudge(8, 'root', n - 2), nudge(9, 'root', 2),
+  ];
+  assert.deepEqual(run('M4', base(5)), { status: 'pass', evidence: [] });
+  assert.deepEqual(run('M4', base(6)), { status: 'violated', evidence: ['nudge excess to=root nudged=6 waking=4 untagged=1'] });
+});
+test('M4 exercised by untagged mail alone; unexercised when W+U=0', () => {
+  assert.equal(run('M4', [checkpoint(5, [session('root', [], { untaggedWakingMail: 1 })]), nudge(6, 'root', 1)]).status, 'pass');
+  assert.equal(run('M4', [checkpoint(5, [session('root')])]).status, 'unexercised');
 });
 
 // M5

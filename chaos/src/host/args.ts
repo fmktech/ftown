@@ -1,5 +1,6 @@
 // Command-line parsing for `npm run test:chaos -- …`. Pure.
 import type { ChaosLevel } from '../contract.ts';
+import { parseSeeds } from '../core/seeds.ts';
 
 export interface VmOptions {
   /** Guest RAM in MiB. */
@@ -8,8 +9,8 @@ export interface VmOptions {
   icountShift: number;
   /** Host wall-clock watchdog per boot, seconds. */
   timeoutSec: number;
-  /** Concurrent VMs; null = default (2, capped by Docker memory). */
-  jobs: number | null;
+  /** Concurrent VMs. */
+  jobs: number;
 }
 
 export type Command =
@@ -26,21 +27,13 @@ export const USAGE = `usage: npm run test:chaos -- <command> [flags]
   run --seeds 1-4 [--level high] [--times 2]    run seeds, compare runs of each seed
   repro --seed N [--times 5] [--level high]     (also: --repro N) one seed, several times
   campaign --seeds 1-20 [--times 2]             run + chaos/out/campaign.json
-common: --jobs N (default 2, capped by Docker memory)  --mem 3072 (selftest 1536)  --timeout <s>  --icount-shift 1`;
+common: --jobs 1  --mem 3072 (selftest 1536)  --timeout <s>  --icount-shift 1`;
 
-/** Parses "1-4", "7", "1,3,5-7". Result sorted and unique. */
+/** Seed list per core/seeds.ts (e.g. "1-3,2,7"); its errors become usage errors (exit 64). */
 export function parseSeedRange(spec: string): number[] {
-  const out = new Set<number>();
-  for (const part of spec.split(',')) {
-    const m = /^(\d+)(?:-(\d+))?$/.exec(part.trim());
-    if (!m) throw new UsageError(`bad seed range: ${JSON.stringify(spec)}`);
-    const lo = Number(m[1]);
-    const hi = m[2] === undefined ? lo : Number(m[2]);
-    if (!Number.isSafeInteger(lo) || !Number.isSafeInteger(hi) || hi < lo) throw new UsageError(`bad seed range: ${JSON.stringify(spec)}`);
-    if (hi - lo > 100_000) throw new UsageError(`seed range too large: ${spec}`);
-    for (let s = lo; s <= hi; s++) out.add(s);
+  try { return parseSeeds(spec); } catch (err) {
+    throw new UsageError(`bad seed list ${JSON.stringify(spec)}: ${err instanceof Error ? err.message : String(err)}`);
   }
-  return [...out].sort((a, b) => a - b);
 }
 
 const VALUE_FLAGS = new Set(['image', 'times', 'seeds', 'seed', 'repro', 'level', 'jobs', 'mem', 'timeout', 'icount-shift']);
@@ -89,7 +82,7 @@ export function parseArgs(argv: readonly string[]): Command {
     memMb: flags.has('mem') ? posInt('mem', flags.get('mem')!, 1536) : isSelftest ? 1536 : 3072,
     icountShift: flags.has('icount-shift') ? posInt('icount-shift', flags.get('icount-shift')!, 0) : 1,
     timeoutSec: flags.has('timeout') ? posInt('timeout', flags.get('timeout')!) : isSelftest ? 900 : 3600,
-    jobs: flags.has('jobs') ? posInt('jobs', flags.get('jobs')!) : null,
+    jobs: flags.has('jobs') ? posInt('jobs', flags.get('jobs')!) : 1,
   };
   if (vm.icountShift > 10) throw new UsageError('--icount-shift must be 0..10');
   const defaultTimes = sub === 'repro' ? 5 : 2;
@@ -114,8 +107,3 @@ export function parseArgs(argv: readonly string[]): Command {
   return { cmd: sub === 'campaign' ? 'campaign' : 'run', seeds, level, times, vm };
 }
 
-/** Default concurrency: 2, but only as many VMs as fit in Docker's memory (guest RAM + 512 MiB each, 80% of total). Pure. */
-export function defaultJobs(dockerMemBytes: number, memMb: number): number {
-  const perVm = (memMb + 512) * 1024 * 1024;
-  return Math.max(1, Math.min(2, Math.floor((dockerMemBytes * 0.8) / perVm)));
-}

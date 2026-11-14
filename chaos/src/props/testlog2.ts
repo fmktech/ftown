@@ -4,7 +4,7 @@ import type { AgentEvent, AttentionObs, FaultKind, Rec, Role, SessionObs, Snapsh
 export function sess(role: Role, over: Partial<SessionObs> = {}): SessionObs {
   return {
     role, status: 'running', tmuxAlive: true, procAlive: true,
-    inbox: [], inboxParses: true, attention: [], attentionParses: true, ...over,
+    inbox: [], inboxParses: true, attention: [], attentionParses: true, untaggedWakingMail: 0, ...over,
   };
 }
 
