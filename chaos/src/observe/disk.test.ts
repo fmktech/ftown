@@ -39,6 +39,7 @@ test('inbox: tagged mail only, in file order, checkpoint and untagged skipped', 
   assert.deepEqual(r.inbox[2], { tag: 'CHAOS-M-2001', type: 'message', fromRole: 'child2', delivered: false, deliveredVia: null, nudged: true });
   assert.deepEqual(r.inbox[3], { tag: 'CHAOS-M-1002', type: 'fyi', fromRole: 'child1', delivered: true, deliveredVia: 'drain', nudged: false });
   assert.deepEqual(r.inbox[4], { tag: 'CHAOS-M-3', type: 'message', fromRole: 'external', delivered: true, deliveredVia: 'nudge', nudged: true });
+  assert.equal(r.untaggedWakingMail, 2, 'untagged escalation + untagged answer mail; untagged fyi and checkpoint are not counted');
   assert.equal(r.inbox[5].fromRole, 'unknown', 'no from= in the body');
   assert.equal(r.inbox[5].deliveredVia, 'cli');
 });
@@ -46,13 +47,14 @@ test('inbox: tagged mail only, in file order, checkpoint and untagged skipped', 
 test('inbox: a torn last line makes parses false but keeps earlier mail', async () => {
   const r = await readInbox(DATA, 'child-0001');
   assert.equal(r.inboxParses, false);
+  assert.equal(r.untaggedWakingMail, 0, 'the torn line is not counted');
   assert.deepEqual(r.inbox.map((m) => m.tag), ['CHAOS-M-1']);
   assert.equal(r.inbox[0].fromRole, 'root');
 });
 
 test('inbox: missing file or null id is empty and parses', async () => {
-  assert.deepEqual(await readInbox(DATA, 'child-0002'), { inbox: [], inboxParses: true });
-  assert.deepEqual(await readInbox(DATA, null), { inbox: [], inboxParses: true });
+  assert.deepEqual(await readInbox(DATA, 'child-0002'), { inbox: [], inboxParses: true, untaggedWakingMail: 0 });
+  assert.deepEqual(await readInbox(DATA, null), { inbox: [], inboxParses: true, untaggedWakingMail: 0 });
 });
 
 test('inbox: a checkpoint line alone is not corrupt; a non-object JSON line is', async () => {
@@ -61,7 +63,7 @@ test('inbox: a checkpoint line alone is not corrupt; a non-object JSON line is',
     await mkdir(join(dir, 'sessions', 's'), { recursive: true });
     const file = join(dir, 'sessions', 's', 'inbox.jsonl');
     await writeFile(file, '{"_ftown":"pr-event-checkpoint","version":1}\n\n');
-    assert.deepEqual(await readInbox(dir, 's'), { inbox: [], inboxParses: true });
+    assert.deepEqual(await readInbox(dir, 's'), { inbox: [], inboxParses: true, untaggedWakingMail: 0 });
     await writeFile(file, '42\n');
     assert.equal((await readInbox(dir, 's')).inboxParses, false);
   } finally {
