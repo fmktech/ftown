@@ -1,10 +1,10 @@
 // Real implementations of the fake agent's injected dependencies. Node built-ins only.
 import { spawn } from 'node:child_process';
-import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
+import { appendFileSync, closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { GUEST, ROLES } from '../contract.ts';
 import type { AgentEvent, AgentLogLine, Clock, Role } from '../contract.ts';
-import type { CliOpts, CliResult } from './agent.ts';
+import type { AgentState, CliOpts, CliResult, StateStore } from './agent.ts';
 
 const DEFAULT_FTOWN_CLI = `${GUEST.bridgeDir}/dist/ftown-cli.js`;
 const DEFAULT_HOOK_SCRIPT = `${GUEST.bridgeDir}/hooks/notify.sh`;
@@ -119,6 +119,48 @@ export function rawFailureWriter(dir: string, role: Role, clock: Clock): (cmd: s
   return (cmd, r) => {
     mkdirSync(dir, { recursive: true });
     appendFileSync(file, `t=${clock.now()} cmd=${cmd} code=${r.code}\n--- stderr\n${r.stderr}\n--- stdout\n${r.stdout}\n===\n`);
+  };
+}
+
+/** Persists { nextTag, cursor } atomically in <dir>/<role>.state.json (temp file in dir, fsync, rename). */
+export function fileStateStore(dir: string, role: Role): StateStore {
+  const file = join(dir, `${role}.state.json`);
+  const tmp = join(dir, `${role}.state.json.tmp.${process.pid}`);
+  return {
+    load(): AgentState | null {
+      let raw: string;
+      try {
+        raw = readFileSync(file, 'utf8');
+      } catch (err: unknown) {
+        if (err && typeof err === 'object' && 'code' in err && err.code === 'ENOENT') {
+          return null;
+        }
+        throw err;
+      }
+      const parsed: unknown = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error(`invalid state object in ${file}`);
+      }
+      const obj = parsed as Record<string, unknown>;
+      if (
+        typeof obj.nextTag !== 'number' || !Number.isInteger(obj.nextTag) || obj.nextTag < 0 ||
+        typeof obj.cursor !== 'number' || !Number.isInteger(obj.cursor) || obj.cursor < 0
+      ) {
+        throw new Error(`invalid nextTag/cursor in ${file}`);
+      }
+      return { nextTag: obj.nextTag, cursor: obj.cursor };
+    },
+    save(state: AgentState): void {
+      mkdirSync(dir, { recursive: true });
+      const fd = openSync(tmp, 'w');
+      try {
+        writeFileSync(fd, JSON.stringify({ nextTag: state.nextTag, cursor: state.cursor }));
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
+      renameSync(tmp, file);
+    },
   };
 }
 

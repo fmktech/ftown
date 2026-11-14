@@ -99,12 +99,10 @@ const M4: Property = {
   title: 'nudge-once',
   check(log): PropResult {
     const sends = acceptedSends(log);
-    const waking = new Map<Role, Set<string>>();
+    const waking = new Map<Role, number>();
     for (const s of sends) {
       if (s.type === 'fyi') continue;
-      let set = waking.get(s.to);
-      if (set === undefined) waking.set(s.to, (set = new Set()));
-      set.add(s.tag);
+      waking.set(s.to, (waking.get(s.to) ?? 0) + 1);
     }
     const nudged = new Map<Role, number>();
     for (const r of log) {
@@ -118,12 +116,12 @@ const M4: Property = {
       }
     }
     const roles = new Set<Role>([...waking.keys(), ...untagged.keys()]);
-    if (![...roles].some((r) => (waking.get(r)?.size ?? 0) + (untagged.get(r) ?? 0) > 0)) {
+    if (![...roles].some((r) => (waking.get(r) ?? 0) + (untagged.get(r) ?? 0) > 0)) {
       return { status: 'unexercised', evidence: [] };
     }
     const evidence: string[] = [];
     for (const [role, n] of nudged) {
-      const w = waking.get(role)?.size ?? 0;
+      const w = waking.get(role) ?? 0;
       const u = untagged.get(role) ?? 0;
       if (n > w + u) evidence.push(`nudge excess to=${role} nudged=${n} waking=${w} untagged=${u}`);
     }
