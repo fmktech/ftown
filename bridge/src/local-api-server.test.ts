@@ -2055,3 +2055,93 @@ describe('LocalApiServer worktree create', () => {
     assert.deepEqual((await store.listSessions()).map((session) => session.id), ['parent-1']);
   });
 });
+
+describe('LocalApiServer shellType alias and validation', () => {
+  it('maps shellType agy to canonical antigravity and stores it on POST /api/sessions', async (t) => {
+    const home = mkdtempSync(join(tmpdir(), 'ftw-shell-alias-'));
+    const server = new LocalApiServer();
+    const token = 'alias-token';
+    const store = new SessionStore(join(home, 'data'));
+    const runs: Array<{ command: string }> = [];
+    const runner = {
+      getPreferredRuntime: () => 'direct',
+      run: (id: string, command: string) => { runs.push({ command }); },
+      stop: () => false,
+      isRunning: () => false,
+    } as unknown as ProcessRunner;
+    const centrifugo = { publishSessionUpdate: async () => {} } as unknown as CentrifugoClient;
+    server.setAuthToken(token);
+    server.setDependencies(store, runner, centrifugo, 'user-1');
+    server.setSessionFactory({
+      store,
+      runner,
+      centrifugo,
+      userId: 'user-1',
+      bridgeId: 'bridge-1',
+      hookPort: 4321,
+      hookToken: 'hook-token',
+      notifyScriptPath: '/tmp/notify.sh',
+      wireTerminalInput: () => {},
+    });
+    const port = await server.start();
+    t.after(() => {
+      server.stop();
+      rmSync(home, { recursive: true, force: true });
+    });
+
+    const res = await api(port, token, 'POST', '/api/sessions', {
+      shellType: 'agy',
+      model: 'gemini-4-hydrogen-medium',
+      prompt: 'hello world',
+    });
+    assert.equal(res.status, 201);
+    assert.equal(res.data.session.shellType, 'antigravity');
+    const stored = await store.listSessions();
+    assert.equal(stored.length, 1);
+    assert.equal(stored[0].shellType, 'antigravity');
+    assert.match(stored[0].command, /^agy --dangerously-skip-permissions --model 'gemini-4-hydrogen-medium'/);
+  });
+
+  it('rejects unknown shellType with 400 listing valid values on POST /api/sessions', async (t) => {
+    const home = mkdtempSync(join(tmpdir(), 'ftw-shell-reject-'));
+    const server = new LocalApiServer();
+    const token = 'reject-token';
+    const store = new SessionStore(join(home, 'data'));
+    const runner = {
+      getPreferredRuntime: () => 'direct',
+      run: () => { throw new Error('must not launch'); },
+      stop: () => false,
+      isRunning: () => false,
+    } as unknown as ProcessRunner;
+    const centrifugo = { publishSessionUpdate: async () => {} } as unknown as CentrifugoClient;
+    server.setAuthToken(token);
+    server.setDependencies(store, runner, centrifugo, 'user-1');
+    server.setSessionFactory({
+      store,
+      runner,
+      centrifugo,
+      userId: 'user-1',
+      bridgeId: 'bridge-1',
+      hookPort: 4321,
+      hookToken: 'hook-token',
+      notifyScriptPath: '/tmp/notify.sh',
+      wireTerminalInput: () => {},
+    });
+    const port = await server.start();
+    t.after(() => {
+      server.stop();
+      rmSync(home, { recursive: true, force: true });
+    });
+
+    const res = await api(port, token, 'POST', '/api/sessions', {
+      shellType: 'bogus-harness',
+      prompt: 'hello world',
+    });
+    assert.equal(res.status, 400);
+    assert.match(String(res.data.error), /Invalid shellType "bogus-harness"/);
+    assert.match(String(res.data.error), /Valid values:/);
+    assert.match(String(res.data.error), /antigravity/);
+    assert.match(String(res.data.error), /agy/);
+    assert.equal((await store.listSessions()).length, 0);
+  });
+});

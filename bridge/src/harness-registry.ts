@@ -476,6 +476,59 @@ export function isShellType(value: unknown): value is ShellType {
 }
 
 /**
+ * Single alias map from routing/quota provider ids to canonical harness keys.
+ * QuotaProviderId uses 'agy' while the harness registry key is 'antigravity'.
+ * claude, codex, grok, muse, and opencode match their canonical harness keys directly.
+ */
+export const SHELL_ALIASES: Readonly<Record<string, ShellType>> = Object.freeze({
+  agy: 'antigravity',
+});
+
+/** All valid shell type inputs: canonical harness keys followed by recognized aliases. */
+export const ACCEPTED_SHELL_TYPES: readonly string[] = Object.freeze([
+  ...SHELL_TYPES,
+  ...Object.keys(SHELL_ALIASES),
+]);
+
+export class InvalidShellTypeError extends Error {
+  readonly status = 400;
+  readonly code = 'invalid_shell_type';
+
+  constructor(invalidType: unknown) {
+    const value = typeof invalidType === 'string' ? invalidType : String(invalidType);
+    super(`Invalid shellType "${value}". Valid values: ${ACCEPTED_SHELL_TYPES.join(', ')}`);
+    this.name = 'InvalidShellTypeError';
+  }
+}
+
+export function isShellTypeOrAlias(value: unknown): boolean {
+  return isShellType(value) || (typeof value === 'string' && Object.prototype.hasOwnProperty.call(SHELL_ALIASES, value));
+}
+
+/**
+ * Resolves a shellType input to its canonical harness key.
+ * - If undefined or null, returns undefined.
+ * - If a valid harness key, returns it.
+ * - If a recognized alias (e.g. 'agy'), returns the canonical harness key ('antigravity').
+ * - Otherwise, throws an InvalidShellTypeError listing valid values.
+ */
+export function normalizeShellType(value: unknown): ShellType | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (isShellType(trimmed)) {
+      return trimmed;
+    }
+    if (Object.prototype.hasOwnProperty.call(SHELL_ALIASES, trimmed)) {
+      return SHELL_ALIASES[trimmed];
+    }
+  }
+  throw new InvalidShellTypeError(value);
+}
+
+/**
  * Whether the initial prompt may be passed as a CLI argument for this harness,
  * given the session's resume fields (a resume suppresses the prompt arg).
  */
