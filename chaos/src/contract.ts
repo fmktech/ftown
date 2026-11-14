@@ -171,14 +171,20 @@ export interface ProfileTiming {
   /** Interval between periodic checkpoints. "After heal" properties are judged at the final one. */
   checkpointEveryMs: number;
   /**
-   * Every agent script's last step must begin by this instant (guest ms since t0), so the
-   * workload overlaps the fault window and has finished well before the final checkpoint.
+   * Every agent script's last step, and every workload op, must begin by this instant (guest ms
+   * since t0, so the agent's own start offset counts), so the workload overlaps the fault window
+   * and has finished well before the final checkpoint.
+   *
+   * Sizing rule: the bridge nudges a hooked session about unread mail 60 s after the mail (or
+   * after a restart re-arms it). The final checkpoint must therefore come more than 60 s after
+   * both the last waking mail and the last heal, with margin for a bridge restart (a few seconds):
+   * faultWindowEndMs + quiesceMs >= max(workloadEndMs, faultWindowEndMs) + 80_000.
    */
   workloadEndMs: number;
 }
 
 export const PROFILE: Record<RunProfile, ProfileTiming> = {
-  short: { faultWindowStartMs: 75_000, faultWindowEndMs: 115_000, quiesceMs: 60_000, checkpointEveryMs: 15_000, workloadEndMs: 135_000 },
+  short: { faultWindowStartMs: 75_000, faultWindowEndMs: 115_000, quiesceMs: 90_000, checkpointEveryMs: 15_000, workloadEndMs: 110_000 },
   soak: { faultWindowStartMs: 90_000, faultWindowEndMs: 330_000, quiesceMs: 150_000, checkpointEveryMs: 30_000, workloadEndMs: 450_000 },
 };
 
