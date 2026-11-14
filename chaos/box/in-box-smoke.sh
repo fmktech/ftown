@@ -41,6 +41,19 @@ sleep 1
 echo "--- /data/sessions/$childid/inbox.jsonl"; cat "/data/sessions/$childid/inbox.jsonl" 2>&1
 step mail-in-inbox grep -q 'CHAOS-M-1 from=external to=child1' "/data/sessions/$childid/inbox.jsonl"
 
+# Agent mail read in the exact form the fake agent uses (global --json before the subcommand).
+mr=$(as_ftown env FTOWN_SESSION_ID="$childid" ftown harness --json mail read 2>&1); echo "$mr"
+step mail-read-json sh -c "printf '%s' \"\$1\" | node -e 'let s=\"\";process.stdin.on(\"data\",d=>s+=d).on(\"end\",()=>{const j=JSON.parse(s);process.exit(j.sessionId===process.argv[1]&&j.messages.some(m=>m.body===\"CHAOS-M-1 from=external to=child1\"&&m.deliveredAt)?0:1)})' \"\$2\"" _ "$mr" "$childid"
+
+# Real installed hook script, with port/token as the bridge injects them (from bridge.json here).
+hp=$(jq -r .port /data/bridge.json); ht=$(jq -r .token /data/bridge.json)
+pl='{"hook_event_name":"Stop","session_id":"'"$childid"'"}'
+step hook-script-run as_ftown sh -c 'printf "%s" "$1" | FTOWN_SESSION_ID="$2" FTOWN_HOOK_PORT="$3" FTOWN_HOOK_TOKEN="$4" "$CHAOS_HOOK_SCRIPT"' _ "$pl" "$childid" "$hp" "$ht"
+# Debug run: the same POST notify.sh makes, showing the HTTP status the bridge returns.
+code=$(printf '%s' "$pl" | jq -c --arg sid "$childid" '. + {ftown_session_id: $sid, ftown_session_source: ""}' | curl -s -o /dev/null -w '%{http_code}' -X POST "http://localhost:$hp/hook" -H 'Content-Type: application/json' -H "Authorization: Bearer $ht" --data-binary @-)
+echo "hook POST status: $code"
+step hook-accepted-200 test "$code" = 200
+
 tm=$(as_ftown tmux -L ftown ls 2>&1); echo "$tm"
 step tmux-root sh -c "printf '%s' \"\$1\" | grep -q \"ftown-$rootid\"" _ "$tm"
 step tmux-child sh -c "printf '%s' \"\$1\" | grep -q \"ftown-$childid\"" _ "$tm"
