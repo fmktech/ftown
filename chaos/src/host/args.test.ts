@@ -46,6 +46,17 @@ test('run, campaign and repro', () => {
   assert.deepEqual([t.seeds, t.times, t.level], [[0], 2, 'off']);
 });
 
+test('drop faults', () => {
+  const r = parseArgs(['repro', '--seed', '3', '--drop-faults', 'f2,clock_jump_fwd']);
+  assert.ok(r.cmd === 'run');
+  assert.equal(r.dropFaults, 'f2,clock_jump_fwd');
+  const n = parseArgs(['run', '--seeds', '1']);
+  assert.ok(n.cmd === 'run');
+  assert.equal(n.dropFaults, null);
+  for (const bad of ['F2', 'f2;rm', 'f2,', ',f2', 'a b', '']) assert.throws(() => parseArgs(['run', '--seeds', '1', '--drop-faults', bad]), UsageError, bad);
+  assert.throws(() => parseArgs(['campaign', '--seeds', '1', '--drop-faults', 'f1']), UsageError);
+});
+
 test('usage errors', () => {
   const bad = [
     ['run'], ['frob'], ['run', '--seeds'], ['run', '--seeds', '1', '--level', 'max'], ['selftest', '--times', '0'],

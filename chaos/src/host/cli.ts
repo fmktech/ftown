@@ -28,8 +28,8 @@ function requireBuild(): void {
   console.log(`image ${info.image}  kernel ${info.kernelVersion}  initramfs sha256 ${info.initramfsSha256} (${info.initramfsBytes} bytes)`);
 }
 
-function params(cmd: GuestParams['cmd'], seed: number, level: GuestParams['level'], vm: VmOptions): GuestParams {
-  return { cmd, seed, level, memMb: vm.memMb, icountShift: vm.icountShift };
+function params(cmd: GuestParams['cmd'], seed: number, level: GuestParams['level'], vm: VmOptions, dropFaults: string | null = null): GuestParams {
+  return { cmd, seed, level, memMb: vm.memMb, icountShift: vm.icountShift, dropFaults };
 }
 
 async function selftest(times: number, vm: VmOptions): Promise<number> {
@@ -92,7 +92,8 @@ async function runSeeds(c: Extract<Command, { cmd: 'run' | 'campaign' }>): Promi
   mkdirSync(OUT_DIR, { recursive: true });
   const tasks = c.seeds.flatMap((seed) => Array.from({ length: c.times }, (_, k) => ({ seed, k })));
   const results = await pool(c.vm.jobs, tasks.map(({ seed, k }) => async (): Promise<BootResult> => {
-    const o = await boot(params('run', seed, c.level, c.vm), join(OUT_DIR, String(seed), `run${k + 1}`), c.vm.timeoutSec);
+    const seedDir = c.dropFaults === null ? String(seed) : `${seed}-drop-${c.dropFaults}`;
+    const o = await boot(params('run', seed, c.level, c.vm, c.dropFaults), join(OUT_DIR, seedDir, `run${k + 1}`), c.vm.timeoutSec);
     const canon = o.files.get('canon.jsonl');
     if (o.infraError === null && canon === undefined) {
       return { exitCode: EXIT.infra, infraError: 'guest sent no canon.jsonl', hash: null, content: null, wallMs: o.wallMs };

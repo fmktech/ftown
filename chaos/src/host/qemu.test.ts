@@ -14,6 +14,12 @@ test('qemu command line is hermetic and deterministic', () => {
   assert.equal(a.filter((x) => x === '-serial').length, 2);
 });
 
+test('drop faults go on the kernel command line only when set', () => {
+  const base = { cmd: 'run' as const, seed: 1, level: 'high' as const, memMb: 3072, icountShift: 1 };
+  assert.ok(!qemuArgs(base).join(' ').includes('chaos.drop'));
+  assert.ok(qemuArgs({ ...base, dropFaults: 'f2,f4' }).at(-1)!.endsWith(' chaos.drop=f2,f4'));
+});
+
 test('debug overrides', () => {
   const a = qemuArgs({ cmd: 'selftest', seed: 0, level: 'off', memMb: 1536, icountShift: 1 });
   assert.deepEqual(withDebugOverrides(a, {}), a);

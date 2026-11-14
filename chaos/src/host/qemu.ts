@@ -14,6 +14,8 @@ export interface GuestParams {
   level: ChaosLevel;
   memMb: number;
   icountShift: number;
+  /** Fault ids/kinds the guest must skip ([a-z0-9_,]), or null. */
+  dropFaults?: string | null;
 }
 
 export const RTC_BASE = '2026-01-01T00:00:00';
@@ -25,6 +27,7 @@ export function qemuArgs(p: GuestParams): string[] {
     'nokaslr', 'norandmaps', 'tsc=reliable', 'clocksource=tsc', 'no_timer_check', 'mitigations=off',
     'quiet', 'loglevel=4', 'rdinit=/init',
     `chaos.cmd=${p.cmd}`, `chaos.seed=${p.seed}`, `chaos.level=${p.level}`,
+    ...(p.dropFaults ? [`chaos.drop=${p.dropFaults}`] : []),
   ].join(' ');
   return [
     'qemu-system-x86_64',
@@ -93,7 +96,9 @@ export async function boot(p: GuestParams, outDir: string, timeoutSec: number): 
   // sharing) at the moment the container exits.
   const dockerArgs = [
     'run', '--name', name, '--network', 'none', '-v', `${CACHE_DIR}:/in:ro`,
-    QEMU_IMAGE, 'sh', '-c', 'mkdir -p /out && : > /out/console.log && : > /out/frames.txt && exec "$@"', 'sh', ...withDebugOverrides(qemuArgs(p)),
+    // Investigation knob: CHAOS_QEMU_IMAGE selects e.g. the tracing build (writes /out/trace.txt).
+    '-e', 'QEMU_CHAOS_TRACE=/out/trace.txt',
+    process.env.CHAOS_QEMU_IMAGE ?? QEMU_IMAGE, 'sh', '-c', 'mkdir -p /out && : > /out/console.log && : > /out/frames.txt && exec "$@"', 'sh', ...withDebugOverrides(qemuArgs(p)),
   ];
   const started = performance.now();
   let timedOut = false;
