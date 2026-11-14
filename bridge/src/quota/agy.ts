@@ -29,6 +29,42 @@ const USAGE_ARGS = ['-p', '/usage', '--output-format', 'json'] as const;
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 const FIVE_HOUR_MINUTES = 300;
 const WEEKLY_MINUTES = 10080;
+const WINDOW_MINUTES_BY_KIND: Record<QuotaWindowKind, number> = {
+  five_hour: FIVE_HOUR_MINUTES,
+  weekly: WEEKLY_MINUTES,
+};
+
+/**
+ * Antigravity (`agy`) rate-limit pool names as reported in `scopedLimits`.
+ * - `'Gemini Models'`: Gemini models except Argon
+ * - `'Gemini 4 Argon'`: Gemini 4 Argon models (`gemini-4-argon*`)
+ * - `'Claude and GPT models'`: Claude and GPT models served through `agy`
+ */
+export const AGY_QUOTA_POOLS = [
+  'Gemini Models',
+  'Gemini 4 Argon',
+  'Claude and GPT models',
+] as const;
+
+export type AgyQuotaPool = (typeof AGY_QUOTA_POOLS)[number];
+
+/**
+ * Pure mapping from an `agy` model ID to its rate-limit pool (`scopedLimits` scope):
+ * - `gemini-4-argon*` -> `'Gemini 4 Argon'`
+ * - IDs containing `claude` or `gpt` -> `'Claude and GPT models'`
+ * - Other `gemini*` -> `'Gemini Models'`
+ * - Unknown / unrecognized IDs -> `null` (callers fall back to the tightest pool).
+ */
+export function agyQuotaPool(modelId: string): AgyQuotaPool | null {
+  const id = modelId.trim().toLowerCase();
+  if (id.length === 0) return null;
+  if (id.startsWith('gemini-4-argon')) return 'Gemini 4 Argon';
+  if (id.includes('claude') || id.includes('gpt')) return 'Claude and GPT models';
+  if (id.startsWith('gemini')) return 'Gemini Models';
+  return null;
+}
+
+export const agyPoolForModel = agyQuotaPool;
 const NOT_FOUND_MESSAGE = 'agy CLI not found';
 const NO_BUCKETS_MESSAGE = 'agy reported no usage buckets';
 const UNEXPECTED_OUTPUT_MESSAGE = 'unexpected output from `agy -p /usage`';
@@ -208,6 +244,45 @@ export function parseAgyUsage(body: unknown, observedAt: string): ProviderQuota 
   };
   if (scopedLimits.length > 0) quota.scopedLimits = scopedLimits;
   return quota;
+}
+
+/**
+ * Pure: returns the quota windows that govern an `agy` model on `row`.
+ * When `modelId` maps to a known pool and `row.scopedLimits` carries at least one
+ * bucket for that pool, returns those pool windows (with `five_hour` = 300 min and
+ * `weekly` = 10080 min). When `modelId` is unknown (`agyQuotaPool` returns `null`)
+ * or the pool has no entries in `row.scopedLimits`, falls back to `row.windows`
+ * (the tightest pool per window kind).
+ */
+export function agyWindowsForModel(
+  row: Pick<ProviderQuota, 'windows' | 'scopedLimits'>,
+  modelId: string,
+): QuotaWindow[] {
+  const pool = agyQuotaPool(modelId);
+  const scoped = row.scopedLimits;
+  if (pool !== null && Array.isArray(scoped) && scoped.length > 0) {
+    const matches = scoped.filter((limit) => limit.scope === pool);
+    if (matches.length > 0) {
+      const windows: QuotaWindow[] = [];
+      for (const kind of ['five_hour', 'weekly'] as const) {
+        const ofKind = matches.filter((entry) => entry.kind === kind);
+        if (ofKind.length === 0) continue;
+        let best = ofKind[0];
+        for (const entry of ofKind.slice(1)) {
+          if (rankOf(entry.usedPercent) > rankOf(best.usedPercent)) best = entry;
+        }
+        windows.push({
+          kind,
+          usedPercent: best.usedPercent,
+          resetsAt: best.resetsAt,
+          windowMinutes: WINDOW_MINUTES_BY_KIND[kind],
+          note: pool,
+        });
+      }
+      if (windows.length > 0) return windows;
+    }
+  }
+  return Array.isArray(row.windows) ? row.windows.map((window) => ({ ...window })) : [];
 }
 
 /** Pure: extracts the JSON object from stdout: the whole text, else the last line starting with `{`. */

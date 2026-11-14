@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { adviseQuotaRouting, assessWindow } from './routing.js';
+import { advisePickRouting, adviseQuotaRouting, assessWindow } from './routing.js';
 import type { ProviderQuota, QuotaWindow } from './types.js';
 
 const NOW = new Date('2026-11-13T12:00:00.000Z');
@@ -655,5 +655,65 @@ describe('adviseQuotaRouting', () => {
       rows.map((r) => r.provider),
       order,
     );
+  });
+
+  it('labels the provider-level agy summary with the tightest pool and computes per-pick availability across three pools', () => {
+    const fiveHourReset = inMinutes(180);
+    const weeklyReset = inMinutes(9240);
+    const agyRow = row({
+      provider: 'agy',
+      windows: [
+        win({
+          kind: 'five_hour',
+          usedPercent: 100,
+          resetsAt: fiveHourReset,
+          windowMinutes: FIVE_HOUR_MINUTES,
+          note: 'tightest: Gemini Models',
+        }),
+        win({
+          kind: 'weekly',
+          usedPercent: 60,
+          resetsAt: weeklyReset,
+          windowMinutes: WEEK_MINUTES,
+          note: 'tightest: Gemini Models',
+        }),
+      ],
+      scopedLimits: [
+        { scope: 'Gemini Models', kind: 'five_hour', usedPercent: 100, resetsAt: fiveHourReset },
+        { scope: 'Gemini Models', kind: 'weekly', usedPercent: 60, resetsAt: weeklyReset },
+        { scope: 'Claude and GPT models', kind: 'five_hour', usedPercent: 90, resetsAt: fiveHourReset },
+        { scope: 'Claude and GPT models', kind: 'weekly', usedPercent: 20, resetsAt: weeklyReset },
+        { scope: 'Gemini 4 Argon', kind: 'weekly', usedPercent: 1, resetsAt: weeklyReset },
+      ],
+    });
+
+    const routing = adviseQuotaRouting([agyRow], NOW);
+    assert.equal(routing[0].provider, 'agy');
+    assert.equal(routing[0].availability, 'exhausted');
+    assert.equal(routing[0].leftPercent, 0);
+    assert.equal(routing[0].reason, '5-hour window used up, resets in 3h 0m (tightest: Gemini Models)');
+
+    const argon = advisePickRouting({ provider: 'agy', model: 'gemini-4-argon-medium' }, [agyRow], routing, NOW);
+    assert.equal(argon.availability, 'available');
+    assert.equal(argon.leftPercent, 99);
+    assert.equal(argon.bindingWindow, 'weekly');
+
+    const claudeThroughAgy = advisePickRouting({ provider: 'agy', model: 'claude-opus-5-5-high' }, [agyRow], routing, NOW);
+    assert.equal(claudeThroughAgy.availability, 'low');
+    assert.equal(claudeThroughAgy.leftPercent, 10);
+    assert.equal(claudeThroughAgy.bindingWindow, 'five_hour');
+
+    const gptThroughAgy = advisePickRouting({ provider: 'agy', model: 'gpt-oss-120b-medium' }, [agyRow], routing, NOW);
+    assert.equal(gptThroughAgy.availability, 'low');
+    assert.equal(gptThroughAgy.leftPercent, 10);
+
+    const flash = advisePickRouting({ provider: 'agy', model: 'gemini-3.8-flash' }, [agyRow], routing, NOW);
+    assert.equal(flash.availability, 'exhausted');
+    assert.equal(flash.leftPercent, 0);
+
+    const unknownModel = advisePickRouting({ provider: 'agy', model: 'unknown-agy-model' }, [agyRow], routing, NOW);
+    assert.equal(unknownModel.availability, 'exhausted');
+    assert.equal(unknownModel.leftPercent, 0);
+    assert.match(unknownModel.reason, /tightest: Gemini Models/);
   });
 });
