@@ -3,6 +3,11 @@
 set -eu
 . "$(dirname "$0")/env.sh"
 
+# Already running? No-op (checked before touching any ownership). A stale/foreign pid file is removed.
+mkdir -p "$CHAOS_RUN"
+running=$(live_bridge_pid)
+if [ -n "$running" ]; then echo "up: bridge already running (pid $running), nothing to do"; exit 0; fi
+
 mkdir -p "$CHAOS_RUN/agents" "$CHAOS_RUN/scripts" "$CHAOS_OUT" "$CHAOS_TMUX_TMPDIR" "$CHAOS_DATA_DIR/solo/bin" /work
 # /run/chaos: root-owned 0755 (t0, ids.json readable by ftown); agents/ scripts/ tmux/ owned by ftown.
 chown root:root "$CHAOS_RUN"; chmod 0755 "$CHAOS_RUN"
@@ -30,24 +35,19 @@ if [ ! -d /work/repo/.git ]; then
     git push -q origin main'
 fi
 
-if [ -f "$CHAOS_BRIDGE_PID" ] && kill -0 "$(cat "$CHAOS_BRIDGE_PID")" 2>/dev/null; then
-  echo "up: bridge already running (pid $(cat "$CHAOS_BRIDGE_PID"))" >&2
-  exit 1
-fi
-
 touch "$CHAOS_BRIDGE_LOG"; chown ftown:ftown "$CHAOS_BRIDGE_LOG"
 (CHAOS_EXEC=exec; as_ftown sh -c 'cd "$HOME" && exec node /opt/ftown/bridge/dist/ftown-cli.js start --solo --data-dir "$FTOWN_DATA_DIR" --port '"$CHAOS_PORT") \
   >>"$CHAOS_BRIDGE_LOG" 2>&1 </dev/null &
 echo $! > "$CHAOS_BRIDGE_PID"
 sleep 0.2
 # The recorded pid must be the bridge (node) itself, so kill -9 hits the bridge.
-grep -q "ftown-cli.js" "/proc/$(cat "$CHAOS_BRIDGE_PID")/cmdline" 2>/dev/null || { echo "up: pid file is not the bridge" >&2; tail -n 40 "$CHAOS_BRIDGE_LOG" >&2; exit 1; }
+bridge_alive "$(cat "$CHAOS_BRIDGE_PID")" || { echo "up: pid file is not the bridge" >&2; tail -n 40 "$CHAOS_BRIDGE_LOG" >&2; exit 1; }
 
 # Ready = the local API answers `sessions list`. Bounded: 300 x 0.2s = 60s.
 i=0
 while [ $i -lt 300 ]; do
-  if ! kill -0 "$(cat "$CHAOS_BRIDGE_PID")" 2>/dev/null; then
-    echo "up: bridge exited during start" >&2; tail -n 40 "$CHAOS_BRIDGE_LOG" >&2; exit 1
+  if ! bridge_alive "$(cat "$CHAOS_BRIDGE_PID")"; then
+    echo "up: bridge exited during start" >&2; rm -f "$CHAOS_BRIDGE_PID"; tail -n 40 "$CHAOS_BRIDGE_LOG" >&2; exit 1
   fi
   if as_ftown ftown sessions list >/dev/null 2>&1; then
     echo "up: bridge ready (pid $(cat "$CHAOS_BRIDGE_PID"), $((i / 5)).$((i % 5 * 2))s)"
@@ -55,5 +55,7 @@ while [ $i -lt 300 ]; do
   fi
   sleep 0.2; i=$((i + 1))
 done
-echo "up: bridge not ready after 60s" >&2; tail -n 40 "$CHAOS_BRIDGE_LOG" >&2
+echo "up: bridge not ready after 60s; killing it" >&2
+kill -KILL "$(cat "$CHAOS_BRIDGE_PID")" 2>/dev/null; rm -f "$CHAOS_BRIDGE_PID"
+tail -n 40 "$CHAOS_BRIDGE_LOG" >&2
 exit 1

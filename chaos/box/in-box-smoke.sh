@@ -58,11 +58,13 @@ tm=$(as_ftown tmux -L ftown ls 2>&1); echo "$tm"
 step tmux-root sh -c "printf '%s' \"\$1\" | grep -q \"ftown-$rootid\"" _ "$tm"
 step tmux-child sh -c "printf '%s' \"\$1\" | grep -q \"ftown-$childid\"" _ "$tm"
 
-kill -9 "$(cat "$CHAOS_BRIDGE_PID")"; sleep 0.5
-step bridge-killed sh -c "! kill -0 $(cat "$CHAOS_BRIDGE_PID") 2>/dev/null"
-rm -f "$CHAOS_BRIDGE_PID"
+p1=$(cat "$CHAOS_BRIDGE_PID")
+step up-noop-when-live sh -c '/opt/chaos/box/up.sh | grep -q "already running" && [ "$(cat "$1")" = "$2" ]' _ "$CHAOS_BRIDGE_PID" "$p1"
+# Stale-pid path: kill -9 and leave the pid file in place.
+kill -9 "$p1"; sleep 0.5
+step bridge-killed sh -c '. /opt/chaos/box/env.sh; ! bridge_alive "$1"' _ "$p1"
 t0=$(date +%s%N)
-step up-after-kill /opt/chaos/box/up.sh
+step up-after-stale-pid /opt/chaos/box/up.sh
 echo "restart: $(( ($(date +%s%N) - t0) / 1000000 )) ms"
 list=$(as_ftown ftown sessions list 2>&1); echo "$list"
 for id in "$rootid" "$childid"; do
@@ -70,7 +72,8 @@ for id in "$rootid" "$childid"; do
   step "listed-running-after-restart $id ($st)" test "$st" = running
 done
 sleep 2
-step restarted-bridge-alive kill -0 "$(cat "$CHAOS_BRIDGE_PID")"
+step restarted-bridge-alive bridge_alive "$(cat "$CHAOS_BRIDGE_PID")"
+step new-pid-after-stale test "$(cat "$CHAOS_BRIDGE_PID")" != "$p1"
 step no-port-clash sh -c '! grep -q EADDRINUSE "$CHAOS_BRIDGE_LOG"'
 /opt/chaos/box/down.sh
 echo "--- bridge log tail"; tail -n 30 "$CHAOS_BRIDGE_LOG"
