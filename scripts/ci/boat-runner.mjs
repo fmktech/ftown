@@ -51,6 +51,7 @@ export function parseExecFrame(line) {
   if (frame.type === "attached" && Number.isInteger(frame.processId) && frame.processId > 0 && Number.isInteger(frame.stdoutOffset) && frame.stdoutOffset >= 0 && Number.isInteger(frame.stderrOffset) && frame.stderrOffset >= 0) return frame;
   if (["stdout", "stderr"].includes(frame.type) && typeof frame.data === "string") return frame;
   if (frame.type === "exit" && Number.isInteger(frame.exitCode) && frame.exitCode >= 0 && frame.exitCode < 256 && (frame.status === undefined || frame.status === "exited")) return frame;
+  if (frame.type === "error" && typeof frame.error === "string" && frame.error && typeof frame.message === "string" && frame.message) return frame;
   throw new Error("Invalid execution frame");
 }
 
@@ -217,6 +218,15 @@ export async function main({ env = process.env, retryDelaysMs = [5000, 15000], t
     }
   };
   const bc = (args, opts) => checked(boat, ["--no-update", ...args], opts);
+  // Best-effort sandbox liveness for failure diagnosis; never masks the real error.
+  const sandboxState = async id => {
+    try {
+      const result = await run(boat, ["--no-update", "info", id, "--json"], { timeout: 10000, stream: false });
+      const info = JSON.parse((result.stdout || result.stderr).trim());
+      if (result.code !== 0 && info.code === "not_found") return "not_found (already gone)";
+      return typeof info.state === "string" && info.state ? info.state : "unknown";
+    } catch { return "unknown"; }
+  };
   const io = {
     warning: message => console.error(message),
     recordId: id => {
@@ -245,7 +255,8 @@ export async function main({ env = process.env, retryDelaysMs = [5000, 15000], t
     },
     create: async (i, onId) => {
       let seen = false;
-      await bc(["--json", "new", "--ttl", i.job === "e2e" ? "2700" : "1200", "--type", i.job === "e2e" ? "default" : "small", "--no-env", "--no-snapshots"], {
+      const name = `ci-${i.job}-${i.runId}-${i.runAttempt}${i.shard ? `-${i.shard.replace("/", "-of-")}` : ""}`;
+      await bc(["--json", "new", "--ttl", i.job === "e2e" ? "2700" : "1200", "--type", i.job === "e2e" ? "default" : "small", "--name", name, "--no-env", "--no-snapshots"], {
         timeout: 180000, stream: false, onLine: line => {
           let record; try { record = JSON.parse(line); } catch { return; }
           if (record.event === "created") { onId(record.id); seen = true; }
@@ -266,20 +277,25 @@ export async function main({ env = process.env, retryDelaysMs = [5000, 15000], t
       const available = Math.floor((activeDeadline - Date.now() - 10000) / 1000);
       if (available < 1) return 124;
       const remoteTimeout = Math.min(i.job === "e2e" ? 2100 : 900, available);
-      let result, remoteExit;
+      let result, remoteExit, platformError;
       try { result = await run(boat, ["--no-update", "--json", "exec", "--stream", "--timeout", String(remoteTimeout), "--cwd", "repo", id, "--",
         "env", "-i", "HOME=/home/user", "PATH=/home/user/.nvm/versions/node/v24.22.1/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", ...remoteEnvironment(i), "bash", "scripts/ci/run-job.sh", i.job],
         { timeout: (remoteTimeout + 10) * 1000, stream: false, onLine: line => {
           const frame = parseExecFrame(line);
           if (frame.type === "stdout") process.stdout.write(frame.data);
           if (frame.type === "stderr") process.stderr.write(frame.data);
+          if (frame.type === "error") {
+            if (platformError) throw new Error("Duplicate execution error");
+            platformError = frame;
+          }
           if (frame.type === "exit") {
             if (remoteExit !== undefined) throw new Error("Duplicate execution exit");
             remoteExit = frame.exitCode;
           }
         } }); }
-      catch (error) { if (error.exitCode === 124) throw new Error("Remote execution completion unconfirmed after timeout"); throw error; }
-      if (remoteExit === undefined || result.code !== remoteExit) throw new Error("Remote execution completion unconfirmed");
+      catch (error) { if (error.exitCode === 124) throw new Error(`Remote execution completion unconfirmed for sandbox ${id} after timeout`); throw error; }
+      if (platformError) throw new Error(`Boat exec stream failed for sandbox ${id} (${platformError.error}: ${platformError.message}); sandbox state after the failure: ${await sandboxState(id)}. The remote job reported no result — this is a Boat platform failure, not a test failure. Re-run the job; if it repeats, report sandbox ${id} to Boat support.`);
+      if (remoteExit === undefined || result.code !== remoteExit) throw new Error(`Remote execution completion unconfirmed for sandbox ${id}: the exec stream ended without an exit frame (Boat CLI exit ${result.code}); sandbox state after the failure: ${await sandboxState(id)}. The remote job reported no result — this is a Boat platform failure, not a test failure. Re-run the job; if it repeats, report sandbox ${id} to Boat support.`);
       return remoteExit;
     },
     artifacts: async id => {
