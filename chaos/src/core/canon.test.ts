@@ -4,7 +4,7 @@ import type { Rec } from '../contract.ts';
 import { decodeLog, encodeLog, encodeRec, hashLog } from './canon.ts';
 
 const sample: Rec[] = [
-  { k: 'run', seed: 3, level: 'high', contract: 3 },
+  { k: 'run', seed: 3, level: 'high', profile: 'soak', contract: 7 },
   {
     k: 'schedule',
     faults: [{ id: 'f1', kind: 'clock_jump_back', target: 'clock', atMs: 90000, durationMs: 0, jumpMs: -30000, long: false }],
@@ -35,7 +35,7 @@ function shuffled(v: unknown): unknown {
 }
 
 test('top-level key order follows the contract; nested keys are alphabetical; no whitespace', () => {
-  assert.equal(encodeRec(sample[0]!), '{"k":"run","seed":3,"level":"high","contract":3}');
+  assert.equal(encodeRec(sample[0]!), '{"k":"run","seed":3,"level":"high","profile":"soak","contract":7}');
   assert.equal(
     encodeRec(sample[1]!),
     '{"k":"schedule","faults":[{"atMs":90000,"durationMs":0,"id":"f1","jumpMs":-30000,"kind":"clock_jump_back","long":false,"target":"clock"}]}',
@@ -73,13 +73,13 @@ test('empty log, malformed logs', () => {
 
 test('unknown kind and non-finite numbers throw', () => {
   assert.throws(() => encodeRec({ k: 'nope' } as unknown as Rec));
-  assert.throws(() => encodeRec({ k: 'run', seed: Number.NaN, level: 'off', contract: 3 }));
+  assert.throws(() => encodeRec({ k: 'run', seed: Number.NaN, level: 'off', profile: 'short', contract: 7 }));
 });
 
 test('only plain data is allowed: integers, strings, booleans, null, arrays, plain objects', () => {
   const withE = (e: unknown) => ({ k: 'agent', t: 1, role: 'root', e }) as unknown as Rec;
-  assert.throws(() => encodeRec({ k: 'run', seed: 1.5, level: 'off', contract: 3 }), /non-integer/);
-  assert.throws(() => encodeRec({ k: 'run', seed: Number.POSITIVE_INFINITY, level: 'off', contract: 3 }));
+  assert.throws(() => encodeRec({ k: 'run', seed: 1.5, level: 'off', profile: 'short', contract: 7 }), /non-integer/);
+  assert.throws(() => encodeRec({ k: 'run', seed: Number.POSITIVE_INFINITY, level: 'off', profile: 'short', contract: 7 }));
   assert.throws(() => encodeRec(withE({ ev: 'x', d: new Date(0) })), /plain/);
   assert.throws(() => encodeRec(withE({ ev: 'x', d: new Map() })), /plain/);
   assert.throws(() => encodeRec(withE({ ev: 'x', d: new Set() })), /plain/);

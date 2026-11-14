@@ -5,7 +5,7 @@ import { assertDeclared, evaluate, worst } from './evaluate.ts';
 
 const mk = (id: string, kind: PropKind, check: Property['check']): Property => ({ id, kind, source: 's', title: id, check });
 const fixed = (id: string, kind: PropKind, r: PropResult): Property => mk(id, kind, () => r);
-const log: Rec[] = [{ k: 'run', seed: 1, level: 'low', contract: 3 }];
+const log: Rec[] = [{ k: 'run', seed: 1, level: 'low', profile: 'short', contract: 7 }];
 
 test('all passing => ok; verdicts follow prop order', () => {
   const r = evaluate(
@@ -68,7 +68,7 @@ test('null/undefined result, invalid status and bad evidence are violated, never
 
 test('a property cannot mutate the log seen by another', () => {
   const mutator = mk('M', 'sometimes', (l) => {
-    try { (l as Rec[]).push({ k: 'run', seed: 9, level: 'off', contract: 3 }); } catch { /* frozen */ }
+    try { (l as Rec[]).push({ k: 'run', seed: 9, level: 'off', profile: 'short', contract: 7 }); } catch { /* frozen */ }
     try { (l[0] as { seed: number }).seed = 99; } catch { /* frozen */ }
     return { status: 'hit', evidence: [] };
   });

@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseArgs, parseSeedRange, UsageError } from './args.ts';
+import { OUT_DIR, seedOutDir } from './paths.ts';
+import { join } from 'node:path';
 
 test('seed ranges', () => {
   assert.deepEqual(parseSeedRange('1-4'), [1, 2, 3, 4]);
@@ -32,18 +34,33 @@ test('selftest defaults and flags', () => {
 test('run, campaign and repro', () => {
   const r = parseArgs(['run', '--seeds', '1-4']);
   assert.ok(r.cmd === 'run');
-  assert.deepEqual([r.seeds, r.level, r.times, r.vm.jobs], [[1, 2, 3, 4], 'high', 2, 1]);
-  const c = parseArgs(['campaign', '--seeds', '1-20', '--times', '2', '--level', 'low']);
+  assert.deepEqual([r.seeds, r.level, r.profile, r.times, r.vm.jobs, r.vm.timeoutSec], [[1, 2, 3, 4], 'low', 'short', 2, 1, 600]);
+  const rSoak = parseArgs(['run', '--seeds', '1-4', '--profile', 'soak']);
+  assert.ok(rSoak.cmd === 'run');
+  assert.deepEqual([rSoak.level, rSoak.profile, rSoak.vm.timeoutSec], ['high', 'soak', 1500]);
+  const cDefault = parseArgs(['campaign', '--seeds', '1-20']);
+  assert.ok(cDefault.cmd === 'campaign');
+  assert.deepEqual([cDefault.level, cDefault.profile, cDefault.vm.timeoutSec], ['low', 'short', 600]);
+  const c = parseArgs(['campaign', '--seeds', '1-20', '--times', '2', '--level', 'low', '--profile', 'soak', '--timeout', '999']);
   assert.ok(c.cmd === 'campaign');
-  assert.deepEqual([c.seeds.length, c.level], [20, 'low']);
+  assert.deepEqual([c.seeds.length, c.level, c.profile, c.vm.timeoutSec], [20, 'low', 'soak', 999]);
   for (const argv of [['--repro', '9'], ['repro', '--seed', '9'], ['repro', '--repro', '9']]) {
     const p = parseArgs(argv);
     assert.ok(p.cmd === 'run', argv.join(' '));
-    assert.deepEqual([p.seeds, p.times], [[9], 5]);
+    assert.deepEqual([p.seeds, p.times, p.profile, p.level], [[9], 5, 'short', 'low']);
   }
-  const t = parseArgs(['--repro', '0', '--times', '2', '--level', 'off']);
+  const t = parseArgs(['--repro', '0', '--times', '2', '--level', 'off', '--profile', 'soak']);
   assert.ok(t.cmd === 'run');
-  assert.deepEqual([t.seeds, t.times, t.level], [[0], 2, 'off']);
+  assert.deepEqual([t.seeds, t.times, t.level, t.profile, t.vm.timeoutSec], [[0], 2, 'off', 'soak', 1500]);
+});
+
+test('profile validation and seedOutDir', () => {
+  assert.throws(() => parseArgs(['run', '--seeds', '1', '--profile', 'fast']), UsageError);
+  assert.throws(() => parseArgs(['selftest', '--profile', 'short']), UsageError);
+  assert.throws(() => parseArgs(['run', '--seeds', '1', '--profile', 'short', '--level', 'high']), /--profile soak/);
+  assert.throws(() => parseArgs(['run', '--seeds', '1', '--level', 'high']), /--profile soak/);
+  assert.equal(seedOutDir(3, 'short', null), join(OUT_DIR, '3-short'));
+  assert.equal(seedOutDir(3, 'soak', 'f2,f4'), join(OUT_DIR, '3-soak-drop-f2,f4'));
 });
 
 test('drop faults', () => {

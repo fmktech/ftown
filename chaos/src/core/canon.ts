@@ -3,7 +3,7 @@ import type { Rec } from '../contract.ts';
 
 /** Top-level key order per record kind: the order declared in the contract's Rec union. */
 const TOP_ORDER: Readonly<Record<Rec['k'], readonly string[]>> = {
-  run: ['k', 'seed', 'level', 'contract'],
+  run: ['k', 'seed', 'level', 'profile', 'contract'],
   schedule: ['k', 'faults'],
   fault: ['k', 't', 'id', 'phase', 'kind', 'target', 'ok'],
   op: ['k', 't', 'op', 'ok', 'error'],

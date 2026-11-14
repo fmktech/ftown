@@ -1,5 +1,5 @@
 // Command-line parsing for `npm run test:chaos -- …`. Pure.
-import type { ChaosLevel } from '../contract.ts';
+import { DEFAULT_PROFILE, RUN_PROFILES, type ChaosLevel, type RunProfile } from '../contract.ts';
 import { parseSeeds } from '../core/seeds.ts';
 
 export interface VmOptions {
@@ -17,18 +17,18 @@ export type Command =
   | { cmd: 'help' }
   | { cmd: 'build'; image: string | null; checkRepro: boolean }
   | { cmd: 'selftest'; times: number; vm: VmOptions; longSeconds: number | null }
-  | { cmd: 'run' | 'campaign'; seeds: number[]; level: ChaosLevel; times: number; vm: VmOptions; dropFaults: string | null };
+  | { cmd: 'run' | 'campaign'; seeds: number[]; level: ChaosLevel; profile: RunProfile; times: number; vm: VmOptions; dropFaults: string | null };
 
 export class UsageError extends Error {}
 
 export const USAGE = `usage: npm run test:chaos -- <command> [flags]
   build [--image <tag>] [--check-repro]         build kernel, initramfs and qemu container into chaos/.cache/
   selftest [--times 2] [--long <guest s>]       boot N times, require byte-identical selftest.json (--long: long probe)
-  run --seeds 1-4 [--level high] [--times 2]    run seeds, compare runs of each seed
-  repro --seed N [--times 5] [--level high]     (also: --repro N) one seed, several times
-  run/repro: --drop-faults f2,f4|<kind>         guest skips these faults; output in out/<seed>-drop-<list>/
-  campaign --seeds 1-20 [--times 2]             run + chaos/out/campaign.json
-common: --jobs 1  --mem 3072 (selftest 1536)  --timeout <s>  --icount-shift 1`;
+  run --seeds 1-4 [--profile short|soak] [--level low] [--times 2]    run seeds, compare runs of each seed
+  repro --seed N [--profile short|soak] [--times 5] [--level low]     (also: --repro N) one seed, several times
+  run/repro: --drop-faults f2,f4|<kind>         guest skips these faults; output in out/<seed>-<profile>[-drop-<list>]/
+  campaign --seeds 1-20 [--profile short|soak] [--times 2]            run + chaos/out/campaign.json
+common: --jobs 1  --mem 3072 (selftest 1536)  --timeout <s> (short 600, soak 1500)  --icount-shift 1`;
 
 /** Seed list per core/seeds.ts (e.g. "1-3,2,7"); its errors become usage errors (exit 64). */
 export function parseSeedRange(spec: string): number[] {
@@ -38,7 +38,7 @@ export function parseSeedRange(spec: string): number[] {
 }
 
 const BOOL_FLAGS = new Set(['check-repro']);
-const VALUE_FLAGS = new Set(['drop-faults', 'long', 'image', 'times', 'seeds', 'seed', 'repro', 'level', 'jobs', 'mem', 'timeout', 'icount-shift']);
+const VALUE_FLAGS = new Set(['drop-faults', 'long', 'image', 'times', 'seeds', 'seed', 'repro', 'level', 'profile', 'jobs', 'mem', 'timeout', 'icount-shift']);
 
 function posInt(flag: string, v: string, min = 1): number {
   if (!/^\d+$/.test(v) || Number(v) < min) throw new UsageError(`--${flag} needs an integer >= ${min}, got ${JSON.stringify(v)}`);
@@ -74,9 +74,9 @@ export function parseArgs(argv: readonly string[]): Command {
   const allowed: Record<string, string[]> = {
     build: ['image', 'check-repro'],
     selftest: ['long', 'times', 'jobs', 'mem', 'timeout', 'icount-shift'],
-    run: ['drop-faults', 'seeds', 'level', 'times', 'jobs', 'mem', 'timeout', 'icount-shift'],
-    campaign: ['seeds', 'level', 'times', 'jobs', 'mem', 'timeout', 'icount-shift'],
-    repro: ['drop-faults', 'seed', 'repro', 'level', 'times', 'jobs', 'mem', 'timeout', 'icount-shift'],
+    run: ['drop-faults', 'seeds', 'level', 'profile', 'times', 'jobs', 'mem', 'timeout', 'icount-shift'],
+    campaign: ['seeds', 'level', 'profile', 'times', 'jobs', 'mem', 'timeout', 'icount-shift'],
+    repro: ['drop-faults', 'seed', 'repro', 'level', 'profile', 'times', 'jobs', 'mem', 'timeout', 'icount-shift'],
   };
   const ok = allowed[sub];
   if (ok === undefined) throw new UsageError(`unknown command ${sub}`);
@@ -85,10 +85,14 @@ export function parseArgs(argv: readonly string[]): Command {
   if (sub === 'build') return { cmd: 'build', image: flags.get('image') ?? null, checkRepro: flags.has('check-repro') };
 
   const isSelftest = sub === 'selftest';
+  const profileRaw = flags.get('profile') ?? DEFAULT_PROFILE;
+  if (!RUN_PROFILES.includes(profileRaw as RunProfile)) throw new UsageError(`bad --profile ${profileRaw}`);
+  const profile = profileRaw as RunProfile;
+  const defaultTimeout = isSelftest ? (!flags.has('long') ? 300 : 3600) : profile === 'soak' ? 1500 : 600;
   const vm: VmOptions = {
     memMb: flags.has('mem') ? posInt('mem', flags.get('mem')!, 1536) : isSelftest ? 1536 : 3072,
     icountShift: flags.has('icount-shift') ? posInt('icount-shift', flags.get('icount-shift')!, 0) : 1,
-    timeoutSec: flags.has('timeout') ? posInt('timeout', flags.get('timeout')!) : isSelftest && !flags.has('long') ? 300 : 3600,
+    timeoutSec: flags.has('timeout') ? posInt('timeout', flags.get('timeout')!) : defaultTimeout,
     jobs: flags.has('jobs') ? posInt('jobs', flags.get('jobs')!) : 1,
   };
   if (vm.icountShift > 10) throw new UsageError('--icount-shift must be 0..10');
@@ -96,9 +100,12 @@ export function parseArgs(argv: readonly string[]): Command {
   const times = flags.has('times') ? posInt('times', flags.get('times')!) : defaultTimes;
   if (isSelftest) return { cmd: 'selftest', times, vm, longSeconds: flags.has('long') ? posInt('long', flags.get('long')!) : null };
 
-  const levelRaw = flags.get('level') ?? 'high';
+  const levelRaw = flags.get('level') ?? (profile === 'short' ? 'low' : 'high');
   if (levelRaw !== 'off' && levelRaw !== 'low' && levelRaw !== 'high') throw new UsageError(`bad --level ${levelRaw}`);
   const level: ChaosLevel = levelRaw;
+  if (profile === 'short' && level === 'high') {
+    throw new UsageError('--level high is not valid with --profile short; use --profile soak');
+  }
 
   const dropFaults = flags.get('drop-faults') ?? null;
   if (dropFaults !== null && !/^[a-z0-9_]+(,[a-z0-9_]+)*$/.test(dropFaults)) {
@@ -110,11 +117,11 @@ export function parseArgs(argv: readonly string[]): Command {
     const s = flags.get('seed') ?? flags.get('repro');
     if (s === undefined) throw new UsageError('repro needs --seed N');
     seeds = [posInt('seed', s, 0)];
-    return { cmd: 'run', seeds, level, times, vm, dropFaults };
+    return { cmd: 'run', seeds, level, profile, times, vm, dropFaults };
   }
   const spec = flags.get('seeds');
   if (spec === undefined) throw new UsageError(`${sub} needs --seeds`);
   seeds = parseSeedRange(spec);
-  return { cmd: sub === 'campaign' ? 'campaign' : 'run', seeds, level, times, vm, dropFaults };
+  return { cmd: sub === 'campaign' ? 'campaign' : 'run', seeds, level, profile, times, vm, dropFaults };
 }
 

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fakeClock } from '../core/clock.ts';
-import { PROPERTY_IDS } from '../contract.ts';
+import { PROFILE, PROPERTY_IDS } from '../contract.ts';
 import type { Rec, Snapshot } from '../contract.ts';
 import { runCheckpoints } from './checkpoints.ts';
 import { agentCommand, createArgs, idsDeadline, parseAgentLog, parseCli, parseCreatedId } from './main.ts';
@@ -30,7 +30,9 @@ test('agent cmdline match is exact-token', () => {
 });
 
 test('parseCli', () => {
-  assert.deepEqual(parseCli(['--seed', '3', '--level', 'high']), { seed: 3, level: 'high' });
+  assert.deepEqual(parseCli(['--seed', '3', '--level', 'high']), { seed: 3, level: 'high', profile: 'short' });
+  assert.deepEqual(parseCli(['--seed', '3', '--level', 'high', '--profile', 'soak']), { seed: 3, level: 'high', profile: 'soak' });
+  assert.equal(parseCli(['--seed', '3', '--level', 'low', '--profile', 'bogus']), null);
   assert.equal(parseCli(['--seed', 'x', '--level', 'high']), null);
   assert.equal(parseCli(['--seed', '3']), null);
 });
@@ -56,17 +58,24 @@ test('every declared property is in the set', () => {
   assert.deepEqual(allProperties.map((p) => p.id).sort(), [...PROPERTY_IDS].sort());
 });
 
-test('checkpoints every 30 s until stopped', async () => {
-  const clock = fakeClock();
-  const recs: Rec[] = [];
-  const snap: Snapshot = { bridgeAlive: true, bridgeResponsive: true, sessions: [], treeEvents: [], treeEventsCorruptLines: 0 };
-  let stop = false;
-  const done = runCheckpoints({ clock, take: async () => snap, log: (r) => recs.push(r) }, () => stop);
-  await clock.advance(95_000);
-  stop = true;
-  await clock.advance(1_000);
-  await done;
-  assert.deepEqual(recs.map((r) => (r.k === 'checkpoint' ? `${r.name}@${r.t}` : '')), ['cp1@30000', 'cp2@60000', 'cp3@90000']);
+test('checkpoints every checkpointEveryMs until stopped', async () => {
+  for (const profile of ['short', 'soak'] as const) {
+    const every = PROFILE[profile].checkpointEveryMs;
+    const clock = fakeClock();
+    const recs: Rec[] = [];
+    const snap: Snapshot = { bridgeAlive: true, bridgeResponsive: true, sessions: [], treeEvents: [], treeEventsCorruptLines: 0 };
+    let stop = false;
+    const done = runCheckpoints({ clock, take: async () => snap, log: (r) => recs.push(r) }, every, () => stop);
+    await clock.advance(every * 3 + 5_000);
+    stop = true;
+    await clock.advance(1_000);
+    await done;
+    assert.deepEqual(
+      recs.map((r) => (r.k === 'checkpoint' ? `${r.name}@${r.t}` : '')),
+      [`cp1@${every}`, `cp2@${every * 2}`, `cp3@${every * 3}`],
+      profile,
+    );
+  }
 });
 
 test('agent events are rebuilt from contract fields; bad strings become invalid and are counted', () => {

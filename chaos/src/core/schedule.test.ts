@@ -1,33 +1,37 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { FAULTS, FAULT_WINDOW_END_MS, FAULT_WINDOW_START_MS, type ChaosLevel, type FaultSpec } from '../contract.ts';
+import { FAULTS, PROFILE, type ChaosLevel, type FaultSpec, type RunProfile } from '../contract.ts';
 import { deriveRng } from './rng.ts';
 import { buildSchedule, validateFaults } from './schedule.ts';
 
-const build = (seed: number, level: ChaosLevel) => buildSchedule(seed, level, deriveRng(seed, 'faults'));
+const build = (seed: number, level: ChaosLevel, profile: RunProfile = 'soak') =>
+  buildSchedule(seed, level, profile, deriveRng(seed, 'faults'));
 
 test('level off is empty', () => {
-  for (let s = 1; s <= 20; s++) assert.deepEqual(build(s, 'off'), []);
+  for (const profile of ['short', 'soak'] as const) {
+    for (let s = 1; s <= 20; s++) assert.deepEqual(build(s, 'off', profile), []);
+  }
 });
 
 test('same inputs give deep-equal output; seeds differ', () => {
-  assert.deepEqual(build(42, 'high'), build(42, 'high'));
-  assert.deepEqual(build(42, 'low'), build(42, 'low'));
+  assert.deepEqual(build(42, 'high', 'soak'), build(42, 'high', 'soak'));
+  assert.deepEqual(build(42, 'low', 'short'), build(42, 'low', 'short'));
   const seen = new Set<string>();
-  for (let s = 1; s <= 30; s++) seen.add(JSON.stringify(build(s, 'high')));
+  for (let s = 1; s <= 30; s++) seen.add(JSON.stringify(build(s, 'high', 'soak')));
   assert.ok(seen.size > 20);
 });
 
 test('ids f1..fn in atMs order', () => {
-  const s = build(5, 'high');
+  const s = build(5, 'high', 'soak');
   s.forEach((f, i) => assert.equal(f.id, `f${i + 1}`));
   for (let i = 1; i < s.length; i++) assert.ok(s[i - 1]!.atMs <= s[i]!.atMs);
 });
 
-for (const level of ['low', 'high'] as const) {
-  test(`property over seeds 1..200 for level ${level}`, () => {
+for (const [level, profile] of [['low', 'short'], ['low', 'soak'], ['high', 'soak']] as const) {
+  test(`property over seeds 1..200 for level ${level}, profile ${profile}`, () => {
+    const { faultWindowStartMs, faultWindowEndMs } = PROFILE[profile];
     for (let seed = 1; seed <= 200; seed++) {
-      const s = build(seed, level);
+      const s = build(seed, level, profile);
       const longs = s.filter((f) => f.long);
       if (level === 'low') {
         assert.ok(s.length >= 2 && s.length <= 4, `seed ${seed} count ${s.length}`);
@@ -37,8 +41,8 @@ for (const level of ['low', 'high'] as const) {
         assert.equal(longs.length, 1);
       }
       for (const f of s) {
-        assert.ok(f.atMs >= FAULT_WINDOW_START_MS, `seed ${seed} start`);
-        assert.ok(f.atMs + f.durationMs <= FAULT_WINDOW_END_MS, `seed ${seed} end`);
+        assert.ok(f.atMs >= faultWindowStartMs, `seed ${seed} start`);
+        assert.ok(f.atMs + f.durationMs <= faultWindowEndMs, `seed ${seed} end`);
         const spec = FAULTS.find((x) => x.kind === f.kind)!;
         if (spec.target === 'clock') {
           assert.equal(f.durationMs, 0);
@@ -105,18 +109,20 @@ test('validateFaults rejects inverted and invalid ranges', () => {
   assert.throws(() => validateFaults([{ ...clockSpec, jump: { short: [2, 1], long: [1, 1] } }]), /inverted/);
 });
 
-test('unknown level throws', () => {
-  assert.throws(() => buildSchedule(1, 'medium' as ChaosLevel, deriveRng(1, 'faults')), /unknown level/);
+test('unknown level, unknown profile, and (short, high) throw', () => {
+  assert.throws(() => buildSchedule(1, 'medium' as ChaosLevel, 'short', deriveRng(1, 'faults')), /unknown level/);
+  assert.throws(() => buildSchedule(1, 'low', 'tiny' as RunProfile, deriveRng(1, 'faults')), /unknown profile/);
+  assert.throws(() => buildSchedule(1, 'high', 'short', deriveRng(1, 'faults')), /soak/);
 });
 
 // Golden schedules. Any change to the FAULTS table or to the drawing order changes every seed's
 // schedule; this test is what catches it. Update deliberately, never to make a run green.
-const GOLDEN_LOW = [{"id":"f1","kind":"clock_jump_back","target":"clock","atMs":118184,"durationMs":0,"jumpMs":-30000,"long":false},{"id":"f2","kind":"bridge_kill9","target":"bridge","atMs":120951,"durationMs":1392,"jumpMs":null,"long":false},{"id":"f3","kind":"agent_kill9","target":"child3","atMs":156598,"durationMs":0,"jumpMs":null,"long":false},{"id":"f4","kind":"bridge_sigterm","target":"bridge","atMs":269171,"durationMs":2162,"jumpMs":null,"long":false}];
-const GOLDEN_HIGH = [{"id":"f1","kind":"bridge_kill9","target":"bridge","atMs":120951,"durationMs":1392,"jumpMs":null,"long":false},{"id":"f2","kind":"clock_jump_fwd","target":"clock","atMs":137427,"durationMs":0,"jumpMs":90000,"long":false},{"id":"f3","kind":"agent_sigstop","target":"child3","atMs":142049,"durationMs":3000,"jumpMs":null,"long":false},{"id":"f4","kind":"clock_jump_fwd","target":"clock","atMs":214820,"durationMs":0,"jumpMs":2100000,"long":true},{"id":"f5","kind":"bridge_sigterm","target":"bridge","atMs":269171,"durationMs":2162,"jumpMs":null,"long":false},{"id":"f6","kind":"agent_kill9","target":"child2","atMs":283604,"durationMs":0,"jumpMs":null,"long":false}];
+const GOLDEN_SHORT_LOW = [{"id":"f1","kind":"bridge_kill9","target":"bridge","atMs":75980,"durationMs":1392,"jumpMs":null,"long":false},{"id":"f2","kind":"bridge_sigterm","target":"bridge","atMs":78949,"durationMs":2162,"jumpMs":null,"long":false},{"id":"f3","kind":"agent_kill9","target":"child3","atMs":81327,"durationMs":0,"jumpMs":null,"long":false},{"id":"f4","kind":"clock_jump_back","target":"clock","atMs":89820,"durationMs":0,"jumpMs":-30000,"long":false}];
+const GOLDEN_SOAK_HIGH = [{"id":"f1","kind":"bridge_kill9","target":"bridge","atMs":120951,"durationMs":1392,"jumpMs":null,"long":false},{"id":"f2","kind":"clock_jump_fwd","target":"clock","atMs":137427,"durationMs":0,"jumpMs":90000,"long":false},{"id":"f3","kind":"agent_sigstop","target":"child3","atMs":142049,"durationMs":3000,"jumpMs":null,"long":false},{"id":"f4","kind":"clock_jump_fwd","target":"clock","atMs":214820,"durationMs":0,"jumpMs":2100000,"long":true},{"id":"f5","kind":"bridge_sigterm","target":"bridge","atMs":269171,"durationMs":2162,"jumpMs":null,"long":false},{"id":"f6","kind":"agent_kill9","target":"child2","atMs":283604,"durationMs":0,"jumpMs":null,"long":false}];
 
-test('golden schedule for seed 1, level low', () => {
-  assert.deepEqual(build(1, 'low'), GOLDEN_LOW);
+test('golden schedule for seed 1, short, low', () => {
+  assert.deepEqual(build(1, 'low', 'short'), GOLDEN_SHORT_LOW);
 });
-test('golden schedule for seed 1, level high', () => {
-  assert.deepEqual(build(1, 'high'), GOLDEN_HIGH);
+test('golden schedule for seed 1, soak, high', () => {
+  assert.deepEqual(build(1, 'high', 'soak'), GOLDEN_SOAK_HIGH);
 });

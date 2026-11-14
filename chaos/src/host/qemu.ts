@@ -2,7 +2,7 @@
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { EXIT, type ChaosLevel } from '../contract.ts';
+import { EXIT, type ChaosLevel, type RunProfile } from '../contract.ts';
 import { FrameError, parseFrames } from './frames.ts';
 import { consoleFailure } from './summary.ts';
 import { CACHE_DIR, QEMU_IMAGE } from './paths.ts';
@@ -12,6 +12,7 @@ export interface GuestParams {
   cmd: 'selftest' | 'selftest-long' | 'run';
   seed: number;
   level: ChaosLevel;
+  profile: RunProfile;
   memMb: number;
   icountShift: number;
   /** Fault ids/kinds the guest must skip ([a-z0-9_,]), or null. */
@@ -26,7 +27,7 @@ export function qemuArgs(p: GuestParams): string[] {
     'console=ttyS0', 'panic=-1', 'oops=panic', 'random.trust_cpu=off', 'random.trust_bootloader=off',
     'nokaslr', 'norandmaps', 'tsc=reliable', 'clocksource=tsc', 'no_timer_check', 'mitigations=off',
     'quiet', 'loglevel=4', 'rdinit=/init',
-    `chaos.cmd=${p.cmd}`, `chaos.seed=${p.seed}`, `chaos.level=${p.level}`,
+    `chaos.cmd=${p.cmd}`, `chaos.seed=${p.seed}`, `chaos.level=${p.level}`, `chaos.profile=${p.profile}`,
     ...(p.dropFaults ? [`chaos.drop=${p.dropFaults}`] : []),
   ].join(' ');
   return [

@@ -1,6 +1,6 @@
 // Seed-derived fake-agent scripts, one per role. Pure: same seed => same scripts.
 import { ROLES } from '../contract.ts';
-import type { AgentScript, AgentStep, DeriveRng, MailType, Rng, Role } from '../contract.ts';
+import type { AgentScript, AgentStep, DeriveRng, MailType, Rng, Role, RunProfile } from '../contract.ts';
 
 export type Scripts = Record<Role, AgentScript>;
 
@@ -58,7 +58,13 @@ export const IDLE_MARGIN_MS = 30_000;
 /** Last tag of root's range (root's ordinary mails use 1000–1003). */
 export const ROOT_IDLE_NUDGE_TAG = 1999;
 
-function childScript(role: Role, rng: Rng, early: boolean, asks: number): AgentScript {
+/** Per-action sleep range for children, by profile (keeps short within workloadEndMs and overlapping the fault window). */
+const CHILD_ACTION_SLEEP_MS: Record<RunProfile, readonly [number, number]> = {
+  short: [6_000, 10_000],
+  soak: [1_000, 20_000],
+};
+
+function childScript(role: Role, rng: Rng, early: boolean, asks: number, profile: RunProfile): AgentScript {
   const nextMail = counter(role);
   const nextAsk = counter(role);
   const ask = (): AgentStep => {
@@ -88,7 +94,7 @@ function childScript(role: Role, rng: Rng, early: boolean, asks: number): AgentS
       default:
         break;
     }
-    steps.push(sleep(rng, 1_000, 20_000));
+    steps.push(sleep(rng, ...CHILD_ACTION_SLEEP_MS[profile]));
   }
   // Always at least one child -> parent mail, then go idle so mail to this child nudges it.
   steps.push({ do: 'mail_send', to: 'parent', type: 'result', body: mailBody(nextMail(), role, 'root') });
@@ -96,12 +102,12 @@ function childScript(role: Role, rng: Rng, early: boolean, asks: number): AgentS
   return { role, steps, readMailOnNudge: true, answerRoutedQuestions: false };
 }
 
-export function buildScripts(seed: number, deriveRng: DeriveRng): Scripts {
+export function buildScripts(seed: number, profile: RunProfile, deriveRng: DeriveRng): Scripts {
   const rootRng = deriveRng(seed, 'agent.root');
   const root = rootScript(rootRng);
   const asks = chooseAsks(rootRng);
   const out = { root } as Scripts;
-  for (const role of CHILDREN) out[role] = childScript(role, deriveRng(seed, `agent.${role}`), asks.early === role, asks.later[role]);
+  for (const role of CHILDREN) out[role] = childScript(role, deriveRng(seed, `agent.${role}`), asks.early === role, asks.later[role], profile);
   // Guaranteed nudge: once every child has finished its script (and sent Stop, so it is idle),
   // root sends one waking 'task' mail to a child, then goes idle itself.
   const childEnd = Math.max(...CHILDREN.map((r) => sleepTotal(out[r])));
