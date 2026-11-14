@@ -253,6 +253,12 @@ export interface SessionObs {
   /** Truth: the fake agent process for this role exists (any state, including stopped). */
   procAlive: boolean;
   inbox: MailObs[];
+  /**
+   * Number of inbox lines that are waking mail (type != 'fyi') WITHOUT a CHAOS-M tag: mail the
+   * bridge or the attention flow generated (question escalations, attention answers, PR mail).
+   * They are counted, not listed, because their bodies carry ids.
+   */
+  untaggedWakingMail: number;
   /** false when inbox.jsonl has a line that does not parse. */
   inboxParses: boolean;
   attention: AttentionObs[];
@@ -290,7 +296,7 @@ export type Rec =
   | { k: 'checkpoint'; t: number; name: string; final: boolean; snap: Snapshot }
   | { k: 'verdict'; prop: string; kind: PropKind; status: PropStatus; evidence: string[] };
 
-export const CONTRACT_VERSION = 3;
+export const CONTRACT_VERSION = 4;
 
 /** Operations the supervisor's workload driver performs through the real ftown CLI. */
 export type WorkloadOp =
