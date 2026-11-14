@@ -21,8 +21,10 @@ import {
   resolveProviderAuthEnv,
   resolveProviderRuntimeEnv,
   WorkingDirMissingError,
+  WorktreeError,
 } from './create-ftown-session.js';
 import type { CreateFtownSessionDeps } from './create-ftown-session.js';
+import type { SessionWorktree, WorktreeCreateRequest } from './coordination/contract-b.js';
 import type { Session } from './types.js';
 
 function restoreHome(realHome: string | undefined): void {
@@ -1169,5 +1171,214 @@ describe('update launch admission', () => {
     await Promise.resolve(); assert.equal(drained, false);
     resume(); await launch; await drain;
     assert.equal(runs.length, 1);
+  });
+});
+
+describe('parseCreateSessionBody — worktree plumbing', () => {
+  it('accepts undefined, strict true, and { branch?, base? } objects', () => {
+    assert.strictEqual(parseCreateSessionBody({}).worktree, undefined);
+    assert.strictEqual(parseCreateSessionBody({ worktree: undefined }).worktree, undefined);
+    assert.strictEqual(parseCreateSessionBody({ worktree: true }).worktree, true);
+    assert.deepEqual(parseCreateSessionBody({ worktree: {} }).worktree, {});
+    assert.deepEqual(parseCreateSessionBody({ worktree: { branch: 'feat/x' } }).worktree, { branch: 'feat/x' });
+    assert.deepEqual(parseCreateSessionBody({ worktree: { base: 'main' } }).worktree, { base: 'main' });
+    assert.deepEqual(
+      parseCreateSessionBody({ worktree: { branch: 'feat/x', base: 'main' } }).worktree,
+      { branch: 'feat/x', base: 'main' },
+    );
+  });
+
+  it('rejects non-strict or malformed worktree inputs with a validation error', () => {
+    for (const invalid of [
+      false,
+      'yes',
+      'true',
+      1,
+      null,
+      [],
+      ['branch'],
+      { branch: 123 },
+      { base: false },
+      { branch: 'ok', extra: 'nope' },
+      { unknown: 'x' },
+    ]) {
+      assert.throws(
+        () => parseCreateSessionBody({ worktree: invalid }),
+        (err: unknown) => {
+          assert.ok(err instanceof WorktreeError);
+          assert.match(err.message, /Invalid worktree option/i);
+          return true;
+        },
+        `expected validation error for ${JSON.stringify(invalid)}`,
+      );
+    }
+  });
+});
+
+describe('createFtownSession — bridge-owned worktree creation', () => {
+  it('creates a worktree from explicit workdir, parent workdir, or cwd, and sets workingDir and session.worktree', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'ftw-wt-create-'));
+    const explicitDir = join(root, 'explicit-repo');
+    const parentDir = join(root, 'parent-repo');
+    mkdirSync(explicitDir);
+    mkdirSync(parentDir);
+
+    try {
+      const calls: WorktreeCreateRequest[] = [];
+      const parentSession: Session = { ...fakeSession('parent-1'), workingDir: parentDir };
+      const harness = fakeDeps([parentSession, fakeSession('explicit-repo')]);
+      harness.deps.worktrees = {
+        create: async (req: WorktreeCreateRequest): Promise<SessionWorktree> => {
+          calls.push(req);
+          return {
+            repoRoot: req.fromDir,
+            path: join(req.fromDir, '.claude', 'worktrees', req.name),
+            branch: req.branch ?? `ftown/${req.name}`,
+            base: req.base ?? 'main',
+            createdByBridge: true,
+          };
+        },
+        remove: async () => {},
+      };
+
+      // 1. Explicit workingDir + generated suffixed name + branch/base options
+      const s1 = await createFtownSession(harness.deps, {
+        shellType: 'cursor',
+        workingDir: explicitDir,
+        worktree: { branch: 'feat/custom', base: 'develop' },
+      });
+      assert.strictEqual(s1.name, 'explicit-repo_1');
+      assert.deepEqual(calls[0], {
+        fromDir: resolve(explicitDir),
+        name: 'explicit-repo_1',
+        branch: 'feat/custom',
+        base: 'develop',
+      });
+      const expectedPath1 = join(resolve(explicitDir), '.claude', 'worktrees', 'explicit-repo_1');
+      assert.strictEqual(s1.workingDir, expectedPath1);
+      assert.deepEqual(s1.worktree, {
+        repoRoot: resolve(explicitDir),
+        path: expectedPath1,
+        branch: 'feat/custom',
+        base: 'develop',
+        createdByBridge: true,
+      });
+      assert.strictEqual(harness.runs[0].workingDir, expectedPath1);
+      assert.match(s1.command, new RegExp(`--workspace '${expectedPath1.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'`));
+
+      // 2. Inherited parent workingDir + explicit session name + worktree: true
+      const s2 = await createFtownSession(harness.deps, {
+        shellType: 'shell',
+        parentSessionId: 'parent-1',
+        name: 'child-worker',
+        worktree: true,
+      });
+      assert.deepEqual(calls[1], {
+        fromDir: parentDir,
+        name: 'child-worker',
+      });
+      const expectedPath2 = join(parentDir, '.claude', 'worktrees', 'child-worker');
+      assert.strictEqual(s2.workingDir, expectedPath2);
+      assert.strictEqual(s2.worktree?.path, expectedPath2);
+      assert.strictEqual(harness.runs[1].workingDir, expectedPath2);
+
+      // 3. Fallback to process.cwd() when neither workingDir nor parent workingDir is present
+      const s3 = await createFtownSession(harness.deps, {
+        shellType: 'shell',
+        name: 'cwd-worker',
+        worktree: true,
+      });
+      assert.deepEqual(calls[2], {
+        fromDir: process.cwd(),
+        name: 'cwd-worker',
+      });
+      assert.strictEqual(s3.workingDir, join(process.cwd(), '.claude', 'worktrees', 'cwd-worker'));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('surfaces WorktreeError before saving or launching the session', async () => {
+    const harness = fakeDeps();
+    harness.deps.worktrees = {
+      create: async () => {
+        throw new WorktreeError('detached_head', 'detached HEAD; pass --base');
+      },
+      remove: async () => {},
+    };
+
+    await assert.rejects(
+      () =>
+        createFtownSession(harness.deps, {
+          shellType: 'shell',
+          name: 'fails-wt',
+          worktree: true,
+        }),
+      (err: unknown) => {
+        assert.ok(err instanceof WorktreeError);
+        assert.strictEqual(err.code, 'detached_head');
+        assert.match(err.message, /detached HEAD/);
+        return true;
+      },
+    );
+    assert.strictEqual(harness.saved.length, 0);
+    assert.strictEqual(harness.runs.length, 0);
+  });
+
+  it('cleans up the created worktree when saveSession or runner.run throws, and logs a warning if cleanup fails', async () => {
+    const removed: Array<{ wt: SessionWorktree; opts: { force: boolean; deleteBranch: boolean } }> = [];
+    let removeError: Error | undefined;
+    const makeWorktrees = () => ({
+      create: async (req: WorktreeCreateRequest): Promise<SessionWorktree> => ({
+        repoRoot: req.fromDir,
+        path: `/tmp/wt/${req.name}`,
+        branch: req.branch ?? `ftown/${req.name}`,
+        base: req.base ?? 'main',
+        createdByBridge: true,
+      }),
+      remove: async (wt: SessionWorktree, opts: { force: boolean; deleteBranch: boolean }) => {
+        removed.push({ wt, opts });
+        if (removeError) throw removeError;
+      },
+    });
+
+    // 1. saveSession throws -> worktrees.remove called with { force: false, deleteBranch: true }
+    const h1 = fakeDeps();
+    h1.deps.worktrees = makeWorktrees();
+    h1.deps.store.saveSession = async () => {
+      throw new Error('disk full');
+    };
+    await assert.rejects(
+      () => createFtownSession(h1.deps, { shellType: 'shell', name: 'save-fail', worktree: true }),
+      /disk full/,
+    );
+    assert.strictEqual(removed.length, 1);
+    assert.strictEqual(removed[0].wt.path, '/tmp/wt/save-fail');
+    assert.deepEqual(removed[0].opts, { force: false, deleteBranch: true });
+
+    // 2. runner.run throws AND cleanup also throws -> logs warning with path and rethrows original error
+    const h2 = fakeDeps();
+    h2.deps.worktrees = makeWorktrees();
+    h2.deps.runner.run = () => {
+      throw new Error('spawn failed');
+    };
+    removeError = new Error('git worktree remove failed');
+    const warnings: string[] = [];
+    const prevWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(' '));
+    };
+    try {
+      await assert.rejects(
+        () => createFtownSession(h2.deps, { shellType: 'shell', name: 'spawn-fail', worktree: true }),
+        /spawn failed/,
+      );
+    } finally {
+      console.warn = prevWarn;
+    }
+    assert.strictEqual(removed.length, 2);
+    assert.strictEqual(removed[1].wt.path, '/tmp/wt/spawn-fail');
+    assert.deepEqual(removed[1].opts, { force: false, deleteBranch: true });
+    assert.ok(warnings.some((w) => w.includes('/tmp/wt/spawn-fail')));
   });
 });

@@ -1276,7 +1276,6 @@ export function SessionList({
               activity={sessionActivity?.get(session.id)?.activity}
               needsInput={Boolean(sessionActivity?.get(session.id)?.attention)}
             />
-            <SessionCardChip card={session.card} />
             <span
               title={new Date(session.createdAt).toLocaleString()}
               style={{ fontSize: 10, color: "var(--text-faint)", fontVariantNumeric: "tabular-nums" }}
@@ -1360,6 +1359,12 @@ export function SessionList({
             </div>
           );
         })()}
+
+        {session.card && (
+          <div style={{ display: "flex", minWidth: 0, marginBottom: 2 }}>
+            <SessionCardChip card={session.card} />
+          </div>
+        )}
 
         {isSelected && session.name && (
           <p

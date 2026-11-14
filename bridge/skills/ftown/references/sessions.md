@@ -88,6 +88,44 @@ Pass the cursor back as `--since` to see only what changed.
 Exit codes for `status`, `board` and `events`: 0 ok, 1 error, 2 usage,
 3 wait timed out with the condition unmet.
 
+## Manager brief
+
+A coordinating session keeps a markdown brief plus timestamped notes; the
+dashboard overview renders the brief, the last 10 notes and the session's
+children automatically. The target defaults to `FTOWN_SESSION_ID`.
+
+```bash
+ftown brief show [--json] [--session-id <id>]
+ftown brief set (--file <path.md> | --text <t> | --clear) [--session-id <id>]
+ftown brief note <text...> [--session-id <id>]
+```
+
+Text is markdown, at most 16384 characters; a note is a single line of
+1–280 characters; at most 50 notes are kept (oldest dropped). Control
+characters except newline and tab are stripped; text over the limit is an
+error (exit 1), never truncated.
+
+## Worktrees
+
+Children that write code can get a bridge-created git worktree. The default
+branch is `ftown/<slug(name)>` at `<repoRoot>/.claude/worktrees/<slug(name)>`;
+the base defaults to the current branch of the working directory (a detached
+HEAD needs `--base`). Only bridge-created worktrees are ever removed.
+
+```bash
+ftown sessions create --parent --worktree [--branch <b>] [--base <ref>] [--workdir <dir>]
+ftown sessions remove <id> [--keep-worktree | --force-worktree]
+ftown worktrees list [--json]
+ftown worktrees prune [--json]
+```
+
+On remove, a clean worktree whose branch is merged or fully pushed is
+retired (worktree removed; the branch is deleted only when merged);
+otherwise it is retained and the command prints why (for example
+`worktree retained: 2 unpushed commits`). `--keep-worktree` always retains,
+`--force-worktree` forces removal. `prune` applies the same rule to archived
+sessions only.
+
 ## Preview session files
 
 ```bash
@@ -183,7 +221,9 @@ Attention persists an `agent_needs_input` event, returns its exact ID and update
 the existing dashboard attention flow. Logical duplicate unresolved requests
 coalesce while recording occurrences; resolving it permits a new incident.
 Only creation triggers notification, and hosted push remains opt-in with existing
-session/harness eligibility. Do not automatically retry an uncertain mutation.
+session/harness eligibility. For a parent-routed item, creation notifies only
+the parent; the dashboard notice and push fire if it is escalated to the human.
+Do not automatically retry an uncertain mutation.
 Acknowledging/resolving an event never answers or approves a CLI prompt.
 
 ### Questions and answers
@@ -222,6 +262,37 @@ directly. If nobody is waiting, the answer is sent as ftown mail from "You"
 FTown session follow the same path and are answered from the dashboard inbox.
 The terminal picker appears only if the human chooses "Answer in terminal" or
 after an hour.
+
+### Parent-first routing
+
+When the asking session has a running parent, the request goes to the parent
+first: the parent receives one waking escalation mail (`[ftown question ...]`)
+naming the commands below, and the human's inbox shows the item greyed as
+"with parent" (the human may still answer it). There is no timer; only the
+parent, or the parent stopping while the item is open, moves it to the human.
+
+```bash
+# Open parent-routed questions from my children (plain: `<child> <eventId> <title>` plus options)
+ftown attention list [--json]
+
+# Answer a child's question (as the parent)
+ftown attention answer <child-id> <event-id> (--option <n|label>... | --text <t> | --answers-json <json>) [--json]
+
+# Raise it to the human instead (note at most 500 characters)
+ftown attention escalate <child-id> <event-id> [--note <t>] [--json]
+
+# Bypass the parent: only the human can provide this
+ftown sessions attention --to human --message "Please paste the API token" --title "Credential needed"
+```
+
+Answer only from facts you hold — the plan, the agreed contract, earlier
+human answers. Preferences and irreversible choices are escalated, not
+answered. A parent answer is delivered exactly like a human answer (live
+waiter, or mail whose sender is the parent session).
+
+Exit codes for `ftown attention`: 0 ok, 1 error, 2 usage, 4 forbidden (the
+caller is not the child's parent), 5 conflict (already resolved or already
+escalated to the human).
 
 PR links accept only HTTPS GitHub `/owner/repo/pull/<positive-number>` URLs.
 Outer whitespace, query/fragment and a trailing slash are normalized; credentials,
@@ -291,6 +362,9 @@ Fan-out targets are messaged sequentially, one JSON result line per target.
 | `--command` | Full command override (skips `--shell` builder) |
 | `--parent` | Set parent to `$FTOWN_SESSION_ID` |
 | `--parent-id` | Explicit parent session UUID |
+| `--worktree` | Create a bridge-owned git worktree for the session (see Worktrees) |
+| `--branch <b>` | Worktree branch (requires `--worktree`; default `ftown/<slug(name)>`) |
+| `--base <ref>` | Ref the worktree branch starts from (requires `--worktree`) |
 | `--model` | Harness model name or provider/model pattern (when supported) |
 
 Provider-flavored shells (`zai`, `kimi`, `deepseek`, `fireworks`) run Claude
@@ -313,9 +387,9 @@ ftown sessions grep <child-id> --pattern 'FAIL|Error'
 
 ### Completion handoff
 
-When the task creates or updates a GitHub PR, associate its actual URL with the
-FTown session before the completion notice. Then request user attention once the
-task is complete, before the final handoff. Replace the sample URL and summary
+A top-level session (no parent): when the task creates or updates a GitHub PR,
+associate its actual URL with the FTown session before the completion notice.
+Then request user attention once the task is complete, before the final handoff. Replace the sample URL and summary
 below with truthful outcomes and checks (including checks not run):
 
 ```bash
@@ -329,8 +403,10 @@ For tasks without a PR, omit the PR command and PR summary. Use the verified
 
 Send one completion request per completed task, not repeated per-turn notices.
 Logical duplicate coalescing does not justify retries after an uncertain outcome;
-inspect the existing request first, as described above. Child agents still send
-their assigned result to the parent; the user attention request is additional.
+inspect the existing request first, as described above. Child agents do not
+raise "Work complete": they set their card to `done` and send their assigned
+result to the parent, and the parent raises one completion notice for the
+whole job.
 
 ## Environment
 
@@ -361,7 +437,14 @@ The CLI wraps the loopback API. Raw access if needed:
 | GET | `/api/sessions` | List |
 | POST | `/api/sessions` | Create |
 | PATCH | `/api/sessions/:id` | Rename, move or associate a PR (`{ name?, parentSessionId?, pullRequestUrl? }`; `null` detaches/clears) |
-| POST | `/api/sessions/:id/attention` | Request human input (`{ message, title?, questions? }`) → `{ event }`; invalid `questions` → 400 `invalid_prompt` |
+| POST | `/api/sessions/:id/attention` | Request input (`{ message, title?, questions?, to?: 'human' }`) → `{ event }`; invalid `questions` → 400 `invalid_prompt` |
+| POST | `/api/sessions/:id/attention/:eventId/answer` | Parent answers a child (`{ answers }`); 403 not the parent, 409 resolved |
+| POST | `/api/sessions/:id/attention/:eventId/escalate` | Parent raises it to the human (`{ note? }`); 403 not the parent, 409 already human/resolved |
+| GET | `/api/sessions/:id/attention/routed` | Open parent-routed items of my children → `{ items }` |
+| GET/PUT/DELETE | `/api/sessions/:id/brief` | Read, set/clear (`{ text: string \| null }`) or delete the manager brief |
+| POST | `/api/sessions/:id/brief/notes` | Append a brief note (`{ text }`) |
+| GET | `/api/worktrees` | List bridge-owned worktrees with git status |
+| POST | `/api/worktrees/prune` | Retire eligible archived worktrees → `{ removed, retained }` |
 | GET | `/api/sessions/:id/attention/:eventId` | Read one item (`?waitSeconds=0..25` long-polls until resolved) → `{ event }`; 404 `attention_not_found` |
 | POST | `/api/sessions/:id/attention/ask` | Harness hook: record an AskUserQuestion (`{ toolName, toolUseId, toolInput }`) → `{ event }` or `null` if not promptable |
 | GET | `/api/sessions/:id/screen` | Terminal lines |
@@ -373,7 +456,7 @@ The CLI wraps the loopback API. Raw access if needed:
 | POST | `/api/sessions/:id/message` | Inject a message line as keystrokes (`{ text, from? }`) |
 | PUT | `/api/sessions/:id/preview` | Replace or add preview files, local CLI only (`{ paths: string[], mode: 'replace' \| 'add' }`) |
 | DELETE | `/api/sessions/:id/preview` | Remove preview files by name or clear the preview, local CLI only (`{ names?: string[] }`; absent names clears all) |
-| DELETE | `/api/sessions/:id` | Remove (tombstone-archived) |
+| DELETE | `/api/sessions/:id` | Remove (tombstone-archived; `?worktree=keep\|force` overrides worktree retirement) |
 | GET | `/api/archive` | List removed-session tombstones |
 | POST | `/api/sessions/:id/revive` | Recreate a removed session (new id) |
 

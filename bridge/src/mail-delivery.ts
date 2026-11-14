@@ -29,6 +29,12 @@ export const MAIL_NUDGE_MIN_INTERVAL_MS = 30_000;
 // turn never reaches Stop, and ignore busy markers old enough to be a crash.
 export const MAIL_NUDGE_BUSY_RECHECK_MS = 60_000;
 export const AGENT_BUSY_STALE_MS = 30 * 60_000;
+// Hooked harnesses with no native wake (e.g. antigravity) set the busy marker on
+// every PreToolUse/PostToolUse/UserPromptSubmit and clear it only on a posted
+// Stop; a hook error or timeout can leave the marker stuck, and their Stop-drain
+// keeps the turn going, so treat the marker as stale far sooner than the 30
+// minute crash window. Harnesses with a native wake keep the long window.
+export const HOOKED_BUSY_STALE_MS = 120_000;
 export const NATIVE_WAKE_LEASE_MS = 30_000;
 /** Leading literals of every ftown-originated prompt (bridge or installed plugin). Trimmed prompts starting with one are injected. */
 export const INJECTED_PROMPT_PREFIXES = ['[ftown msg from ', '[ftown mail]', 'FTown mail may be available.'] as const;
@@ -182,6 +188,7 @@ export class MailDeliveryService {
   private pendingNudgeFrom: Map<string, string> = new Map();
   private lastNudgeAt: Map<string, number> = new Map();
   private agentBusySince: Map<string, number> = new Map();
+  private agentBusyEvent: Map<string, 'PreToolUse' | 'PostToolUse' | 'UserPromptSubmit'> = new Map();
   private nativeLeases = new Map<string, NativeWakeRegistration & { until: number }>();
   private selectionLocks = new Map<string, Promise<void>>();
   private codexClaims = new Map<string, Set<string>>();
@@ -330,14 +337,19 @@ export class MailDeliveryService {
     return claimed?.size ? messages.filter(message => !claimed.has(message.id)) : messages;
   }
 
-  /** Hook activity (UserPromptSubmit/PreToolUse/PostToolUse): the agent is mid-turn. */
-  markAgentBusy(sessionId: string): void {
+  /** Hook activity (UserPromptSubmit/PreToolUse/PostToolUse): the agent is mid-turn.
+   *  The event name is kept because the staleness window depends on it: PreToolUse
+   *  can precede a single tool call far longer than HOOKED_BUSY_STALE_MS, while a
+   *  fresh PostToolUse/UserPromptSubmit means a new turn boundary is imminent. */
+  markAgentBusy(sessionId: string, event?: 'PreToolUse' | 'PostToolUse' | 'UserPromptSubmit'): void {
     this.agentBusySince.set(sessionId, this.now());
+    if (event !== undefined) this.agentBusyEvent.set(sessionId, event);
   }
 
   /** Hook Stop: the agent's turn ended (the injection record is kept). */
   markAgentIdle(sessionId: string): void {
     this.agentBusySince.delete(sessionId);
+    this.agentBusyEvent.delete(sessionId);
   }
 
   /** Hook SessionEnd / session removal: forget the injection record. */
@@ -657,10 +669,32 @@ export class MailDeliveryService {
     this.nudgeTimers.set(sessionId, timer);
   }
 
-  /** True while the agent is mid-turn (hook activity since the last Stop), up to AGENT_BUSY_STALE_MS. */
-  isAgentRecentlyBusy(sessionId: string): boolean {
+  /** True while the agent is mid-turn (hook activity since the last Stop), up to the session's busy-stale window. */
+  isAgentRecentlyBusy(sessionId: string, session?: Session): boolean {
     const busySince = this.agentBusySince.get(sessionId);
-    return busySince !== undefined && this.now() - busySince < AGENT_BUSY_STALE_MS;
+    if (busySince === undefined) return false;
+    return this.now() - busySince < this.busyStaleFor(sessionId, session);
+  }
+
+  /** Staleness window for a session's current busy marker, computed once per check. */
+  private busyStaleFor(sessionId: string, session?: Session): number {
+    return this.busyStaleMs(session, this.agentBusyEvent.get(sessionId));
+  }
+
+  /** The busy marker of a hooked harness with no native wake (no codex/muse waker,
+   *  no claude-mod/opencode plugin identity) goes stale quickly — but only when the
+   *  last hook event was PostToolUse or UserPromptSubmit: a lone PreToolUse (or an
+   *  unknown/omitted event) can precede one long tool call, so it keeps
+   *  AGENT_BUSY_STALE_MS. */
+  private busyStaleMs(session: Session | undefined, busyEvent?: 'PreToolUse' | 'PostToolUse' | 'UserPromptSubmit'): number {
+    if (!session || !session.shellType || !HOOKED_SHELL_TYPES.has(session.shellType)) return AGENT_BUSY_STALE_MS;
+    if (session.shellType === 'codex' || session.shellType === 'muse' || session.shellType === 'pi') return AGENT_BUSY_STALE_MS;
+    if (this.pluginIdentity(session, 'claude-mod') !== undefined || this.pluginIdentity(session, 'opencode') !== undefined) return AGENT_BUSY_STALE_MS;
+    return busyEvent === 'PostToolUse' || busyEvent === 'UserPromptSubmit' ? HOOKED_BUSY_STALE_MS : AGENT_BUSY_STALE_MS;
+  }
+
+  private logMail(sessionId: string, action: 'defer' | 'nudge' | 'unmark', reason: string): void {
+    console.debug(`[mail] ${sessionId} ${action} ${reason}`);
   }
 
   private fireMailNudge(sessionId: string): Promise<void> {
@@ -825,7 +859,8 @@ export class MailDeliveryService {
     }
     const leaseRemaining = this.pluginLeaseRemaining(session);
     if (leaseRemaining > 0) { this.scheduleMailNudge(sessionId, fromLabel, leaseRemaining); return; }
-    if (this.isAgentRecentlyBusy(sessionId)) {
+    if (this.isAgentRecentlyBusy(sessionId, session)) {
+      this.logMail(sessionId, 'defer', `busy within ${this.busyStaleFor(sessionId, session)}ms stale window`);
       this.scheduleMailNudge(sessionId, fromLabel, MAIL_NUDGE_BUSY_RECHECK_MS);
       return;
     }
@@ -898,14 +933,16 @@ export class MailDeliveryService {
     const unstampMuse = async () => {
       if (museStamped?.batchIds.length) {
         await mailStore.unmarkNudged(sessionId, museStamped.batchIds, museStamped.token);
+        this.logMail(sessionId, 'unmark', 'native wake attempt undone');
       }
     };
 
     const legacyWait = (this.legacyReadyAt.get(sessionId) ?? 0) - this.now();
     if (legacyWait > 0) { await unstampMuse(); this.scheduleMailNudge(sessionId, fromLabel, legacyWait); return; }
 
-    if (this.isAgentRecentlyBusy(sessionId)) {
+    if (this.isAgentRecentlyBusy(sessionId, session)) {
       await unstampMuse();
+      this.logMail(sessionId, 'defer', `busy within ${this.busyStaleFor(sessionId, session)}ms stale window`);
       this.scheduleMailNudge(sessionId, fromLabel, MAIL_NUDGE_BUSY_RECHECK_MS);
       return;
     }
@@ -950,8 +987,9 @@ export class MailDeliveryService {
     if (session.shellType === 'codex') { await unstampMuse(); this.scheduleMailNudge(sessionId, fromLabel, MAIL_NUDGE_DELAY_MS); return; }
     const refreshedLease = this.pluginLeaseRemaining(session);
     if (refreshedLease > 0) { await unstampMuse(); this.scheduleMailNudge(sessionId, fromLabel, refreshedLease); return; }
-    if (this.isAgentRecentlyBusy(sessionId)) {
+    if (this.isAgentRecentlyBusy(sessionId, session)) {
       await unstampMuse();
+      this.logMail(sessionId, 'defer', `busy within ${this.busyStaleFor(sessionId, session)}ms stale window`);
       this.scheduleMailNudge(sessionId, fromLabel, MAIL_NUDGE_BUSY_RECHECK_MS);
       return;
     }
@@ -969,6 +1007,7 @@ export class MailDeliveryService {
       const stamped = await mailStore.markNudged(sessionId, requestedIds, token);
       if (!stamped.length) {
         await mailStore.unmarkNudged(sessionId, requestedIds, token);
+        this.logMail(sessionId, 'unmark', 'stamp claimed nothing');
         this.pendingNudgeFrom.delete(sessionId);
         return;
       }
@@ -1007,6 +1046,7 @@ export class MailDeliveryService {
     this.pendingNudgeFrom.delete(sessionId);
     if (current()) {
       this.lastNudgeAt.set(sessionId, this.now());
+      this.logMail(sessionId, 'nudge', `pty wake with ${batchIds.length} message(s)`);
     }
   }
 

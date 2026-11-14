@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, type RefObject } from "react";
 import type { ManualInputNotice } from "@/lib/hook-events";
+import { isWithParentNotice } from "@/lib/hook-events";
 import type { SessionActivity } from "@/hooks/useAllSessionEvents";
 import type { BridgeInfo } from "@/hooks/useBridges";
 import type { Command, CommandResponse, Session } from "@/types";
@@ -10,7 +11,7 @@ import type { AttentionAnswerEntry } from "../../../bridge/src/attention-prompt-
 import type { AnswerSessionAttentionResult } from "@/hooks/useAllSessionEvents";
 import { AttentionAnswerForm, type AttentionAnswerSubmitResult } from "./AttentionAnswerForm";
 
-export interface InboxEntry { session: Session; notice: ManualInputNotice; bridgeName: string; replyDisabledReason?: string }
+export interface InboxEntry { session: Session; notice: ManualInputNotice; bridgeName: string; replyDisabledReason?: string; /** Name of the parent session a parent-routed item is waiting with, resolved from the session list. */ parentName?: string }
 /** Queue exactly one browser reply; ambiguous outcomes require an explicit user decision. */
 export async function queueSessionReply(send: (command: Command) => Promise<CommandResponse>, entry: InboxEntry, message: string): Promise<void> {
   let response: CommandResponse;
@@ -61,13 +62,29 @@ export function inboxEntries(sessions: readonly Session[], activity: ReadonlyMap
     if (!notice || hiddenSessions.has(session.id) || hiddenBridges.has(session.bridgeId)) return [];
     const bridgeName = bridges.find(bridge => bridge.bridgeId === session.bridgeId)?.hostname || session.bridgeId;
     const replyDisabledReason = session.status !== "running" ? "This session is not running." : !ready.has(session.bridgeId) ? "Reconnect this computer before replying." : !canControl(session.bridgeId) ? "This browser does not have control permission for this computer." : undefined;
-    return [{ session, notice, bridgeName, replyDisabledReason }];
+    const routedParent = notice.route === "parent" && notice.routedTo ? sessions.find(candidate => candidate.id === notice.routedTo) : undefined;
+    const parentName = notice.route === "parent" && notice.routedTo
+      ? routedParent ? routedParent.name || routedParent.prompt?.slice(0, 36) || routedParent.id : notice.routedTo
+      : undefined;
+    return [{ session, notice, bridgeName, replyDisabledReason, ...(parentName ? { parentName } : {}) }];
   }).sort((a, b) => b.notice.receivedAt - a.notice.receivedAt);
+}
+
+/** A parent-routed item the parent has not escalated yet: greyed "with parent", expandable, outside the waiting counts. */
+export function isWithParent(notice: Pick<ManualInputNotice, "route" | "escalatedAt">): boolean {
+  return isWithParentNotice(notice);
+}
+
+/** Items that count toward the title-bar waiting prefix and the inbox trigger badge. */
+export function waitingInboxCount(entries: readonly InboxEntry[]): number {
+  return entries.filter(entry => !isWithParent(entry.notice)).length;
 }
 
 export function InboxItemBody({ entry, onOpenSession, onDismiss, onReply, onAnswer, hideOpenSession }: { entry: InboxEntry; onOpenSession: (id: string) => void; onDismiss: (entry: InboxEntry) => Promise<void>; onReply: (entry: InboxEntry, message: string) => Promise<void>; onAnswer: (entry: InboxEntry, answers: AttentionAnswerEntry[]) => Promise<AttentionAnswerSubmitResult>; hideOpenSession?: boolean }) {
   const [draft, setDraft] = useState(""); const [message, setMessage] = useState(""); const [error, setError] = useState("");
   const [sending, setSending] = useState(false); const [dismissing, setDismissing] = useState(false);
+  const withParent = isWithParent(entry.notice);
+  const [expanded, setExpanded] = useState(!withParent);
   const sendingRef = useRef(false), dismissingRef = useRef(false);
   const name = entry.session.name || entry.session.prompt?.slice(0, 36) || "Session";
   async function send() {
@@ -89,22 +106,34 @@ export function InboxItemBody({ entry, onOpenSession, onDismiss, onReply, onAnsw
   const hookPrompt = prompt?.channel === "hook";
   const normalizeText = (text?: string) => (text ?? "").trim().replace(/\s+/g, " ");
   const messageDuplicatesQuestion = !!prompt && prompt.questions.length === 1 && normalizeText(entry.notice.message) === normalizeText(prompt.questions[0].question);
+  const answeredBy = entry.notice.answeredBy?.kind === "session" ? entry.notice.answeredBy : undefined;
+  const answeredByLabel = answeredBy ? answeredBy.name || answeredBy.sessionId || "the parent session" : undefined;
   return <>
     <div className="min-w-0"><h3 className="break-words text-sm font-semibold [overflow-wrap:anywhere]">{name}</h3><p className="break-words text-xs text-[var(--text-muted)] [overflow-wrap:anywhere]">{entry.bridgeName} · <time dateTime={new Date(entry.notice.receivedAt).toISOString()}>{new Date(entry.notice.receivedAt).toLocaleString()}</time></p></div>
     <p className="break-words text-sm font-semibold [overflow-wrap:anywhere]">{entry.notice.title}</p>
     {!messageDuplicatesQuestion && <p className="whitespace-pre-wrap text-sm [overflow-wrap:anywhere]">{entry.notice.message}</p>}
+    {withParent && <p className="break-words text-xs text-[var(--text-muted)] [overflow-wrap:anywhere]">With parent {entry.parentName ?? "the parent session"}</p>}
+    {entry.notice.escalatedAt && <p className="break-words text-xs text-[var(--text-muted)] [overflow-wrap:anywhere]">Escalated by parent{entry.notice.escalationNote ? `: ${entry.notice.escalationNote}` : ""}</p>}
+    {answeredByLabel && <p className="break-words text-xs text-[var(--text-muted)] [overflow-wrap:anywhere]">Answered by {answeredByLabel}</p>}
+    {withParent && !expanded ? (
+      <div className="flex flex-wrap gap-2">
+        <button type="button" className="btn-ghost min-h-11" onClick={() => setExpanded(true)}>Answer now</button>
+      </div>
+    ) : <>
     <div className="flex flex-wrap gap-2">{hideOpenSession ? null : <button type="button" className="btn-ghost min-h-11" onClick={() => onOpenSession(entry.session.id)}>Open session</button>}{!hookPrompt && <button type="button" className="btn-ghost min-h-11" disabled={dismissing} onClick={() => void dismiss()}>{dismissing ? "Dismissing…" : "Dismiss"}</button>}</div>
     {prompt ? <AttentionAnswerForm key={noticeKey(entry.session.id, entry.notice)} prompt={prompt} sessionName={name} disabledReason={entry.replyDisabledReason} onSubmit={answers => onAnswer(entry, answers)} onAnswerInTerminal={hookPrompt ? () => void answerInTerminal() : undefined} /> : <>
     <label className="flex min-w-0 flex-col gap-1 text-xs text-[var(--text-muted)]">Reply to {name}<textarea className="min-h-20 w-full min-w-0 rounded-md border border-[var(--border-muted)] bg-[var(--bg-surface)] p-2 text-sm text-[var(--text-primary)]" maxLength={65536} value={draft} onChange={event => { setDraft(event.target.value); setMessage(""); setError(""); }} disabled={sending || !!entry.replyDisabledReason} /></label>
     {entry.replyDisabledReason && <p className="text-xs text-[var(--text-muted)]">{entry.replyDisabledReason}</p>}
     <button type="button" className="btn-accent min-h-11" disabled={sending || !!entry.replyDisabledReason || !draft.trim()} onClick={() => void send()}>{sending ? "Sending…" : "Send reply"}</button>
     </>}
+    </>}
     {message && <p role="status" className="text-xs text-[var(--text-muted)]">{message}</p>}{error && <p role="alert" className="text-xs text-[var(--status-error)]">{error}</p>}
   </>;
 }
 
 function InboxItem({ entry, onOpenSession, onDismiss, onReply, onAnswer }: { entry: InboxEntry; onOpenSession: (id: string) => void; onDismiss: (entry: InboxEntry) => Promise<void>; onReply: (entry: InboxEntry, message: string) => Promise<void>; onAnswer: (entry: InboxEntry, answers: AttentionAnswerEntry[]) => Promise<AttentionAnswerSubmitResult> }) {
-  return <article data-inbox-entry={entry.session.id} className="min-w-0 space-y-2 rounded-md border border-[var(--border-muted)] bg-[var(--bg-base)] p-3">
+  const withParent = isWithParent(entry.notice);
+  return <article data-inbox-entry={entry.session.id} className={`min-w-0 space-y-2 rounded-md border border-[var(--border-muted)] bg-[var(--bg-base)] p-3 ${withParent ? "opacity-60" : ""}`}>
     <InboxItemBody entry={entry} onOpenSession={onOpenSession} onDismiss={onDismiss} onReply={onReply} onAnswer={onAnswer} />
   </article>;
 }

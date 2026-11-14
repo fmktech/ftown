@@ -768,6 +768,9 @@ program
       mail: mailStore,
       publishSession: (session) => { void centrifugo.publishSessionUpdate(userId, session); },
       now: Date.now,
+      onAttentionEscalated: (sessionId, item) => {
+        localApiServer.publishHumanAttention(sessionId, item);
+      },
     });
     localApiServer.setCoordination(coordination);
     const stopPushSessionObserver = centrifugo.onLocalPublication((channel, data) => {
@@ -872,6 +875,7 @@ program
       publishSyntheticStop: (sid, reason) => pump.publishSyntheticStop(sid, reason),
       withSessionWrite: (sid, task) => pump.withSessionWrite(sid, task),
       unregisterSession: handleSessionExit,
+      onSessionEnding: (session) => coordination.onSessionExit(session.id, session),
       flushTerminalBuffer: (sid) => pump.flush(sid),
       destroyTerminal: (sid) => terminalManager.destroy(sid),
     });

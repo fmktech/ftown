@@ -5,7 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { Command, Session } from "@/types";
 import type { AttentionAnswerEntry } from "../../../bridge/src/attention-prompt-protocol";
 import type { AttentionAnswerSubmitResult } from "./AttentionAnswerForm";
-import { attentionAnswerSubmitResult, inboxEntries, queueSessionReply, SessionInboxPage, SessionInboxTrigger, type InboxEntry } from "./SessionInbox";
+import { attentionAnswerSubmitResult, inboxEntries, isWithParent, waitingInboxCount, queueSessionReply, SessionInboxPage, SessionInboxTrigger, type InboxEntry } from "./SessionInbox";
 const session = (id: string, extra: Partial<Session> = {}): Session => ({ id, bridgeId: "b", name: id, status: "running", createdAt: "2026-01-01", updatedAt: "2026-01-01", ...extra });
 const entry = (id: string, timestamp = 1): InboxEntry => ({ session: session(id), bridgeName: "Laptop", notice: { type: "agent_needs_input", title: "Review", message: "Full message\n" + "x".repeat(300), receivedAt: timestamp } });
 const base = { onOpenSession: vi.fn(), onDismiss: vi.fn(async () => {}), onReply: vi.fn(async () => {}), onAnswer: vi.fn(async (_entry: InboxEntry, _answers: AttentionAnswerEntry[]): Promise<AttentionAnswerSubmitResult> => ({ ok: true, message: "Answer sent to first." })) };
@@ -180,6 +180,10 @@ it.each([["Answer delivered to first."], ["Answer saved, but mail delivery faile
 });
 
 const withMessage = (message: string, question: string): InboxEntry => { const item = promptEntry("first", "mail"); item.notice = { ...item.notice, message, prompt: { channel: "mail", questions: [{ question, options: [{ label: "A" }, { label: "B" }], multiSelect: false, allowText: false }] } }; return item; };
+const routedEntry = (notice: Partial<InboxEntry["notice"]> = {}, entry: Partial<InboxEntry> = {}): InboxEntry => {
+  const item = promptEntry("child", "mail");
+  return { ...item, notice: { ...item.notice, route: "parent", routedTo: "boss", ...notice }, ...entry };
+};
 it("shows a prompted question once when the message equals its only question", () => {
   render(<Fixture entries={[withMessage("Which deploy target should I use?", "Which deploy target should I use?")]}/>); fireEvent.click(screen.getByRole("button", { name: /Inbox/ }));
   expect(within(document.querySelector("[data-inbox-entry='first']") as HTMLElement).getAllByText("Which deploy target should I use?")).toHaveLength(1);
@@ -192,4 +196,71 @@ it("shows both the message and the question when they differ", () => {
 it("treats whitespace and trim differences as equal when deduplicating", () => {
   render(<Fixture entries={[withMessage("  Which deploy\n  target should   I use?\n", "Which deploy target should I use?")]}/>); fireEvent.click(screen.getByRole("button", { name: /Inbox/ }));
   expect(within(document.querySelector("[data-inbox-entry='first']") as HTMLElement).getAllByText("Which deploy target should I use?")).toHaveLength(1);
+});
+
+it("resolves the parent name for a parent-routed item from the session list", () => {
+  const rows = [session("boss", { name: "Boss" }), session("child", { parentSessionId: "boss" })];
+  const activity = new Map([["child", { activity: "idle" as const, attention: routedEntry().notice }]]);
+  const entries = inboxEntries(rows, activity, [], new Set(), new Set(), new Set(["b"]), () => true);
+  expect(entries).toHaveLength(1); expect(entries[0].parentName).toBe("Boss");
+  expect(isWithParent(entries[0].notice)).toBe(true);
+});
+
+it("greys a parent-routed item behind an Answer now expander until expanded", () => {
+  const item = routedEntry({}, { parentName: "Boss" });
+  render(<Fixture entries={[item]}/>); fireEvent.click(screen.getByRole("button", { name: /Inbox/ }));
+  const article = screen.getByRole("article"); expect(article.className).toContain("opacity-60");
+  expect(within(article).getByText("With parent Boss")).toBeTruthy();
+  expect(within(article).queryByRole("button", { name: "Dismiss" })).toBeNull();
+  expect(within(article).queryByLabelText("Safe")).toBeNull();
+  fireEvent.click(within(article).getByRole("button", { name: "Answer now" }));
+  expect(within(article).queryByRole("button", { name: "Answer now" })).toBeNull();
+  fireEvent.click(within(article).getByLabelText("Safe"));
+  fireEvent.click(within(article).getByRole("button", { name: "Send answer" }));
+  expect(base.onAnswer).toHaveBeenCalledWith(item, [{ selected: [1] }]);
+});
+
+it("keeps an escalated item fully expanded and notes who escalated it", () => {
+  const item = routedEntry({ escalatedAt: "2026-01-01T00:00:00.000Z", escalationNote: "I am only the messenger" });
+  render(<Fixture entries={[item]}/>); fireEvent.click(screen.getByRole("button", { name: /Inbox/ }));
+  const article = screen.getByRole("article"); expect(article.className).not.toContain("opacity-60");
+  expect(within(article).getByText("Escalated by parent: I am only the messenger")).toBeTruthy();
+  expect(within(article).queryByRole("button", { name: "Answer now" })).toBeNull();
+  expect(within(article).getByRole("button", { name: "Dismiss" })).toBeTruthy();
+  expect(within(article).getByLabelText("Safe")).toBeTruthy();
+});
+
+it("shows parent-session provenance where an answered item displays its answers", () => {
+  const item = routedEntry({ answeredBy: { kind: "session", sessionId: "boss", name: "Boss" } });
+  render(<Fixture entries={[item]}/>); fireEvent.click(screen.getByRole("button", { name: /Inbox/ }));
+  expect(within(screen.getByRole("article")).getByText("Answered by Boss")).toBeTruthy();
+});
+
+it("counts parent-routed non-escalated items outside the waiting count and keeps escalated ones inside", () => {
+  const waiting = routedEntry(); const escalated = routedEntry({ escalatedAt: "2026-01-01T00:00:00.000Z", escalationNote: "n" }, { session: session("second") });
+  const ordinary = entry("third", 3);
+  expect(waitingInboxCount([waiting, escalated, ordinary])).toBe(2);
+  expect(waitingInboxCount([waiting])).toBe(0);
+});
+
+it("falls back to the routedTo id when the parent session is not in the list", () => {
+  const rows = [session("child")];
+  const activity = new Map([["child", { activity: "idle" as const, attention: routedEntry({ routedTo: "ghost-parent" }).notice }]]);
+  const entries = inboxEntries(rows, activity, [], new Set(), new Set(), new Set(["b"]), () => true);
+  expect(entries[0].parentName).toBe("ghost-parent");
+  render(<Fixture entries={entries}/>); fireEvent.click(screen.getByRole("button", { name: /Inbox/ }));
+  expect(within(screen.getByRole("article")).getByText("With parent ghost-parent")).toBeTruthy();
+});
+
+it("labels an escalated item without a note without a colon", () => {
+  const item = routedEntry({ escalatedAt: "2026-11-13T00:00:00.000Z" });
+  render(<Fixture entries={[item]}/>); fireEvent.click(screen.getByRole("button", { name: /Inbox/ }));
+  expect(within(screen.getByRole("article")).getByText("Escalated by parent")).toBeTruthy();
+  expect(within(screen.getByRole("article")).queryByText(/^Escalated by parent:/)).toBeNull();
+});
+
+it("shows no provenance when a human answered the item", () => {
+  const item = routedEntry({ answeredBy: { kind: "human" } });
+  render(<Fixture entries={[item]}/>); fireEvent.click(screen.getByRole("button", { name: /Inbox/ }));
+  expect(within(screen.getByRole("article")).queryByText(/^Answered by/)).toBeNull();
 });

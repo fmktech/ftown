@@ -8,8 +8,14 @@ import {
 
 const ROLLUP_ORDER: readonly BoardRollupKey[] = [...CARD_STATES, 'unset'];
 
+const BLOCKED_TEXT_MAX = 60;
+
 function pad2(n: number): string {
   return String(n).padStart(2, '0');
+}
+
+function truncate(text: string, max: number): string {
+  return [...text].slice(0, max).join('');
 }
 
 export function formatLocalHHMM(iso: string): string {
@@ -36,6 +42,15 @@ export function formatBoardRow(card: SessionCard, nowMs: number): string {
   const headline = card.declared?.headline || '-';
 
   let suffix = '';
+  const progress = card.declared?.progress;
+  if (progress && state !== 'done') {
+    suffix += `  ${progress.done}/${progress.total}`;
+  }
+  const blockedOn = card.declared?.blockedOn;
+  if (blockedOn) {
+    const ref = blockedOn.ref ? `:${blockedOn.ref}` : '';
+    suffix += `  blocked on ${blockedOn.kind}${ref}: ${truncate(blockedOn.text, BLOCKED_TEXT_MAX)}`;
+  }
   if (card.derived.pr) {
     suffix += `  PR:${card.derived.pr.state}`;
   }

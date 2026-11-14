@@ -369,6 +369,40 @@ describe("inbox document title", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
     await waitFor(() => expect(document.title).toBe("(2) ftown new"));
   });
+  it("does not count parent-routed non-escalated items toward the waiting prefix", async () => {
+    window.matchMedia = vi.fn().mockReturnValue({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    document.title = "ftown base";
+    state.sessions = [session("ordinary", "Regular shell"), session("boss", "Boss"), session("child", "Worker", { parentSessionId: "boss" })];
+    dashboard();
+    expect(document.title).toBe("ftown base");
+    const ordinary = { type: "agent_needs_input" as const, title: "Review", message: "Inspect", receivedAt: 10 };
+    const withParent = { type: "agent_needs_input" as const, title: "Question", message: "Ask", receivedAt: 11, route: "parent" as const, routedTo: "boss" };
+    state.activity = new Map([["ordinary", { activity: "idle", attention: ordinary }], ["child", { activity: "idle", attention: withParent }]]);
+    fireEvent.click(screen.getByRole("tab", { name: /^Workspace/ }));
+    await waitFor(() => expect(document.title).toBe("(1) ftown base"));
+    // Once the parent escalates, the item counts again.
+    state.activity = new Map([["child", { activity: "idle", attention: { ...withParent, escalatedAt: "2026-11-13T00:00:00.000Z", escalationNote: "Parent is gone" } }]]);
+    fireEvent.click(screen.getByRole("tab", { name: "Terminal" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
+    await waitFor(() => expect(document.title).toBe("(1) ftown base"));
+  });
+});
+
+describe("manager Overview tab", () => {
+  it("appears on the phone for a session with children, shows the overview panel, and disappears for a plain session", async () => {
+    window.matchMedia = vi.fn().mockReturnValue({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    state.sessions = [session("boss", "Boss"), session("child", "Worker", { parentSessionId: "boss" }), session("plain", "Regular shell")];
+    dashboard();
+    fireEvent.click(await screen.findByRole("button", { name: /Boss/ }));
+    expect(phoneTabNames()).toEqual(["Workspace", "Overview", "Terminal"]);
+    fireEvent.click(phoneTab("Overview"));
+    expect(phoneTab("Overview").getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("tabpanel", { name: "Overview" })).toBeTruthy();
+    fireEvent.click(phoneTab("Terminal"));
+    expect(screen.queryByRole("tabpanel", { name: "Overview" })).toBeNull();
+    fireEvent.click(await screen.findByRole("button", { name: /Regular shell/ }));
+    expect(phoneTabNames()).toEqual(["Workspace", "Terminal"]);
+  });
 });
 
 type Layout = "wide" | "compact" | "mobile";

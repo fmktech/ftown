@@ -7,6 +7,7 @@ import type { PushNotice } from './push-notifier.js';
 import { classifyAttentionHook, normalizeAttentionPrompt, promptSchema, sanitizeAttentionText, type Activity, type AttentionItem, type Resolution } from './attention-events.js';
 import { ATTENTION_ITEM_WAIT_MAX_SECONDS, ATTENTION_PROMPT_LIMITS, ATTENTION_WAITER_TTL_MS, type AttentionPrompt } from './attention-prompt-protocol.js';
 import { validateAttentionAnswer } from './attention-prompt.js';
+import { ESCALATION_NOTE_MAX, type AttentionAnsweredBy, type AttentionRoute, type AttentionRoutingFields, type AttentionRoutingStoreApi } from './coordination/contract-b.js';
 
 const L = ATTENTION_PROMPT_LIMITS;
 /** JSON with object keys sorted, so equal prompts always hash alike. */
@@ -26,6 +27,12 @@ const answerSchema = z.object({
   answeredAt: z.string(),
 }).strict();
 
+const answeredBySchema = z.object({
+  kind: z.enum(['human', 'session']),
+  sessionId: z.string().optional(),
+  name: z.string().optional(),
+}).strict();
+
 const itemSchema = z.object({
   id: z.string(), sequence: z.number().int().positive(),
   type: z.enum(['permission_prompt', 'elicitation_dialog', 'agent_needs_input', 'ask_user']),
@@ -34,6 +41,11 @@ const itemSchema = z.object({
   acknowledgedAt: z.string().optional(), resolvedAt: z.string().optional(),
   resolution: z.enum(['manual', 'user_prompt', 'elicitation_complete', 'session_end', 'answered', 'tool_complete', 'replied']).optional(),
   prompt: promptSchema.optional(), answer: answerSchema.optional(),
+  route: z.enum(['parent', 'human']).optional(),
+  routedTo: z.string().optional(),
+  escalatedAt: z.string().optional(),
+  escalationNote: z.string().max(ESCALATION_NOTE_MAX).optional(),
+  answeredBy: answeredBySchema.optional(),
   fingerprint: z.string(), sourceId: z.string().optional(), reason: z.string().optional(),
 }).strict();
 const ledgerSchema = z.object({
@@ -73,7 +85,7 @@ export interface AttentionNotificationOptions {
 interface IdleTimer { cycleId: string; timer: ReturnType<typeof setTimeout> }
 
 /** Single-process, serialized snapshots. Missing/corrupt files never masquerade as recovered history. */
-export class AttentionStore {
+export class AttentionStore implements AttentionRoutingStoreApi {
   private locks = new Map<string, Promise<unknown>>();
   private listeners = new Map<string, Set<() => void>>();
   /** Per session: wake callbacks of item waiters, fired whenever any item is resolved. */
@@ -379,8 +391,8 @@ export class AttentionStore {
       this.wakeItemWaiters(id);
     });
   }
-  /** Record the human's answer and resolve the item. The caller delivers it (waiter or mail). */
-  async answer(id: string, eventId: string, answers: unknown, now?: Date): Promise<AttentionAnswerResult> {
+  /** Record the answer (human or parent session) and resolve the item. The caller delivers it (waiter or mail). */
+  async answer(id: string, eventId: string, answers: unknown, now?: Date, answeredBy: AttentionAnsweredBy = { kind: 'human' }): Promise<AttentionAnswerResult> {
     return this.withLock(id, async () => {
       const ledger = await this.load(id);
       const event = ledger.events.find(candidate => candidate.id === eventId);
@@ -398,6 +410,11 @@ export class AttentionStore {
       }
       const timestamp = at.toISOString();
       event.answer = { answers: checked.value, answeredAt: timestamp };
+      event.answeredBy = {
+        kind: answeredBy.kind,
+        ...(answeredBy.sessionId !== undefined ? { sessionId: answeredBy.sessionId } : {}),
+        ...(answeredBy.name !== undefined ? { name: answeredBy.name } : {}),
+      };
       event.resolvedAt = timestamp;
       event.resolution = 'answered';
       const resolvedIds = [event.id];
@@ -411,6 +428,41 @@ export class AttentionStore {
       await this.save(id, ledger);
       this.wakeItemWaiters(id);
       return { item, snapshot: { attention: this.latestExplicit(ledger), sequence: ledger.sequence }, waiterLive };
+    });
+  }
+  async setRoute(sessionId: string, eventId: string, fields: AttentionRoutingFields, expectRoute?: AttentionRoute): Promise<AttentionItem | undefined> {
+    return this.withLock(sessionId, async () => {
+      const ledger = await this.load(sessionId);
+      const event = ledger.events.find(candidate => candidate.id === eventId);
+      if (!event || event.resolvedAt) return undefined;
+      // Compare-and-set: parent escalate and parent-exit must not both publish.
+      if (expectRoute !== undefined && event.route !== expectRoute) return undefined;
+      if (fields.route !== undefined) event.route = fields.route;
+      if (fields.routedTo !== undefined) event.routedTo = fields.routedTo;
+      if (fields.escalatedAt !== undefined) event.escalatedAt = fields.escalatedAt;
+      if (fields.escalationNote !== undefined) {
+        const cleanedNote = sanitizeAttentionText(fields.escalationNote, ESCALATION_NOTE_MAX);
+        if (cleanedNote) event.escalationNote = cleanedNote;
+        else delete event.escalationNote;
+      }
+      if (fields.answeredBy !== undefined) {
+        event.answeredBy = {
+          kind: fields.answeredBy.kind,
+          ...(fields.answeredBy.sessionId !== undefined ? { sessionId: fields.answeredBy.sessionId } : {}),
+          ...(fields.answeredBy.name !== undefined ? { name: fields.answeredBy.name } : {}),
+        };
+      }
+      await this.save(sessionId, ledger);
+      return publicItem(event);
+    });
+  }
+  async listRouted(childId: string): Promise<AttentionItem[]> {
+    return this.withLock(childId, async () => {
+      const ledger = await this.load(childId);
+      return ledger.events
+        .filter(event => !event.resolvedAt && event.route === 'parent')
+        .sort((a, b) => a.sequence - b.sequence)
+        .map(publicItem);
     });
   }
   async mutate(id: string, ids: string[], operation: 'ack' | 'resolve', reason?: string): Promise<AttentionItem[]> {

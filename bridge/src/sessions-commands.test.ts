@@ -343,3 +343,60 @@ test('attention --wait retries transient poll failures three times then fails', 
     return { event: { id: 'evt-1' } };
   });
 }));
+
+test('create --worktree maps worktree, --branch and --base to POST body and rejects --branch/--base without --worktree', async () => fixture(async (requests, output) => {
+  assert.equal(await runSessions(['create', '--branch', 'feat/x']), 1);
+  assert.equal(await runSessions(['create', '--base', 'main']), 1);
+  assert.equal(requests.length, 0);
+  assert.ok(output.some((line) => line.includes('--branch and --base require --worktree')));
+
+  assert.equal(await runSessions(['create', '--prompt', 'work', '--worktree']), 0);
+  assert.deepEqual(requests.at(-1)?.body, { prompt: 'work', worktree: true });
+
+  assert.equal(await runSessions(['create', '--prompt', 'work', '--worktree', '--branch', 'feat/a']), 0);
+  assert.deepEqual(requests.at(-1)?.body, { prompt: 'work', worktree: { branch: 'feat/a' } });
+
+  assert.equal(await runSessions(['create', '--prompt', 'work', '--worktree', '--base', 'main']), 0);
+  assert.deepEqual(requests.at(-1)?.body, { prompt: 'work', worktree: { base: 'main' } });
+
+  assert.equal(await runSessions(['create', '--prompt', 'work', '--worktree', '--branch', 'feat/a', '--base', 'main']), 0);
+  assert.deepEqual(requests.at(-1)?.body, { prompt: 'work', worktree: { branch: 'feat/a', base: 'main' } });
+}));
+
+test('remove maps --keep-worktree and --force-worktree query params and prints worktreeOutcome', async () => {
+  let currentOutcome: { action: string; reason?: string } | undefined;
+  await fixture(async (requests, output) => {
+    assert.equal(await runSessions(['remove', 'sess-1', '--keep-worktree', '--force-worktree']), 1);
+    assert.equal(requests.length, 0);
+
+    currentOutcome = { action: 'removed' };
+    assert.equal(await runSessions(['remove', 'sess-1', '--force-worktree']), 0);
+    assert.equal(requests.at(-1)?.method, 'DELETE');
+    assert.ok(requests.at(-1)?.url.endsWith('/api/sessions/sess-1?worktree=force'));
+    assert.ok(output.some((line) => line.includes('worktree removed')));
+
+    output.length = 0;
+    currentOutcome = { action: 'retained', reason: '2 unpushed commits' };
+    assert.equal(await runSessions(['remove', 'sess-2', '--keep-worktree', '--plain']), 0);
+    assert.equal(requests.at(-1)?.method, 'DELETE');
+    assert.ok(requests.at(-1)?.url.endsWith('/api/sessions/sess-2?worktree=keep'));
+    assert.ok(output.some((line) => line.includes('worktree retained: 2 unpushed commits')));
+
+    output.length = 0;
+    currentOutcome = { action: 'retained', reason: 'uncommitted changes' };
+    assert.equal(await runSessions(['remove', 'sess-3']), 0);
+    assert.ok(requests.at(-1)?.url.endsWith('/api/sessions/sess-3'));
+    assert.ok(output.some((line) => line.includes('worktree retained: uncommitted changes')));
+  }, () => ({ removed: true, ...(currentOutcome ? { worktreeOutcome: currentOutcome } : {}) }));
+});
+
+test('attention --to human sends to:"human" in request body and rejects invalid --to targets', async () => fixture(async (requests, output) => {
+  process.env.FTOWN_SESSION_ID = 'self-id';
+  assert.equal(await runSessions(['attention', '--message', 'Need token', '--to', 'parent']), 1);
+  assert.equal(requests.length, 0);
+  assert.ok(output.some((line) => line.includes('--to only accepts "human"')));
+
+  assert.equal(await runSessions(['attention', '--message', 'Need token', '--to', 'human']), 0);
+  assert.equal(requests.at(-1)?.method, 'POST');
+  assert.deepEqual(requests.at(-1)?.body, { message: 'Need token', to: 'human' });
+}, (request) => request.method === 'GET' ? newCapabilities : { event: { id: 'evt-human' } }));

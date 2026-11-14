@@ -4,6 +4,8 @@ import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AttentionStore } from './attention-store.js';
+import { WorktreeError } from './coordination/contract-b.js';
+import type { AttentionItem } from './attention-events.js';
 
 import type { CommandRpcDeps } from './command-rpc.js';
 import { createCommandHandler } from './command-rpc.js';
@@ -17,6 +19,44 @@ import type { BridgeSecurityService } from './security/bridge/security.js';
 import type { VerifiedApplication } from './security/protocol.js';
 import type { ModelRoutingService } from './quota/routing-service.js';
 import type { ModelRoutingSnapshot, SetModelRoutingResult } from './quota/types.js';
+
+test('human answers store provenance and route fields flow through the attention projection', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'attention-provenance-'));
+  await mkdir(join(dir, 'session'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const attentionStore = new AttentionStore(id => join(dir, id));
+  const question = { question: 'Pick', options: [{ label: 'A' }, { label: 'B' }], multiSelect: false, allowText: false };
+  const responses: CommandResponse[] = [];
+  const handler = createCommandHandler({ bridgeId: 'owner', attentionStore,
+    sessionController: { get: async (id: string) => id === 'session' ? { id, bridgeId: 'owner' } : null } as unknown as SessionController,
+    publishCommandResponse: async response => { responses.push(response); } });
+  const ask = () => attentionStore.record('session', 'Notification', { notification_type: 'agent_needs_input', message: 'Q' }, { prompt: { channel: 'mail', questions: [question] } });
+  const attentionOf = (requestId: string): AttentionItem | null =>
+    (responses.find(response => response.requestId === requestId)?.data as { attention: AttentionItem | null } | undefined)?.attention ?? null;
+
+  const routed = (await ask())!;
+  await attentionStore.setRoute('session', routed.id, { route: 'parent', routedTo: 'parent' });
+  await handler({ type: 'get_session_attention', requestId: 'routed-read', payload: { bridgeId: 'owner', sessionId: 'session' } });
+  const projected = attentionOf('routed-read');
+  assert.equal(projected?.route, 'parent'); assert.equal(projected?.routedTo, 'parent');
+  assert.equal(projected?.escalatedAt, undefined); assert.equal(projected?.escalationNote, undefined); assert.equal(projected?.answeredBy, undefined);
+
+  // A human may answer a parent-routed item directly (no route check on this path).
+  await handler({ type: 'answer_session_attention', requestId: 'human-answer', payload: { bridgeId: 'owner', sessionId: 'session', eventId: routed.id, answers: [{ selected: [1] }] } });
+  assert.equal(responses.at(-1)?.success, true);
+  const answered = await attentionStore.waitForItem('session', routed.id, 0);
+  assert.equal(answered.resolution, 'answered');
+  assert.deepEqual(answered.answeredBy, { kind: 'human' });
+  assert.equal(answered.route, 'parent'); assert.equal(answered.routedTo, 'parent');
+
+  const escalated = (await ask())!;
+  await attentionStore.setRoute('session', escalated.id, { route: 'human', escalatedAt: '2026-01-02T00:00:00.000Z', escalationNote: 'Parent unavailable' });
+  await handler({ type: 'get_session_attention', requestId: 'escalated-read', payload: { bridgeId: 'owner', sessionId: 'session' } });
+  const projectedEscalated = attentionOf('escalated-read');
+  assert.equal(projectedEscalated?.id, escalated.id);
+  assert.equal(projectedEscalated?.route, 'human'); assert.equal(projectedEscalated?.escalatedAt, '2026-01-02T00:00:00.000Z');
+  assert.equal(projectedEscalated?.escalationNote, 'Parent unavailable'); assert.equal(projectedEscalated?.answeredBy, undefined);
+});
 
 test('targeted update commands validate payloads and bind an accepted ticket to verified dispatch', async () => {
   const responses: CommandResponse[] = []; let requests = 0, starts = 0;
@@ -260,6 +300,15 @@ for (const populated of [false, true]) {
     assert.equal(responses.length, 1);
   });
 }
+test('create_session maps WorktreeError to a 400-class code without leaking git details', async () => {
+  const responses: CommandResponse[] = [];
+  const handler = createCommandHandler({ bridgeId: 'owner', sessionController: {
+    create: async () => { throw new WorktreeError('exists', 'worktree path already exists'); },
+  } as unknown as SessionController, publishCommandResponse: async response => { responses.push(response); } });
+  await handler({ type: 'create_session', requestId: 'wt', payload: { prompt: 'p', name: 'job', worktree: true } } as unknown as Command);
+  assert.deepEqual(responses.at(-1), { requestId: 'wt', success: false, error: 'worktree path already exists', data: { code: 'exists' } });
+});
+
 test('create_session forwards the grok and antigravity native session ids to the controller', async () => {
   const responses: CommandResponse[] = []; const inputs: Record<string, unknown>[] = [];
   const handler = createCommandHandler({ bridgeId: 'owner', sessionController: {

@@ -1,7 +1,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import type { Activity } from '../attention-events.js';
+import type { Activity, AttentionItem } from '../attention-events.js';
 import type { MailMessage, Session } from '../types.js';
+import { PARENT_UNAVAILABLE_NOTE, type AttentionRoute, type AttentionRoutingFields } from './contract-b.js';
 import {
   CardValidationError,
   type Board,
@@ -178,6 +179,9 @@ function createHarness() {
   const sessions = new Map<string, Session>();
   const published: Session[] = [];
   const attentionMap = new Map<string, { activity: Activity; openCount: number }>();
+  const routedMap = new Map<string, AttentionItem[]>();
+  const setRouteCalls: Array<{ sessionId: string; eventId: string; fields: AttentionRoutingFields; expectRoute?: AttentionRoute }> = [];
+  const escalatedCallbacks: Array<{ sessionId: string; item: AttentionItem }> = [];
   const unreadMap = new Map<string, number>();
   const prMap = new Map<string, CoordinationPrStatusResult | null>();
   let nowMs = Date.parse('2026-11-13T12:00:00.000Z');
@@ -207,6 +211,18 @@ function createHarness() {
     },
     attention: {
       list: async (id) => attentionMap.get(id) ?? { activity: { state: 'idle' }, openCount: 0 },
+      listRouted: async (childId) => routedMap.get(childId) ?? [],
+      setRoute: async (sessionId, eventId, fields, expectRoute) => {
+        setRouteCalls.push({ sessionId, eventId, fields, expectRoute });
+        const list = routedMap.get(sessionId) ?? [];
+        const idx = list.findIndex((item) => item.id === eventId);
+        if (idx < 0) return undefined;
+        if (expectRoute !== undefined && list[idx].route !== expectRoute) return undefined;
+        const updated: AttentionItem = { ...list[idx], ...fields };
+        list.splice(idx, 1);
+        routedMap.set(sessionId, list);
+        return updated;
+      },
     },
     prStatus: async (url) => prMap.get(url) ?? null,
     mail: {
@@ -217,6 +233,9 @@ function createHarness() {
       published.push(structuredClone(s));
     },
     now: () => nowMs,
+    onAttentionEscalated: (sessionId, item) => {
+      escalatedCallbacks.push({ sessionId, item });
+    },
     createEvents: () => {
       fakeEvents = new FakeTreeEventLog();
       return fakeEvents;
@@ -236,6 +255,9 @@ function createHarness() {
     sessions,
     published,
     attentionMap,
+    routedMap,
+    setRouteCalls,
+    escalatedCallbacks,
     unreadMap,
     prMap,
     get fakeEvents() {
@@ -550,5 +572,125 @@ describe('coordination wiring', () => {
     h.setLoadSessionThrow(true);
     await assert.doesNotReject(() => h.coord.onSessionExit('child-1'));
     h.setLoadSessionThrow(false);
+  });
+
+  it('onSessionExit on a parent session escalates all open parent-routed child attention items with PARENT_UNAVAILABLE_NOTE', async () => {
+    const h = createHarness();
+    const parent = makeSession('parent-1', { name: 'Parent', status: 'completed' });
+    const child1 = makeSession('child-1', { name: 'Worker 1', parentSessionId: 'parent-1' });
+    const child2 = makeSession('child-2', { name: 'Worker 2', parentSessionId: 'parent-1' });
+    h.sessions.set(parent.id, parent);
+    h.sessions.set(child1.id, child1);
+    h.sessions.set(child2.id, child2);
+
+    h.routedMap.set('child-1', [
+      {
+        id: 'att-1',
+        sequence: 1,
+        type: 'agent_needs_input',
+        title: 'Question 1',
+        message: 'Help 1',
+        createdAt: '2026-11-13T10:00:00.000Z',
+        lastSeenAt: '2026-11-13T10:00:00.000Z',
+        occurrences: 1,
+        route: 'parent',
+        routedTo: 'parent-1',
+      },
+    ]);
+    h.routedMap.set('child-2', [
+      {
+        id: 'att-2',
+        sequence: 2,
+        type: 'ask_user',
+        title: 'Question 2',
+        message: 'Help 2',
+        createdAt: '2026-11-13T10:01:00.000Z',
+        lastSeenAt: '2026-11-13T10:01:00.000Z',
+        occurrences: 1,
+        route: 'parent',
+        routedTo: 'parent-1',
+      },
+    ]);
+
+    await h.coord.onSessionExit('parent-1');
+
+    assert.equal(h.setRouteCalls.length, 2);
+    assert.equal(h.setRouteCalls.every((call) => call.expectRoute === 'parent'), true);
+    assert.deepEqual(
+      h.setRouteCalls.map((c) => ({
+        sessionId: c.sessionId,
+        eventId: c.eventId,
+        route: c.fields.route,
+        note: c.fields.escalationNote,
+      })),
+      [
+        { sessionId: 'child-1', eventId: 'att-1', route: 'human', note: PARENT_UNAVAILABLE_NOTE },
+        { sessionId: 'child-2', eventId: 'att-2', route: 'human', note: PARENT_UNAVAILABLE_NOTE },
+      ],
+    );
+    assert.equal(h.escalatedCallbacks.length, 2);
+    assert.equal(h.escalatedCallbacks[0].sessionId, 'child-1');
+    assert.equal(h.escalatedCallbacks[0].item.route, 'human');
+    assert.equal(h.escalatedCallbacks[0].item.escalationNote, PARENT_UNAVAILABLE_NOTE);
+  });
+
+  it('escalates from a running snapshot and from a deleted parent without a second notice', async () => {
+    const h = createHarness();
+    const parent = makeSession('parent-1', { name: 'Parent', status: 'running' });
+    const child = makeSession('child-1', { name: 'Worker', parentSessionId: 'parent-1' });
+    h.sessions.set(parent.id, parent);
+    h.sessions.set(child.id, child);
+    h.routedMap.set('child-1', [
+      {
+        id: 'att-1',
+        sequence: 1,
+        type: 'agent_needs_input',
+        title: 'Question',
+        message: 'Help',
+        createdAt: '2026-11-13T10:00:00.000Z',
+        lastSeenAt: '2026-11-13T10:00:00.000Z',
+        occurrences: 1,
+        route: 'parent',
+        routedTo: 'parent-1',
+      },
+    ]);
+
+    // A live non-terminal session is not an exit.
+    await h.coord.onSessionExit('parent-1');
+    assert.equal(h.setRouteCalls.length, 0);
+    assert.equal(h.fakeEvents.byRoot.get('parent-1'), undefined);
+
+    // Remove/stop passes the snapshot it already holds. loadSession must not be required.
+    h.setLoadSessionThrow(true);
+    await h.coord.onSessionExit('parent-1', parent);
+    h.setLoadSessionThrow(false);
+    assert.equal(h.setRouteCalls.length, 1);
+    assert.equal(h.setRouteCalls[0].fields.escalationNote, PARENT_UNAVAILABLE_NOTE);
+    assert.equal(h.escalatedCallbacks.length, 1);
+    assert.equal(h.fakeEvents.byRoot.get('parent-1'), undefined);
+
+    // The record is gone. A later exit handler must still try, and must not publish again.
+    h.sessions.delete('parent-1');
+    h.routedMap.set('child-1', [
+      {
+        id: 'att-1',
+        sequence: 1,
+        type: 'agent_needs_input',
+        title: 'Question',
+        message: 'Help',
+        createdAt: '2026-11-13T10:00:00.000Z',
+        lastSeenAt: '2026-11-13T10:00:00.000Z',
+        occurrences: 1,
+        route: 'parent',
+        routedTo: 'parent-1',
+      },
+    ]);
+    h.setRouteCalls.length = 0;
+    h.escalatedCallbacks.length = 0;
+    await h.coord.onSessionExit('parent-1');
+    assert.equal(h.setRouteCalls.length, 1);
+    assert.equal(h.escalatedCallbacks.length, 1);
+    await h.coord.onSessionExit('parent-1');
+    assert.equal(h.escalatedCallbacks.length, 1);
   });
 });

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   AGENT_BUSY_STALE_MS,
+  MAIL_NUDGE_BUSY_RECHECK_MS,
   MAIL_NUDGE_DELAY_HOOKED_MS,
   MAIL_NUDGE_DELAY_MS,
   MAIL_WAKE_TEXT,
@@ -623,6 +624,77 @@ describe('MailDeliveryService busy re-check', () => {
     // threshold, then the nudge finally fires.
     await clock.advance(AGENT_BUSY_STALE_MS + 60_600 + 5_600);
     assert.equal(runner.nudgeLines().length, 1, 'stale busy marker no longer blocks the nudge');
+  });
+
+  it('a hooked no-native-wake harness stops deferring 2 minutes after PostToolUse', async () => {
+    const { clock, store, runner, service } = setup();
+    const session = makeSession('agy', { shellType: 'antigravity', antigravitySessionId: 'conv-1' });
+    store.add(session);
+    runner.running.add('agy');
+
+    // agy is mid-turn; the hook never posts Stop (error/timeout path).
+    service.markAgentBusy('agy', 'PostToolUse');
+    await clock.advance(5 * 60_000);
+    await service.acceptMail(session, { body: 'needs the answer', from: 'boss' });
+
+    // The nudge fires on its normal hooked schedule (60s), not after 30 minutes.
+    await clock.advance(MAIL_NUDGE_DELAY_HOOKED_MS + 600);
+    assert.equal(runner.nudgeLines().length, 1, 'the short stale window let the nudge through');
+    await clock.advance(AGENT_BUSY_STALE_MS);
+    assert.equal(runner.nudgeLines().length, 1, 'exactly one nudge');
+    service.stop();
+  });
+
+  it('a hooked no-native-wake harness keeps the long window after PreToolUse', async () => {
+    const { clock, store, runner, service } = setup();
+    const session = makeSession('agy', { shellType: 'antigravity' });
+    store.add(session);
+    runner.running.add('agy');
+
+    // One long tool call (>2 min) emits no hook events: PreToolUse then silence.
+    service.markAgentBusy('agy', 'PreToolUse');
+    await clock.advance(5 * 60_000);
+    await service.acceptMail(session, { body: 'needs the answer', from: 'boss' });
+
+    await clock.advance(MAIL_NUDGE_DELAY_HOOKED_MS + MAIL_NUDGE_BUSY_RECHECK_MS + 600);
+    assert.equal(runner.nudgeLines().length, 0, 'a silent PreToolUse must not release the nudge after 2 minutes');
+    await clock.advance(AGENT_BUSY_STALE_MS + MAIL_NUDGE_DELAY_HOOKED_MS + MAIL_NUDGE_BUSY_RECHECK_MS + 600);
+    assert.equal(runner.nudgeLines().length, 1, 'only the long crash window releases the nudge');
+    service.stop();
+  });
+
+  it('a hooked harness with a native wake keeps the 30 minute stale window', async () => {
+    const { clock, store, runner, service } = setup();
+    const session = makeSession('s1', { shellType: 'claude', claudeSessionId: 'claude-1' });
+    store.add(session);
+    runner.running.add('s1');
+
+    service.markAgentBusy('s1');
+    await clock.advance(5 * 60_000);
+    await service.acceptMail(session, { body: 'needs the answer', from: 'boss' });
+
+    await clock.advance(MAIL_NUDGE_DELAY_HOOKED_MS + MAIL_NUDGE_BUSY_RECHECK_MS + 600);
+    assert.equal(runner.nudgeLines().length, 0, 'five minutes of busy still defers the wake');
+    await clock.advance(AGENT_BUSY_STALE_MS + MAIL_NUDGE_DELAY_HOOKED_MS + MAIL_NUDGE_BUSY_RECHECK_MS + 600);
+    assert.equal(runner.nudgeLines().length, 1, 'only the long crash window releases the nudge');
+    service.stop();
+  });
+
+  it('a drained Stop clears the busy marker so the recheck fires for a hooked no-native-wake harness', async () => {
+    const { clock, store, runner, service } = setup();
+    const session = makeSession('agy', { shellType: 'antigravity' });
+    store.add(session);
+    runner.running.add('agy');
+
+    service.markAgentBusy('agy');
+    await service.acceptMail(session, { body: 'work item', from: 'boss' });
+    await clock.advance(5_600);
+    assert.equal(runner.nudgeLines().length, 0);
+
+    service.markAgentIdle('agy');
+    await clock.advance(MAIL_NUDGE_BUSY_RECHECK_MS + 600);
+    assert.equal(runner.nudgeLines().length, 1, 'the posted Stop unblocked the nudge');
+    service.stop();
   });
 });
 

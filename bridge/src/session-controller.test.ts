@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 
 import { SessionController } from './session-controller.js';
 import type { SessionControllerDeps, SessionStoreLike } from './session-controller.js';
+import type { SessionWorktree, WorktreeApi, WorktreeRetireDecision, WorktreeStatus } from './coordination/contract-b.js';
+import { WorktreeError } from './coordination/contract-b.js';
 import type { Session, SessionUsage } from './types.js';
 
 function makeSession(overrides: Partial<Session> = {}): Session {
@@ -309,9 +311,80 @@ describe('SessionController.stop', () => {
     assert.equal(h.published.length, 0);
     assert.equal(h.unregistered.length, 0);
   });
+
+  it('notifies onSessionEnding with the completed session before unregister', async () => {
+    const seen: string[] = [];
+    const h = setup([makeSession({ status: 'running' })], {
+      onSessionEnding: async (session) => {
+        seen.push(`ending:${session.status}`);
+        assert.equal(h.store.sessions.get('sess-1')?.status, 'completed');
+      },
+      unregisterSession: (sessionId) => {
+        seen.push(`unregister:${sessionId}`);
+      },
+    });
+
+    assert.deepEqual(await h.controller.stop('sess-1'), { stopped: true });
+    assert.deepEqual(seen, ['ending:completed', 'unregister:sess-1']);
+  });
 });
 
 describe('SessionController.remove', () => {
+  const sampleWorktree: SessionWorktree = {
+    repoRoot: '/repo',
+    path: '/repo/.claude/worktrees/worker',
+    branch: 'ftown/worker',
+    base: 'main',
+    createdByBridge: true,
+  };
+
+  function makeStatus(overrides: Partial<WorktreeStatus> = {}): WorktreeStatus {
+    return {
+      path: sampleWorktree.path,
+      branch: sampleWorktree.branch,
+      base: sampleWorktree.base,
+      exists: true,
+      dirty: false,
+      ahead: 0,
+      unpushed: 0,
+      mergedIntoBase: true,
+      ...overrides,
+    };
+  }
+
+  function makeFakeWorktrees(opts: {
+    status?: (wt: SessionWorktree) => Promise<WorktreeStatus>;
+    decide?: (st: WorktreeStatus) => WorktreeRetireDecision;
+    remove?: (wt: SessionWorktree, options: { force: boolean; deleteBranch: boolean }) => Promise<void>;
+  } = {}): WorktreeApi & {
+    statusCalls: SessionWorktree[];
+    removeCalls: Array<{ wt: SessionWorktree; opts: { force: boolean; deleteBranch: boolean } }>;
+  } {
+    const statusCalls: SessionWorktree[] = [];
+    const removeCalls: Array<{ wt: SessionWorktree; opts: { force: boolean; deleteBranch: boolean } }> = [];
+    return {
+      statusCalls,
+      removeCalls,
+      create: async () => sampleWorktree,
+      status: async (wt) => {
+        statusCalls.push(wt);
+        return opts.status ? opts.status(wt) : makeStatus();
+      },
+      decide: (st) => {
+        if (opts.decide) return opts.decide(st);
+        if (!st.exists) return { action: 'retain', reason: 'worktree missing' };
+        if (st.dirty) return { action: 'retain', reason: 'uncommitted changes' };
+        if (st.mergedIntoBase) return { action: 'remove', deleteBranch: true };
+        if (st.unpushed === 0) return { action: 'remove', deleteBranch: false };
+        return { action: 'retain', reason: '2 unpushed commits' };
+      },
+      remove: async (wt, removeOpts) => {
+        removeCalls.push({ wt, opts: removeOpts });
+        if (opts.remove) await opts.remove(wt, removeOpts);
+      },
+    };
+  }
+
   it('maps the removed session to { removed: true } and a miss to { removed: false }', async () => {
     const h = setup([makeSession()]);
 
@@ -319,6 +392,244 @@ describe('SessionController.remove', () => {
     assert.deepEqual(h.removedCalls, [{ sessionId: 'sess-1', onlyIfFinished: true }]);
 
     assert.deepEqual(await h.controller.remove('sess-1'), { removed: false });
+  });
+
+  it('auto-retires a clean merged bridge worktree and deletes the branch', async () => {
+    const worktrees = makeFakeWorktrees({
+      status: async () => makeStatus({ mergedIntoBase: true, dirty: false }),
+    });
+    const h = setup([makeSession({ worktree: { ...sampleWorktree } })], { worktrees });
+
+    const res = await h.controller.remove('sess-1');
+
+    assert.deepEqual(res, {
+      removed: true,
+      worktreeOutcome: { action: 'removed' },
+    });
+    assert.equal(worktrees.statusCalls.length, 1);
+    assert.deepEqual(worktrees.removeCalls, [
+      { wt: sampleWorktree, opts: { force: false, deleteBranch: true } },
+    ]);
+    assert.equal(h.store.saved.length, 1);
+    assert.equal(h.store.saved[0].worktree, undefined);
+  });
+
+  it('auto-retains a dirty or unpushed worktree and persists worktree.retained before archiving', async () => {
+    const worktrees = makeFakeWorktrees({
+      status: async () => makeStatus({ dirty: true, mergedIntoBase: false }),
+    });
+    let archivedSnapshot: Session | null = null;
+    const h = setup([makeSession({ worktree: { ...sampleWorktree } })], { worktrees });
+    const origRemove = h.store.sessions;
+    const controller = new SessionController({
+      store: h.store,
+      runner: { stop: () => false },
+      publishSessionUpdate: async () => {},
+      worktrees,
+      removeSession: async (id) => {
+        const s = await h.store.loadSession(id);
+        archivedSnapshot = s ? structuredClone(s) : null;
+        origRemove.delete(id);
+        return s;
+      },
+    });
+
+    const res = await controller.remove('sess-1');
+
+    assert.deepEqual(res, {
+      removed: true,
+      worktreeOutcome: { action: 'retained', reason: 'uncommitted changes' },
+    });
+    assert.equal(worktrees.removeCalls.length, 0);
+    assert.equal(h.store.saved.length, 1);
+    assert.equal(archivedSnapshot?.worktree?.retained?.reason, 'uncommitted changes');
+    assert.ok(archivedSnapshot?.worktree?.retained?.at);
+  });
+
+  it('keep mode retains with "kept by request" without calling status or remove', async () => {
+    const worktrees = makeFakeWorktrees();
+    const h = setup([makeSession({ worktree: { ...sampleWorktree } })], { worktrees });
+
+    const res = await h.controller.remove('sess-1', undefined, 'keep');
+
+    assert.deepEqual(res, {
+      removed: true,
+      worktreeOutcome: { action: 'retained', reason: 'kept by request' },
+    });
+    assert.equal(worktrees.statusCalls.length, 0);
+    assert.equal(worktrees.removeCalls.length, 0);
+    assert.equal(h.store.saved.length, 1);
+    assert.equal(h.store.saved[0].worktree?.retained?.reason, 'kept by request');
+  });
+
+  it('force mode removes with force=true and deleteBranch only when mergedIntoBase', async () => {
+    const unmergedWorktrees = makeFakeWorktrees({
+      status: async () => makeStatus({ dirty: true, mergedIntoBase: false }),
+    });
+    const h1 = setup([makeSession({ worktree: { ...sampleWorktree } })], {
+      worktrees: unmergedWorktrees,
+    });
+    const res1 = await h1.controller.remove('sess-1', undefined, 'force');
+    assert.deepEqual(res1, { removed: true, worktreeOutcome: { action: 'removed' } });
+    assert.deepEqual(unmergedWorktrees.removeCalls, [
+      { wt: sampleWorktree, opts: { force: true, deleteBranch: false } },
+    ]);
+
+    const mergedWorktrees = makeFakeWorktrees({
+      status: async () => makeStatus({ dirty: true, mergedIntoBase: true }),
+    });
+    const h2 = setup([makeSession({ worktree: { ...sampleWorktree } })], {
+      worktrees: mergedWorktrees,
+    });
+    const res2 = await h2.controller.remove('sess-1', undefined, 'force');
+    assert.deepEqual(res2, { removed: true, worktreeOutcome: { action: 'removed' } });
+    assert.deepEqual(mergedWorktrees.removeCalls, [
+      { wt: sampleWorktree, opts: { force: true, deleteBranch: true } },
+    ]);
+
+    const failingStatusWorktrees = makeFakeWorktrees({
+      status: async () => {
+        throw new WorktreeError('git_failed', 'fatal: status probe failed');
+      },
+    });
+    const h3 = setup([makeSession({ worktree: { ...sampleWorktree } })], {
+      worktrees: failingStatusWorktrees,
+    });
+    const res3 = await h3.controller.remove('sess-1', undefined, 'force');
+    assert.deepEqual(res3, { removed: true, worktreeOutcome: { action: 'removed' } });
+    assert.deepEqual(failingStatusWorktrees.removeCalls, [
+      { wt: sampleWorktree, opts: { force: true, deleteBranch: false } },
+    ]);
+  });
+
+  it('git errors retain the worktree with reason and never block archiving', async () => {
+    const worktrees = makeFakeWorktrees({
+      remove: async () => {
+        throw new WorktreeError('git_failed', 'fatal: worktree locked');
+      },
+    });
+    const h = setup([makeSession({ worktree: { ...sampleWorktree } })], { worktrees });
+
+    const res = await h.controller.remove('sess-1', undefined, 'auto');
+
+    assert.deepEqual(res, {
+      removed: true,
+      worktreeOutcome: { action: 'retained', reason: 'fatal: worktree locked' },
+    });
+    assert.equal(h.removedCalls.length, 1);
+    assert.equal(h.store.saved.length, 1);
+    assert.equal(h.store.saved[0].worktree?.retained?.reason, 'fatal: worktree locked');
+  });
+
+  it('clears session.worktree on the archived record only when removal succeeded', async () => {
+    const removedWorktrees = makeFakeWorktrees({
+      status: async () => makeStatus({ mergedIntoBase: true, dirty: false }),
+    });
+    let archivedRemoved: Session | null = null;
+    const removed = setup([makeSession({ worktree: { ...sampleWorktree } })], {
+      worktrees: removedWorktrees,
+    });
+    const removedStore = removed.store.sessions;
+    const removedController = new SessionController({
+      store: removed.store,
+      runner: { stop: () => false },
+      publishSessionUpdate: async () => {},
+      worktrees: removedWorktrees,
+      removeSession: async (id) => {
+        const s = await removed.store.loadSession(id);
+        archivedRemoved = s ? structuredClone(s) : null;
+        removedStore.delete(id);
+        return s;
+      },
+    });
+    assert.deepEqual(await removedController.remove('sess-1'), {
+      removed: true,
+      worktreeOutcome: { action: 'removed' },
+    });
+    assert.equal(archivedRemoved?.worktree, undefined);
+
+    const keptWorktrees = makeFakeWorktrees({
+      status: async () => makeStatus({ dirty: true, mergedIntoBase: false }),
+    });
+    let archivedKept: Session | null = null;
+    const kept = setup([makeSession({ worktree: { ...sampleWorktree } })], {
+      worktrees: keptWorktrees,
+    });
+    const keptStore = kept.store.sessions;
+    const keptController = new SessionController({
+      store: kept.store,
+      runner: { stop: () => false },
+      publishSessionUpdate: async () => {},
+      worktrees: keptWorktrees,
+      removeSession: async (id) => {
+        const s = await kept.store.loadSession(id);
+        archivedKept = s ? structuredClone(s) : null;
+        keptStore.delete(id);
+        return s;
+      },
+    });
+    await keptController.remove('sess-1');
+    assert.equal(archivedKept?.worktree?.path, sampleWorktree.path);
+    assert.equal(archivedKept?.worktree?.retained?.reason, 'uncommitted changes');
+  });
+
+  it('escalates before archive and still archives when escalation throws', async () => {
+    const order: string[] = [];
+    let hook: ReturnType<typeof setup> | undefined;
+    hook = setup([makeSession({ id: 'parent', status: 'running' })], {
+      onSessionEnding: async (session) => {
+        order.push('ending');
+        assert.equal(hook?.store.sessions.has(session.id), true);
+      },
+      removeSession: async (sessionId) => {
+        order.push('remove');
+        const session = hook?.store.sessions.get(sessionId) ?? null;
+        if (session) hook?.store.sessions.delete(sessionId);
+        return session;
+      },
+    });
+    assert.deepEqual(await hook.controller.remove('parent'), { removed: true });
+    assert.deepEqual(order, ['ending', 'remove']);
+
+    let called = false;
+    const throwing = setup([makeSession({ status: 'completed' })], {
+      onSessionEnding: async () => {
+        called = true;
+        throw new Error('attention down');
+      },
+    });
+    assert.deepEqual(await throwing.controller.remove('sess-1'), { removed: true });
+    assert.equal(called, true);
+    assert.equal(throwing.removedCalls.length, 1);
+
+    let rejectedHook = false;
+    const rejected = setup([makeSession({ status: 'running' })], {
+      onSessionEnding: async () => {
+        rejectedHook = true;
+      },
+      removeSession: async () => null,
+    });
+    assert.deepEqual(await rejected.controller.remove('sess-1', { onlyIfFinished: true }), {
+      removed: false,
+    });
+    assert.equal(rejectedHook, false);
+  });
+
+  it('does not touch worktrees when onlyIfFinished rejects a running session', async () => {
+    const worktrees = makeFakeWorktrees();
+    const h = setup(
+      [makeSession({ status: 'running', worktree: { ...sampleWorktree } })],
+      {
+        worktrees,
+        removeSession: async () => null,
+      },
+    );
+
+    const res = await h.controller.remove('sess-1', { onlyIfFinished: true }, 'force');
+
+    assert.deepEqual(res, { removed: false });
+    assert.equal(worktrees.statusCalls.length, 0);
+    assert.equal(worktrees.removeCalls.length, 0);
   });
 });
 

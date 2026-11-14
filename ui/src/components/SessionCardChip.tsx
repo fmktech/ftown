@@ -15,81 +15,111 @@ export function cardStateLabel(state: CardState): string {
   return CARD_STATE_LABELS[state];
 }
 
-/** Colours reuse the existing CSS variables/tokens; no global CSS is added. */
-const CHIP_COLORS: Record<CardState, { fg: string; bg: string; border: string }> = {
-  working: { fg: "var(--accent)", bg: "var(--accent-dim)", border: "rgba(0, 255, 136, 0.15)" },
-  blocked: { fg: "var(--status-pending)", bg: "rgba(255, 170, 0, 0.08)", border: "rgba(255, 170, 0, 0.15)" },
+/**
+ * Per-state glyph and colour for the plain text line, reusing glyphs and colour
+ * tokens already used elsewhere in the UI (▸ collapse arrows, ✓/✗ stream status,
+ * ⚠ warning badges, --accent, --status-* and --shell-generic tokens).
+ */
+const CHIP_ICONS: Record<CardState, string> = {
+  working: "▸",
+  blocked: "⚠",
+  waiting_review: "◷",
+  done: "✓",
+  failed: "✗",
+};
+
+const CHIP_COLORS: Record<CardState, string> = {
+  working: "var(--accent)",
+  blocked: "var(--status-pending)",
   // Blue is already themed for generic badges (--shell-generic); keeps review distinct from blocked amber.
-  waiting_review: { fg: "var(--shell-generic)", bg: "rgba(0, 191, 255, 0.08)", border: "rgba(0, 191, 255, 0.15)" },
-  done: { fg: "var(--text-secondary)", bg: "transparent", border: "var(--border-muted)" },
-  failed: { fg: "var(--status-error)", bg: "rgba(255, 68, 102, 0.08)", border: "rgba(255, 68, 102, 0.15)" },
+  waiting_review: "var(--shell-generic)",
+  done: "var(--text-secondary)",
+  failed: "var(--status-error)",
 };
 
 export interface SessionCardChipProps {
   card?: SessionCard;
-  /** Omit the headline and tighten padding for very narrow rows. */
+  /** Omit the headline for very narrow inline rows (e.g. the overview table). */
   compact?: boolean;
 }
 
-/** Small declared-state chip (working / blocked / waiting review / done / failed) with headline + progress. */
+/**
+ * Declared card state rendered as a plain text line — icon + coloured text, no
+ * border/background — mirroring the hook activity line ("⚙ using Bash") in font
+ * size and indentation. Full mode spans the row width and truncates with
+ * ellipsis; compact stays inline for narrow table cells and omits the headline.
+ */
 export function SessionCardChip({ card, compact = false }: SessionCardChipProps) {
   if (!card) return null;
 
-  const colors = CHIP_COLORS[card.state];
   const blockedOn = card.state === "blocked" ? card.blockedOn : undefined;
   const stateText = blockedOn ? `blocked on ${blockedOn.kind}` : cardStateLabel(card.state);
-  const progressText = card.progress && card.progress.total > 0
+  const progressText = card.progress && card.progress.total > 0 && card.state !== "done"
     ? `${card.progress.done}/${card.progress.total}`
     : null;
   const summary = card.headline || blockedOn?.text || "";
   const ariaLabel = `${stateText}${progressText ? ` ${progressText}` : ""}${summary ? `: ${summary}` : ""}`;
+  const text = [progressText ? `${stateText} ${progressText}` : stateText, summary]
+    .filter(Boolean)
+    .join(blockedOn ? ": " : " · ");
+
+  const color = CHIP_COLORS[card.state];
+  const icon = (
+    <span aria-hidden style={{ fontStyle: "normal", marginRight: 4, flexShrink: 0 }}>
+      {CHIP_ICONS[card.state]}
+    </span>
+  );
+
+  if (compact) {
+    const compactText = progressText ? `${stateText} ${progressText}` : stateText;
+    return (
+      <span
+        role="img"
+        aria-label={ariaLabel}
+        title={compactText}
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 4,
+          fontSize: 9,
+          fontWeight: 600,
+          fontFamily: "var(--font-mono)",
+          fontVariantNumeric: "tabular-nums",
+          whiteSpace: "nowrap",
+          color,
+        }}
+      >
+        {icon}
+        <span aria-hidden>{compactText}</span>
+      </span>
+    );
+  }
 
   return (
     <span
       role="img"
       aria-label={ariaLabel}
-      title={card.headline || stateText}
+      title={text}
       style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 4,
-        maxWidth: 160,
+        display: "flex",
         minWidth: 0,
-        flexShrink: 1,
-        overflow: "hidden",
-        padding: compact ? "1px 4px" : "1px 6px",
-        borderRadius: 8,
-        fontSize: compact ? 9 : 10,
-        fontWeight: 600,
-        lineHeight: 1.4,
+        fontSize: 10,
+        fontStyle: "italic",
         fontFamily: "var(--font-mono)",
         fontVariantNumeric: "tabular-nums",
+        lineHeight: 1.4,
+        overflow: "hidden",
         whiteSpace: "nowrap",
-        color: colors.fg,
-        background: colors.bg,
-        border: `1px solid ${colors.border}`,
+        color,
       }}
     >
+      {icon}
       <span
         aria-hidden
-        title={blockedOn?.text || undefined}
-        style={{ flexShrink: 0 }}
+        style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
       >
-        {stateText}
+        {text}
       </span>
-      {progressText && (
-        <span aria-hidden style={{ flexShrink: 0 }}>
-          {progressText}
-        </span>
-      )}
-      {!compact && card.headline && (
-        <span
-          aria-hidden
-          style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-        >
-          {card.headline}
-        </span>
-      )}
     </span>
   );
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode } from 'react';
 import type { MessageClient } from '@/lib/message-client';
 import type { BridgeRpc } from '@/hooks/useBridgeRpc';
 import type { Session } from '@/types';
@@ -13,13 +13,17 @@ import type { SessionActivity } from '@/hooks/useAllSessionEvents';
 import type { AttentionAnswerEntry } from '../../../bridge/src/attention-prompt-protocol';
 import type { AttentionAnswerSubmitResult } from './AttentionAnswerForm';
 import { InboxItemBody, inboxItemKey, type InboxEntry } from './SessionInbox';
+import { SessionOverview, childSessionsOf, type OpenAttentionCount } from './SessionOverview';
 import { clampPreviewRatio, isPreviewDescriptor, markdownPreviewDocument, previewDocument, previewRatioBounds } from '@/lib/session-preview';
 import { previewScrollOwnerKey } from '@/lib/preview-scroll-protocol';
+
+/** One slot of the workspace view switcher. "overview" only exists for sessions with children. */
+export type WorkspaceTab = 'terminal' | 'overview' | 'preview' | 'review';
 
 interface Props {
   session: Session | null; client: MessageClient | null; userId: string; readable: boolean;
   sendCommand: BridgeRpc['sendCommand']; subscribeAuthority?: SessionPreviewAuthoritySubscriber; securityGeneration: number; open: boolean; onClose: () => void;
-  isDesktop: boolean; mobileTab: 'sessions' | 'terminal' | 'preview' | 'review'; onMobileTab: (tab: 'terminal' | 'preview' | 'review') => void;
+  isDesktop: boolean; mobileTab: 'sessions' | WorkspaceTab; onMobileTab: (tab: 'terminal' | 'preview' | 'review') => void;
   reviewOpen?: boolean; reviewActivation?: number; onCloseReview?: () => void;
   /** Bumped every time the owner selects the session, including the one already open. */
   sessionActivation?: number;
@@ -34,6 +38,10 @@ interface Props {
     onAnswer(entry: InboxEntry, answers: AttentionAnswerEntry[]): Promise<AttentionAnswerSubmitResult>;
   };
   onRefit: () => void; children: ReactNode; sessions?: Session[]; activity?: SessionActivity;
+  /** Live activity per session id (the dashboard's map), shown in the overview's children table. */
+  activityBySession?: ReadonlyMap<string, SessionActivity>;
+  /** Open attention items per session id; withParent counts items still waiting with the parent. */
+  openAttentionBySession?: ReadonlyMap<string, OpenAttentionCount>;
 }
 type PreviewErrorReason = 'missing' | 'too_large' | 'invalid_utf8' | 'invalid_file' | 'unavailable';
 function previewErrorMessage(reason: PreviewErrorReason, fileName: string): string {
@@ -45,12 +53,12 @@ function previewErrorMessage(reason: PreviewErrorReason, fileName: string): stri
     case 'unavailable': return `${fileName} is unavailable`;
   }
 }
-export function SessionWorkspace({ session, client, userId, readable, sendCommand, subscribeAuthority, securityGeneration, open, onClose, isDesktop, mobileTab, onMobileTab, onRefit, children, sessions = [], activity, reviewOpen = false, reviewActivation = 0, onCloseReview = () => {}, sessionActivation = 0, attention }: Props) {
+export function SessionWorkspace({ session, client, userId, readable, sendCommand, subscribeAuthority, securityGeneration, open, onClose, isDesktop, mobileTab, onMobileTab, onRefit, children, sessions = [], activity, activityBySession, openAttentionBySession, reviewOpen = false, reviewActivation = 0, onCloseReview = () => {}, sessionActivation = 0, attention }: Props) {
   const mainRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
   const [ratio, setRatio] = useState(50);
-  const [compactTab, setCompactTab] = useState<'terminal' | 'preview' | 'review'>('preview');
-  const [auxTab, setAuxTab] = useState<'preview' | 'review'>('preview');
+  const [compactTab, setCompactTab] = useState<WorkspaceTab>('preview');
+  const [auxTab, setAuxTab] = useState<WorkspaceTab>('preview');
   const [conversationOpen, setConversationOpen] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [dragging, setDragging] = useState(false);
@@ -113,12 +121,18 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
   // The "preview" tab is one slot: it shows the waiting item while attention.shown, otherwise the selected preview file.
   const attentionShown = !!attention?.shown;
   const slotOpen = showPreview || attentionShown;
+  // Manager sessions (≥1 child) open on the Overview instead of the terminal; the terminal stays one click away.
+  const childSessions = useMemo(() => session ? childSessionsOf(session, sessions) : [], [session, sessions]);
+  const hasChildSessions = childSessions.length > 0;
+  // Where a slot-less view lands: manager sessions return to their Overview, others to the terminal.
+  // On a phone the tab belongs to Dashboard, whose fallback rule stays terminal.
+  const fallbackView: WorkspaceTab = compact && !isDesktop ? (reviewOpen ? 'review' : 'terminal') : hasChildSessions ? 'overview' : 'terminal';
   const rawView = compact ? (isDesktop ? compactTab : mobileTab) : auxTab;
-  const view = rawView === 'preview' && !slotOpen ? (reviewOpen ? 'review' : 'terminal') : rawView === 'review' && !reviewOpen ? (slotOpen ? 'preview' : 'terminal') : rawView;
+  const view = rawView === 'preview' && !slotOpen ? (reviewOpen ? 'review' : fallbackView) : rawView === 'review' && !reviewOpen ? (slotOpen ? 'preview' : fallbackView) : rawView;
   const attentionVisible = attentionShown && view === 'preview';
   const previousView = useRef({ showPreview, view });
   const previewDisappeared = previousView.current.showPreview && !showPreview && previousView.current.view === 'preview';
-  const activeExpanded = expanded && rawView === view && view !== 'terminal' && !attentionVisible && !previewDisappeared;
+  const activeExpanded = expanded && rawView === view && view !== 'terminal' && view !== 'overview' && !attentionVisible && !previewDisappeared;
   const previewVisible = showPreview && !attentionShown && view === 'preview';
   const { state, refresh, getHardEpoch } = useSessionPreview({ client, userId, target, visible: previewVisible, readable, securityGeneration, sendCommand, subscribeAuthority });
   const owner = target ? previewScrollOwnerKey({ userId, bridgeId: target.bridgeId, sessionId: target.sessionId, previewId: target.preview.id, fileId: target.file.id }) : '';
@@ -159,11 +173,12 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
   }, [previewId, rawView, reviewOpen]);
   useEffect(() => { if (reviewOpen && reviewActivation) { setCompactTab('review'); setAuxTab('review'); } }, [reviewOpen, reviewActivation]);
   useEffect(() => {
-    setCompactTab(current => current === 'preview' && !slotOpen ? (reviewOpen ? 'review' : 'terminal') : current === 'review' && !reviewOpen ? (slotOpen ? 'preview' : 'terminal') : current);
+    setCompactTab(current => current === 'preview' && !slotOpen ? (reviewOpen ? 'review' : fallbackView) : current === 'review' && !reviewOpen ? (slotOpen ? 'preview' : fallbackView) : current);
     setAuxTab(current => current === 'preview' && !slotOpen && reviewOpen ? 'review' : current === 'review' && !reviewOpen ? 'preview' : current);
     if (!isDesktop && mobileTab === 'preview' && !slotOpen) onMobileTab(reviewOpen ? 'review' : 'terminal');
     else if (!isDesktop && mobileTab === 'review' && !reviewOpen) onMobileTab(slotOpen ? 'preview' : 'terminal');
-  }, [slotOpen, reviewOpen, isDesktop, mobileTab, onMobileTab]);
+    else if (!isDesktop && mobileTab === 'overview' && !hasChildSessions) onMobileTab('terminal');
+  }, [slotOpen, reviewOpen, isDesktop, mobileTab, hasChildSessions, fallbackView, onMobileTab]);
   // A newly shown item (session entered, item arrived, item re-shown) brings the slot forward on desktop without moving focus.
   // Keyed by the item, so a new item is brought forward even when the previous one was still shown behind another tab.
   // The mobile tab belongs to Dashboard, which applies its own rule.
@@ -181,11 +196,17 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionActivation]);
   useEffect(() => {
-    if (expanded && (previewDisappeared || rawView !== view || view === 'terminal' || attentionVisible)) setExpanded(false);
+    if (expanded && (previewDisappeared || rawView !== view || view === 'terminal' || view === 'overview' || attentionVisible)) setExpanded(false);
     previousView.current = { showPreview, view };
   }, [expanded, previewDisappeared, rawView, view, showPreview, attentionVisible]);
   useEffect(() => { if (!open && !reviewOpen) { setExpanded(false); setConversationOpen(false); } }, [open, reviewOpen]);
-  useEffect(() => { onRefit(); }, [open, reviewOpen, compact, view, activeExpanded, width, onRefit]);
+  useEffect(() => {
+    // While the overview overlay covers the terminal (compact layouts) the terminal must not be refitted
+    // (it is out of sight); returning to it re-runs this effect and refits it. On a desktop the overview
+    // sits beside the terminal in its own column, so the terminal stays fitted and the effect re-runs.
+    if (compact && view === 'overview') return;
+    onRefit();
+  }, [open, reviewOpen, compact, view, activeExpanded, width, onRefit]);
   const finish = () => {
     const current = drag.current; if (!current) return;
     document.body.style.cursor = current.cursor; document.body.style.userSelect = current.select;
@@ -208,12 +229,20 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
     if (next !== null) { event.preventDefault(); setSplit(next); }
   };
   const hasAux = slotOpen || reviewOpen;
-  const tabs: ('terminal' | 'preview' | 'review')[] = [...(compact ? ['terminal' as const] : []), ...(slotOpen ? ['preview' as const] : []), ...(reviewOpen ? ['review' as const] : [])];
-  const tabLabel = (tab: 'terminal' | 'preview' | 'review') => tab === 'terminal' ? 'Terminal' : tab === 'preview' ? (attentionShown ? 'Waiting' : 'Preview') : 'PR review';
-  const choose = (tab: 'terminal' | 'preview' | 'review') => { if (tab !== 'terminal') { setAuxTab(tab); setCompactTab(tab); } else setCompactTab('terminal'); if (compact && !isDesktop) onMobileTab(tab); };
+  // Manager sessions get a workspace column on the desktop even without a side-pane slot: it hosts the
+  // view switcher (Overview/Terminal) and the Overview panel itself, so the terminal stays mounted beside it.
+  const switcherColumn = !compact && hasChildSessions;
+  // The switcher's slots: manager sessions switch between Overview and Terminal, the side-pane slots follow.
+  const tabs: WorkspaceTab[] = [
+    ...(hasChildSessions ? (['overview', 'terminal'] as const) : compact ? (['terminal'] as const) : []),
+    ...(slotOpen ? (['preview'] as const) : []),
+    ...(reviewOpen ? (['review'] as const) : []),
+  ];
+  const tabLabel = (tab: WorkspaceTab) => tab === 'terminal' ? 'Terminal' : tab === 'overview' ? 'Overview' : tab === 'preview' ? (attentionShown ? 'Waiting' : 'Preview') : 'PR review';
+  const choose = (tab: WorkspaceTab) => { setAuxTab(tab); setCompactTab(tab); if (compact && !isDesktop && (tab === 'preview' || tab === 'review')) onMobileTab(tab); };
   const tabKeys = (event: KeyboardEvent<HTMLDivElement>) => {
     if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
-      event.preventDefault(); const index = Math.max(0, tabs.indexOf(view as 'terminal' | 'preview' | 'review'));
+      event.preventDefault(); const index = Math.max(0, tabs.indexOf(view as WorkspaceTab));
       const next = event.key === 'Home' ? tabs[0] : event.key === 'End' ? tabs[tabs.length - 1] : tabs[(index + (event.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
       choose(next); (event.currentTarget.querySelector(`[data-preview-tab="${next}"]`) as HTMLButtonElement | null)?.focus();
     }
@@ -274,19 +303,25 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
     )
   );
   const tabbed = compact || reviewOpen;
-  const terminalVisible = !activeExpanded && (!hasAux || !compact || view === 'terminal');
+  const terminalVisible = !activeExpanded && (!hasAux || !compact || view === 'terminal' || view === 'overview');
   const reviewVisible = reviewOpen && view === 'review';
   return <div ref={mainRef} className="session-workspace" onKeyDown={event => {
     if (activeExpanded && event.key === 'Escape' && !event.defaultPrevented) { event.preventDefault(); setExpanded(false); }
   }}>
-    {hasAux && compact && isDesktop && !activeExpanded && <div role="tablist" aria-label="Session view" onKeyDown={tabKeys} className="session-preview-tabs">
+    {(hasAux || hasChildSessions) && compact && isDesktop && !activeExpanded && <div role="tablist" aria-label="Session view" onKeyDown={tabKeys} className="session-preview-tabs">
       {tabs.map(tab => <button key={tab} id={`compact-${tab}-tab`} data-preview-tab={tab} role="tab" aria-selected={view === tab} aria-controls={`session-${tab}-panel`} tabIndex={view === tab ? 0 : -1} onClick={() => choose(tab)} className={`mobile-tab ${view === tab ? 'mobile-tab-active' : ''}`}>{tabLabel(tab)}</button>)}
     </div>}
     <div className="session-workspace-panes">
-      <div id="session-terminal-panel" role={compact && hasAux ? 'tabpanel' : undefined} aria-label="Terminal" hidden={!terminalVisible} className="session-terminal-pane" style={hasAux && !compact && !activeExpanded ? { flex: `0 0 calc((100% - 8px) * ${actualRatio / 100})` } : undefined}>{children}</div>
-      {hasAux && !compact && !activeExpanded && <div role="separator" aria-label="Resize terminal and preview" aria-orientation="vertical" aria-valuemin={Number(min.toFixed(1))} aria-valuemax={Number(max.toFixed(1))} aria-valuenow={Number(actualRatio.toFixed(1))} tabIndex={0} className="session-preview-separator" onPointerDown={start} onPointerMove={move} onPointerUp={finish} onPointerCancel={finish} onLostPointerCapture={finish} onKeyDown={keyDown} onDoubleClick={() => setSplit(50)} />}
-      {(hasAux || attention) && <div className="session-aux-pane" hidden={!hasAux || (compact && view === 'terminal')}>
-      {!compact && slotOpen && reviewOpen && <div role="tablist" aria-label="Auxiliary view" onKeyDown={tabKeys} className="session-preview-tabs">{tabs.map(tab => <button key={tab} data-preview-tab={tab} role="tab" aria-selected={view === tab} aria-controls={`session-${tab}-panel`} tabIndex={view === tab ? 0 : -1} onClick={() => choose(tab)} className={`mobile-tab ${view === tab ? 'mobile-tab-active' : ''}`}>{tabLabel(tab)}</button>)}</div>}
+      <div id="session-terminal-panel" role={compact && (hasAux || hasChildSessions) ? 'tabpanel' : undefined} aria-label="Terminal" hidden={!terminalVisible} className="session-terminal-pane" style={{ position: 'relative', ...((hasAux || switcherColumn) && !compact && !activeExpanded ? { flex: `0 0 calc((100% - 8px) * ${actualRatio / 100})` } : {}) }}>
+        {children}
+        {/* Compact layouts cover the still-mounted terminal with the Overview; on a desktop the Overview has its own column beside it. */}
+        {compact && view === 'overview' && session && <div id="session-overview-panel" role="tabpanel" aria-label="Overview" style={{ position: 'absolute', inset: 0, zIndex: 5, display: 'flex', background: 'var(--bg-base)' }}>
+          <SessionOverview session={session} sessions={sessions} activityBySession={activityBySession} openAttentionBySession={openAttentionBySession} />
+        </div>}
+      </div>
+      {(hasAux || switcherColumn) && !compact && !activeExpanded && <div role="separator" aria-label="Resize terminal and preview" aria-orientation="vertical" aria-valuemin={Number(min.toFixed(1))} aria-valuemax={Number(max.toFixed(1))} aria-valuenow={Number(actualRatio.toFixed(1))} tabIndex={0} className="session-preview-separator" onPointerDown={start} onPointerMove={move} onPointerUp={finish} onPointerCancel={finish} onLostPointerCapture={finish} onKeyDown={keyDown} onDoubleClick={() => setSplit(50)} />}
+      {(hasAux || attention || switcherColumn) && <div className="session-aux-pane" hidden={(!hasAux && !switcherColumn) || (compact && (view === 'terminal' || view === 'overview'))}>
+      {!compact && (hasChildSessions || (slotOpen && reviewOpen)) && <div role="tablist" aria-label="Auxiliary view" onKeyDown={tabKeys} className="session-preview-tabs">{tabs.map(tab => <button key={tab} data-preview-tab={tab} role="tab" aria-selected={view === tab} aria-controls={`session-${tab}-panel`} tabIndex={view === tab ? 0 : -1} onClick={() => choose(tab)} className={`mobile-tab ${view === tab ? 'mobile-tab-active' : ''}`}>{tabLabel(tab)}</button>)}</div>}
       {(slotOpen || attention) && <section id="session-preview-panel" role={!slotOpen ? undefined : tabbed ? 'tabpanel' : attentionShown ? undefined : 'region'} aria-label={!slotOpen ? undefined : attentionShown ? (tabbed ? 'Waiting' : undefined) : 'Session preview'} hidden={!slotOpen || view !== 'preview'} className="session-preview-pane">
         <div className="session-preview-toolbar">
           {viewSelector}
@@ -327,6 +362,9 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
           {dragging && <div className="session-preview-drag-shield" />}
         </div>}
       </section>}
+      {switcherColumn && view === 'overview' && session && <div id="session-overview-panel" role="tabpanel" aria-label="Overview" style={{ flex: 1, minHeight: 0, display: 'flex' }}>
+        <SessionOverview session={session} sessions={sessions} activityBySession={activityBySession} openAttentionBySession={openAttentionBySession} />
+      </div>}
       {reviewOpen && <PullRequestReview session={session} client={client} userId={userId} visible={reviewVisible} readable={readable} securityGeneration={securityGeneration} sendCommand={sendCommand} subscribeAuthority={subscribeAuthority} onClose={onCloseReview} expanded={activeExpanded} onExpand={() => setExpanded(value => !value)} />}
       </div>}
     </div>

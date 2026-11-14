@@ -15,8 +15,9 @@ import type { Server, IncomingMessage, ServerResponse } from 'node:http';
 
 import type { SessionStore } from './session-store.js';
 import type { MailStore } from './mail-store.js';
+import type { PushNotice } from './push-notifier.js';
 import { AttentionStore, AttentionError, type SubagentIdleSignal } from './attention-store.js';
-import { sanitizeAttentionText } from './attention-events.js';
+import { sanitizeAttentionText, type AttentionItem } from './attention-events.js';
 import { parseAttentionPrompt } from './attention-prompt.js';
 import { ATTENTION_ITEM_WAIT_MAX_SECONDS, type AttentionPrompt } from './attention-prompt-protocol.js';
 import type { Session } from './types.js';
@@ -44,7 +45,24 @@ import { removeFtownSession } from './remove-ftown-session.js';
 import { collectSessionUsage } from './usage-collector.js';
 import { toWireSession } from './session-wire.js';
 import { CardValidationError, type CardPatch } from './coordination/contract.js';
+import {
+  PARENT_UNAVAILABLE_NOTE,
+  RouteError,
+  WorktreeError,
+  type AttentionRoute,
+  type RouteContext,
+  type RouteModule,
+} from './coordination/contract-b.js';
+import {
+  decideRoute,
+  deliverAttentionAnswer,
+  formatParentQuestionMail,
+  markArchivedWorktreeRetained,
+} from './coordination/attention-routing.js';
+import { handleBriefRoutes } from './coordination/routes-brief.js';
+import { createWorktreeRoutes } from './coordination/routes-worktrees.js';
 import { createCoordination, rootOf, type Coordination } from './coordination/wiring.js';
+import { GitWorktrees } from './worktrees.js';
 
 export interface HookPayload {
   ftown_session_id: string;
@@ -289,7 +307,8 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     await this.security.revalidate(message.principal);
     void this.handleApiRoute(request, response as unknown as ServerResponse, new URL(route.path, 'http://localhost').pathname,
       new URL(route.path, 'http://localhost')).catch(error => {
-        if (error instanceof BadRequestError) jsonResponse(response as unknown as ServerResponse, 400, { error: error.message });
+        if (error instanceof BadRequestError || error instanceof WorktreeError) jsonResponse(response as unknown as ServerResponse, 400, { error: error.message });
+        else if (error instanceof RouteError) jsonResponse(response as unknown as ServerResponse, error.status, { error: error.message });
         else if (error instanceof AttentionError) jsonResponse(response as unknown as ServerResponse, error.status, { error: error.message, code: error.code });
         else jsonResponse(response as unknown as ServerResponse, 500, { error: 'bridge_error', code: 'bridge_error' });
       });
@@ -301,10 +320,37 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   private coordination: Coordination | null = null;
   private defaultCoordination: Coordination | null = null;
   private mailStore: MailStore | null = null;
+  private attentionPushHandler?: (sessionId: string, notice: PushNotice) => void;
+  /** In-flight parent-routed creates. Pushes are held, then dropped only for that item id. */
+  private parentPushAttempt = 0;
+  private readonly parentPushAttempts = new Map<string, Set<number>>();
+  private readonly heldAttentionPushes: Array<{
+    sessionId: string;
+    notice: PushNotice;
+    owners: Set<number>;
+    dropped: boolean;
+  }> = [];
   private recoveryEpoch = 0;
   private recoveryStartedAt = -1;
   private recoveryStopped = false;
   private runnerReadyListener: ((sessionId: string) => void) | null = null;
+  private readonly worktreeRoutes: RouteModule = createWorktreeRoutes({
+    listLive: async () => (this.store ? this.store.listSessions() : []),
+    listArchived: async () =>
+      this.store
+        ? (await this.store.listArchived()).map((record) => {
+            const sanitized = { ...record };
+            delete sanitized.env;
+            delete sanitized.previewSource;
+            return sanitized;
+          })
+        : [],
+    worktrees: new GitWorktrees(),
+    markRetained: async (sessionId, reason) => {
+      if (!this.store) return;
+      await markArchivedWorktreeRetained((id) => this.store!.sessionDir(id), sessionId, reason);
+    },
+  });
 
   setBrowserAccess(access: BrowserAccess): void {
     this.browserAccess = access;
@@ -317,6 +363,336 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   setAttentionStore(store: AttentionStore): void {
     this.attention = store;
     this.defaultCoordination = null;
+    // onNotification is a private constructor parameter. It is still an own
+    // instance property at runtime; the cast is the only way to wrap it.
+    const internal = store as unknown as {
+      onNotification?: (sessionId: string, notice: PushNotice) => void;
+    };
+    const original = internal.onNotification;
+    this.attentionPushHandler = original;
+    if (original) {
+      internal.onNotification = (sessionId: string, notice: PushNotice) => {
+        const attempts = this.parentPushAttempts.get(sessionId);
+        if (attempts && attempts.size > 0) {
+          this.heldAttentionPushes.push({
+            sessionId,
+            notice,
+            owners: new Set(attempts),
+            dropped: false,
+          });
+          return;
+        }
+        original(sessionId, notice);
+      };
+    }
+  }
+
+  /** Dashboard notice + push for an item that is reaching the human now. */
+  publishHumanAttention(sessionId: string, item: AttentionItem): void {
+    if (item.type === 'ask_user' || item.prompt?.channel === 'hook') {
+      this.emit('event', {
+        sessionId,
+        eventName: 'PreToolUse',
+        source: 'api',
+        data: {
+          hook_event_name: 'PreToolUse',
+          attentionId: item.id,
+          attentionSequence: item.sequence,
+          attentionCreatedAt: item.createdAt,
+          ...(item.prompt ? { attentionPrompt: item.prompt } : {}),
+        },
+      });
+    } else {
+      this.emit('event', {
+        sessionId,
+        eventName: 'Notification',
+        source: 'api',
+        data: {
+          notification_type: 'agent_needs_input',
+          title: item.title,
+          message: item.message,
+          notification_id: item.id,
+          attentionId: item.id,
+          attentionSequence: item.sequence,
+          attentionCreatedAt: item.createdAt,
+          ...(item.prompt ? { attentionPrompt: item.prompt } : {}),
+        },
+      });
+    }
+    try {
+      this.attentionPushHandler?.(sessionId, {
+        kind: 'question',
+        eventKey: `question:${item.id}`,
+        title: item.title,
+        message: item.message,
+        occurredAt: item.escalatedAt ?? item.createdAt,
+      });
+    } catch {
+      // Optional push delivery cannot fail escalation.
+    }
+  }
+
+  private readCallerSessionId(req: IncomingMessage): string | undefined {
+    const callerHeader = req.headers['x-ftown-session-id'];
+    return typeof callerHeader === 'string' && callerHeader.trim()
+      ? callerHeader.trim()
+      : undefined;
+  }
+
+  private readAttentionTarget(body: Record<string, unknown>): 'human' | undefined {
+    if (!Object.prototype.hasOwnProperty.call(body, 'to')) return undefined;
+    if (body.to === 'human') return 'human';
+    throw new BadRequestError("Invalid attention target");
+  }
+
+  private async resolveAttentionRouting(
+    child: Session,
+    to?: 'human',
+  ): Promise<{ route: AttentionRoute; parent: Session | null }> {
+    if (!this.store || !child.parentSessionId) {
+      return { route: 'human', parent: null };
+    }
+    const parent = await this.store.loadSession(child.parentSessionId);
+    const parentRunning =
+      !!parent &&
+      (typeof this.runner?.isRunning === 'function'
+        ? this.runner.isRunning(parent.id)
+        : parent.status === 'running');
+    const route = decideRoute(child, parent, parentRunning, to);
+    return { route, parent };
+  }
+
+  /** Hold pushes for this session until the created item id is known. */
+  private beginParentPushHold(sessionId: string): number {
+    const attempt = ++this.parentPushAttempt;
+    let attempts = this.parentPushAttempts.get(sessionId);
+    if (!attempts) {
+      attempts = new Set();
+      this.parentPushAttempts.set(sessionId, attempts);
+    }
+    attempts.add(attempt);
+    return attempt;
+  }
+
+  /** Drop only `question:<suppressItemId>`. Every other held notice is delivered. */
+  private finishParentPushHold(sessionId: string, attempt: number, suppressItemId?: string): void {
+    const attempts = this.parentPushAttempts.get(sessionId);
+    attempts?.delete(attempt);
+    if (attempts && attempts.size === 0) this.parentPushAttempts.delete(sessionId);
+    const suppressKey = suppressItemId ? `question:${suppressItemId}` : undefined;
+    for (let index = this.heldAttentionPushes.length - 1; index >= 0; index--) {
+      const held = this.heldAttentionPushes[index];
+      if (!held.owners.has(attempt)) continue;
+      held.owners.delete(attempt);
+      if (suppressKey && held.notice.eventKey === suppressKey) held.dropped = true;
+      if (held.owners.size === 0) {
+        this.heldAttentionPushes.splice(index, 1);
+        if (!held.dropped) {
+          try { this.attentionPushHandler?.(held.sessionId, held.notice); } catch { /* Optional push delivery cannot fail the request. */ }
+        }
+      }
+    }
+  }
+
+  /** Apply a parent route only when the item was just created. Repeats keep their stored route. */
+  private async applyParentRoute(
+    session: Session,
+    item: AttentionItem,
+    created: boolean,
+    route: AttentionRoute,
+    parent: Session | null,
+  ): Promise<{ item: AttentionItem; skipNotice: boolean; suppressPushId?: string }> {
+    if (created && route === 'parent' && parent && this.attention) {
+      const routed = await this.attention.setRoute(session.id, item.id, {
+        route: 'parent',
+        routedTo: parent.id,
+      });
+      if (!routed) return { item, skipNotice: false };
+      const fallback = await this.sendParentQuestionMail(session, parent, routed);
+      // The create push is the parent's to swallow. A mail failure publishes its own.
+      return { item: fallback ?? routed, skipNotice: true, suppressPushId: item.id };
+    }
+    if (!created && item.route === 'parent') return { item, skipNotice: true };
+    return { item, skipNotice: false };
+  }
+
+  /** Mail the parent. On failure, route the item to the human and publish now. Returns that item. */
+  private async sendParentQuestionMail(
+    child: Session,
+    parent: Session,
+    item: AttentionItem,
+  ): Promise<AttentionItem | undefined> {
+    let failed = false;
+    try {
+      const accepted = await this.acceptSessionMail(parent, {
+        from: child.id,
+        fromName: child.name,
+        type: 'escalation',
+        threadId: item.id,
+        body: formatParentQuestionMail(child, item),
+      });
+      if (!accepted.ok) {
+        console.error('[Bridge] Failed to mail parent question:', accepted.error);
+        failed = true;
+      }
+    } catch (err) {
+      console.error(
+        '[Bridge] Failed to mail parent question:',
+        err instanceof Error ? err.message : err,
+      );
+      failed = true;
+    }
+    if (!failed || !this.attention) return undefined;
+    const updated = await this.attention.setRoute(child.id, item.id, {
+      route: 'human',
+      escalatedAt: new Date().toISOString(),
+      escalationNote: PARENT_UNAVAILABLE_NOTE,
+    }, 'parent');
+    if (updated && !updated.resolvedAt && updated.route === 'human') {
+      this.publishHumanAttention(child.id, updated);
+      return updated;
+    }
+    try {
+      return await this.attention.waitForItem(child.id, item.id, 0);
+    } catch {
+      return item;
+    }
+  }
+
+  /** Caller must be the child's parent. Returns the parent session, or null after writing 403. */
+  private async loadParentCaller(
+    req: IncomingMessage,
+    res: ServerResponse,
+    child: Session,
+  ): Promise<Session | null> {
+    const caller = this.readCallerSessionId(req);
+    if (!this.store || !child.parentSessionId || caller !== child.parentSessionId) {
+      jsonResponse(res, 403, { error: 'Only the parent session can do this', code: 'forbidden' });
+      return null;
+    }
+    const parent = await this.store.loadSession(child.parentSessionId);
+    if (!parent || parent.id !== child.parentSessionId) {
+      jsonResponse(res, 403, { error: 'Only the parent session can do this', code: 'forbidden' });
+      return null;
+    }
+    return parent;
+  }
+
+  private async dispatchCoordinationRoutes(
+    req: IncomingMessage,
+    res: ServerResponse,
+    path: string,
+    url: URL,
+  ): Promise<boolean> {
+    if (!this.store) return false;
+    const store = this.store;
+    let responded = false;
+    const ctx: RouteContext = {
+      req,
+      res,
+      method: req.method ?? 'GET',
+      path,
+      query: url.searchParams,
+      callerSessionId: this.readCallerSessionId(req),
+      parseBody: () => parseBody(req),
+      json: (status, body) => {
+        responded = true;
+        jsonResponse(res, status, body);
+      },
+      loadSession: (id) => store.loadSession(id),
+      saveSession: (session) => store.saveSession(session),
+      publishSession: (session) => {
+        if (this.centrifugo && this.userId) {
+          void this.centrifugo.publishSessionUpdate(this.userId, session);
+        }
+      },
+    };
+    try {
+      if (await handleBriefRoutes(ctx)) return true;
+      if (await this.worktreeRoutes(ctx)) return true;
+      return false;
+    } catch (error) {
+      if (error instanceof RouteError) {
+        if (!responded && !res.headersSent) ctx.json(error.status, { error: error.message });
+        return true;
+      }
+      throw error;
+    }
+  }
+
+  private async handleParentAttentionAction(
+    req: IncomingMessage,
+    res: ServerResponse,
+    childId: string,
+    eventId: string,
+    action: 'answer' | 'escalate',
+  ): Promise<void> {
+    if (req.method !== 'POST') {
+      jsonResponse(res, 405, { error: 'Method not allowed' });
+      return;
+    }
+    if (!this.store) {
+      jsonResponse(res, 503, { error: 'Server not ready' });
+      return;
+    }
+    const child = await this.store.loadSession(childId);
+    if (!child) {
+      jsonResponse(res, 404, { error: 'Session not found', code: 'unknown_session' });
+      return;
+    }
+    if (!this.attention) {
+      jsonResponse(res, 503, { error: 'Attention store not ready', code: 'attention_not_ready' });
+      return;
+    }
+    const parent = await this.loadParentCaller(req, res, child);
+    if (!parent) return;
+    if (action === 'answer') {
+      const body = await parseBody(req);
+      if (!body || typeof body !== 'object' || Array.isArray(body)
+        || Object.keys(body).some((key) => key !== 'answers')) {
+        throw new BadRequestError('Invalid attention answer');
+      }
+      const { item, waiterLive } = await this.attention.answer(
+        child.id,
+        eventId,
+        body.answers,
+        undefined,
+        { kind: 'session', sessionId: parent.id, name: parent.name },
+      );
+      await deliverAttentionAnswer({
+        child,
+        item,
+        waiterLive,
+        sender: { from: parent.id, fromName: parent.name },
+        acceptMail: (session, mailBody) => this.acceptSessionMail(session, mailBody),
+      });
+      jsonResponse(res, 200, { event: item });
+      return;
+    }
+    const body = await parseBody(req);
+    if (!body || typeof body !== 'object' || Array.isArray(body)
+      || Object.keys(body).some((key) => key !== 'note')) {
+      throw new BadRequestError('Invalid escalation');
+    }
+    if (body.note !== undefined && (typeof body.note !== 'string' || body.note.length > 500)) {
+      throw new BadRequestError('Invalid escalation note');
+    }
+    const current = await this.attention.waitForItem(child.id, eventId, 0);
+    if (current.resolvedAt || current.route !== 'parent') {
+      jsonResponse(res, 409, { error: 'Attention request is already with the human', code: 'attention_conflict' });
+      return;
+    }
+    const updated = await this.attention.setRoute(child.id, eventId, {
+      route: 'human',
+      escalatedAt: new Date().toISOString(),
+      ...(typeof body.note === 'string' ? { escalationNote: body.note } : {}),
+    }, 'parent');
+    if (!updated || updated.resolvedAt || updated.route !== 'human') {
+      jsonResponse(res, 409, { error: 'Attention request is already with the human', code: 'attention_conflict' });
+      return;
+    }
+    this.publishHumanAttention(child.id, updated);
+    jsonResponse(res, 200, { event: updated });
   }
 
   setCoordination(coordination: Coordination): void {
@@ -342,6 +718,10 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
           this.attention
             ? this.attention.list(id)
             : { activity: { state: 'unknown' }, openCount: 0 },
+        listRouted: async (childId) =>
+          this.attention ? this.attention.listRouted(childId) : [],
+        setRoute: async (sessionId, eventId, fields, expectRoute) =>
+          this.attention ? this.attention.setRoute(sessionId, eventId, fields, expectRoute) : undefined,
       },
       prStatus: async () => null,
       mail: {
@@ -358,6 +738,9 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         }
       },
       now: Date.now,
+      onAttentionEscalated: (sessionId, item) => {
+        this.publishHumanAttention(sessionId, item);
+      },
     });
     return this.defaultCoordination;
   }
@@ -465,6 +848,10 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       removeSession: (id, options) =>
         removeFtownSession({ store, runner, centrifugo, userId }, id, options),
       collectUsage: (session) => collectSessionUsage(session),
+      onSessionEnding: async (session) => {
+        const coordination = this.getCoordination();
+        if (coordination) await coordination.onSessionExit(session.id, session);
+      },
       ...(this.sessionDeps ? { sessionFactory: this.sessionDeps } : {}),
     });
     return this.sessionController;
@@ -632,10 +1019,19 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         if (caller?.shellType) body.shellType = caller.shellType;
       }
 
-      const input = parseCreateSessionBody(
-        body,
-        useCallerAsParent ? callerSessionId : undefined,
-      );
+      let input: ReturnType<typeof parseCreateSessionBody>;
+      try {
+        input = parseCreateSessionBody(
+          body,
+          useCallerAsParent ? callerSessionId : undefined,
+        );
+      } catch (err) {
+        if (err instanceof WorktreeError) {
+          jsonResponse(res, 400, { error: err.message });
+          return;
+        }
+        throw err;
+      }
 
       if (!input.command && !input.shellType && !input.prompt) {
         jsonResponse(res, 400, {
@@ -654,6 +1050,10 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         const session = await controller.create(input);
         jsonResponse(res, 201, { session: toWireSession(session) });
       } catch (err) {
+        if (err instanceof WorktreeError) {
+          jsonResponse(res, 400, { error: err.message });
+          return;
+        }
         if (err instanceof ProviderAuthMissingError) {
           const r = providerAuthMissingResponse(err);
           jsonResponse(res, r.status, r.body);
@@ -702,6 +1102,20 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       return;
     }
 
+    if (await this.dispatchCoordinationRoutes(req, res, path, url)) return;
+
+    const parentAttentionMatch = path.match(/^\/api\/sessions\/([a-zA-Z0-9_-]+)\/attention\/([A-Za-z0-9_-]{1,100})\/(answer|escalate)$/);
+    if (parentAttentionMatch) {
+      await this.handleParentAttentionAction(
+        req,
+        res,
+        parentAttentionMatch[1],
+        parentAttentionMatch[2],
+        parentAttentionMatch[3] as 'answer' | 'escalate',
+      );
+      return;
+    }
+
     const attentionMatch = path.match(/^\/api\/sessions\/([a-zA-Z0-9_-]+)\/attention(?:\/([A-Za-z0-9_-]+))?$/);
     if (attentionMatch) {
       const id = attentionMatch[1];
@@ -710,6 +1124,23 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       if (!this.attention) { jsonResponse(res, 503, { error: 'Attention store not ready', code: 'attention_not_ready' }); return; }
       const attentionSub = attentionMatch[2];
       const attentionAction = attentionSub === 'ack' || attentionSub === 'resolve' ? attentionSub : undefined;
+      if (attentionSub === 'routed') {
+        if (req.method !== 'GET') { jsonResponse(res, 405, { error: 'Method not allowed' }); return; }
+        const caller = this.readCallerSessionId(req);
+        if (caller !== id) {
+          jsonResponse(res, 403, { error: 'Only the parent session can do this', code: 'forbidden' });
+          return;
+        }
+        const sessions = await this.store.listSessions();
+        const items: Array<{ sessionId: string; sessionName: string; event: AttentionItem }> = [];
+        for (const child of sessions) {
+          if (child.parentSessionId !== id || child.id === id) continue;
+          const routed = await this.attention.listRouted(child.id);
+          for (const event of routed) items.push({ sessionId: child.id, sessionName: child.name, event });
+        }
+        jsonResponse(res, 200, { items });
+        return;
+      }
       if (attentionSub === 'ask') {
         if (req.method !== 'POST') { jsonResponse(res, 405, { error: 'Method not allowed' }); return; }
         if (session.status !== 'running' && session.status !== 'pending') {
@@ -717,23 +1148,38 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         }
         const body = await parseBody(req);
         if (!body || typeof body !== 'object' || Array.isArray(body)
-          || Object.keys(body).some((key) => !['toolName', 'toolUseId', 'toolInput'].includes(key))) throw new BadRequestError('Invalid ask arguments');
+          || Object.keys(body).some((key) => !['toolName', 'toolUseId', 'toolInput', 'to'].includes(key))) throw new BadRequestError('Invalid ask arguments');
         if (typeof body.toolName !== 'string' || !body.toolName.trim() || body.toolName.length > 200) throw new BadRequestError('Invalid toolName');
         if (typeof body.toolUseId !== 'string' || !body.toolUseId.trim() || body.toolUseId.length > 200) throw new BadRequestError('Invalid toolUseId');
+        const to = this.readAttentionTarget(body);
+        const { route, parent } = await this.resolveAttentionRouting(session, to);
         const toolData = { tool_name: body.toolName, tool_use_id: body.toolUseId, tool_input: body.toolInput };
-        const { item, created } = await this.attention.recordDetailed(id, 'PreToolUse', toolData);
-        // When ftown's ordinary (async) PreToolUse hook is missing or late, this is the only signal the UI gets.
-        // Same stamped payload as /hook; deduped asks publish nothing, and the agent is not marked busy.
-        if (item && created) {
-          this.emit('event', { sessionId: id, eventName: 'PreToolUse', source: 'api', data: {
-            hook_event_name: 'PreToolUse', ...toolData,
-            attentionId: item.id, attentionSequence: item.sequence, attentionCreatedAt: item.createdAt,
-          } } as HookEvent);
-          if (session.parentSessionId) {
-            await this.getCoordination()?.emit(session, 'attention', item.title, item.id);
+        const hold = route === 'parent' ? this.beginParentPushHold(id) : undefined;
+        let suppressItemId: string | undefined;
+        try {
+          const { item, created } = await this.attention!.recordDetailed(id, 'PreToolUse', toolData);
+          // When ftown's ordinary (async) PreToolUse hook is missing or late, this is the only signal the UI gets.
+          // Same stamped payload as /hook; deduped asks publish nothing, and the agent is not marked busy.
+          // Only a newly created parent-routed item skips that notice and the push.
+          let responseItem = item;
+          if (item && created) {
+            const applied = await this.applyParentRoute(session, item, created, route, parent);
+            responseItem = applied.item;
+            suppressItemId = applied.suppressPushId;
+            if (!applied.skipNotice) {
+              this.emit('event', { sessionId: id, eventName: 'PreToolUse', source: 'api', data: {
+                hook_event_name: 'PreToolUse', ...toolData,
+                attentionId: applied.item.id, attentionSequence: applied.item.sequence, attentionCreatedAt: applied.item.createdAt,
+              } } as HookEvent);
+            }
+            if (session.parentSessionId) {
+              await this.getCoordination()?.emit(session, 'attention', applied.item.title, applied.item.id);
+            }
           }
+          jsonResponse(res, 200, { event: responseItem && responseItem.prompt ? responseItem : null });
+        } finally {
+          if (hold !== undefined) this.finishParentPushHold(id, hold, suppressItemId);
         }
-        jsonResponse(res, 200, { event: item && item.prompt ? item : null });
         return;
       }
       if (attentionSub && !attentionAction) {
@@ -758,9 +1204,10 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         }
         const body = await parseBody(req);
         if (!body || typeof body !== 'object' || Array.isArray(body)
-          || Object.keys(body).some((key) => !['title', 'message', 'questions'].includes(key))) throw new BadRequestError('Invalid attention arguments');
+          || Object.keys(body).some((key) => !['title', 'message', 'questions', 'to'].includes(key))) throw new BadRequestError('Invalid attention arguments');
         if (typeof body.message !== 'string' || !body.message.trim() || body.message.trim().length > 2000) throw new BadRequestError('Invalid attention message');
         if (body.title !== undefined && (typeof body.title !== 'string' || !body.title.trim() || body.title.trim().length > 200)) throw new BadRequestError('Invalid attention title');
+        const to = this.readAttentionTarget(body);
         const title = sanitizeAttentionText(typeof body.title === 'string' ? body.title : 'Session needs your input', 200);
         const message = sanitizeAttentionText(body.message, 2000);
         if (!title || !message) throw new BadRequestError('Attention text must not be empty');
@@ -770,19 +1217,34 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
           if (!parsed.ok) { jsonResponse(res, 400, { error: parsed.error, code: 'invalid_prompt' }); return; }
           prompt = parsed.value;
         }
-        const event = await this.attention.record(id, 'Notification', { notification_type: 'agent_needs_input', title, message }, prompt ? { prompt } : undefined);
-        if (!event) throw new AttentionError('attention_storage_error', 'Attention history could not be persisted', 500);
-        // Durable commit precedes publication; the live stream carries only
-        // the sanitized request and its exact committed record identifier.
-        this.emit('event', { sessionId: id, eventName: 'Notification', source: 'api', data: {
-          notification_type: 'agent_needs_input', title: event.title, message: event.message, notification_id: event.id,
-          attentionId: event.id, attentionSequence: event.sequence, attentionCreatedAt: event.createdAt,
-          ...(event.prompt ? { attentionPrompt: event.prompt } : {}),
-        } });
-        if (session.parentSessionId) {
-          await this.getCoordination()?.emit(session, 'attention', event.title, event.id);
+        const { route, parent } = await this.resolveAttentionRouting(session, to);
+        const hold = route === 'parent' ? this.beginParentPushHold(id) : undefined;
+        let suppressItemId: string | undefined;
+        try {
+          const event = await this.attention!.record(id, 'Notification', { notification_type: 'agent_needs_input', title, message }, prompt ? { prompt } : undefined);
+          if (!event) throw new AttentionError('attention_storage_error', 'Attention history could not be persisted', 500);
+          // record() only reports the item. A newly created row starts at one occurrence;
+          // a repeat increments it and must keep the route it already has.
+          const applied = await this.applyParentRoute(session, event, event.occurrences === 1, route, parent);
+          suppressItemId = applied.suppressPushId;
+          // Durable commit precedes publication; the live stream carries only
+          // the sanitized request and its exact committed record identifier.
+          // A new parent-routed item skips the dashboard notice. A repeat keeps
+          // its stored route, so a human-routed repeat still publishes.
+          if (!applied.skipNotice) {
+            this.emit('event', { sessionId: id, eventName: 'Notification', source: 'api', data: {
+              notification_type: 'agent_needs_input', title: applied.item.title, message: applied.item.message, notification_id: applied.item.id,
+              attentionId: applied.item.id, attentionSequence: applied.item.sequence, attentionCreatedAt: applied.item.createdAt,
+              ...(applied.item.prompt ? { attentionPrompt: applied.item.prompt } : {}),
+            } });
+          }
+          if (session.parentSessionId) {
+            await this.getCoordination()?.emit(session, 'attention', applied.item.title, applied.item.id);
+          }
+          jsonResponse(res, 200, { event: applied.item });
+        } finally {
+          if (hold !== undefined) this.finishParentPushHold(id, hold, suppressItemId);
         }
-        jsonResponse(res, 200, { event });
         return;
       }
       if (!attentionSub && req.method === 'GET') {
@@ -1121,10 +1583,23 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         return;
       }
 
-      await controller.remove(sessionId);
+      const worktreeValues = url.searchParams.getAll('worktree');
+      if (worktreeValues.length > 1) throw new BadRequestError('Invalid worktree mode');
+      let worktreeMode: 'auto' | 'keep' | 'force' = 'auto';
+      if (worktreeValues.length === 1) {
+        const mode = worktreeValues[0];
+        if (mode !== 'keep' && mode !== 'force') throw new BadRequestError('Invalid worktree mode');
+        worktreeMode = mode;
+      }
+
+      const removed = await controller.remove(sessionId, undefined, worktreeMode);
       this.mail.markSessionEnded(sessionId);
 
-      jsonResponse(res, 200, { removed: true, sessionId });
+      jsonResponse(res, 200, {
+        removed: true,
+        sessionId,
+        ...(removed.worktreeOutcome ? { worktreeOutcome: removed.worktreeOutcome } : {}),
+      });
       return;
     }
 
@@ -1689,7 +2164,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         committedAttention = await this.attention.record(ftownSessionId, hookEventName, rest,
           isPromptSubmit ? { promptOrigin: injected ? 'injected' : 'human' } : undefined);
       }
-      if (hookEventName === 'UserPromptSubmit' || hookEventName === 'PreToolUse' || hookEventName === 'PostToolUse') this.mail.markAgentBusy(ftownSessionId);
+      if (hookEventName === 'UserPromptSubmit' || hookEventName === 'PreToolUse' || hookEventName === 'PostToolUse') this.mail.markAgentBusy(ftownSessionId, hookEventName);
       else if (hookEventName === 'Stop') this.mail.markAgentIdle(ftownSessionId);
       else if (hookEventName === 'SessionEnd') { this.mail.markAgentIdle(ftownSessionId); this.mail.markSessionEnded(ftownSessionId); }
       const conversationId = payload.conversation_id;

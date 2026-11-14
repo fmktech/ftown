@@ -1,8 +1,10 @@
-import type { Activity } from '../attention-events.js';
+import type { Activity, AttentionItem } from '../attention-events.js';
 import type { PullRequestState } from '../pull-request-status-protocol.js';
 import type { MailMessage, Session } from '../types.js';
+import { escalateParentChildren } from './attention-routing.js';
 import { BoardService } from './board.js';
 import { CardStore } from './card-store.js';
+import type { AttentionRoute, AttentionRoutingFields } from './contract-b.js';
 import type {
   BoardDeps,
   BoardServiceApi,
@@ -27,6 +29,13 @@ export interface CoordinationSessionStore {
 
 export interface CoordinationAttentionStore {
   list(id: string): Promise<{ activity: Activity; openCount: number }>;
+  listRouted?(childId: string): Promise<AttentionItem[]>;
+  setRoute?(
+    sessionId: string,
+    eventId: string,
+    fields: AttentionRoutingFields,
+    expectRoute?: AttentionRoute,
+  ): Promise<AttentionItem | undefined>;
 }
 
 export interface CoordinationPrStatusResult {
@@ -46,6 +55,7 @@ export interface CoordinationDeps {
   mail: CoordinationMailStore;
   publishSession: (s: Session) => void;
   now: () => number;
+  onAttentionEscalated?: (sessionId: string, item: AttentionItem) => void;
   /** Optional factory seams for unit tests using *Api fakes. */
   createCards?: (deps: CardStoreDeps) => CardStoreApi;
   createEvents?: (deps: TreeEventLogDeps) => TreeEventLogApi;
@@ -59,7 +69,12 @@ export interface Coordination {
   digest: DigestProvider;
   mailSink: MailEventSink;
   emit(session: Session, kind: TreeEventKind, summary: string, ref?: string): Promise<void>;
-  onSessionExit(sessionId: string): Promise<void>;
+  /**
+   * `snapshot`, when passed, is the session as it existed before the record was
+   * deleted. Callers that already hold it (stop, remove/archive) must pass it:
+   * reloading after delete returns null and skips escalation.
+   */
+  onSessionExit(sessionId: string, snapshot?: Session): Promise<void>;
   onSessionStart(sessionId: string): void;
 }
 
@@ -122,21 +137,41 @@ export function createCoordination(deps: CoordinationDeps): Coordination {
     }
   }
 
-  async function onSessionExit(sessionId: string): Promise<void> {
+  async function escalateExitingParent(sessionId: string): Promise<void> {
+    if (!deps.attention.listRouted || !deps.attention.setRoute) return;
+    await escalateParentChildren(sessionId, {
+      listSessions: () => deps.store.listSessions(),
+      attention: {
+        listRouted: (id) => deps.attention.listRouted!(id),
+        setRoute: (id, eventId, fields, expectRoute) => deps.attention.setRoute!(id, eventId, fields, expectRoute),
+      },
+      now: deps.now,
+      onEscalated: deps.onAttentionEscalated,
+    });
+  }
+
+  async function onSessionExit(sessionId: string, snapshot?: Session): Promise<void> {
     if (exitedSessions.has(sessionId)) return;
-    await deps.store
-      .loadSession(sessionId)
-      .then((session) => {
-        if (session && (session.status === 'completed' || session.status === 'error')) {
-          return emit(session, 'exit', `exited: ${session.status}`);
-        }
-      })
-      .catch((error) => {
-        console.warn(
-          '[Coordination] Failed to load session on exit:',
-          error instanceof Error ? error.message : String(error),
-        );
-      });
+    try {
+      // A caller-supplied snapshot is authoritative. loadSession after remove/archive
+      // returns null, which used to skip escalateParentChildren entirely.
+      const session = snapshot !== undefined ? snapshot : await deps.store.loadSession(sessionId);
+      const terminal = !!session && (session.status === 'completed' || session.status === 'error');
+      if (terminal && session) {
+        await emit(session, 'exit', `exited: ${session.status}`);
+      }
+      // Running snapshot: stop/remove is ending the session before its status
+      // write is visible. Null load: the record was deleted before this ran.
+      // A live non-terminal session with no snapshot is not an exit.
+      if (terminal || snapshot !== undefined || !session) {
+        await escalateExitingParent(sessionId);
+      }
+    } catch (error) {
+      console.warn(
+        '[Coordination] Failed to load session on exit:',
+        error instanceof Error ? error.message : String(error),
+      );
+    }
   }
 
   const cards: CardStoreApi = (deps.createCards ?? ((d) => new CardStore(d)))({

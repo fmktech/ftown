@@ -449,14 +449,15 @@ describe('model routing service: set', () => {
   it('serialises sets: the second starts only after the first finishes', async t => {
     const h = await harness(t);
     const pending = deferred<QuotaReport>();
-    h.setCollect(() => pending.promise);
+    const collectStarted = deferred<true>();
+    h.setCollect(() => { collectStarted.resolve(true); return pending.promise; });
     const order: string[] = [];
     const first = h.service.set({ config: { ...config(), steering: 'first' } }).then((r: SetModelRoutingResult) => { order.push('first'); return r; });
     // Invalid, so unserialised it would settle at once, before the first set's collect resolves.
     const invalid = h.service.set({ config: { version: 2 } as unknown as ModelRoutingConfig }).then((r: SetModelRoutingResult) => { order.push('invalid'); return r; });
     const third = h.service.set({ config: { ...config(), steering: 'third' } }).then((r: SetModelRoutingResult) => { order.push('third'); return r; });
     // The invalid-file read happens before collect, so wait until that collect is actually in flight.
-    for (let i = 0; h.calls.length === 0 && i < 50; i++) await new Promise(resolve => setImmediate(resolve));
+    await collectStarted.promise;
     assert.deepEqual(order, []);
     assert.equal(h.calls.length, 1);
     pending.resolve(report());
