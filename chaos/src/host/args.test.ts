@@ -19,7 +19,10 @@ test('build', () => {
 
 test('selftest defaults and flags', () => {
   const c = parseArgs(['selftest', '--times', '3', '--mem', '2048', '--jobs', '1']);
-  assert.deepEqual(c, { cmd: 'selftest', times: 3, vm: { memMb: 2048, icountShift: 1, timeoutSec: 300, jobs: 1 } });
+  assert.deepEqual(c, { cmd: 'selftest', times: 3, vm: { memMb: 2048, icountShift: 1, timeoutSec: 300, jobs: 1 }, longSeconds: null });
+  const l = parseArgs(['selftest', '--long', '600']);
+  assert.ok(l.cmd === 'selftest');
+  assert.deepEqual([l.longSeconds, l.vm.timeoutSec], [600, 3600]);
   const d = parseArgs(['selftest']);
   assert.ok(d.cmd === 'selftest');
   assert.deepEqual([d.vm.memMb, d.vm.jobs], [1536, 1]);
@@ -41,6 +44,17 @@ test('run, campaign and repro', () => {
   const t = parseArgs(['--repro', '0', '--times', '2', '--level', 'off']);
   assert.ok(t.cmd === 'run');
   assert.deepEqual([t.seeds, t.times, t.level], [[0], 2, 'off']);
+});
+
+test('drop faults', () => {
+  const r = parseArgs(['repro', '--seed', '3', '--drop-faults', 'f2,clock_jump_fwd']);
+  assert.ok(r.cmd === 'run');
+  assert.equal(r.dropFaults, 'f2,clock_jump_fwd');
+  const n = parseArgs(['run', '--seeds', '1']);
+  assert.ok(n.cmd === 'run');
+  assert.equal(n.dropFaults, null);
+  for (const bad of ['F2', 'f2;rm', 'f2,', ',f2', 'a b', '']) assert.throws(() => parseArgs(['run', '--seeds', '1', '--drop-faults', bad]), UsageError, bad);
+  assert.throws(() => parseArgs(['campaign', '--seeds', '1', '--drop-faults', 'f1']), UsageError);
 });
 
 test('usage errors', () => {

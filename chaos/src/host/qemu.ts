@@ -9,11 +9,13 @@ import { CACHE_DIR, QEMU_IMAGE } from './paths.ts';
 import { run } from './proc.ts';
 
 export interface GuestParams {
-  cmd: 'selftest' | 'run';
+  cmd: 'selftest' | 'selftest-long' | 'run';
   seed: number;
   level: ChaosLevel;
   memMb: number;
   icountShift: number;
+  /** Fault ids/kinds the guest must skip ([a-z0-9_,]), or null. */
+  dropFaults?: string | null;
 }
 
 export const RTC_BASE = '2026-01-01T00:00:00';
@@ -25,6 +27,7 @@ export function qemuArgs(p: GuestParams): string[] {
     'nokaslr', 'norandmaps', 'tsc=reliable', 'clocksource=tsc', 'no_timer_check', 'mitigations=off',
     'quiet', 'loglevel=4', 'rdinit=/init',
     `chaos.cmd=${p.cmd}`, `chaos.seed=${p.seed}`, `chaos.level=${p.level}`,
+    ...(p.dropFaults ? [`chaos.drop=${p.dropFaults}`] : []),
   ].join(' ');
   return [
     'qemu-system-x86_64',
@@ -55,6 +58,23 @@ export interface BootOutcome {
   wallMs: number;
 }
 
+/**
+ * Investigation knobs (not for normal runs): CHAOS_QEMU_SET="-machine=q35,hpet=off;-icount=shift=3"
+ * replaces the value after an existing flag; CHAOS_QEMU_EXTRA="-global a.b=c" appends arguments.
+ */
+export function withDebugOverrides(args: string[], env: NodeJS.ProcessEnv = process.env): string[] {
+  const out = [...args];
+  for (const kv of (env.CHAOS_QEMU_SET ?? '').split(';').filter((x) => x !== '')) {
+    const eq = kv.indexOf('=');
+    const i = out.indexOf(kv.slice(0, eq));
+    if (eq < 0 || i < 0) throw new Error(`CHAOS_QEMU_SET: no flag ${kv}`);
+    out[i + 1] = kv.slice(eq + 1);
+  }
+  const extra = (env.CHAOS_QEMU_EXTRA ?? '').split(' ').filter((x) => x !== '');
+  if (extra.length > 0) out.splice(out.indexOf('-kernel'), 0, ...extra);
+  return out;
+}
+
 let counter = 0;
 /** Containers started by this process and not yet removed. */
 const live = new Set<string>();
@@ -76,7 +96,9 @@ export async function boot(p: GuestParams, outDir: string, timeoutSec: number): 
   // sharing) at the moment the container exits.
   const dockerArgs = [
     'run', '--name', name, '--network', 'none', '-v', `${CACHE_DIR}:/in:ro`,
-    QEMU_IMAGE, 'sh', '-c', 'mkdir -p /out && : > /out/console.log && : > /out/frames.txt && exec "$@"', 'sh', ...qemuArgs(p),
+    // Investigation knob: CHAOS_QEMU_IMAGE selects e.g. the tracing build (writes /out/trace.txt).
+    '-e', 'QEMU_CHAOS_TRACE=/out/trace.txt',
+    process.env.CHAOS_QEMU_IMAGE ?? QEMU_IMAGE, 'sh', '-c', 'mkdir -p /out && : > /out/console.log && : > /out/frames.txt && exec "$@"', 'sh', ...withDebugOverrides(qemuArgs(p)),
   ];
   const started = performance.now();
   let timedOut = false;

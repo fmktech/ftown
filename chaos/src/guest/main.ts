@@ -2,7 +2,7 @@
 import { EXIT, type ChaosLevel } from '../contract.ts';
 import { existsSync } from 'node:fs';
 import { EXIT_SENT_MARKER, emitExit, emitFile } from './emit.ts';
-import { runSelftest } from './selftest.ts';
+import { runLongSelftest, runSelftest } from './selftest.ts';
 
 interface SupervisorModule {
   runSeed(opts: { seed: number; level: ChaosLevel }): Promise<number>;
@@ -13,6 +13,11 @@ async function main(): Promise<number> {
   if (cmd === 'selftest') {
     const report = await runSelftest();
     emitFile('selftest.json', JSON.stringify(report) + '\n');
+    return EXIT.ok;
+  }
+  if (cmd === 'selftest-long') {
+    const seconds = Number(process.env.CHAOS_SEED) || 600;
+    emitFile('long.jsonl', await runLongSelftest(seconds, (l) => console.log(l)));
     return EXIT.ok;
   }
   if (cmd === 'run') {
