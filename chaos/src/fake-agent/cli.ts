@@ -2,7 +2,7 @@
 import { spawn } from 'node:child_process';
 import { appendFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { ROLES } from '../contract.ts';
+import { GUEST, ROLES } from '../contract.ts';
 import type { AgentEvent, AgentLogLine, Clock, Role } from '../contract.ts';
 import type { CliOpts, CliResult } from './agent.ts';
 
@@ -64,6 +64,7 @@ export function realHook(): (event: string) => Promise<boolean> {
   return async (event) => {
     const script = process.env.CHAOS_HOOK_SCRIPT;
     if (!script) return false;
+    // notify.sh always exits 0 (even with the bridge unreachable), so ok only means "exit code 0".
     const payload = JSON.stringify({ hook_event_name: event, session_id: process.env.FTOWN_SESSION_ID ?? '' });
     const r = await run('/bin/bash', [script], { stdin: payload, timeoutMs: HOOK_TIMEOUT_MS });
     return r.code === 0;
@@ -90,6 +91,20 @@ export function fileLogger(dir: string, role: Role, clock: Clock): (e: AgentEven
   return (e) => {
     const line: AgentLogLine = { t: clock.now(), role, e };
     appendFileSync(file, `${JSON.stringify(line)}\n`);
+  };
+}
+
+/**
+ * Shared-epoch clock: now() = floor((hrtime - t0) / 1e6) with t0 (decimal ns string) read once
+ * from `path`. Throws when the file is missing or not a decimal integer: no private fallback epoch.
+ */
+export function epochClock(path: string): Clock {
+  const raw = readFileSync(path, 'utf8').trim();
+  if (!/^\d+$/.test(raw)) throw new Error(`clock epoch file ${path} does not hold a decimal nanosecond string`);
+  const t0 = BigInt(raw);
+  return {
+    now: () => Number((process.hrtime.bigint() - t0) / 1_000_000n),
+    sleep: (ms) => new Promise((done) => setTimeout(done, ms)),
   };
 }
 

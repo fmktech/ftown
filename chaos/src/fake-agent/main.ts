@@ -1,10 +1,10 @@
 // Entry point: node /opt/chaos/src/fake-agent/main.ts --role <role> --script <path.json> [ignored args]
 import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
-import { performance } from 'node:perf_hooks';
-import type { AgentScript, Clock } from '../contract.ts';
+import { GUEST } from '../contract.ts';
+import type { AgentScript } from '../contract.ts';
 import { runAgent } from './agent.ts';
-import { fileLogger, idsFromFile, isRole, realCli, realHook } from './cli.ts';
+import { epochClock, fileLogger, idsFromFile, isRole, realCli, realHook } from './cli.ts';
 
 function parseArgs(argv: string[]): { role: string | undefined; script: string | undefined } {
   let role: string | undefined;
@@ -20,12 +20,6 @@ function parseArgs(argv: string[]): { role: string | undefined; script: string |
   return { role, script };
 }
 
-// Guest time source: monotonic ms since this process started (the supervisor maps it to run time).
-const clock: Clock = {
-  now: () => Math.round(performance.now()),
-  sleep: (ms) => new Promise((done) => setTimeout(done, ms)),
-};
-
 async function main(): Promise<void> {
   const { role, script: scriptPath } = parseArgs(process.argv.slice(2));
   if (!role || !isRole(role) || !scriptPath) {
@@ -33,11 +27,9 @@ async function main(): Promise<void> {
     process.exit(2);
   }
   const script = JSON.parse(readFileSync(scriptPath, 'utf8')) as AgentScript;
-  const logDir = process.env.CHAOS_AGENT_LOG_DIR;
-  if (!logDir) {
-    process.stderr.write('CHAOS_AGENT_LOG_DIR is not set\n');
-    process.exit(2);
-  }
+  const logDir = process.env.CHAOS_AGENT_LOG_DIR || GUEST.agentLogDir;
+  // Throws (and the process fails loudly) when the shared epoch file is unreadable.
+  const clock = epochClock(process.env.CHAOS_T0_FILE || GUEST.t0File);
   const log = fileLogger(logDir, role, clock);
 
   process.on('SIGTERM', () => {
@@ -54,7 +46,7 @@ async function main(): Promise<void> {
     hook: realHook(),
     log,
     stdinLines: rl,
-    resolveId: idsFromFile(process.env.CHAOS_IDS_FILE),
+    resolveId: idsFromFile(process.env.CHAOS_IDS_FILE || GUEST.idsFile),
   });
   if (result.exitCode !== null) return;
   // Steps done (and stdin closed): stay alive, idle, until killed.
