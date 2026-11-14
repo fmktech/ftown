@@ -5,7 +5,7 @@ import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSy
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { apiErrorCode, apiFailureMessage, instanceNameFor, isRetryableApiError, main, orchestrate, parseInstances, remoteEnvironment, remoteRunDir, runKeyFor, validate } from "./agent37-runner.mjs";
+import { apiErrorCode, apiFailureMessage, instanceNameFor, isRetryableApiError, main, orchestrate, parseInstances, remoteEnvironment, remoteRunDir, resourcesFor, runKeyFor, validate } from "./agent37-runner.mjs";
 
 const base = { job: "e2e", event: "pull_request", repository: "fmktech/ftown", headRepository: "fmktech/ftown", author: "alice", sender: "alice", actor: "alice", runId: "123", runAttempt: "1", key: "secret" };
 test("routes internal, fork, each Dependabot identity, push and dispatch correctly", () => {
@@ -34,6 +34,10 @@ test("remote environment is an explicit allowlist, with no key", () => {
   const i = { ...base, job: "bridge-version", baseSha: "a".repeat(40), headSha: "b".repeat(40) };
   assert.deepEqual(remoteEnvironment(i, "/w"), ["CI=true", "GITHUB_WORKSPACE=/w", "GITHUB_RUN_ID=123", "GITHUB_RUN_ATTEMPT=1", `BASE=${i.baseSha}`, `HEAD=${i.headSha}`]);
   assert(!remoteEnvironment(i, "/w").join(" ").includes(i.key));
+});
+test("instance sizes use valid platform combinations", () => {
+  assert.deepEqual(resourcesFor("e2e"), { cpu: 4, memory: 16, disk: 40 });
+  assert.deepEqual(resourcesFor("centrifugo"), { cpu: 2, memory: 4, disk: 12 });
 });
 test("one long-lived instance serves each job kind and e2e shard, with a per-run directory", () => {
   assert.equal(instanceNameFor({ job: "e2e", shard: "2/3" }), "ftown-ci-e2e-2");

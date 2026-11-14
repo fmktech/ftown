@@ -81,8 +81,14 @@ export function isRetryableApiError(status, code) {
   return status === 503 && (code === "wake_failed" || code === "wake_timeout");
 }
 
-export function apiFailureMessage(action, { status, code, instanceId, template } = {}) {
+export function resourcesFor(job) {
+  // Valid platform combinations: 2/4, 4/8, 4/16, 4/32 (vCPU/GB, disk in range).
+  return job === "e2e" ? { cpu: 4, memory: 16, disk: 40 } : { cpu: 2, memory: 4, disk: 12 };
+}
+
+export function apiFailureMessage(action, { status, code, instanceId, template, detail } = {}) {
   const where = instanceId ? ` for instance ${instanceId}` : "";
+  const suffix = detail ? `: ${detail}` : "";
   if (status === 402 || code === "insufficient_balance" || code === "instance_suspended") {
     return `Agent37 ${action} failed${where}: workspace funding is exhausted (HTTP ${status} ${code}). Top up the Agent37 wallet, then re-run the job.`;
   }
@@ -95,7 +101,16 @@ export function apiFailureMessage(action, { status, code, instanceId, template }
   if (code === "template_not_found" || (action === "create instance" && status === 404)) {
     return `Agent37 create instance failed: template '${template || defaultTemplate}' was not found. Build it once with: a37 image build scripts/ci/agent37/Dockerfile ${template || defaultTemplate} scripts/ci/agent37 — then re-run the job.`;
   }
-  return `Agent37 ${action} failed${where} (HTTP ${status} ${code}). Re-run the job; if it repeats, report instance ${instanceId || "unknown"} to Agent37 support.`;
+  return `Agent37 ${action} failed${where} (HTTP ${status} ${code})${suffix}. Re-run the job; if it repeats, report instance ${instanceId || "unknown"} to Agent37 support.`;
+}
+
+export function apiErrorDetail(bodyText) {
+  try {
+    const body = JSON.parse(bodyText);
+    const error = body?.error;
+    if (error && typeof error === "object" && typeof error.message === "string" && error.message) return error.message;
+    return typeof body?.message === "string" && body.message ? body.message : "";
+  } catch { return ""; }
 }
 
 export function parseInstances(bodyText) {
@@ -246,7 +261,7 @@ export async function main({ env = process.env, retryDelaysMs = [5000, 15000], t
     const { status, text } = await api(method, path, opts);
     if (status < 200 || status >= 300) {
       const code = apiErrorCode(text);
-      throw Object.assign(new Error(apiFailureMessage(action, { status, code, instanceId: opts.instanceId, template: input.template })), { status, code, retryable: isRetryableApiError(status, code) });
+      throw Object.assign(new Error(redact(apiFailureMessage(action, { status, code, instanceId: opts.instanceId, template: input.template, detail: apiErrorDetail(text) }))), { status, code, retryable: isRetryableApiError(status, code) });
     }
     return text ? JSON.parse(text) : {};
   };
@@ -286,7 +301,7 @@ export async function main({ env = process.env, retryDelaysMs = [5000, 15000], t
     ensure: async (i, onId) => {
       const name = instanceNameFor(i);
       const template = i.template || defaultTemplate;
-      const resources = i.job === "e2e" ? { cpu: 4, memory: 16 } : { cpu: 2, memory: 8 };
+      const resources = resourcesFor(i.job);
       const listByName = async () => {
         const { status, text } = await api("GET", "/v1/instances");
         if (status === 404 || status === 405) return undefined;
