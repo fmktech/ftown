@@ -301,7 +301,7 @@ export type Rec =
   | { k: 'checkpoint'; t: number; name: string; final: boolean; snap: Snapshot }
   | { k: 'verdict'; prop: string; kind: PropKind; status: PropStatus; evidence: string[] };
 
-export const CONTRACT_VERSION = 5;
+export const CONTRACT_VERSION = 6;
 
 /** Operations the supervisor's workload driver performs through the real ftown CLI. */
 export type WorkloadOp =
@@ -346,6 +346,7 @@ export const PROPERTY_IDS = [
   'T1', // always: tree-event seq strictly increasing, no gaps, no duplicates, no regression
   'S1', // unreachable: session shown running/pending while its tmux session and process are gone
   'R1', // always: bridge alive and responsive at the final checkpoint
+  'R2', // unreachable: bridge dead at a checkpoint while no bridge fault is active (30 s grace after heal)
   'C1', // sometimes: bridge restarted while mail was pending
   'C2', // sometimes: a parent died with an open child ask
 ] as const;
