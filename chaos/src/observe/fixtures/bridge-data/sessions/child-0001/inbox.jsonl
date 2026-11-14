@@ -1,0 +1,2 @@
+{"id":"c1a-aaaaaa","ts":"2026-01-01T00:00:05.000Z","from":"root-0001","fromName":"root","to":"child-0001","type":"task","body":"CHAOS-M-1 from=root to=child1","deliveredAt":"2026-01-01T00:00:06.000Z","deliveredVia":"poll"}
+{"id":"c1b-bbbbbb","ts":"2026-01-01T00:00:08.000Z","from":"root-0001","to":"child-0001","type":"mess
