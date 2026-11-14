@@ -1,0 +1,47 @@
+SPDX-License-Identifier: GPL-2.0-or-later
+Derived from QEMU 1:7.2+dfsg-7+deb12u18, softmmu/icount.c, accel/tcg/tcg-accel-ops-icount.c
+
+Subject: icount: do not warp QEMU_CLOCK_VIRTUAL over an unaccounted vCPU slice
+
+icount_start_warp_timer() runs in the main loop (main_loop_wait, timerlist_rearm) and
+advances qemu_icount_bias by the distance to the next QEMU_CLOCK_VIRTUAL deadline when
+all vCPUs are idle. The main thread has current_cpu == NULL, so QEMU_CLOCK_VIRTUAL there
+is qemu_icount as of the last icount_process_data(). Between a vCPU executing HLT
+(halted = 1, so "idle") and icount_process_data() accounting that slice, the clock lags
+by the slice's instructions, the computed deadline is too large and the warp overshoots.
+Whether the main loop wakes inside that window depends on host scheduling, so two runs
+of the same guest diverge by a few ms of guest time under host load.
+
+Skip the warp while any vCPU slice is unaccounted (icount_budget != 0). The vCPU thread
+notifies the main loop after accounting when all CPUs are idle (rr_cpu_thread_fn), so the
+warp then happens with an exact clock.
+--- a/softmmu/icount.c
++++ b/softmmu/icount.c
+@@ -310,6 +310,16 @@
+     if (replay_mode != REPLAY_MODE_PLAY) {
+         if (!all_cpu_threads_idle()) {
+             return;
++        }
++
++        {
++            CPUState *cs;
++            CPU_FOREACH(cs) {
++                if (qatomic_load_acquire(&cs->icount_budget) != 0) {
++                    /* slice not yet accounted: the clock lags, see header */
++                    return;
++                }
++            }
+         }
+ 
+         if (qtest_enabled()) {
+--- a/accel/tcg/tcg-accel-ops-icount.c
++++ b/accel/tcg/tcg-accel-ops-icount.c
+@@ -127,7 +127,7 @@
+     /* Reset the counters */
+     cpu_neg(cpu)->icount_decr.u16.low = 0;
+     cpu->icount_extra = 0;
+-    cpu->icount_budget = 0;
++    qatomic_store_release(&cpu->icount_budget, 0);
+ 
+     replay_account_executed_instructions();
+ 

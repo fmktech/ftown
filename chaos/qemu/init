@@ -1,0 +1,81 @@
+#!/bin/sh
+# PID 1 of the chaos guest. Root is the initramfs (RAM). No disks, no network but lo.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export HOME=/root LANG=C.UTF-8 TZ=UTC NODE_OPTIONS= 
+BB=/bin/busybox
+[ -x "$BB" ] || BB=/usr/bin/busybox
+
+halt_now() {
+  sync
+  $BB sleep 1
+  $BB poweroff -f
+  echo o > /proc/sysrq-trigger
+  exit 1
+}
+# Runs one setup step; on failure reports it on the console and the frame port, then powers off.
+step() {
+  desc=$1; shift
+  if ! "$@"; then
+    echo "chaos-init: FAILED $desc" > /dev/console 2>/dev/null || echo "chaos-init: FAILED $desc"
+    printf 'CHAOS-EXIT 3\n' > /dev/ttyS1 2>/dev/null
+    halt_now
+  fi
+}
+
+step "mkdir base dirs" mkdir -p /proc /sys /dev /run /tmp
+step "mount proc" mount -t proc proc /proc
+step "mount sysfs" mount -t sysfs sysfs /sys
+$BB mountpoint -q /dev || step "mount devtmpfs" mount -t devtmpfs devtmpfs /dev
+[ -e /dev/console ] || step "mknod console" $BB mknod -m 600 /dev/console c 5 1
+[ -e /dev/ttyS1 ] || step "mknod ttyS1" $BB mknod -m 660 /dev/ttyS1 c 4 65
+step "mkdir pts shm" mkdir -p /dev/pts /dev/shm
+step "mount devpts" mount -t devpts devpts /dev/pts
+step "mount /dev/shm" mount -t tmpfs -o mode=1777 tmpfs /dev/shm
+step "mount /run" mount -t tmpfs -o mode=755 tmpfs /run
+step "mount /tmp" mount -t tmpfs -o mode=1777 tmpfs /tmp
+step "mount cgroup2" mount -t cgroup2 cgroup2 /sys/fs/cgroup
+exec 0</dev/console 1>/dev/console 2>&1
+
+step "ip link set lo up" $BB ip link set lo up
+step "hostname" $BB hostname chaos
+# Raw output on the frame port: no \n -> \r\n translation.
+step "stty ttyS1" $BB stty -F /dev/ttyS1 raw -echo 115200
+
+CHAOS_CMD=selftest; CHAOS_SEED=0; CHAOS_LEVEL=off; CHAOS_PROFILE=; CHAOS_DROP_FAULTS=
+for a in $(cat /proc/cmdline); do
+  case "$a" in
+    chaos.cmd=*) CHAOS_CMD=${a#chaos.cmd=} ;;
+    chaos.seed=*) CHAOS_SEED=${a#chaos.seed=} ;;
+    chaos.level=*) CHAOS_LEVEL=${a#chaos.level=} ;;
+    chaos.profile=*) CHAOS_PROFILE=${a#chaos.profile=} ;;
+    chaos.drop=*) CHAOS_DROP_FAULTS=${a#chaos.drop=} ;;
+  esac
+done
+export CHAOS_CMD CHAOS_SEED CHAOS_LEVEL CHAOS_PROFILE CHAOS_DROP_FAULTS
+# Inside the VM the clock is the guest's own (instruction-counted), so the supervisor may jump it.
+# Never set this anywhere else (e.g. Docker bring-up shares the host clock).
+export CHAOS_ALLOW_CLOCK=1
+echo "chaos-init: cmd=$CHAOS_CMD seed=$CHAOS_SEED level=$CHAOS_LEVEL profile=$CHAOS_PROFILE"
+
+rm -f /run/chaos-exit-sent
+cd /
+# PID 1 must reap orphans (killed bridge/agent trees reparent to us). Run node as a background
+# job and block in `wait`: dash's wait calls waitpid(-1), so every exited orphan is reaped while
+# we wait for node, and no zombie accumulates during the run.
+node /opt/chaos/src/guest/main.ts &
+node_pid=$!
+code=
+while [ -z "$code" ]; do
+  wait "$node_pid"; rc=$?
+  # wait returns >128 when interrupted by a signal; node is then still running.
+  if kill -0 "$node_pid" 2>/dev/null; then continue; fi
+  code=$rc
+done
+echo "chaos-init: main exited $code"
+if [ ! -e /run/chaos-exit-sent ]; then
+  # main did not report; that is an infrastructure failure unless it exited cleanly with a code.
+  [ "$code" -eq 0 ] && code=3
+  printf 'CHAOS-EXIT %s\n' "$code" > /dev/ttyS1
+fi
+# halt_now sleeps 1 s so the UART drains (virtual time under icount: costs no wall time).
+halt_now

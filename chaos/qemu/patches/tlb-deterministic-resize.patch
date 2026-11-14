@@ -1,0 +1,80 @@
+SPDX-License-Identifier: GPL-2.0-or-later
+Derived from QEMU 1:7.2+dfsg-7+deb12u18, accel/tcg/cputlb.c
+
+Subject: tcg/cputlb: size the softmmu TLB from a flush count, not host time
+
+tlb_mmu_resize_locked() grows and shrinks the per-mmu-idx TLB on a 100 ms window of
+get_clock_realtime(). The TLB size decides which guest accesses miss and go through the
+page walker, which sets the guest page-table Accessed/Dirty bits. x86 Linux clears
+Accessed bits without a TLB flush (ptep_clear_flush_young), so whether a bit is set again
+depends on QEMU's TLB contents, hence on host speed. Consumers of those bits (page aging,
+khugepaged) then take different paths and an icount guest stops being reproducible: two
+runs of the same guest execute a different instruction at the same icount.
+
+Count resize checks (one per flush) instead of reading the host clock; all five
+get_clock_realtime() uses in this file only feed the resize window.
+--- a/accel/tcg/cputlb.c
++++ b/accel/tcg/cputlb.c
+@@ -156,7 +156,16 @@
+     size_t new_size = old_size;
+     int64_t window_len_ms = 100;
+     int64_t window_len_ns = window_len_ms * 1000 * 1000;
+-    bool window_expired = now > desc->window_begin_ns + window_len_ns;
++    static int64_t flush_seq;
++    bool window_expired;
++
++    /*
++     * Deterministic window: count TLB resize checks (one "ms" each) instead of reading
++     * host realtime, so the TLB size, and with it the guest-visible Accessed/Dirty
++     * bits set by the page walker, never depend on host speed.
++     */
++    now = ++flush_seq * 1000 * 1000;
++    window_expired = now > desc->window_begin_ns + window_len_ns;
+ 
+     if (desc->n_used_entries > desc->window_max_entries) {
+         desc->window_max_entries = desc->n_used_entries;
+@@ -268,7 +277,7 @@
+ void tlb_init(CPUState *cpu)
+ {
+     CPUArchState *env = cpu->env_ptr;
+-    int64_t now = get_clock_realtime();
++    int64_t now = 0;
+     int i;
+ 
+     qemu_spin_init(&env_tlb(env)->c.lock);
+@@ -337,7 +346,7 @@
+     CPUArchState *env = cpu->env_ptr;
+     uint16_t asked = data.host_int;
+     uint16_t all_dirty, work, to_clean;
+-    int64_t now = get_clock_realtime();
++    int64_t now = 0;
+ 
+     assert_cpu_is_self(cpu);
+ 
+@@ -497,7 +506,7 @@
+         tlb_debug("forcing full flush midx %d ("
+                   TARGET_FMT_lx "/" TARGET_FMT_lx ")\n",
+                   midx, lp_addr, lp_mask);
+-        tlb_flush_one_mmuidx_locked(env, midx, get_clock_realtime());
++        tlb_flush_one_mmuidx_locked(env, midx, 0);
+     } else {
+         if (tlb_flush_entry_locked(tlb_entry(env, midx, page), page)) {
+             tlb_n_used_entries_dec(env, midx);
+@@ -727,7 +736,7 @@
+         tlb_debug("forcing full flush midx %d ("
+                   TARGET_FMT_lx "/" TARGET_FMT_lx "+" TARGET_FMT_lx ")\n",
+                   midx, addr, mask, len);
+-        tlb_flush_one_mmuidx_locked(env, midx, get_clock_realtime());
++        tlb_flush_one_mmuidx_locked(env, midx, 0);
+         return;
+     }
+ 
+@@ -740,7 +749,7 @@
+         tlb_debug("forcing full flush midx %d ("
+                   TARGET_FMT_lx "/" TARGET_FMT_lx ")\n",
+                   midx, d->large_page_addr, d->large_page_mask);
+-        tlb_flush_one_mmuidx_locked(env, midx, get_clock_realtime());
++        tlb_flush_one_mmuidx_locked(env, midx, 0);
+         return;
+     }
+ 
