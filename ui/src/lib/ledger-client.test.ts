@@ -54,24 +54,28 @@ function instrumentCrypto(): void {
     })())) as never);
   }
 }
-/** Until no tracked real work is pending and two event-loop turns in a row found the system idle (microtasks drained). */
+let testToken = 0;
+/** Until no tracked real work is pending and an event-loop turn found the system idle (microtasks drained). */
 async function quiet(): Promise<void> {
-  for (let idle = 0; idle < 2;) {
+  const token = testToken;
+  while (token === testToken) {
     await new Promise(resolve => { realSetImmediate(resolve); });
+    if (token !== testToken) return;
     if (pending.size > 0) {
-      idle = 0;
       await Promise.allSettled([...pending]);
     } else {
-      idle += 1;
+      return;
     }
   }
 }
 /** Moves the fake clock forward by `ms`: each due timer fires at its own instant, and the system is quiet before the clock moves on. */
 async function advance(ms: number): Promise<void> {
+  const token = testToken;
   await quiet();
+  if (token !== testToken) return;
   let reached = false;
   setTimeout(() => { reached = true; }, ms);
-  while (!reached) {
+  while (!reached && token === testToken) {
     vi.advanceTimersToNextTimer();
     await quiet();
   }
@@ -80,7 +84,18 @@ async function advance(ms: number): Promise<void> {
 const ORIGIN = "https://ftown.example";
 const RP_ID = "ftown.example";
 const b64url = (data: Uint8Array): string => Buffer.from(data).toString("base64url");
-const json = (value: unknown, status = 200): Response => new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } });
+const responseOf = (body: string | null, status = 200, headers: Record<string, string> = {}): Response => {
+  const map = new Headers(headers);
+  return {
+    status,
+    ok: status >= 200 && status < 300,
+    headers: map,
+    text: async () => body ?? "",
+    json: async () => (body ? JSON.parse(body) : null),
+  } as unknown as Response;
+};
+const json = (value: unknown, status = 200, headers: Record<string, string> = {}): Response =>
+  responseOf(JSON.stringify(value), status, { "Content-Type": "application/json", ...headers });
 const wire = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 const char = (code: number): string => String.fromCharCode(code);
 
@@ -159,7 +174,7 @@ class FakeServer {
     if (pair && method === "PUT") {
       if (!this.sessions.length) return json({ error: "unauthorized" }, 401);
       this.mailbox.set(pair[1], (body as { sealed: string }).sealed);
-      return new Response(null, { status: 204 });
+      return responseOf(null, 204);
     }
     return json({ error: "not_found" }, 404);
   }) as typeof fetch;
@@ -399,9 +414,7 @@ function revisions(b: Browser): number[] {
   b.client.subscribe(() => { seen.push(b.replica.raw()?.checkpoint.revision ?? -1); });
   return seen;
 }
-const rateLimited = (seconds?: number): Response => new Response(JSON.stringify({ error: "rate_limited" }), {
-  status: 429, headers: seconds === undefined ? { "Content-Type": "application/json" } : { "Content-Type": "application/json", "Retry-After": String(seconds) },
-});
+const rateLimited = (seconds?: number): Response => json({ error: "rate_limited" }, 429, seconds === undefined ? {} : { "Retry-After": String(seconds) });
 const ledgerGets = (server: FakeServer): number => server.requests.filter(item => item === "GET /api/account/ledger").length;
 /**
  * Fake clock for setTimeout and Date only (WebCrypto and setImmediate stay real; see advance() and quiet()). It starts on a whole
@@ -424,9 +437,11 @@ async function revokedBridge(): Promise<{ server: FakeServer; authenticator: Fak
 }
 
 beforeEach(() => {
+  testToken += 1;
   instrumentCrypto();
 });
 afterEach(() => {
+  testToken += 1;
   expect(violations.splice(0)).toEqual([]);
   for (const client of clients.splice(0)) client.dispose();
   vi.useRealTimers();
@@ -1472,7 +1487,7 @@ describe("LedgerClient re-offer", () => {
     const header = label === "5 (s)" ? "5" : label === "0" ? "0"
       : new Date(start + (label.includes("past") ? -60_000 : 120_000)).toUTCString();
     let refusals = 1;
-    server.postHook = () => (refusals-- > 0 ? new Response(JSON.stringify({ error: "rate_limited" }), { status: 429, headers: { "Retry-After": header } }) : null);
+    server.postHook = () => (refusals-- > 0 ? json({ error: "rate_limited" }, 429, { "Retry-After": header }) : null);
     const posts = server.posts.length;
     authenticator.calls = [];
     await expect(page.client.revokeDevice(phone)).rejects.toThrow("rate_limited");
@@ -1623,7 +1638,8 @@ describe("LedgerClient re-offer", () => {
     await page.client.load();
     authenticator.calls = [];
     const start = fakeTime();
-    for (let second = 0; second < 600; second += 1) {
+    const token = testToken;
+    for (let second = 0; second < 600 && token === testToken; second += 1) {
       void page.client.noteHead("z".repeat(43), 1);
       await advance(1_000);
     }
@@ -2068,7 +2084,8 @@ describe("LedgerClient re-offer", () => {
     const page = await browser(server, authenticator, { storage: a.storage, identity: a, deps: { fetchImpl, random: () => 0 } });
     fakeTime();
     await page.client.load();
-    for (let at = 0; at < 600_000; at += 2_000) {
+    const token = testToken;
+    for (let at = 0; at < 600_000 && token === testToken; at += 2_000) {
       void page.client.noteHead("z".repeat(43), 1);
       await advance(2_000);
     }
@@ -2122,14 +2139,14 @@ describe("LedgerClient re-offer", () => {
     const { server, authenticator, a, accountId } = await owner();
     await a.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "studio") });
     fakeTime();
-    server.postHook = () => new Response(JSON.stringify({ error: "ledger_unavailable" }), { status: 503 });
+    server.postHook = () => json({ error: "ledger_unavailable" }, 503);
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
     await expect(a.client.revokeBridge("studio")).rejects.toThrow("server_unavailable");
     expect(a.client.snapshot()).toMatchObject({ serverState: "current", pendingWrite: { operation: "revoke_bridge", bridgeId: "studio" }, unsaved: { deviceIds: [], bridgeIds: ["studio"] } });
     a.client.dispose();
     let up = false;
     const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => (up ? server.fetch(input, init)
-      : new Response(JSON.stringify({ error: "ledger_unavailable" }), { status: 503 }))) as typeof fetch;
+      : json({ error: "ledger_unavailable" }, 503))) as typeof fetch;
     const page = await browser(server, authenticator, { storage: a.storage, identity: a, deps: { fetchImpl } });
     await page.client.load();
     expect(page.client.snapshot()).toMatchObject({ pendingWrite: { operation: "revoke_bridge", bridgeId: "studio" }, unsaved: { deviceIds: [], bridgeIds: ["studio"] } });
@@ -2151,7 +2168,7 @@ describe("LedgerClient re-offer", () => {
     const { server, authenticator, a, accountId } = await revokedBridge();
     let down = true;
     const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => (down
-      ? new Response(JSON.stringify({ error: "ledger_unavailable" }), { status: 503 }) : server.fetch(input, init))) as typeof fetch;
+      ? json({ error: "ledger_unavailable" }, 503) : server.fetch(input, init))) as typeof fetch;
     const page = await browser(server, authenticator, { storage: memoryReplicaStorage(), identity: a, deps: { fetchImpl } });
     expect((await page.replica.offer(a.replica.raw()?.ledger, { bind: true, expectAccountId: accountId })).decision).toBe("adopt");
     fakeTime();
@@ -2360,7 +2377,7 @@ describe("LedgerClient server-sequenced writes", () => {
     await expect(a.client.revokeDevice((await a.endpoint(accountId)).endpoint.id)).rejects.toThrow("write_pending");
     expect(authenticator.calls).toEqual([]);
     // The server refuses the record for good (too large): dropped, kept to sign again, writes open again.
-    server.postHook = () => new Response(JSON.stringify({ error: "ledger_limit" }), { status: 413 });
+    server.postHook = () => json({ error: "ledger_limit" }, 413);
     await advance(600_000);
     expect(a.client.snapshot()).toMatchObject({ pendingWrite: null, lastConflict: { bridgeId: "b1", reason: "ledger_limit" } });
     expect(a.client.snapshot().discarded.map(item => item.payload.operation.type)).toEqual(["add_bridge"]);
@@ -2451,7 +2468,7 @@ describe("LedgerClient divergence", () => {
     expect(view?.mine.carry).toEqual([]);
     const local = a.replica.raw()?.ledger;
     // The server is down at the POST: nothing adopted, the divergence stays; the signed choice is kept in memory (L6).
-    server.postHook = () => new Response(JSON.stringify({ error: "ledger_unavailable" }), { status: 503 });
+    server.postHook = () => json({ error: "ledger_unavailable" }, 503);
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
     authenticator.calls = [];
     await expect(a.client.resolveDivergence("theirs", shown(a))).rejects.toThrow("server_unavailable");
@@ -2888,7 +2905,7 @@ describe("LedgerClient review regressions (T1–T12) and the local block", () =>
     await a.client.append({ type: "add_bridge", bridge: await testBridge(accountId, "stolen") });
     const stolen = a.replica.raw()?.checkpoint.bridges[0];
     if (stolen === undefined) throw new Error("setup");
-    server.postHook = () => new Response(JSON.stringify({ error: "ledger_unavailable" }), { status: 503 });
+    server.postHook = () => json({ error: "ledger_unavailable" }, 503);
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
     await expect(a.client.revokeBridge("stolen")).rejects.toThrow("server_unavailable");
     await a.client.offer({ type: "ledger", ledger: await addDevices(base, authenticator, accountId, 1) });
@@ -2941,7 +2958,7 @@ describe("LedgerClient review regressions (T1–T12) and the local block", () =>
     for (const change of [false, true]) {
       const { server, authenticator, a, accountId, other } = await split(async accountId => [{ type: "add_device", device: await testDevice(accountId) }]);
       let refusals = 1;
-      server.postHook = () => (refusals-- > 0 ? new Response(JSON.stringify({ error: "ledger_unavailable" }), { status: 503 }) : null);
+      server.postHook = () => (refusals-- > 0 ? json({ error: "ledger_unavailable" }, 503) : null);
       vi.spyOn(console, "warn").mockImplementation(() => undefined);
       fakeTime();
       authenticator.calls = [];
