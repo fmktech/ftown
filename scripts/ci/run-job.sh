@@ -35,7 +35,7 @@ case "$job" in
     ;;
   centrifugo) bash scripts/ci/validate-centrifugo.sh ;;
   unit)
-    node --test scripts/ci/boat-runner.test.mjs scripts/ci/bridge-version.test.mjs
+    node --test scripts/ci/bridge-version.test.mjs
     node --test e2e/scripts/setup-browser-trust.test.mjs
     (cd e2e && npm ci)
     (cd ui && npm ci && npm test && node --test ../e2e/scripts/ci-fixtures.test.mjs)

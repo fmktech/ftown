@@ -24,4 +24,3 @@ jobs:
       - uses: ./.github/actions/run-ci
         with:
           job: unit
-          boat-api-key: ${{ secrets.BOAT_API_KEY }}

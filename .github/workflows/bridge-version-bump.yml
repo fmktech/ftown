@@ -27,6 +27,5 @@ jobs:
       - uses: ./.github/actions/run-ci
         with:
           job: bridge-version
-          boat-api-key: ${{ secrets.BOAT_API_KEY }}
           base-sha: ${{ github.event.pull_request.base.sha }}
           head-sha: ${{ github.event.pull_request.head.sha }}
