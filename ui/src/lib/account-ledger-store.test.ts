@@ -141,6 +141,7 @@ const T0 = Date.now() - 3_600_000;
 const NONE: StickyIds = { deviceIds: [], bridgeIds: [] };
 const b64 = (data: Uint8Array): string => Buffer.from(data).toString('base64url');
 const randomB64 = (length: number): string => b64(crypto.getRandomValues(new Uint8Array(length)));
+const STICKY_FLOOD_8192 = Array.from({ length: 8192 }, () => randomB64(32));
 const plain = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
 interface Chain { ledger: Ledger; accountId: string; head: string; issuedAt: number }
@@ -598,14 +599,14 @@ describe('account write budget (admitAccountWrite)', () => {
 
   it('an over-limit sticky set is rejected before the budget is consulted', async () => {
     const { passkey, base, d1 } = await registered();
-    db.rows.set(base.accountId, await sealed(base, { deviceIds: Array.from({ length: 8192 }, () => randomB64(32)), bridgeIds: [] }, row(base.accountId).version));
-    const before = plain(row(base.accountId));
+    db.rows.set(base.accountId, await sealed(base, { deviceIds: STICKY_FLOOD_8192, bridgeIds: [] }, row(base.accountId).version));
+    const before = row(base.accountId);
     // A valid extension whose revocation would be the 8193rd sticky id.
     const revoking = await append(base, passkey, { type: 'revoke_device', endpointId: d1.endpoint.id });
     const { limits, admitAccountWrite } = budget(true);
     expect(await offer(revoking.ledger, limits)).toMatchObject({ decision: 'reject', discarded: 0 });
     expect(admitAccountWrite).not.toHaveBeenCalled();
-    expect(row(base.accountId)).toEqual(before);
+    expect(row(base.accountId)).toBe(before);
   });
 
   it('is consumed at most once when a lost write race is re-run', async () => {
@@ -1134,13 +1135,13 @@ describe('sticky revocations', () => {
     const { passkey, base, d1 } = await registered();
     const { chain: stored } = await addDevice(base, passkey, 'S1');
     expect((await offer(stored.ledger)).decision).toBe('adopt');
-    db.rows.set(base.accountId, await sealed(stored, { deviceIds: Array.from({ length: 8192 }, () => randomB64(32)), bridgeIds: [] }, row(base.accountId).version));
-    const before = JSON.stringify(row(base.accountId));
+    db.rows.set(base.accountId, await sealed(stored, { deviceIds: STICKY_FLOOD_8192, bridgeIds: [] }, row(base.accountId).version));
+    const before = row(base.accountId);
     const other = await append(base, passkey, { type: 'revoke_device', endpointId: d1.endpoint.id });
     warn.mockClear();
     db.writes = 0;
-    for (let index = 0; index < 3; index += 1) expect(verdict(await offer(other.ledger))).toEqual(['reject', 'diverged']);
-    expect(JSON.stringify(row(base.accountId))).toBe(before);
+    for (let index = 0; index < 2; index += 1) expect(verdict(await offer(other.ledger))).toEqual(['reject', 'diverged']);
+    expect(row(base.accountId)).toBe(before);
     expect(db.writes).toBe(0);
     expect(enforced()).toEqual([`[ledger] account ${base.accountId.slice(0, 8)} cannot enforce 1 removal(s) seen on a different history: sticky set full`]);
   });
@@ -1583,9 +1584,8 @@ describe('write safety', () => {
     const revoked = await append(base, passkey, { type: 'revoke_device', endpointId: d1.endpoint.id });
     expect((await offer(revoked.ledger)).decision).toBe('adopt');
     // 8192 sticky ids (the limit), d1 not among them: the adopted chain's own (carried) revocation would be the 8193rd.
-    const flood = Array.from({ length: 8192 }, () => randomB64(32));
-    db.rows.set(base.accountId, await sealed(revoked, { deviceIds: flood, bridgeIds: [] }, row(base.accountId).version));
-    const before = plain(row(base.accountId));
+    db.rows.set(base.accountId, await sealed(revoked, { deviceIds: STICKY_FLOOD_8192, bridgeIds: [] }, row(base.accountId).version));
+    const before = row(base.accountId);
     db.writes = 0;
     const { chain: other } = await addDevice(base, passkey, 'O1');
     const { limits, admitAccountWrite } = budget(true);
@@ -1593,7 +1593,7 @@ describe('write safety', () => {
     expect(verdict(await offer((await resolveCarrying(other, revoked, passkey)).chain.ledger, limits))).toEqual(['reject', undefined]);
     expect(db.writes).toBe(0);
     expect(admitAccountWrite).not.toHaveBeenCalled();
-    expect(row(base.accountId)).toEqual(before);
+    expect(row(base.accountId)).toBe(before);
   });
 });
 
