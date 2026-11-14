@@ -113,6 +113,15 @@ export function isRole(value: string): value is Role {
   return (ROLES as readonly string[]).includes(value);
 }
 
+/** Appends the raw output of failed CLI calls to <dir>/<role>.stderr.log. Never hashed. */
+export function rawFailureWriter(dir: string, role: Role, clock: Clock): (cmd: string, r: CliResult) => void {
+  const file = join(dir, `${role}.stderr.log`);
+  return (cmd, r) => {
+    mkdirSync(dir, { recursive: true });
+    appendFileSync(file, `t=${clock.now()} cmd=${cmd} code=${r.code}\n--- stderr\n${r.stderr}\n--- stdout\n${r.stdout}\n===\n`);
+  };
+}
+
 /** Arguments are `--role <r> --script <p>` (or `--k=v`); anything else, e.g. from the bridge, is ignored. */
 export function parseArgs(argv: string[]): { role: string | undefined; script: string | undefined } {
   let role: string | undefined;
