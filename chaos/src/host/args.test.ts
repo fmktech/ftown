@@ -6,7 +6,8 @@ test('seed ranges', () => {
   assert.deepEqual(parseSeedRange('1-4'), [1, 2, 3, 4]);
   assert.deepEqual(parseSeedRange('7'), [7]);
   assert.deepEqual(parseSeedRange('5-6,1,6'), [1, 5, 6]);
-  for (const bad of ['', '4-1', 'a', '1-', '-3', '1..3']) assert.throws(() => parseSeedRange(bad), UsageError, bad);
+  assert.deepEqual(parseSeedRange('1-3,2,7'), [1, 2, 3, 7]);
+  for (const bad of ['', '3-1', 'a', '1,,2', '1-', '-3', '1..3']) assert.throws(() => parseSeedRange(bad), UsageError, bad);
 });
 
 test('build', () => {

@@ -24,7 +24,7 @@ async function pool<T>(jobs: number, tasks: (() => Promise<T>)[]): Promise<T[]> 
 
 function requireBuild(): void {
   const info = readBuildInfo();
-  if (info === null) throw new UsageError('no build found: run `npm run test:chaos -- build` first');
+  if (info === null) throw new Error('no build found: run `npm run test:chaos -- build` first');
   console.log(`image ${info.image}  kernel ${info.kernelVersion}  initramfs sha256 ${info.initramfsSha256} (${info.initramfsBytes} bytes)`);
 }
 
@@ -54,12 +54,12 @@ async function selftest(times: number, vm: VmOptions): Promise<number> {
   for (let k = 1; k < times; k++) {
     if (jsons[k] !== jsons[0]) {
       console.log(`NONDETERMINISM run1 vs run${k + 1}: keys ${differingKeys(JSON.parse(jsons[0]), JSON.parse(jsons[k])).join(', ')}`);
-      code = EXIT.nondeterminism;
+      code = EXIT.reproDiverged;
     }
     const rawSame = consoles[k] === consoles[0];
     if (normalizeConsole(consoles[k]) !== normalizeConsole(consoles[0])) {
       console.log(`NONDETERMINISM console run1 vs run${k + 1} differs`);
-      code = EXIT.nondeterminism;
+      code = EXIT.reproDiverged;
     } else console.log(`console run${k + 1}: ${rawSame ? 'byte-identical' : 'identical modulo printk timestamps'} to run1`);
   }
   const rep = JSON.parse(jsons[0]) as { hasNetworkInterfaceOtherThanLo: boolean; cpuHasRdrand: boolean; cpuHasRdseed: boolean };
@@ -98,7 +98,7 @@ async function runSeeds(c: Extract<Command, { cmd: 'run' | 'campaign' }>): Promi
 async function main(argv: string[]): Promise<number> {
   let c: Command;
   try { c = parseArgs(argv); } catch (err) {
-    if (err instanceof UsageError) { console.error(`${err.message}\n${USAGE}`); return EXIT.infra; }
+    if (err instanceof UsageError) { console.error(`${err.message}\n${USAGE}`); return EXIT.usage; }
     throw err;
   }
   switch (c.cmd) {

@@ -17,13 +17,13 @@ test('identical runs pass with the guest exit code', () => {
 
 test('differing runs are nondeterminism with the first differing line', () => {
   const s = summarizeSeed(1, [boot('a\nb\nc\n'), boot('a\nb\nc\n'), boot('a\nX\nc\n')]);
-  assert.equal(s.exitCode, EXIT.nondeterminism);
+  assert.equal(s.exitCode, EXIT.reproDiverged);
   assert.match(s.nondeterminism!, /run1 vs run3 differ at line 2/);
   assert.match(s.nondeterminism!, /run3: X/);
 });
 
 test('same log but different exit code is nondeterminism', () => {
-  assert.equal(summarizeSeed(1, [boot('a', 0), boot('a', 1)]).exitCode, EXIT.nondeterminism);
+  assert.equal(summarizeSeed(1, [boot('a', 0), boot('a', 1)]).exitCode, EXIT.reproDiverged);
 });
 
 test('an infra error in any run makes the seed infra', () => {
@@ -35,9 +35,9 @@ test('an infra error in any run makes the seed infra', () => {
 
 test('worst exit ordering', () => {
   assert.equal(worstExit([]), EXIT.ok);
-  assert.equal(worstExit([0, 4, 1]), EXIT.violation);
-  assert.equal(worstExit([1, 3]), EXIT.infra);
-  assert.equal(worstExit([3, 2, 1]), EXIT.nondeterminism);
+  assert.equal(worstExit([0, 1, 0]), EXIT.violation);
+  assert.equal(worstExit([1, 4, 0]), EXIT.reproDiverged);
+  assert.equal(worstExit([4, 3, 1]), EXIT.infra);
   assert.equal(worstExit([0, 99]), EXIT.infra);
 });
 

@@ -64,10 +64,9 @@ export function violatedProps(canon: string): string[] {
 /** Severity order for combining exit codes: higher wins. */
 const RANK: Record<number, number> = {
   [EXIT.ok]: 0,
-  [EXIT.unexercised]: 1,
-  [EXIT.violation]: 2,
+  [EXIT.violation]: 1,
+  [EXIT.reproDiverged]: 2,
   [EXIT.infra]: 3,
-  [EXIT.nondeterminism]: 4,
 };
 
 export function worstExit(codes: readonly number[]): number {
@@ -102,7 +101,7 @@ export function summarizeSeed(seed: number, boots: readonly BootResult[]): SeedS
     hRun: first.hash,
     violated: violatedProps(first.content ?? ''),
     wallSec,
-    exitCode: nondeterminism !== null ? EXIT.nondeterminism : worstExit([first.exitCode]),
+    exitCode: nondeterminism !== null ? EXIT.reproDiverged : worstExit([first.exitCode]),
     nondeterminism,
     infraError: null,
   };
