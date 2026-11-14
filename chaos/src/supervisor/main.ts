@@ -1,7 +1,7 @@
 // In-guest supervisor: runs one seed end to end and writes the canonical log.
 //   node /opt/chaos/src/supervisor/main.ts --seed N --level off|low|high
 import { existsSync } from 'node:fs';
-import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { CONTRACT_VERSION, EXIT, FAULT_WINDOW_END_MS, GUEST, PARENT_OF, ROLES, RUN_QUIESCE_MS } from '../contract.ts';
@@ -22,6 +22,7 @@ import { buildScripts, sleepTotal } from './scripts.ts';
 import { agentPids, asFtown, down, exec, FTOWN_ENV, ftown, isAlive, readBridgePid, up } from './target.ts';
 import { normaliseError, planWorkload, runWorkload, WORKLOAD_START_MS } from './workload.ts';
 import { sanitizeAgentEvent } from './agentcanon.ts';
+import { applyDrop, parseDropFaults } from './drop.ts';
 
 const CONTROL_TIMEOUT_MS = 20_000;
 const CREATE_TIMEOUT_MS = 60_000;
@@ -174,13 +175,30 @@ async function writeSideFiles(): Promise<void> {
   }
 }
 
-const OUT_FILES = ['canon.jsonl', 'verdicts.json', 'side-bridge.log', 'side-tmux.txt', 'side-agents.jsonl', ...ROLES.map((r) => `side-${r}.stderr.log`)];
+let procsChain: Promise<void> = Promise.resolve();
+/** Appends `ps -eo pid,ppid,stat,etime,args` under a header naming the checkpoint (serialised). */
+function appendProcs(name: string, t: number): Promise<void> {
+  procsChain = procsChain.then(async () => {
+    try {
+      const r = await exec('ps', ['-eo', 'pid,ppid,stat,etime,args'], { timeoutMs: 10_000 });
+      await mkdir(GUEST.outDir, { recursive: true });
+      await appendFile(join(GUEST.outDir, 'side-procs.txt'), `=== ${name} t=${t}\n${r.stdout}${r.stderr}\n`);
+    } catch {
+      /* sidecar only */
+    }
+  });
+  return procsChain;
+}
+
+const OUT_FILES = ['canon.jsonl', 'verdicts.json', 'side-bridge.log', 'side-tmux.txt', 'side-agents.jsonl', 'side-procs.txt', ...ROLES.map((r) => `side-${r}.stderr.log`)];
 
 interface Outcome {
   verdicts: Extract<Rec, { k: 'verdict' }>[];
   exitCode: number;
   error: string | null;
   invalidAgentFields: number;
+  /** Experiment marker: CHAOS_DROP_FAULTS tokens, or null for a plain seed run. */
+  dropFaults: string[] | null;
 }
 
 /** Writes outputs, stops the bridge and emits frames. Each step is isolated; it never throws. */
@@ -199,9 +217,10 @@ async function finish(rec: Recorder, o: Outcome): Promise<number> {
     await writeFile(join(GUEST.outDir, 'canon.jsonl'), canon);
   });
   await step('verdicts', async () => {
-    const report = { verdicts: o.verdicts, exitCode: o.exitCode, H_run: hashLog(canon), invalidAgentFields: o.invalidAgentFields, ...(o.error === null ? {} : { error: o.error }) };
+    const report = { verdicts: o.verdicts, exitCode: o.exitCode, H_run: hashLog(canon), invalidAgentFields: o.invalidAgentFields, dropFaults: o.dropFaults, ...(o.error === null ? {} : { error: o.error }) };
     await writeFile(join(GUEST.outDir, 'verdicts.json'), `${JSON.stringify(report, null, 2)}\n`);
   });
+  await step('procs', () => procsChain);
   await step('side', writeSideFiles);
   await step('down', down);
   await step('emit', () => emitOut(OUT_FILES.filter((name) => existsSync(join(GUEST.outDir, name)))));
@@ -215,7 +234,7 @@ export function idsDeadline(rootCreateStartMs: number, rootFirstSleepMs: number)
   return rootCreateStartMs + rootFirstSleepMs;
 }
 
-async function drive(seed: number, level: ChaosLevel, clock: Clock, rec: Recorder, schedule: ReturnType<typeof buildSchedule>): Promise<Outcome> {
+async function drive(seed: number, level: ChaosLevel, clock: Clock, rec: Recorder, schedule: ReturnType<typeof buildSchedule>): Promise<Omit<Outcome, 'dropFaults'>> {
   const actions = makeActions(clock);
   if (!(await actions.bridgeUp())) throw new Infra('infra:bridge_up');
 
@@ -256,7 +275,12 @@ async function drive(seed: number, level: ChaosLevel, clock: Clock, rec: Recorde
       bridgeResponsive: async () => (await ftown(['sessions', 'list'], { timeoutMs: CONTROL_TIMEOUT_MS })).code === 0,
       tmux: { user: GUEST.user, env: { HOME: FTOWN_ENV.HOME, TMUX_TMPDIR: FTOWN_ENV.TMUX_TMPDIR } },
     });
-  const cpDeps = { clock, take, log: rec.log };
+  // Each checkpoint also appends a process listing to side-procs.txt (sidecar, never hashed).
+  const cpLog = (r: Rec): void => {
+    rec.log(r);
+    if (r.k === 'checkpoint') void appendProcs(r.name, r.t);
+  };
+  const cpDeps = { clock, take, log: cpLog };
   let stop = false;
   const stopped = () => stop;
   // Every loop gets its handler at creation: the first failure stops the others.
@@ -306,15 +330,22 @@ export async function runSeed({ seed, level }: { seed: number; level: ChaosLevel
   const clock: Clock = realClock({ t0Ns: writeT0(GUEST.t0File) });
   await chmod(GUEST.t0File, 0o644);
   const rec = new Recorder();
-  const schedule = buildSchedule(seed, level, deriveRng(seed, 'faults'));
+  // The seed's schedule is generated in full (same rng draws), then experiment drops are applied.
+  const dropFaults = parseDropFaults(process.env.CHAOS_DROP_FAULTS);
+  const dropped = applyDrop(buildSchedule(seed, level, deriveRng(seed, 'faults')), dropFaults ?? []);
+  const schedule = dropped.faults;
   rec.log({ k: 'run', seed, level, contract: CONTRACT_VERSION });
   rec.log({ k: 'schedule', faults: schedule });
+  if (dropped.unknown.length > 0) {
+    process.stderr.write(`supervisor: CHAOS_DROP_FAULTS has unknown ids/kinds: ${dropped.unknown.join(',')}\n`);
+    return finish(rec, { verdicts: [], exitCode: EXIT.usage, error: 'usage:drop_faults', invalidAgentFields: 0, dropFaults });
+  }
   let outcome: Outcome;
   try {
-    outcome = await drive(seed, level, clock, rec, schedule);
+    outcome = { ...(await drive(seed, level, clock, rec, schedule)), dropFaults };
   } catch (e) {
     process.stderr.write(`supervisor: ${e instanceof Error ? e.stack : String(e)}\n`);
-    outcome = { verdicts: [], exitCode: EXIT.infra, error: e instanceof Infra ? e.message : 'infra:drive', invalidAgentFields: 0 };
+    outcome = { verdicts: [], exitCode: EXIT.infra, error: e instanceof Infra ? e.message : 'infra:drive', invalidAgentFields: 0, dropFaults };
   }
   return finish(rec, outcome);
 }
