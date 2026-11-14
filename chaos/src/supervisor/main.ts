@@ -45,14 +45,19 @@ export function parseCreatedId(stdout: string): string | null {
   }
 }
 
-/** Parsed agent log lines (a truncated last line from a kill -9 is dropped). */
+/**
+ * Agent log lines for the canonical log: a truncated last line (kill -9) is dropped, raw
+ * 'stdin_line' events are left out (they carry ids and wall times; they stay in side-agents.jsonl)
+ * and the 'start' pid is zeroed.
+ */
 export function parseAgentLog(text: string, role: Role): AgentLogLine[] {
   const out: AgentLogLine[] = [];
   for (const line of text.split('\n')) {
     if (line.trim() === '') continue;
     try {
       const j = JSON.parse(line) as AgentLogLine;
-      if (typeof j.t === 'number' && j.e && typeof j.e === 'object') out.push({ t: j.t, role, e: j.e });
+      if (typeof j.t !== 'number' || !j.e || typeof j.e !== 'object' || j.e.ev === 'stdin_line') continue;
+      out.push({ t: j.t, role, e: j.e.ev === 'start' ? { ev: 'start', pid: 0 } : j.e });
     } catch {
       /* partial line */
     }

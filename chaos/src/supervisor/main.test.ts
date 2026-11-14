@@ -36,7 +36,19 @@ test('parseCli', () => {
 
 test('agent log parsing drops a truncated line and forces the role', () => {
   const lines = parseAgentLog('{"t":1,"role":"child1","e":{"ev":"start","pid":9}}\n{"t":2,"ro', 'child1');
-  assert.deepEqual(lines, [{ t: 1, role: 'child1', e: { ev: 'start', pid: 9 } }]);
+  assert.deepEqual(lines, [{ t: 1, role: 'child1', e: { ev: 'start', pid: 0 } }]);
+});
+
+test('agent log merge drops stdin_line and keeps other events', () => {
+  const text = [
+    '{"t":1,"role":"root","e":{"ev":"start","pid":134}}',
+    '{"t":2,"role":"root","e":{"ev":"stdin_line","text":"[ftown] You are child session (abc) since 06:55"}}',
+    '{"t":3,"role":"root","e":{"ev":"nudge","n":2}}',
+  ].join('\n');
+  assert.deepEqual(parseAgentLog(text, 'root'), [
+    { t: 1, role: 'root', e: { ev: 'start', pid: 0 } },
+    { t: 3, role: 'root', e: { ev: 'nudge', n: 2 } },
+  ]);
 });
 
 test('all eleven properties are declared', () => {
