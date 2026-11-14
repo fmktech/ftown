@@ -112,3 +112,32 @@ test('empty schedule: no records, no final heal', async () => {
   assert.deepEqual(calls, []);
   assert.deepEqual(recs, []);
 });
+
+test('a slow heal does not delay other faults; a bridge step waits for the running bridge heal', async () => {
+  const clock = fakeClock();
+  const calls: string[] = [];
+  const recs: Rec[] = [];
+  const base = fakeActions(calls);
+  const actions: FaultActions = {
+    ...base,
+    async bridgeUp() {
+      calls.push('up begin');
+      await clock.sleep(26_000);
+      calls.push('up end');
+      return base.bridgeUp();
+    },
+  };
+  const schedule = [
+    f('f1', 'bridge_kill9', 'bridge', 20_000, 3_000),
+    f('f2', 'agent_kill9', 'child1', 30_000, 0),
+    f('f3', 'bridge_sigstop', 'bridge', 35_000, 2_000),
+  ];
+  const done = runFaults({ clock, schedule, actions, roles: ROLES, log: (r) => recs.push(r) });
+  await clock.advance(100_000);
+  await done;
+  assert.deepEqual(
+    recs.map((r) => (r.k === 'fault' ? `${r.t} ${r.id} ${r.phase}` : '')),
+    ['20000 f1 start', '30000 f2 start', '23000 f1 heal', '49000 f3 start', '51000 f3 heal', '51000 heal heal'],
+  );
+  assert.deepEqual(calls.slice(0, 6), ['bridge SIGKILL', 'up begin', 'child1 SIGKILL', 'up end', 'up', 'bridge SIGSTOP']);
+});
