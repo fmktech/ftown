@@ -29,11 +29,10 @@ test('invitation URLs carry the full invitation only in the dedicated connect fr
   assert.deepEqual(JSON.parse(new URLSearchParams(url.hash.slice(1)).get('invite')!), invitation);
 });
 
-test('security help lists recovery commands without accessing a bridge or printing an invitation', async () => {
-  const previous = process.stdout.write; let output = '';
-  process.stdout.write = ((chunk: string | Uint8Array) => { output += String(chunk); return true; }) as typeof process.stdout.write;
-  try { assert.equal(await runSecurity(['--help']), 0); }
-  finally { process.stdout.write = previous; }
+test('security help lists recovery commands without accessing a bridge or printing an invitation', async t => {
+  const log = t.mock.method(console, 'log', () => {});
+  assert.equal(await runSecurity(['--help']), 0);
+  const output = log.mock.calls.map(call => call.arguments.map(String).join(' ')).join('\n');
   for (const command of ['invite', 'devices', 'revoke', 'proxy']) assert.ok(output.includes(command));
   // Account computers pair by a passkey link printed by `ftown start`; the v1 approval commands are gone.
   for (const command of ['pair-status', 'pair-confirm', 'pair-reject', 'pair-link']) assert.ok(!output.includes(command), command);
@@ -102,10 +101,9 @@ test('soloPanelOrigin keeps the hosted flow when nothing answers or the answer i
   try { assert.equal(await soloPanelOrigin(`http://127.0.0.1:${lost.port}`, 'b'), null); } finally { await lost.close(); }
 });
 
-test('a custom-port solo panel prints its invitation on its own origin instead of the hosted one', async () => {
+test('a custom-port solo panel prints its invitation on its own origin instead of the hosted one', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'ftown-security-cli-'));
-  const previous = process.stdout.write; let output = '';
-  process.stdout.write = ((chunk: string | Uint8Array) => { output += String(chunk); return true; }) as typeof process.stdout.write;
+  const log = t.mock.method(console, 'log', () => {});
   try {
     writeFileSync(join(dir, 'bridge.json'),
       JSON.stringify({ port: 1, token: 'local-token', bridgeId: 'b', ownerId: 'solo:b', soloOrigin: 'http://localhost:18042' }));
@@ -117,36 +115,37 @@ test('a custom-port solo panel prints its invitation on its own origin instead o
     const send = async () => INVITATION as unknown as ApplicationJson;
     assert.equal(await runSecurity(['--data-dir', dir, 'invite'], send, fetchImpl), 0);
     assert.equal(probed, 'http://localhost:18042/api/security/info');
+    const output = log.mock.calls.map(call => call.arguments.map(String).join(' ')).join('\n');
     assert.ok(output.startsWith('http://localhost:18042/connect#invite='), output);
     assert.ok(!output.includes('ftown.ia.br'));
-  } finally { process.stdout.write = previous; rmSync(dir, { recursive: true, force: true }); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('a solo origin that stopped naming this bridge falls back to the configured API origin', async () => {
+test('a solo origin that stopped naming this bridge falls back to the configured API origin', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'ftown-security-cli-'));
-  const previous = process.stdout.write; let output = '';
-  process.stdout.write = ((chunk: string | Uint8Array) => { output += String(chunk); return true; }) as typeof process.stdout.write;
+  const log = t.mock.method(console, 'log', () => {});
   try {
     writeFileSync(join(dir, 'bridge.json'),
       JSON.stringify({ port: 1, token: 'local-token', bridgeId: 'b', ownerId: 'solo:b', soloOrigin: 'http://localhost:18042', apiUrl: 'https://ftown.ia.br' }));
     const fetchImpl = (async () => new Response(JSON.stringify({ bridgeId: 'another-bridge' }), { status: 200 })) as typeof fetch;
     const send = async () => INVITATION as unknown as ApplicationJson;
     assert.equal(await runSecurity(['--data-dir', dir, 'invite'], send, fetchImpl), 0);
+    const output = log.mock.calls.map(call => call.arguments.map(String).join(' ')).join('\n');
     assert.ok(output.startsWith('https://ftown.ia.br/connect#invite='), output);
-  } finally { process.stdout.write = previous; rmSync(dir, { recursive: true, force: true }); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('without a persisted solo origin the invitation stays on the configured API origin', async () => {
+test('without a persisted solo origin the invitation stays on the configured API origin', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'ftown-security-cli-'));
-  const previous = process.stdout.write; let output = '';
-  process.stdout.write = ((chunk: string | Uint8Array) => { output += String(chunk); return true; }) as typeof process.stdout.write;
+  const log = t.mock.method(console, 'log', () => {});
   try {
     writeFileSync(join(dir, 'bridge.json'), JSON.stringify({ port: 1, token: 'local-token', bridgeId: 'b', ownerId: 'solo:b', apiUrl: 'https://ftown.ia.br' }));
     const fetchImpl = (async () => { throw new Error('no solo panel'); }) as typeof fetch;
     const send = async () => INVITATION as unknown as ApplicationJson;
     assert.equal(await runSecurity(['--data-dir', dir, 'invite'], send, fetchImpl), 0);
+    const output = log.mock.calls.map(call => call.arguments.map(String).join(' ')).join('\n');
     assert.ok(output.startsWith('https://ftown.ia.br/connect#invite='), output);
-  } finally { process.stdout.write = previous; rmSync(dir, { recursive: true, force: true }); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('the bridge pointer writer persists the solo panel origin the invite CLIs read', async () => {

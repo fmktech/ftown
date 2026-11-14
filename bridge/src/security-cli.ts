@@ -60,9 +60,10 @@ export async function invitationOrigin(soloOrigin: string | undefined, bridgeId:
 }
 
 export async function runSecurity(argv: string[], send: typeof securityCommand = securityCommand,
-  fetchImpl: typeof fetch = fetch): Promise<number> {
+  fetchImpl: typeof fetch = fetch, print: (line: string) => void = console.log): Promise<number> {
   const program = new Command().name('ftown security').description('Manage this bridge’s encrypted endpoint trust')
-    .option('--data-dir <path>', 'Bridge instance data directory').exitOverride();
+    .option('--data-dir <path>', 'Bridge instance data directory').exitOverride()
+    .configureOutput({ writeOut: text => print(text) });
   const pointer = () => readLocalPointer(program.opts().dataDir as string | undefined);
   program.command('invite').description('Create a one-use browser invitation (secret is printed only on this explicit request)')
     .option('--label <label>', 'Device label', 'Browser')
@@ -70,13 +71,13 @@ export async function runSecurity(argv: string[], send: typeof securityCommand =
       const current = pointer();
       if (accountManaged(current.ownerId)) throw new SecurityCliRefusal(ACCOUNT_MANAGED_INVITE_MESSAGE);
       const invite = await send(current, 'security_invite', { label: String(options.label) }) as unknown as BridgeInvitation;
-      console.log(invitationLink(invite, await invitationOrigin(current.soloOrigin, current.bridgeId, current.apiUrl, fetchImpl)));
+      print(invitationLink(invite, await invitationOrigin(current.soloOrigin, current.bridgeId, current.apiUrl, fetchImpl)));
     });
   program.command('devices').description('List locally approved encrypted endpoints').action(async () => {
-    const result = await securityCommand(pointer(), 'security_devices'); console.log(JSON.stringify(result));
+    const result = await securityCommand(pointer(), 'security_devices'); print(JSON.stringify(result));
   });
   program.command('revoke <endpoint-id>').description('Revoke an endpoint on this bridge').action(async endpointId => {
-    await securityCommand(pointer(), 'security_revoke', { endpointId: String(endpointId) }); console.log('Endpoint revoked.');
+    await securityCommand(pointer(), 'security_revoke', { endpointId: String(endpointId) }); print('Endpoint revoked.');
   });
   program.command('proxy').description('Run one encrypted local API request from bounded JSON on stdin').action(async () => {
     let bytes = 0; const chunks: Buffer[] = [];
