@@ -142,11 +142,26 @@ test('every seed and profile: turns, busy cap, idle sleep, asks, overlap, and wo
           assert.equal(s[role].answerRoutedQuestions, false);
           assert.ok(s[role].steps.some((x) => x.do === 'mail_send' && x.to === 'parent'));
           asks += s[role].steps.filter((x) => x.do === 'ask').length;
+          const laterAsksForRole = beginTimes.filter((x) => x.do === 'ask' && x.t >= faultWindowStartMs).length;
+          assert.ok(laterAsksForRole <= 1, `${profile} seed ${seed} ${role}: laterAsks=${laterAsksForRole} > 1`);
           if (beginTimes.some((x) => x.do === 'ask' && x.t < faultWindowStartMs)) early += 1;
         }
       }
       assert.equal(early, 1, `${profile} seed ${seed}: early asks`);
       assert.ok(asks >= 2 && asks <= 3, `${profile} seed ${seed}: ${asks} asks`);
+      // Verify the number of later asks emitted matches the rootRng draw (none silently dropped).
+      const rootRng = deriveRng(seed, 'agent.root');
+      rootRng.int(45_000, 50_000);
+      if (profile === 'short') rootRng.int(IDLE_SLEEP_MIN_MS.short, IDLE_SLEEP_MIN_MS.short + 500);
+      const rootMails = rootRng.int(profile === 'short' ? 1 : 2, profile === 'short' ? 1 : 3);
+      for (let m = 0; m < rootMails; m++) {
+        rootRng.pick(['child1', 'child2', 'child3']);
+        rootRng.pick(['task', 'message', 'fyi']);
+        if (m < rootMails - 1) rootRng.int(500, profile === 'short' ? 1_000 : 1_500);
+      }
+      rootRng.pick(['child1', 'child2', 'child3']); // early
+      const expectedLater = rootRng.int(1, 2);
+      assert.equal(asks - early, expectedLater, `${profile} seed ${seed}: emitted later asks ${asks - early} != chosen ${expectedLater}`);
     }
   }
 });

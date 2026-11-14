@@ -109,13 +109,18 @@ function pushTurn(steps: AgentStep[], actions: readonly AgentStep[]): void {
 
 /**
  * Ask plan, drawn from the root's stream: one child asks first thing (before the fault window
- * opens, so a fault can never remove every ask) plus 1–2 later asks by seed-chosen children.
+ * opens, so a fault can never remove every ask) plus 1–2 later asks sampled without replacement
+ * across children so each child's single action turn can emit its assigned ask without dropping any.
  */
 function chooseAsks(rng: Rng): { early: Role; later: Record<Role, number> } {
   const early = rng.pick(CHILDREN);
   const later: Record<Role, number> = { root: 0, child1: 0, child2: 0, child3: 0 };
   const count = rng.int(1, 2);
-  for (let i = 0; i < count; i++) later[rng.pick(CHILDREN)] += 1;
+  const pool = [...CHILDREN];
+  for (let i = 0; i < count; i++) {
+    const idx = rng.int(0, pool.length - 1);
+    later[pool.splice(idx, 1)[0]] += 1;
+  }
   return { early, later };
 }
 

@@ -213,6 +213,41 @@ test('M5 pass (not settled): recipient mid-turn, Stop only 30 s before final, or
   });
 });
 
+test('M5 edge cases: failed Stop, start-only session, exact 75_000 tie, and respawned recipient', () => {
+  // Failed Stop (ok=false) counts as not settled -> pass
+  const failedStop = [
+    opSend(10_000, 'CHAOS-M-10', 'child1', 'task'),
+    hookEv(15_000, 'child1', 'Stop', false),
+    checkpoint(120_000, [session('child1', [mail('CHAOS-M-10', { delivered: false, type: 'task' })])], true),
+  ];
+  assert.deepEqual(run('M5', failedStop), { status: 'pass', evidence: ['pending, recipient not settled: CHAOS-M-10 to=child1'] });
+
+  // Session with only start (>= 75_000 before final) and old pending mail -> violated
+  const startOnly: Rec[] = [
+    { k: 'agent', t: 5_000, role: 'child1', e: { ev: 'start', pid: 100 } },
+    opSend(10_000, 'CHAOS-M-11', 'child1', 'task'),
+    checkpoint(85_000, [session('child1', [mail('CHAOS-M-11', { delivered: false, type: 'task' })])], true),
+  ];
+  assert.deepEqual(run('M5', startOnly), { status: 'violated', evidence: ['pending CHAOS-M-11 to=child1'] });
+
+  // Exact 75_000 tie (>= 75_000 is settled) -> violated
+  const exactTie = [
+    opSend(25_000, 'CHAOS-M-12', 'child1', 'task'),
+    hookEv(25_000, 'child1', 'Stop', true),
+    checkpoint(100_000, [session('child1', [mail('CHAOS-M-12', { delivered: false, type: 'task' })])], true),
+  ];
+  assert.deepEqual(run('M5', exactTie), { status: 'violated', evidence: ['pending CHAOS-M-12 to=child1'] });
+
+  // Respawned recipient (Stop at 20_000, then new start 30 s before final at 120_000) -> not settled -> pass
+  const respawned: Rec[] = [
+    opSend(10_000, 'CHAOS-M-13', 'child1', 'task'),
+    hookEv(20_000, 'child1', 'Stop', true),
+    { k: 'agent', t: 90_000, role: 'child1', e: { ev: 'start', pid: 101 } },
+    checkpoint(120_000, [session('child1', [mail('CHAOS-M-13', { delivered: false, type: 'task' })])], true),
+  ];
+  assert.deepEqual(run('M5', respawned), { status: 'pass', evidence: ['pending, recipient not settled: CHAOS-M-13 to=child1'] });
+});
+
 test('M5 unexercised: no live session or no final checkpoint', () => {
   assert.equal(run('M5', [checkpoint(9, [session('child1', [], { tmuxAlive: false })], true)]).status, 'unexercised');
   assert.equal(run('M5', [checkpoint(9, [session('child1')])]).status, 'unexercised');

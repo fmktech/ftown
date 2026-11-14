@@ -157,10 +157,13 @@ const M5: Property = {
       } else if (r.k === 'agent' && r.t <= cp.t) {
         if (r.e.ev === 'mail_sent' && r.e.accepted) {
           acceptedAt.set(`${r.e.to}\u0000${r.e.tag}`, r.t);
-        } else if (r.e.ev === 'hook_sent' && r.e.ok) {
-          lastHook.set(r.role, { t: r.t, event: r.e.event });
-        } else if (r.e.ev === 'start' && !startedAt.has(r.role)) {
+        } else if (r.e.ev === 'hook_sent') {
+          // hook ok only means the hook script exited 0 (notify.sh always exits 0), so a Stop
+          // the bridge never received still counts as settled here and surfaces as a violation to triage.
+          lastHook.set(r.role, { t: r.t, event: r.e.ok ? r.e.event : 'failed' });
+        } else if (r.e.ev === 'start') {
           startedAt.set(r.role, r.t);
+          lastHook.delete(r.role);
         }
       }
     }
