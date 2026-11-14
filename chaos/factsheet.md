@@ -59,6 +59,12 @@ PATH=/opt/chaos-bin:/home/ftown/.ftown/bin:/usr/local/bin:/usr/bin:/bin`, run vi
 - Measured: first solo start ≈ 3.4 s to ready; restart after `kill -9` 1.6–3.6 s. Sessions survive
   the kill (tmux keeps them) and are listed `running` after restart.
 - `down.sh`: SIGTERM, SIGKILL after 10 s.
+- Liveness (`box/env.sh` `bridge_alive`): a pid counts as the bridge only if `/proc/<pid>/stat` state
+  is not Z/X (kill -0 succeeds on zombies, and PID 1 in the box/VM may not reap) AND its cmdline
+  contains `ftown-cli.js start`. `up.sh` checks this first, before any chown/chmod: live bridge →
+  exit 0 no-op; stale/foreign pid file → removed, start proceeds. Readiness timeout kills the
+  started bridge and removes the pid file. Smoke steps `up-noop-when-live`, `up-after-stale-pid`
+  (kill -9 with the pid file left in place), `new-pid-after-stale`.
 
 ## CLI lines that worked (all as `as_ftown …`)
 
