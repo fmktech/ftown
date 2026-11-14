@@ -7,9 +7,9 @@ const sample: Rec[] = [
   { k: 'run', seed: 3, level: 'high', contract: 3 },
   {
     k: 'schedule',
-    faults: [{ id: 'f1', kind: 'clock_jump_back', target: 'clock', atMs: 20000, durationMs: 0, jumpMs: -30000, long: false }],
+    faults: [{ id: 'f1', kind: 'clock_jump_back', target: 'clock', atMs: 90000, durationMs: 0, jumpMs: -30000, long: false }],
   },
-  { k: 'fault', t: 20000, id: 'f1', phase: 'start', kind: 'clock_jump_back', target: 'clock', ok: true },
+  { k: 'fault', t: 90000, id: 'f1', phase: 'start', kind: 'clock_jump_back', target: 'clock', ok: true },
   { k: 'op', t: 5, op: { op: 'mail_send', tag: 'CHAOS-M-1', to: 'child1', type: 'task' }, ok: false, error: 'x "q"\n' },
   { k: 'agent', t: 7, role: 'child1', e: { ev: 'mail_received', tag: 'CHAOS-M-1', type: 'task', fromRole: 'root' } },
   {
@@ -38,7 +38,7 @@ test('top-level key order follows the contract; nested keys are alphabetical; no
   assert.equal(encodeRec(sample[0]!), '{"k":"run","seed":3,"level":"high","contract":3}');
   assert.equal(
     encodeRec(sample[1]!),
-    '{"k":"schedule","faults":[{"atMs":20000,"durationMs":0,"id":"f1","jumpMs":-30000,"kind":"clock_jump_back","long":false,"target":"clock"}]}',
+    '{"k":"schedule","faults":[{"atMs":90000,"durationMs":0,"id":"f1","jumpMs":-30000,"kind":"clock_jump_back","long":false,"target":"clock"}]}',
   );
   assert.equal(
     encodeRec(sample[3]!),
