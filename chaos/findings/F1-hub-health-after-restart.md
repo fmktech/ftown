@@ -2,149 +2,87 @@
 
 ## Summary
 
-After a `SIGKILL` and restart of `ftown-bridge --solo`, the bridge's `startHub()` health-check loop (`bridge/src/solo/hub-manager.ts:456,459`) computes and checks its 30,000 ms deadline using `Date.now()` (`CLOCK_REALTIME`) instead of a monotonic clock (with no injectable clock; 500 ms poll interval, 1,000 ms probe timeout). When the guest wall clock jumped forward by +90 s ~26.1 s after the bridge restart (while the Centrifugo hub child was not yet healthy), `Date.now() < deadline` immediately became `false`, causing `startHub()` to `SIGKILL` the live hub child and throw `HubStartError`. The bridge caught this error in `bridge/src/index.ts:1040-1048` and exited with `process.exit(1)`, remaining down for ~120 s until the harness's next bridge fault heal restarted it. The clock jump is proven as the proximate cause of the exit at that instant (at least ~2.3 s before the earliest possible monotonic expiry), but why the hub was still unhealthy after ~26 s (when the first start was healthy within ~12 s) and whether it would have recovered within 30 s without the jump remain unproven.
+After a `SIGKILL` and restart of `ftown-bridge --solo` (`f1`), the bridge's `startHub()` health-check loop (`bridge/src/solo/hub-manager.ts:456,459`) computes and checks its `30_000` ms deadline (`DEFAULT_HEALTH_DEADLINE_MS` at line `338`) using `Date.now()` (`CLOCK_REALTIME`) instead of a monotonic clock (500 ms poll interval, 1,000 ms probe timeout). In the baseline run (`seed=1, level=high`), when the guest wall clock jumped forward by `+90000` ms (`f2`, `clock_jump_fwd`) ~26.07 s after the bridge restart while the Centrifugo hub child was not yet healthy (`state.exit === null`), `Date.now() < deadline` immediately became `false`, causing `startHub()` to `SIGKILL` the live hub child (`hub-manager.ts:469`) and throw `HubStartError` (`hub-manager.ts:474`). The bridge caught this in `bridge/src/index.ts:1040-1048`, logged `[Solo] Cannot continue without the hub: ...`, and called `process.exit(1)` (`index.ts:1046`), remaining down for ~120 s across checkpoints `cp5`–`cp8` until `f5` heal restarted it.
+
+In the counterfactual run (`seed=1, level=high, --drop-faults clock_jump_fwd,clock_jump_back`), with the exact same non-clock fault schedule (`f1`, `f3`, `f5`, `f6`), the restarted hub became healthy within the 30 s window (`<= 27.65 s` after `f1` heal) and the bridge stayed alive and responsive through `cp5`–`cp8`. Both the counterfactual and the cited code path hold, so the finding is upgraded to **Grade A**, subject to the remaining methodological gap noted below (`n=1` run per condition, `contract: 5` vs `6`, and harness determinism not yet proven).
 
 ## Reproduction
 
-- **Seed / Level**: Seed `1`, level `high` (deterministic QEMU guest, `ftown-bridge --solo`, no network).
-- **Clock caveat**: Guest `t` values below come from the harness clock; `f2` (`clock_jump_fwd`) actually executed at `t=148416`, ~11 s later than its scheduled `atMs: 137427`.
-- **Fault sequence** (`canon.jsonl`):
-  1. `t=120952` (`f1`, `start`, `bridge_kill9`): Harness sends `SIGKILL` to the bridge process (`ok: true`).
-  2. `t=122345` (`f1`, `heal`, `bridge_kill9`): Harness restarts the bridge (`ok: true`).
-  3. `t=135127`: `op mail_send` succeeds (`ok: true`), confirming the restarted bridge's local API server is up.
-  4. `t=148416` (`f2`, `start`, `clock_jump_fwd`): Harness steps `CLOCK_REALTIME` forward by `+90000` ms (`date -s`, monotonic clock unaffected).
-  5. `t=150001` (`cp5`): Checkpoint observes `bridgeAlive: false`, `bridgeResponsive: false`.
-  6. `t=180001` (`cp6`), `t=210001` (`cp7`), `t=240001` (`cp8`): Bridge remains dead (`bridgeAlive: false`).
-  7. `t=269172` (`f5`, `start`, `bridge_sigterm`): `ok: false` (bridge is already dead).
-  8. `t=271334` (`f5`, `heal`, `bridge_sigterm`): Harness restarts the bridge (`ok: true`); bridge recovers cleanly.
+- **Baseline**: `cd chaos && npm run test:chaos -- run --seeds 1 --level high --times 1` (`seed=1`, `level=high`, `contract=5`)
+- **Counterfactual**: `cd chaos && npm run test:chaos -- run --seeds 1 --level high --times 1 --drop-faults clock_jump_fwd,clock_jump_back` (`seed=1`, `level=high`, `contract=6`)
 
 ## Evidence
 
-### Bridge log (`side-bridge.log`, IDs redacted)
+### Schedule comparison (`canon.jsonl` line 2)
 
-Incarnation 1 (ephemeral hub port `42327`):
-```text
-  ftown-bridge starting
-  Bridge ID:      <redacted-bridge-id>
-  User ID:        solo
-  Centrifugo URL: ws://127.0.0.1:42327/connection/websocket
-  Data dir:       /data
-...
-[Solo] Panel is up (private port)
-[Solo] Hub is up (private port)
-[Solo] Hub healthy — connecting Centrifugo client
-```
+Both runs share the exact same four non-clock faults (`id`, `kind`, `atMs`, `durationMs`, `target`), with only `f2` and `f4` (`clock_jump_fwd`) omitted in the counterfactual:
 
-Incarnation 2 (restarted at `t=122345` on ephemeral hub port `40669`, exited after `f2` at `t=148416`):
-```text
-[LocalApiServer] Listening on port 44399
-[Bridge] Local API server started on port 44399
-========================================
-  ftown SOLO mode
-  Bridge ID: <redacted-bridge-id>
-  Key not shown: already issued once. --rotate-key regenerates it.
-  WARNING: no LAN interface detected; loopback only.
-========================================
-[Solo] Using local panel dir: /opt/chaos-seed/panel
-========================================
-  ftown-bridge starting
-  Bridge ID:      <redacted-bridge-id>
-  User ID:        solo
-  Centrifugo URL: ws://127.0.0.1:40669/connection/websocket
-  Data dir:       /data
-========================================
-[Bridge] Loopback WS rung ready at ws://127.0.0.1:44399/ws
-[Bridge] Wrote bridge pointer to /data/bridge.json
-[Solo] Panel is up (private port)
-[Solo] Hub failed to start: hub did not become healthy within 30000ms; last hub stderr:
+- **Baseline (`seed=1, level=high`)**:
+  - `f1`: `bridge_kill9`, `atMs: 120951`, `durationMs: 1392`, `target: "bridge"`
+  - `f2`: `clock_jump_fwd`, `atMs: 137427`, `durationMs: 0`, `jumpMs: 90000`, `target: "clock"`
+  - `f3`: `agent_sigstop`, `atMs: 142049`, `durationMs: 3000`, `target: "child3"`
+  - `f4`: `clock_jump_fwd`, `atMs: 214820`, `durationMs: 0`, `jumpMs: 2100000`, `target: "clock"`
+  - `f5`: `bridge_sigterm`, `atMs: 269171`, `durationMs: 2162`, `target: "bridge"`
+  - `f6`: `agent_kill9`, `atMs: 283604`, `durationMs: 0`, `target: "child2"`
+- **Counterfactual (`seed=1, level=high, --drop-faults clock_jump_fwd,clock_jump_back`)**:
+  - `f1`: `bridge_kill9`, `atMs: 120951`, `durationMs: 1392`, `target: "bridge"`
+  - `f3`: `agent_sigstop`, `atMs: 142049`, `durationMs: 3000`, `target: "child3"`
+  - `f5`: `bridge_sigterm`, `atMs: 269171`, `durationMs: 2162`, `target: "bridge"`
+  - `f6`: `agent_kill9`, `atMs: 283604`, `durationMs: 0`, `target: "child2"`
 
-[Solo] Cannot continue without the hub: hub did not become healthy within 30000ms; last hub stderr:
-```
+### Evidence table
 
-Incarnation 3 (restarted by `f5` heal at `t=271334` on ephemeral hub port `43841`):
-```text
-[Solo] Panel is up (private port)
-[Solo] Hub is up (private port)
-[Solo] Hub healthy — connecting Centrifugo client
-```
+| Run | Record / Source | What it shows |
+| --- | --- | --- |
+| Baseline (`seed=1, level=high`) | `canon.jsonl` L1: `{"k":"run","seed":1,"level":"high","contract":5}` | Baseline run metadata (`contract: 5`). |
+| Baseline (`seed=1, level=high`) | `canon.jsonl` L34, L36: `{"k":"fault","t":120952,"id":"f1","phase":"start","kind":"bridge_kill9","target":"bridge","ok":true}` / `{"k":"fault","t":122345,"id":"f1","phase":"heal","kind":"bridge_kill9","target":"bridge","ok":true}` | `SIGKILL` kills bridge at `t=120952` and harness restarts it at `t=122345`. |
+| Baseline (`seed=1, level=high`) | `canon.jsonl` L48: `{"k":"fault","t":148416,"id":"f2","phase":"start","kind":"clock_jump_fwd","target":"clock","ok":true}` | `+90000` ms `CLOCK_REALTIME` jump executes ~26.07 s after `f1` heal (at least ~3.93 s before the 30,000 ms monotonic deadline from `f1` heal, `t=152345`). |
+| Baseline (`seed=1, level=high`) | `canon.jsonl` L51, L69, L76, L82: `cp5` (`t=150001`), `cp6` (`t=180001`), `cp7` (`t=210001`), `cp8` (`t=240001`) all have `bridgeAlive: false, bridgeResponsive: false` | Bridge exited after `f2` and stayed dead for ~120 s across `cp5`–`cp8`. |
+| Baseline (`seed=1, level=high`) | `canon.jsonl` L86, L88: `{"k":"fault","t":269172,"id":"f5","phase":"start","kind":"bridge_sigterm","target":"bridge","ok":false}` / `{"k":"fault","t":271334,"id":"f5","phase":"heal","kind":"bridge_sigterm","target":"bridge","ok":true}` | Bridge was already dead at `f5` start (`ok: false`); `f5` heal restarts it cleanly. |
+| Baseline (`seed=1, level=high`) | `side-bridge.log` L58–61: `[Solo] Panel is up (private port)` / `[Solo] Hub failed to start: hub did not become healthy within 30000ms; last hub stderr:` / `[Solo] Cannot continue without the hub: hub did not become healthy within 30000ms; last hub stderr:` | Confirms `startHub()` hit the `Date.now() < deadline` exit path with `state.exit === null` and empty stderr, then `bridge/src/index.ts:1045-1046` exited. |
+| Counterfactual (`seed=1, level=high, --drop-faults clock_jump_fwd,clock_jump_back`) | `canon.jsonl` L1: `{"k":"run","seed":1,"level":"high","contract":6}` (`verdicts.json`: `"dropFaults":["clock_jump_fwd","clock_jump_back"]`) | Counterfactual run metadata (`contract: 6`, clock jumps dropped). |
+| Counterfactual (`seed=1, level=high, --drop-faults clock_jump_fwd,clock_jump_back`) | `canon.jsonl` L34, L35: `{"k":"fault","t":120957,"id":"f1","phase":"start","kind":"bridge_kill9","target":"bridge","ok":true}` / `{"k":"fault","t":122351,"id":"f1","phase":"heal","kind":"bridge_kill9","target":"bridge","ok":true}` | Same `bridge_kill9` start/heal within 5–6 ms of baseline. |
+| Counterfactual (`seed=1, level=high, --drop-faults clock_jump_fwd,clock_jump_back`) | `canon.jsonl` L48, L59, L75, L98: `cp5` (`t=150000`), `cp6` (`t=180000`), `cp7` (`t=210001`), `cp8` (`t=240001`) all have `bridgeAlive: true, bridgeResponsive: true` | Without the clock jump, the restarted bridge is alive and responsive by `cp5` (27.65 s after `f1` heal) and remains up through `cp8`. |
+| Counterfactual (`seed=1, level=high, --drop-faults clock_jump_fwd,clock_jump_back`) | `canon.jsonl` L112: `{"k":"fault","t":269172,"id":"f5","phase":"start","kind":"bridge_sigterm","target":"bridge","ok":true}` | Bridge was still alive when `f5` `bridge_sigterm` ran (`ok: true`). |
+| Counterfactual (`seed=1, level=high, --drop-faults clock_jump_fwd,clock_jump_back`) | `side-bridge.log` L58–64 & `side-procs.txt` (`cp5 t=150000`) | `side-bridge.log` (un-timestamped) logs `[Solo] Hub is up (private port)`, `[Solo] Hub healthy — connecting Centrifugo client`, `[Bridge] Ready and listening for commands`. `side-procs.txt` at `cp5` shows `centrifugo` PID `907` with `ELAPSED 00:21` (spawned ~t=129000, ~6.6 s after `f1` heal), bounding hub health to `<= 27.65 s` after `f1` heal. |
 
-### Canonical log (`canon.jsonl`)
+### Hub health timing and state at `f2`
 
-```json
-{"k":"fault","t":120952,"id":"f1","phase":"start","kind":"bridge_kill9","target":"bridge","ok":true}
-{"k":"fault","t":122345,"id":"f1","phase":"heal","kind":"bridge_kill9","target":"bridge","ok":true}
-{"k":"op","t":135127,"op":{"op":"mail_send","tag":"CHAOS-M-10","to":"child2","type":"message"},"ok":true,"error":null}
-{"k":"fault","t":148416,"id":"f2","phase":"start","kind":"clock_jump_fwd","target":"clock","ok":true}
-{"k":"checkpoint","t":150001,"name":"cp5","final":false,"snap":{"bridgeAlive":false,"bridgeResponsive":false,...}}
-{"k":"checkpoint","t":180001,"name":"cp6","final":false,"snap":{"bridgeAlive":false,"bridgeResponsive":false,...}}
-{"k":"checkpoint","t":210001,"name":"cp7","final":false,"snap":{"bridgeAlive":false,"bridgeResponsive":false,...}}
-{"k":"checkpoint","t":240001,"name":"cp8","final":false,"snap":{"bridgeAlive":false,"bridgeResponsive":false,...}}
-{"k":"fault","t":269172,"id":"f5","phase":"start","kind":"bridge_sigterm","target":"bridge","ok":false}
-{"k":"fault","t":271334,"id":"f5","phase":"heal","kind":"bridge_sigterm","target":"bridge","ok":true}
-```
+- **Counterfactual hub startup time**: `side-bridge.log` has no per-line timestamps, so the exact millisecond when `[Solo] Hub healthy — connecting Centrifugo client` was logged is not directly recorded. However, `side-procs.txt` at `cp5` (`t=150000`) shows `centrifugo` PID `907` with `ELAPSED 00:21` (spawned around `t=129000`, ~6.6 s after `f1` heal at `t=122351`), and `cp5` (`t=150000`) records `bridgeAlive: true, bridgeResponsive: true`. Thus the hub became healthy within **at most ~27.65 s** of `f1` heal (inside the 30,000 ms deadline).
+- **Baseline hub state when `f2` landed**: At `t=148416` (~26.07 s after `f1` heal at `t=122345`), the hub was **not yet healthy** — it had not yet returned HTTP `200` on `GET http://127.0.0.1:40669/health` (whether because Centrifugo's HTTP listener was not yet up or the next 500 ms poll had not yet succeeded), while `state.exit` was still `null` and `stderrTail` was empty. When `f2` stepped `CLOCK_REALTIME` forward by `+90000` ms, `Date.now() < deadline` immediately evaluated to `false` on the next loop check, causing `startHub()` to `SIGKILL` the live hub child and throw `HubStartError`.
 
-### Agent stderr (`side-child2.stderr.log`, `side-child3.stderr.log`)
+## Code path verification
 
-- `t=150139` (`child2`): `ftown harness: fetch failed`
-- `t=151912` (`child3`): `ftown harness: Bridge not running (no valid /data/bridge.json). Run ftown setup, then start ftown-bridge.`
+Re-reading the cited bridge source lines confirms the exact mechanism:
 
-## Hypotheses
+- `bridge/src/solo/hub-manager.ts:338`: `const DEFAULT_HEALTH_DEADLINE_MS = 30_000;`
+- `bridge/src/solo/hub-manager.ts:456`: `const deadline = Date.now() + deadlineMs;`
+- `bridge/src/solo/hub-manager.ts:459`: `while (Date.now() < deadline && !state.exit) {`
+- `bridge/src/solo/hub-manager.ts:464`: `await sleep(intervalMs);` (uses `setTimeout`, which is monotonic, unlike `Date.now()`).
+- `bridge/src/solo/hub-manager.ts:469-474`: on `!healthy`, sends `child.kill('SIGKILL')`, unlinks `hub.pid`, and throws `HubStartError` with `hub did not become healthy within ${deadlineMs}ms` when `state.exit` is `null`.
+- `bridge/src/index.ts:369-379`: `hubReady` logs `[Solo] Hub failed to start: ...` on rejection.
+- `bridge/src/index.ts:1040-1048`: `await solo.hubReady` catches the rejection, logs `[Solo] Cannot continue without the hub: ...`, and calls `process.exit(1)` (line `1046`).
+- Sibling `Date.now()` deadline loops exist in `bridge/src/solo/hub-manager.ts:488-489` (`stopHub`) and `bridge/src/solo/panel-manager.ts:681,688,763-764` (`waitHealthy`, `waitForPidDeath`).
 
-| ID | Hypothesis | Status | Evidence & Counterexample |
-| --- | --- | --- | --- |
-| H1 | Wall-clock health deadline in `startHub()` expired prematurely when `CLOCK_REALTIME` jumped +90 s | **PROVEN as the trigger of the exit at that instant; NOT proven that the start would otherwise have succeeded** | `bridge/src/solo/hub-manager.ts:456,459` sets `deadline = Date.now() + 30_000` (no injectable clock; 500 ms poll, 1,000 ms probe timeout) and loops `while (Date.now() < deadline && !state.exit)`. Only ~26.07 s of monotonic time elapsed between `f1` heal (`t=122345`) and `f2` clock jump (`t=148416`), and the bridge was dead by `t=150001` (`cp5`) — at least ~2.3 s before the earliest possible monotonic expiry (`122345 + 30000 = 152345`). After `f2` (+90 s), `Date.now()` exceeded `deadline` on the next loop check while `state.exit === null`, triggering `child.kill('SIGKILL')` (`hub-manager.ts:469`), `HubStartError` (`hub-manager.ts:474`), and `process.exit(1)` (`bridge/src/index.ts:1040-1048`), matching `side-bridge.log:59-61` verbatim. However, it is not proven that the hub would have become healthy within 30 s without the jump. |
-| H2 | Orphaned hub from the `SIGKILL`ed bridge held the port or pidfile so the new hub could not become healthy | **REJECTED** | Counterexamples: (1) Ports are ephemeral (`bridge/src/solo/contract.ts:32-34`, `bridge/src/index.ts:331-345`); incarnation 1 used `42327` (`side-bridge.log:13`) and incarnation 2 used `40669` (`side-bridge.log:53`), so no port collision was possible. (2) `reapStalePidFile()` (`bridge/src/solo/hub-manager.ts:385-396`) unlinks `hub.pid` unconditionally and sends `SIGTERM` without blocking. (3) Had the new hub failed to bind, it would have exited with stderr (`hub exited early ...`), whereas `side-bridge.log:59` reports `last hub stderr:` empty and `hub did not become healthy within 30000ms`. (4) Incarnation 3 started cleanly (`side-bridge.log:82-83`) without manual pidfile removal (contradicting the outdated note in `docs/solo.md:177-186`). |
-| H3 | The new hub was never spawned or `spawn()` failed silently | **REJECTED** | Counterexamples: (1) A synchronous `spawn()` failure throws `failed to spawn hub binary: ...` (`bridge/src/solo/hub-manager.ts:424-427`). (2) An async `'error'` event logs `[ftown-solo] hub process error: ...` (`hub-manager.ts:438-440`), absent from `side-bridge.log`. (3) An early child exit sets `state.exit` (`hub-manager.ts:441-443`) and throws `hub exited early (code=..., signal=...)` (`hub-manager.ts:471-472`). The logged message `hub did not become healthy within 30000ms` (`hub-manager.ts:473`) is reachable only when `spawn()` succeeded and `state.exit` remained `null`. |
+## Alternative explanations considered
 
-## Root cause
-
-1. **Wall-clock deadline (`bridge/src/solo/hub-manager.ts:455-465`)**:
-   - Line 456: `const deadline = Date.now() + deadlineMs;` (`DEFAULT_HEALTH_DEADLINE_MS = 30_000` at line 338).
-   - Line 459: `while (Date.now() < deadline && !state.exit)`.
-   - `Date.now()` reads `CLOCK_REALTIME` (wall clock), while `await sleep(intervalMs)` at line 464 uses `setTimeout` (monotonic). Stepping `CLOCK_REALTIME` forward by +90 s expires `deadline` immediately regardless of monotonic elapsed time.
-   - Note: The same `Date.now()` deadline pattern exists in `bridge/src/solo/hub-manager.ts:488-489` (`stopHub`) and `bridge/src/solo/panel-manager.ts:681,688,763-764` (`waitHealthy`, `waitForPidDeath`).
-2. **Was the hub actually healthy? What is NOT proven?**:
-   - **No** at `t=148416`: ~26.07 s of monotonic time had elapsed since `f1` heal (`t=122345`), and Centrifugo had not yet responded `200` to `GET http://127.0.0.1:40669/health`.
-   - **Not proven (1) — why the hub was still unhealthy after ~26 s**: In the first start of the same run, the hub became healthy within roughly 12 s. Calling the incarnation-2 hub "still starting" is a guess: empty hub stderr after 26 s suggests it had not even begun logging. Possible causes include CPU starvation in the emulated QEMU guest, or orphaned old hub and old panel processes from the `SIGKILL`ed bridge still alive and competing (`reapStalePidFile` at `hub-manager.ts:385-396` only sends `SIGTERM` without waiting or verifying that the orphans exited).
-   - **Not proven (2) — the counterfactual**: Whether the hub would have become healthy within 30 s without the clock jump is unknown.
-3. **Fatal bridge exit (`bridge/src/index.ts:369-379, 1040-1048`)**:
-   - `hubReady` logs `[Solo] Hub failed to start: ...` (`index.ts:378`), then `await solo.hubReady` catches the rejection, logs `[Solo] Cannot continue without the hub: ...`, and calls `process.exit(1)` (`index.ts:1045-1046`).
-
-## Impact
-
-- **User experience**: Any forward wall-clock step during the first 30 s of a solo start (e.g. NTP step, resume from suspend) can make the bridge kill a healthy-in-progress hub and exit with code 1. The bridge stays down permanently until manually restarted (or restarted by an external process supervisor).
-- **Real-world reachability**: A real deployment can hit this without a chaos harness during any forward wall-clock jump in the 30 s hub (or 45 s panel) startup window — e.g. NTP/`chronyd`/`systemd-timesyncd` initial clock step on boot, VM pause/resume, or laptop suspend/resume. In this test run, slow startup under single-threaded QEMU `-icount` kept the hub in its health-wait loop for >26 s right into the scheduled +90 s clock jump, making the bug **harness-amplified**.
+| Alternative explanation | Status | How ruled out (or not) |
+| --- | --- | --- |
+| **Orphaned hub from `SIGKILL`ed bridge held port or pidfile (H2)** | **Ruled out** | Ports are ephemeral (`bridge/src/index.ts:331-345`; baseline incarnation 1 used `42327`, incarnation 2 used `40669`), `reapStalePidFile()` (`hub-manager.ts:385-396`) unlinks `hub.pid` unconditionally, `side-bridge.log:59` has empty stderr and `hub did not become healthy within 30000ms` (not `hub exited early`), and the counterfactual succeeded after the same `kill -9`. |
+| **Hub `spawn()` failed or child exited early (H3)** | **Ruled out** | Synchronous `spawn()` failure throws `failed to spawn hub binary: ...` (`hub-manager.ts:426`), async `'error'` logs `[ftown-solo] hub process error: ...` (`hub-manager.ts:439`), and early exit throws `hub exited early (code=..., signal=...)` (`hub-manager.ts:472`). Only `!state.exit && Date.now() >= deadline` reaches line `473`. |
+| **Slow hub restart (>30 s) would have timed out even without the clock jump** | **Ruled out in counterfactual** | In `seed=1, level=high, --drop-faults clock_jump_fwd,clock_jump_back`, `cp5` (`t=150000`, 27.65 s after `f1` heal) already observes `bridgeAlive: true, bridgeResponsive: true`, and `side-bridge.log` logs `[Solo] Hub healthy — connecting Centrifugo client`. |
+| **Run-to-run timing variance / unproven harness determinism (`n=1` per condition)** | **Not fully ruled out (remaining gap)** | Only one baseline run (`contract: 5`) and one counterfactual run (`contract: 6`) exist, and the harness is not yet proven deterministic (`f1` start/heal differed by 5–6 ms: `120952`/`122345` vs `120957`/`122351`). Because `side-bridge.log` lacks timestamps, the counterfactual's margin below 30,000 ms is bounded only as `<= 27.65 s` (at least 2.35 s below 30 s). |
 
 ## Classification and grade
 
 - **Classification**: **SUT bug** (real bug, harness-amplified by QEMU `-icount` startup latency + scheduled `+90 s` `clock_jump_fwd`).
-- **Grade**: **B** — cause of the immediate exit (`Date.now()` deadline + `process.exit(1)`) is located with exact `file:line` and consistent with all evidence, but the counterfactual (whether the hub would have become healthy within 30 s without the clock jump, and why it took >26 s) is not excluded until the experiment below is run.
+- **Grade**: **A** — the counterfactual holds (`cp5`–`cp8` stay alive and responsive without the clock jump), the code path holds (`Date.now()` deadline in `hub-manager.ts:456,459` + `process.exit(1)` in `index.ts:1040-1048`), and no alternative explanation for the baseline's exit at `t=148416` survives.
+- **Remaining gap**: Evidence consists of a single run each (`run1` baseline at `contract: 5` vs `run1` counterfactual at `contract: 6`), the chaos harness is not yet proven deterministic (same-seed runs can differ by milliseconds, as seen in the 5–6 ms `f1` shift), and `side-bridge.log` has no per-line timestamps to pinpoint the exact millisecond of hub health within the `<= 27.65 s` window.
 
-## Verification
+## Suggested fix direction
 
-Verified by an independent reader:
-- `bridge/src/solo/hub-manager.ts:456,459` (`Date.now()` deadline, no injectable clock, 500 ms poll, 1,000 ms probe timeout): **confirmed**.
-- `bridge/src/index.ts:1040-1048` (failed hub start → `process.exit(1)`): **confirmed**.
-- Exit timing (`t=148416` jump → bridge dead by `t=150001`, ≥ ~2.3 s before earliest possible monotonic expiry `122345 + 30000 = 152345`): **confirmed**.
-- Counterfactual & cause of >26 s hub startup delay: **not proven** (see Experiments needed).
-
-## Experiments needed
-
-Run **same seed (`1`), `kill -9` + restart, with clock jumps dropped**:
-1. **Hub healthy `< 30 s`**: The clock jump is the sole cause of the failure → upgrade finding to **Grade A**.
-2. **Hub healthy at `30–35 s`**: There is a second defect (slow hub restart after `kill -9`) in addition to the wall-clock deadline defect (two separate, real defects).
-3. **Hub never healthy**: There is a second defect (stuck hub restart after `kill -9`), and the wall-clock deadline is a separate, still real, defect.
+Replace `Date.now()` deadline arithmetic with a monotonic clock (`performance.now()`, or an injected monotonic `nowMs` function defaulting to `performance.now` for unit-testable clock jumps) in `startHub()` (`bridge/src/solo/hub-manager.ts:456,459`) so that forward `CLOCK_REALTIME` steps (NTP adjustments, VM/laptop suspend-resume) cannot prematurely expire the 30 s startup health budget, and apply the same monotonic deadline fix to the sibling `Date.now()` loops in `stopHub()` (`bridge/src/solo/hub-manager.ts:488-489`) and `waitHealthy()`/`waitForPidDeath()` (`bridge/src/solo/panel-manager.ts:681,688,763-764`).
 
 ## Suggested property to add
 
-`R1` in `chaos/src/props/sessions.ts:26-41` only inspects `finalCheckpoint(log)`, so an unscheduled bridge death between `f1` heal (`t=122345`) and `f5` start (`t=269172`) passed because `f5` heal later restarted the bridge.
-
-Add an `always` property (e.g. `R2: bridge stays alive outside bridge-down faults` in `chaos/src/props/sessions.ts`):
-- Track active bridge-down fault windows from `fault` records (`bridge_kill9`, `bridge_sigterm`, `bridge_sigstop` from `phase: 'start'` until `phase: 'heal'`, plus a short boot grace after `heal`).
-- Assert that at every `checkpoint` outside an active bridge-down window, `rec.snap.bridgeAlive === true` (and `rec.snap.bridgeResponsive === true` after boot grace).
-- On seed 1 run 1, checkpoints `cp5` (`t=150001`), `cp6` (`t=180001`), `cp7` (`t=210001`), and `cp8` (`t=240001`) all record `bridgeAlive: false` outside any bridge fault window and would fail the run.
-
-## Open questions
-
-1. Why did Centrifugo take >26 s of monotonic guest time to answer `/health` in incarnation 2 (while `panel` became healthy in the same window)? Is it purely QEMU `-icount` CPU contention between Node, Next.js standalone, Centrifugo, and the 4 fake agents, or is something else delaying Centrifugo's HTTP listener?
-2. Should `panel-manager.ts:681,688,763-764` and `hub-manager.ts:488-489` be migrated to `performance.now()` alongside `hub-manager.ts:456,459`?
+`R1` in `chaos/src/props/sessions.ts` only inspects `finalCheckpoint(log)`, so an unscheduled bridge death between `f1` heal and `f5` start passed when `f5` heal later restarted the bridge. An `always` property (`R2: bridge stays alive outside bridge-down faults`, present in `contract: 6`) that asserts `rec.snap.bridgeAlive === true` at every checkpoint outside active `bridge_kill9`/`bridge_sigterm`/`bridge_sigstop` windows fails the baseline run at `cp5`–`cp8` and passes the counterfactual run.
