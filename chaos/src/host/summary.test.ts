@@ -26,6 +26,11 @@ test('same log but different exit code is nondeterminism', () => {
   assert.equal(summarizeSeed(1, [boot('a', 0), boot('a', 1)]).exitCode, EXIT.reproDiverged);
 });
 
+test('a guest usage exit (64) surfaces as 64', () => {
+  const s = summarizeSeed(1, [boot('a', 64), boot('a', 64)]);
+  assert.equal(s.exitCode, EXIT.usage);
+});
+
 test('an infra error in any run makes the seed infra', () => {
   const bad: BootResult = { exitCode: EXIT.infra, infraError: 'timeout', hash: null, content: null, wallMs: 5 };
   const s = summarizeSeed(2, [boot('a'), bad]);
@@ -39,6 +44,7 @@ test('worst exit ordering', () => {
   assert.equal(worstExit([1, 4, 0]), EXIT.reproDiverged);
   assert.equal(worstExit([4, 3, 1]), EXIT.infra);
   assert.equal(worstExit([0, 99]), EXIT.infra);
+  assert.equal(worstExit([3, 64, 4]), EXIT.usage);
 });
 
 test('helpers', () => {

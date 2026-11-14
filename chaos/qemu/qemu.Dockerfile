@@ -1,6 +1,8 @@
 # QEMU runner for the host's native architecture. The guest is always x86_64.
-# qemu-system-x86_64 is rebuilt from the pinned Debian source with patches/icount-warp-race.patch:
-# without it, icount runs are not reproducible under host load (see the patch header).
+# qemu-system-x86_64 is rebuilt from the pinned Debian source (minimal TCG-only x86_64 config);
+# firmware and runtime libraries come from the pinned Debian package. Optional build args:
+# PATCH=1 applies patches/icount-warp-race.patch (unproven, off by default); TRACE=1 adds
+# investigation-only tracing (patches/trace.py). Neither is used for real runs.
 FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS build
 ARG QEMU_VER=1:7.2+dfsg-7+deb12u18
 RUN sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/debian.sources \
