@@ -24,8 +24,12 @@ An existing version must have a `gitHead` matching the workflow checkout.
 Otherwise bump the version and merge again. A same-commit retry skips packages
 that already exist, publishes the missing packages in `ftown`, `ftown-bridge`
 order, and logs each skip or acceptance. The publish step fails when npm does
-not print `+ name@version` after the registry PUT. npm returns before the
-public packument updates, so the tag job then polls for up to 20 minutes with
+not print `+ name@version` after the registry PUT. A version npm has already
+staged is still an E404 to `npm view`. Republishing it returns E409
+`previously staged version` for that same version; that conflict counts as
+acceptance, and the tag job waits for the public packument. Other publish
+errors still fail the step. npm returns before the public packument updates,
+so the tag job then polls for up to 20 minutes with
 exponential backoff. It pushes `bridge-vVERSION` only when that tag is absent.
 Re-running the tag job does not publish again. An existing tag is accepted only
 when it resolves to that commit. This permits recovery when only the first

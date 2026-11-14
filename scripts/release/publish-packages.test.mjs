@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import * as publisher from './publish-packages.mjs';
-import { assertPublishAccepted, checkReleaseTag, lookupVersion, packPackages, parsePackResult, publishPackages, releasePlan, releaseTag, VISIBILITY_BACKOFF_FACTOR, VISIBILITY_INITIAL_INTERVAL_MS, VISIBILITY_MAX_INTERVAL_MS, VISIBILITY_TIMEOUT_MS, waitForPublishedPackages } from './publish-packages.mjs';
+import { assertPublishAccepted, checkReleaseTag, isStagedVersionConflict, lookupVersion, packPackages, parsePackResult, publishPackages, releasePlan, releaseTag, VISIBILITY_BACKOFF_FACTOR, VISIBILITY_INITIAL_INTERVAL_MS, VISIBILITY_MAX_INTERVAL_MS, VISIBILITY_TIMEOUT_MS, waitForPublishedPackages } from './publish-packages.mjs';
 
 const commit = 'a'.repeat(40);
 const version = '1.2.3';
@@ -204,6 +204,39 @@ test('publish acceptance requires the registry success line and ignores provenan
   assert.deepEqual(logs, ['Publishing ftown@1.2.3 (ftown.tgz)', 'npm notice Publishing']);
   assert.throws(() => publishPackages([{ name: 'ftown', publish: true }], [], () => accepted('ftown'), { version }), /Missing artifact/);
   assert.throws(() => publishPackages([], [], () => ''), /requires a version/);
+});
+
+function stagedConflict(name, stagedVersion = version) {
+  return `npm error code E409\nnpm error 409 Conflict - PUT https://registry.npmjs.org/${name} - Cannot publish over previously staged version "${stagedVersion}".`;
+}
+
+test('a staged E409 is already published and does not block the next package', () => {
+  assert.equal(isStagedVersionConflict(version, stagedConflict('ftown')), true);
+  assert.equal(isStagedVersionConflict(version, stagedConflict('ftown-bridge')), true);
+  assert.equal(isStagedVersionConflict(version, stagedConflict('ftown', '9.9.9')), false);
+  assert.equal(isStagedVersionConflict(version, stagedConflict('ftown').replace('E409', 'E404')), false);
+  assert.equal(isStagedVersionConflict(version, `npm error code E409\nCannot publish over previously published version "${version}".`), false);
+  const logs = [];
+  const published = [];
+  publishPackages(
+    [{ name: 'ftown', publish: true }, { name: 'ftown-bridge', publish: true }],
+    [{ name: 'ftown', path: 'ftown.tgz' }, { name: 'ftown-bridge', path: 'bridge.tgz' }],
+    (path) => {
+      published.push(path);
+      if (path === 'ftown.tgz') throw new Error(stagedConflict('ftown'));
+      return accepted('ftown-bridge');
+    },
+    { version, log: (message) => logs.push(message) },
+  );
+  assert.deepEqual(published, ['ftown.tgz', 'bridge.tgz']);
+  assert.ok(logs.includes(`Staged ftown@${version}: already accepted by the registry; waiting for visibility`));
+  assert.ok(logs.includes(`Accepted ftown-bridge@${version}`));
+  assert.throws(() => publishPackages(
+    [{ name: 'ftown', publish: true }],
+    [{ name: 'ftown', path: 'ftown.tgz' }],
+    () => { throw new Error(`npm error code E409\nCannot publish over previously published version "${version}".`); },
+    { version, log: () => {} },
+  ), /Rejected ftown@1\.2\.3/);
 });
 
 test('release tag waits once, pushes once, and a same-commit retry neither waits nor pushes', async () => {

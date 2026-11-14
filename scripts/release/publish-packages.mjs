@@ -146,6 +146,14 @@ export function packPackages(version, commit, outputDirectory) {
   } finally { rmSync(temporary, { recursive: true, force: true }); }
 }
 
+/** A staged version is invisible to npm view. Retrying the PUT returns E409 for that same version. */
+export function isStagedVersionConflict(version, output) {
+  const text = String(output ?? '');
+  if (!/\bE409\b/.test(text)) return false;
+  const quoted = version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`previously staged version "${quoted}"`).test(text);
+}
+
 /** npm prints this only after the registry PUT succeeds. Provenance notices are earlier and are not acceptance. */
 export function assertPublishAccepted(name, version, output) {
   const marker = `+ ${name}@${version}`;
@@ -176,7 +184,13 @@ export function publishPackages(plan, artifacts, publish = defaultPublish, { ver
     log(`Publishing ${entry.name}@${version} (${artifact.path})`);
     let output;
     try { output = publish(artifact.path); }
-    catch (error) { throw new Error(`Rejected ${entry.name}@${version}: ${error.message}`); }
+    catch (error) {
+      if (isStagedVersionConflict(version, error.message)) {
+        log(`Staged ${entry.name}@${version}: already accepted by the registry; waiting for visibility`);
+        continue;
+      }
+      throw new Error(`Rejected ${entry.name}@${version}: ${error.message}`);
+    }
     const text = String(output ?? '');
     if (text.trim()) log(text.trim());
     assertPublishAccepted(entry.name, version, text);
