@@ -22,4 +22,3 @@ jobs:
       - uses: ./.github/actions/run-ci
         with:
           job: gitleaks
-          boat-api-key: ${{ secrets.BOAT_API_KEY }}
