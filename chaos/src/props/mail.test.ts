@@ -131,6 +131,74 @@ test('M4 exercised by untagged mail alone; unexercised when W+U=0', () => {
   assert.equal(run('M4', [checkpoint(5, [session('root')])]).status, 'unexercised');
 });
 
+test('M4 seed-3 shape: 3 acked + 1 unacked-but-in-inbox + 2 untagged, n=6 passes with info, n=7 violates', () => {
+  const base = (n: number): Rec[] => [
+    opSend(1, 'CHAOS-M-3', 'root', 'result'),
+    opSend(2, 'CHAOS-M-4', 'root', 'message'),
+    agentSent(3, 'child2', 'CHAOS-M-3000', 'root', 'message'),
+    agent(4, 'child1', { ev: 'mail_sent', tag: 'CHAOS-M-2002', to: 'root', type: 'result', accepted: false, error: 'bridge_unreachable' }),
+    checkpoint(5, [
+      session('root', [
+        mail('CHAOS-M-3', { type: 'result', delivered: false }),
+        mail('CHAOS-M-4', { type: 'message', delivered: false }),
+        mail('CHAOS-M-3000', { type: 'message', delivered: false }),
+        mail('CHAOS-M-2002', { type: 'result', delivered: false }),
+      ], { untaggedWakingMail: 2 }),
+    ]),
+    // Repeated observation in later checkpoint does not double count
+    checkpoint(6, [
+      session('root', [
+        mail('CHAOS-M-3', { type: 'result', delivered: true }),
+        mail('CHAOS-M-4', { type: 'message', delivered: true }),
+        mail('CHAOS-M-3000', { type: 'message', delivered: true }),
+        mail('CHAOS-M-2002', { type: 'result', delivered: true }),
+      ], { untaggedWakingMail: 2 }),
+    ], true),
+    nudge(7, 'root', n),
+  ];
+  assert.deepEqual(run('M4', base(6)), { status: 'pass', evidence: ['persisted without ack: CHAOS-M-2002 to=root'] });
+  assert.deepEqual(run('M4', base(7)), { status: 'violated', evidence: ['nudge excess to=root nudged=7 waking=4 untagged=2'] });
+});
+
+test('M4: failed send absent from inbox does not count; unacked fyi in inbox does not count', () => {
+  const failedAbsent: Rec[] = [
+    opSend(1, 'CHAOS-M-1', 'child1', 'task'),
+    agentSent(2, 'root', 'CHAOS-M-1000', 'child1', 'task', false),
+    checkpoint(3, [session('child1', [mail('CHAOS-M-1', { type: 'task' })])], true),
+    nudge(4, 'child1', 2),
+  ];
+  assert.deepEqual(run('M4', failedAbsent), { status: 'violated', evidence: ['nudge excess to=child1 nudged=2 waking=1 untagged=0'] });
+
+  const unackedFyi: Rec[] = [
+    opSend(1, 'CHAOS-M-1', 'child1', 'task'),
+    agentSent(2, 'root', 'CHAOS-M-1000', 'child1', 'fyi', false),
+    checkpoint(3, [session('child1', [mail('CHAOS-M-1', { type: 'task' }), mail('CHAOS-M-1000', { type: 'fyi' })])], true),
+    nudge(4, 'child1', 1),
+  ];
+  assert.deepEqual(run('M4', unackedFyi), { status: 'pass', evidence: [] });
+});
+
+test('M1: failed send is not required to be delivered even if another mail passes', () => {
+  const log = [
+    opSend(1, 'CHAOS-M-1', 'child1'),
+    agentSent(2, 'root', 'CHAOS-M-1000', 'child1', 'task', false),
+    checkpoint(9, [session('child1', [mail('CHAOS-M-1')])], true),
+  ];
+  assert.deepEqual(run('M1', log), { status: 'pass', evidence: [] });
+});
+
+test('M2: unacknowledged-but-persisted mail passes once, violates on duplicate receive', () => {
+  const passLog = [
+    agentSent(1, 'child1', 'CHAOS-M-2002', 'root', 'result', false),
+    checkpoint(2, [session('root', [mail('CHAOS-M-2002', { type: 'result' })])], true),
+    received(3, 'root', 'CHAOS-M-2002', 'result'),
+  ];
+  assert.deepEqual(run('M2', passLog), { status: 'pass', evidence: [] });
+
+  const dupLog = [...passLog, received(4, 'root', 'CHAOS-M-2002', 'result')];
+  assert.deepEqual(run('M2', dupLog), { status: 'violated', evidence: ['duplicate CHAOS-M-2002 to=root'] });
+});
+
 // M5
 const hookEv = (t: number, role: 'root' | 'child1' | 'child2' | 'child3', event: 'UserPromptSubmit' | 'Stop', ok = true): Rec => ({
   k: 'agent',
@@ -251,6 +319,30 @@ test('M5 edge cases: failed Stop, start-only session, exact 75_000 tie, and resp
 test('M5 unexercised: no live session or no final checkpoint', () => {
   assert.equal(run('M5', [checkpoint(9, [session('child1', [], { tmuxAlive: false })], true)]).status, 'unexercised');
   assert.equal(run('M5', [checkpoint(9, [session('child1')])]).status, 'unexercised');
+});
+
+test('M5: unacknowledged-but-persisted pending mail violates when settled, passes when not settled', () => {
+  const settledFailedSend = [
+    agentSent(10_000, 'root', 'CHAOS-M-2002', 'child1', 'task', false),
+    hookEv(15_000, 'child1', 'UserPromptSubmit'),
+    hookEv(20_000, 'child1', 'Stop'),
+    checkpoint(95_000, [session('child1', [mail('CHAOS-M-2002', { delivered: false, type: 'task' })])], true),
+  ];
+  assert.deepEqual(run('M5', settledFailedSend), { status: 'violated', evidence: ['pending CHAOS-M-2002 to=child1'] });
+
+  const settledFromEarlierCp = [
+    hookEv(10_000, 'child1', 'Stop'),
+    checkpoint(15_000, [session('child1', [mail('CHAOS-M-2003', { delivered: false, type: 'task' })])]),
+    checkpoint(95_000, [session('child1', [mail('CHAOS-M-2003', { delivered: false, type: 'task' })])], true),
+  ];
+  assert.deepEqual(run('M5', settledFromEarlierCp), { status: 'violated', evidence: ['pending CHAOS-M-2003 to=child1'] });
+
+  const recentUnacked = [
+    hookEv(10_000, 'child1', 'Stop'),
+    agentSent(80_000, 'root', 'CHAOS-M-2004', 'child1', 'task', false),
+    checkpoint(95_000, [session('child1', [mail('CHAOS-M-2004', { delivered: false, type: 'task' })])], true),
+  ];
+  assert.deepEqual(run('M5', recentUnacked), { status: 'pass', evidence: ['pending, recipient not settled: CHAOS-M-2004 to=child1'] });
 });
 
 // C1

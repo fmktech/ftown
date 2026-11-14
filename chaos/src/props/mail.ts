@@ -1,5 +1,5 @@
 // Mail properties: pure functions over the canonical log. No I/O.
-import type { MailType, PropResult, Property, Rec, Role, SessionObs, Snapshot } from '../contract.ts';
+import { MAIL_TAG_RE, type MailType, type PropResult, type Property, type Rec, type Role, type SessionObs, type Snapshot } from '../contract.ts';
 
 interface Send {
   tag: string;
@@ -106,9 +106,26 @@ const M4: Property = {
   check(log): PropResult {
     const sends = acceptedSends(log);
     const waking = new Map<Role, number>();
+    const acceptedKeys = new Set<string>();
     for (const s of sends) {
+      acceptedKeys.add(`${s.to}\u0000${s.tag}`);
       if (s.type === 'fyi') continue;
       waking.set(s.to, (waking.get(s.to) ?? 0) + 1);
+    }
+    const persistedUnacked = new Set<string>();
+    const info: string[] = [];
+    for (const r of log) {
+      if (r.k !== 'checkpoint') continue;
+      for (const s of r.snap.sessions) {
+        for (const m of s.inbox) {
+          if (m.type === 'fyi' || !MAIL_TAG_RE.test(m.tag)) continue;
+          const key = `${s.role}\u0000${m.tag}`;
+          if (acceptedKeys.has(key) || persistedUnacked.has(key)) continue;
+          persistedUnacked.add(key);
+          waking.set(s.role, (waking.get(s.role) ?? 0) + 1);
+          info.push(`persisted without ack: ${m.tag} to=${s.role}`);
+        }
+      }
     }
     const nudged = new Map<Role, number>();
     for (const r of log) {
@@ -132,7 +149,7 @@ const M4: Property = {
       if (n > w + u) evidence.push(`nudge excess to=${role} nudged=${n} waking=${w} untagged=${u}`);
     }
     return evidence.length === 0
-      ? { status: 'pass', evidence: [] }
+      ? { status: 'pass', evidence: sorted(info) }
       : { status: 'violated', evidence: sorted(evidence) };
   },
 };
@@ -149,14 +166,24 @@ const M5: Property = {
     if (live.length === 0) return { status: 'unexercised', evidence: [] };
 
     const acceptedAt = new Map<string, number>();
+    const attemptedAt = new Map<string, number>();
+    const firstSeenAt = new Map<string, number>();
     const lastHook = new Map<Role, { t: number; event: string }>();
     const startedAt = new Map<Role, number>();
+    const recordEarliest = (map: Map<string, number>, key: string, t: number): void => {
+      const prev = map.get(key);
+      if (prev === undefined || t < prev) map.set(key, t);
+    };
     for (const r of log) {
-      if (r.k === 'op' && r.t <= cp.t && r.op.op === 'mail_send' && r.ok) {
-        acceptedAt.set(`${r.op.to}\u0000${r.op.tag}`, r.t);
+      if (r.k === 'op' && r.t <= cp.t && r.op.op === 'mail_send') {
+        const key = `${r.op.to}\u0000${r.op.tag}`;
+        if (r.ok) acceptedAt.set(key, r.t);
+        else recordEarliest(attemptedAt, key, r.t);
       } else if (r.k === 'agent' && r.t <= cp.t) {
-        if (r.e.ev === 'mail_sent' && r.e.accepted) {
-          acceptedAt.set(`${r.e.to}\u0000${r.e.tag}`, r.t);
+        if (r.e.ev === 'mail_sent') {
+          const key = `${r.e.to}\u0000${r.e.tag}`;
+          if (r.e.accepted) acceptedAt.set(key, r.t);
+          else recordEarliest(attemptedAt, key, r.t);
         } else if (r.e.ev === 'hook_sent') {
           // hook ok only means the hook script exited 0 (notify.sh always exits 0), so a Stop
           // the bridge never received still counts as settled here and surfaces as a violation to triage.
@@ -164,6 +191,13 @@ const M5: Property = {
         } else if (r.e.ev === 'start') {
           startedAt.set(r.role, r.t);
           lastHook.delete(r.role);
+        }
+      } else if (r.k === 'checkpoint' && r.t <= cp.t) {
+        for (const s of r.snap.sessions) {
+          for (const m of s.inbox) {
+            if (!MAIL_TAG_RE.test(m.tag)) continue;
+            recordEarliest(firstSeenAt, `${s.role}\u0000${m.tag}`, r.t);
+          }
         }
       }
     }
@@ -177,8 +211,12 @@ const M5: Property = {
         : hk.event === 'Stop' && cp.t - hk.t >= SETTLE_MS;
       for (const m of s.inbox) {
         if (m.delivered || m.nudged || m.type === 'fyi') continue;
-        const acc = acceptedAt.get(`${s.role}\u0000${m.tag}`);
-        const mailSettled = acc !== undefined && cp.t - acc >= SETTLE_MS;
+        const key = `${s.role}\u0000${m.tag}`;
+        const acc = acceptedAt.get(key);
+        const att = attemptedAt.get(key);
+        const seen = firstSeenAt.get(key);
+        const knownAt = acc ?? (att !== undefined && seen !== undefined ? Math.min(att, seen) : att ?? seen);
+        const mailSettled = knownAt !== undefined && cp.t - knownAt >= SETTLE_MS;
         if (mailSettled && idleSettled) {
           violated.push(`pending ${m.tag} to=${s.role}`);
         } else {
