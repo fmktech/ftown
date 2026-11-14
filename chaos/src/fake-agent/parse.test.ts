@@ -94,3 +94,19 @@ test('ask tag', () => {
   assert.equal(askTagOf('CHAOS-Q-5 from=root'), 'CHAOS-Q-5');
   assert.equal(askTagOf('Pick DB'), null);
 });
+
+test('nudge: real line with the bridge sender prefix (mail-delivery.ts:455-456)', () => {
+  const real = '[ftown msg from ftown-mail] [ftown] 6 new mail (2 task, 1 escalation, 2 result, 1 message) — run: ftown harness mail read';
+  assert.deepEqual(parseNudge(real), { n: 6 });
+  assert.deepEqual(parseNudge('[ftown msg from chaos-plan] [ftown] 2 new mail (2 message) — run: ftown harness mail read'), { n: 2 });
+  assert.deepEqual(parseNudge('[ftown msg from ftown-mail] [ftown] 1 new mail (1 task) — run: ftown harness mail read'), { n: 1 });
+  assert.deepEqual(parseNudge('[ftown msg from ftown-mail] [ftown] 1 new mail (1 task) — run: ftown harness mail read | digest: hello'), { n: 1 });
+  assert.deepEqual(parseNudge(`\u001b[200~${real}\u001b[201~\r`), { n: 6 });
+  assert.deepEqual(parseNudge(`: '${real}'`), { n: 6 });
+});
+
+test('nudge: quoted or malformed prefixed text is rejected', () => {
+  assert.equal(parseNudge('please check [ftown msg from ftown-mail] [ftown] 1 new mail (1 task)'), null);
+  assert.equal(parseNudge('[ftown msg from ftown-mail [ftown] 1 new mail (1 task)'), null);
+  assert.equal(parseNudge('[ftown msg from ftown-mail] hello'), null);
+});
