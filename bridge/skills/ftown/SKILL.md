@@ -1,16 +1,15 @@
 ---
 name: ftown
 description: >-
-  Control ftown sessions and multi-provider routing: create/list/read/drive
-  sibling sessions (screen, keys, grep), archive/revive/remove them, send and
-  read ftown mail, request human attention or ask questions with options,
-  register HTML/Markdown previews and read preview replies, link session PRs,
-  coordinate worker agents, and read subscription quota/usage plus
-  model-routing tiers across claude, codex, grok, muse, agy and opencode
-  (`ftown quota --json`). Use for ftown sessions, child/sibling agents, bridge
-  mail/inbox, previews, choosing which CLI/model/effort should run delegated
-  work, checking remaining plan usage, local bridge diagnostics, or
-  orchestration.
+  Control ftown sessions and multi-provider routing: sessions
+  (create/list/read/drive, archive/revive/remove), worktrees, and ftown mail.
+  Handle human attention and questions routed to the parent first. Support
+  HTML/Markdown previews, HTML preview replies, PR links, status cards and
+  ftown board/events, the manager's plan list (ftown plan), and manager brief.
+  Use quota/model routing for choosing CLI/model/effort across claude, codex,
+  grok, muse, agy and opencode (`ftown quota --json`). Use for ftown sessions,
+  child/sibling agents, bridge mail/inbox, HTML preview, previews, worktrees,
+  plan list, or orchestration.
 ---
 
 # ftown
