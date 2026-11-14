@@ -201,6 +201,39 @@ interface Outcome {
   dropFaults: string[] | null;
 }
 
+/** Reads source fingerprint metadata written at build time, or {} when absent/invalid. */
+export async function readSourceFingerprintMeta(
+  fpPath = join(GUEST.chaosDir, 'source-fingerprint.json'),
+): Promise<{ sourceFingerprint?: string; sourceHead?: string; sourceDirty?: boolean }> {
+  try {
+    const raw = JSON.parse(await readFile(fpPath, 'utf8')) as { sha256?: unknown; head?: unknown; dirty?: unknown };
+    return {
+      ...(typeof raw.sha256 === 'string' ? { sourceFingerprint: raw.sha256 } : {}),
+      ...(typeof raw.head === 'string' ? { sourceHead: raw.head } : {}),
+      ...(typeof raw.dirty === 'boolean' ? { sourceDirty: raw.dirty } : {}),
+    };
+  } catch {
+    return {};
+  }
+}
+
+export async function buildVerdictsReport(
+  o: Outcome,
+  canon: string,
+  fpPath = join(GUEST.chaosDir, 'source-fingerprint.json'),
+): Promise<Record<string, unknown>> {
+  const fpMeta = await readSourceFingerprintMeta(fpPath);
+  return {
+    verdicts: o.verdicts,
+    exitCode: o.exitCode,
+    H_run: hashLog(canon),
+    invalidAgentFields: o.invalidAgentFields,
+    dropFaults: o.dropFaults,
+    ...fpMeta,
+    ...(o.error === null ? {} : { error: o.error }),
+  };
+}
+
 /** Writes outputs, stops the bridge and emits frames. Each step is isolated; it never throws. */
 async function finish(rec: Recorder, o: Outcome): Promise<number> {
   const step = async (name: string, f: () => Promise<unknown>): Promise<void> => {
@@ -217,7 +250,7 @@ async function finish(rec: Recorder, o: Outcome): Promise<number> {
     await writeFile(join(GUEST.outDir, 'canon.jsonl'), canon);
   });
   await step('verdicts', async () => {
-    const report = { verdicts: o.verdicts, exitCode: o.exitCode, H_run: hashLog(canon), invalidAgentFields: o.invalidAgentFields, dropFaults: o.dropFaults, ...(o.error === null ? {} : { error: o.error }) };
+    const report = await buildVerdictsReport(o, canon);
     await writeFile(join(GUEST.outDir, 'verdicts.json'), `${JSON.stringify(report, null, 2)}\n`);
   });
   await step('procs', () => procsChain);

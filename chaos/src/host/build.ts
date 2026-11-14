@@ -17,15 +17,21 @@ export const FINGERPRINT_INPUT_ROOTS = [
 
 export interface SourceFingerprint {
   sha256: string;
+  chaosSha256: string;
   head: string;
   dirty: boolean;
+  chaosDirty: boolean;
   fileCount: number;
 }
 
 export interface FingerprintDeps {
-  listTrackedFiles(): Promise<string[]>;
-  hashFile(relPath: string): Promise<string>;
+  /** Returns repo-relative POSIX paths of tracked and untracked non-ignored input files. */
+  listFiles(): Promise<string[]>;
+  /** Returns the sha256 hex digest of a repo-relative file, or null if deleted/missing on disk. */
+  hashFile(relPath: string): Promise<string | null>;
+  /** Returns the git commit hash of HEAD. */
   getHead(): Promise<string>;
+  /** Returns whether any of the given repo-relative paths have uncommitted changes. */
   isDirty(inputPaths: readonly string[]): Promise<boolean>;
 }
 
@@ -39,26 +45,36 @@ export interface BuildInfo {
   qemuImageId: string;
   qemuVersion: string;
   sourceFingerprint: string;
+  chaosFingerprint: string;
   sourceHead: string;
   sourceDirty: boolean;
 }
 
 const log = (msg: string) => process.stderr.write(`build: ${msg}\n`);
 
-/** Returns true if a repo-relative path is a guest/bridge input to the chaos image. */
+/**
+ * Returns true if a repo-relative path is an input to the chaos image.
+ * All of bridge/ (over-invalidation is safe) and all non-test chaos/src/ (including
+ * chaos/src/host/, which PACK_SCRIPT packs into /opt/chaos/src) are included.
+ */
 export function isFingerprintInput(relPath: string): boolean {
   if (relPath === 'chaos/package.json') return true;
   if (relPath.startsWith('bridge/')) return true;
   if (relPath.startsWith('chaos/box/')) return true;
   if (relPath.startsWith('chaos/qemu/')) return true;
   if (relPath.startsWith('chaos/src/')) {
-    return !relPath.startsWith('chaos/src/host/') && !relPath.endsWith('.test.ts');
+    return !relPath.endsWith('.test.ts');
   }
   return false;
 }
 
-/** Parses `git status --porcelain -z` output and returns true if any fingerprint input is dirty. */
-export function hasDirtyInput(porcelainZ: string): boolean {
+/** Returns true if a repo-relative path is a chaos-side (non-bridge) input. */
+export function isChaosFingerprintInput(relPath: string): boolean {
+  return isFingerprintInput(relPath) && !relPath.startsWith('bridge/');
+}
+
+/** Parses `git status --porcelain -z` output and returns true if any path matching `pred` is dirty. */
+export function hasDirtyInput(porcelainZ: string, pred: (relPath: string) => boolean = isFingerprintInput): boolean {
   const tokens = porcelainZ.split('\0');
   for (let i = 0; i < tokens.length; i++) {
     const entry = tokens[i];
@@ -66,44 +82,62 @@ export function hasDirtyInput(porcelainZ: string): boolean {
     const x = entry[0];
     const path1 = entry.slice(3);
     const path2 = (x === 'R' || x === 'C') ? (tokens[++i] ?? '') : '';
-    if (isFingerprintInput(path1) || (path2 !== '' && isFingerprintInput(path2))) return true;
+    if (pred(path1) || (path2 !== '' && pred(path2))) return true;
   }
   return false;
 }
 
 export function defaultFingerprintDeps(repoRoot = REPO_ROOT): FingerprintDeps {
   return {
-    async listTrackedFiles(): Promise<string[]> {
-      const out = await mustRun('git', ['-C', repoRoot, 'ls-files', '-z', '--', ...FINGERPRINT_INPUT_ROOTS]);
+    async listFiles(): Promise<string[]> {
+      const out = await mustRun('git', [
+        '-C', repoRoot, 'ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', ...FINGERPRINT_INPUT_ROOTS,
+      ]);
       return out.split('\0').filter((p) => p.length > 0);
     },
-    async hashFile(relPath: string): Promise<string> {
-      return sha256(readFileSync(join(repoRoot, relPath)));
+    async hashFile(relPath: string): Promise<string | null> {
+      try {
+        return sha256(readFileSync(join(repoRoot, relPath)));
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+        throw err;
+      }
     },
     async getHead(): Promise<string> {
       return (await mustRun('git', ['-C', repoRoot, 'rev-parse', 'HEAD'])).trim();
     },
-    async isDirty(): Promise<boolean> {
+    async isDirty(inputPaths: readonly string[]): Promise<boolean> {
+      if (inputPaths.length === 0) return false;
       const out = await mustRun('git', ['-C', repoRoot, 'status', '--porcelain', '-z', '--', ...FINGERPRINT_INPUT_ROOTS]);
-      return hasDirtyInput(out);
+      const set = new Set(inputPaths);
+      return hasDirtyInput(out, (p) => set.has(p));
     },
   };
 }
 
-/** Computes a deterministic sha256 fingerprint over sorted (path, sha256) pairs, HEAD commit, and dirty flag. */
+/** Computes a deterministic sha256 fingerprint over sorted (path, sha256|null) pairs, HEAD commit, and dirty flag. */
 export async function computeSourceFingerprint(deps: FingerprintDeps = defaultFingerprintDeps()): Promise<SourceFingerprint> {
-  const tracked = await deps.listTrackedFiles();
-  const inputFiles = [...new Set(tracked.filter(isFingerprintInput))].sort();
+  const listed = await deps.listFiles();
+  const inputFiles = [...new Set(listed.filter(isFingerprintInput))].sort();
+  const chaosFiles = inputFiles.filter(isChaosFingerprintInput);
   const entries = await Promise.all(inputFiles.map(async (p) => [p, await deps.hashFile(p)] as const));
+  const chaosEntries = entries.filter(([p]) => isChaosFingerprintInput(p));
   const head = await deps.getHead();
   const dirty = await deps.isDirty(inputFiles);
-  const payload = JSON.stringify({ head, dirty, files: entries });
+  const chaosDirty = await deps.isDirty(chaosFiles);
   return {
-    sha256: sha256(payload),
+    sha256: sha256(JSON.stringify({ head, dirty, files: entries })),
+    chaosSha256: sha256(JSON.stringify({ head, dirty: chaosDirty, files: chaosEntries })),
     head,
     dirty,
+    chaosDirty,
     fileCount: entries.length,
   };
+}
+
+export async function inspectImageId(image: string): Promise<string | null> {
+  const r = await run('docker', ['image', 'inspect', '-f', '{{.Id}}', image]);
+  return r.code === 0 ? r.stdout.trim() : null;
 }
 
 /** Shell run inside the qemu container: tar stream on stdin -> reproducible initramfs on /out. */
@@ -146,9 +180,6 @@ export async function build(imageArg: string | null, checkRepro = false): Promis
   mkdirSync(CACHE_DIR, { recursive: true });
 
   const fp = await computeSourceFingerprint();
-  log(`source fingerprint ${fp.sha256} (head=${fp.head.slice(0, 12)} dirty=${fp.dirty} files=${fp.fileCount})`);
-  const fpFile = join(CACHE_DIR, 'source-fingerprint.json');
-  writeFileSync(fpFile, JSON.stringify(fp, null, 2) + '\n');
 
   log(`qemu container ${QEMU_IMAGE} (native arch)`);
   await mustRun('docker', ['build', '-q', '-t', QEMU_IMAGE, '-f', join(QEMU_DIR, 'qemu.Dockerfile'), QEMU_DIR], { echo: true });
@@ -168,6 +199,24 @@ export async function build(imageArg: string | null, checkRepro = false): Promis
     image = DEFAULT_BOX_IMAGE;
   }
   const imageId = (await mustRun('docker', ['image', 'inspect', '-f', '{{.Id}}', image])).trim();
+  const isCustomImage = imageArg !== null;
+  const sourceFingerprint = isCustomImage ? `custom-image:${imageId}` : fp.sha256;
+  const sourceDirty = isCustomImage ? fp.chaosDirty : fp.dirty;
+  if (isCustomImage) {
+    log(`notice: custom image ${image} (${imageId}); sourceFingerprint=${sourceFingerprint} chaos=${fp.chaosSha256.slice(0, 8)}`);
+  } else {
+    log(`source fingerprint ${sourceFingerprint} (head=${fp.head.slice(0, 12)} dirty=${sourceDirty} files=${fp.fileCount})`);
+  }
+
+  const fpFile = join(CACHE_DIR, 'source-fingerprint.json');
+  writeFileSync(fpFile, JSON.stringify({
+    sha256: sourceFingerprint,
+    chaosSha256: fp.chaosSha256,
+    head: fp.head,
+    dirty: sourceDirty,
+    fileCount: fp.fileCount,
+  }, null, 2) + '\n');
+
   log(`initramfs from ${image} (${imageId})`);
   const initrd = join(CACHE_DIR, 'initramfs.cpio.gz');
   await pack(image, initrd, fpFile);
@@ -190,9 +239,10 @@ export async function build(imageArg: string | null, checkRepro = false): Promis
     initramfsBytes: statSync(initrd).size,
     qemuImageId: (await mustRun('docker', ['image', 'inspect', '-f', '{{.Id}}', QEMU_IMAGE])).trim(),
     qemuVersion: (await mustRun('docker', ['run', '--rm', QEMU_IMAGE, 'qemu-system-x86_64', '--version'])).split('\n')[0].trim(),
-    sourceFingerprint: fp.sha256,
+    sourceFingerprint,
+    chaosFingerprint: fp.chaosSha256,
     sourceHead: fp.head,
-    sourceDirty: fp.dirty,
+    sourceDirty,
   };
   writeFileSync(BUILD_INFO, JSON.stringify(info, null, 2) + '\n');
   return info;

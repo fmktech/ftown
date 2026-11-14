@@ -1,10 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { encodeLog } from '../core/canon.ts';
 import { fakeClock } from '../core/clock.ts';
 import { PROFILE, PROPERTY_IDS } from '../contract.ts';
 import type { Rec, Snapshot } from '../contract.ts';
 import { runCheckpoints } from './checkpoints.ts';
-import { agentCommand, createArgs, idsDeadline, parseAgentLog, parseCli, parseCreatedId } from './main.ts';
+import { agentCommand, buildVerdictsReport, createArgs, idsDeadline, parseAgentLog, parseCli, parseCreatedId } from './main.ts';
 import { allProperties } from './props.ts';
 import { asFtownArgv, isAgentCmdline } from './target.ts';
 
@@ -102,4 +106,36 @@ test('agent events are rebuilt from contract fields; bad strings become invalid 
 
 test('ids deadline is root create start + root first sleep', () => {
   assert.equal(idsDeadline(4_000, 15_000), 19_000);
+});
+
+test('buildVerdictsReport records source fingerprint without altering canon.jsonl bytes', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'chaos-verdicts-'));
+  try {
+    const fpPath = join(dir, 'source-fingerprint.json');
+    writeFileSync(fpPath, JSON.stringify({ sha256: 'abc123', head: 'deadbeef', dirty: true }));
+    const records: Rec[] = [
+      { k: 'run', seed: 1, level: 'off', profile: 'short', contract: 8 },
+      { k: 'schedule', faults: [] },
+      { k: 'verdict', prop: 'R1', kind: 'always', status: 'pass', evidence: [] },
+    ];
+    const canonBefore = encodeLog(records);
+    const outcome = {
+      verdicts: [records[2] as Extract<Rec, { k: 'verdict' }>],
+      exitCode: 0,
+      error: null,
+      invalidAgentFields: 0,
+      dropFaults: null,
+    };
+    const withFp = await buildVerdictsReport(outcome, canonBefore, fpPath);
+    const withoutFp = await buildVerdictsReport(outcome, canonBefore, join(dir, 'missing.json'));
+    const canonAfter = encodeLog(records);
+    assert.equal(canonAfter, canonBefore);
+    assert.equal(withFp.sourceFingerprint, 'abc123');
+    assert.equal(withFp.sourceHead, 'deadbeef');
+    assert.equal(withFp.sourceDirty, true);
+    assert.equal('sourceFingerprint' in withoutFp, false);
+    assert.equal(withFp.H_run, withoutFp.H_run);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
