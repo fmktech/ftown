@@ -1,0 +1,8 @@
+{"_ftown":"pr-event-checkpoint","version":1,"linkId":"link-1","headOid":"abc123","state":"in_progress","ordinal":1}
+{"id":"m1a-aaaaaa","ts":"2026-01-01T00:00:10.000Z","from":"child-0001","fromName":"child1","to":"root-0001","type":"result","body":"CHAOS-M-1001 from=child1 to=root","deliveredAt":"2026-01-01T00:00:11.000Z","deliveredVia":"poll"}
+{"id":"m1b-bbbbbb","ts":"2026-01-01T00:00:20.000Z","from":"external","to":"root-0001","type":"task","body":"CHAOS-M-2 from=external to=root"}
+{"id":"m1c-cccccc","ts":"2026-01-01T00:00:30.000Z","from":"child-0002","fromName":"child2","to":"root-0001","type":"message","body":"CHAOS-M-2001 from=child2 to=root","nudgedAt":"2026-01-01T00:00:31.000Z#a1b2c3"}
+{"id":"m1d-dddddd","ts":"2026-01-01T00:00:40.000Z","from":"external","fromName":"ftown","to":"root-0001","type":"escalation","body":"Child session child-0001 is asking a question and needs an answer."}
+{"id":"m1e-eeeeee","ts":"2026-01-01T00:00:50.000Z","from":"child-0001","to":"root-0001","type":"fyi","body":"CHAOS-M-1002 from=child1 to=root","deliveredAt":"2026-01-01T00:00:51.000Z","deliveredVia":"drain"}
+{"id":"m1f-ffffff","ts":"2026-01-01T00:01:00.000Z","from":"external","to":"root-0001","type":"message","body":"CHAOS-M-3 from=external to=root","nudgedAt":"2026-01-01T00:01:01.000Z#d4e5f6","deliveredAt":"2026-01-01T00:01:05.000Z","deliveredVia":"nudge"}
+{"id":"m1g-gggggg","ts":"2026-01-01T00:01:10.000Z","from":"external","to":"root-0001","type":"message","body":"CHAOS-M-4 to=root","deliveredAt":"2026-01-01T00:01:12.000Z","deliveredVia":"cli"}
