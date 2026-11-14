@@ -67,6 +67,19 @@ test('create preserves option payload and accepts the no-op orchestrator compati
     name: 'agent', command: 'custom', model: 'model', parentSessionId: 'parent-id' });
 }));
 
+test('create --shell resolves alias agy to canonical antigravity in request body', async () => fixture(async (requests) => {
+  assert.equal(await runSessions(['create', '--shell', 'agy', '--model', 'gemini-4-hydrogen-medium', '--prompt', 'hello']), 0);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].method, 'POST');
+  assert.deepEqual(requests[0].body, { shellType: 'antigravity', model: 'gemini-4-hydrogen-medium', prompt: 'hello' });
+}));
+
+test('create --shell rejects invalid shellType without calling the API', async () => fixture(async (requests, output) => {
+  assert.equal(await runSessions(['create', '--shell', 'bogus-shell', '--prompt', 'hello']), 1);
+  assert.equal(requests.length, 0);
+  assert.ok(output.some((line) => line.includes('Invalid shellType') && line.includes('Valid values:')));
+}));
+
 test('terminal and mail commands preserve their legacy requests and inbox alias', async () => fixture(async (requests, output) => {
   assert.equal(await runSessions(['grep', 'session', '--pattern', 'question', '--offset', '2', '--limit', '7']), 0);
   assert.deepEqual(requests.at(-1)?.body, { pattern: 'question', offset: 2, limit: 7 });
