@@ -7,11 +7,11 @@ on:
   workflow_dispatch:
 
 # Top-level permissions are the ceiling for every job below. `contents:
-# write` is needed by the `publish` job (push the bridge-vX.Y.Z release tag)
+# write` is needed by the `tag` job (push the bridge-vX.Y.Z release tag)
 # and by the `release-panel` job's `release-ui.yml` call (create the panel
 # release). `id-token: write` (npm trusted publishing / OIDC) is scoped down
 # to the `publish` job only, since it is the only job that runs `npm
-# publish`.
+# publish`. The tag job can be re-run alone after a visibility timeout.
 permissions:
   contents: write
   id-token: write
@@ -76,7 +76,7 @@ jobs:
     if: needs.version.outputs.package_changed == 'true'
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
       id-token: write # npm trusted publishing (OIDC)
     defaults:
       run:
@@ -104,6 +104,25 @@ jobs:
 
       - name: Publish ftown then ftown-bridge (retry missing packages only)
         run: node ../scripts/release/publish-packages.mjs publish
+
+  # Separate from publish so a visibility timeout can be re-run without another npm publish.
+  tag:
+    needs: [version, release-panel, publish]
+    if: needs.version.outputs.package_changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: bridge
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.1'
+          registry-url: 'https://registry.npmjs.org'
 
       - name: Tag release
         run: node ../scripts/release/publish-packages.mjs tag

@@ -6,6 +6,11 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 
 export const PACKAGE_NAMES = ['ftown', 'ftown-bridge'];
+/** npm's PUT returns before the public packument updates. 0.26 took ~5 min; ftown@0.27.0 took 19m19s. */
+export const VISIBILITY_TIMEOUT_MS = 20 * 60 * 1000;
+export const VISIBILITY_INITIAL_INTERVAL_MS = 5_000;
+export const VISIBILITY_MAX_INTERVAL_MS = 30_000;
+export const VISIBILITY_BACKOFF_FACTOR = 2;
 const bridgeDirectory = resolve(dirname(fileURLToPath(import.meta.url)), '../../bridge');
 
 function command(program, args, cwd = bridgeDirectory, timeoutMs) {
@@ -22,7 +27,7 @@ function checked(program, args, cwd) {
 
 /** Only npm's structured E404 means absent; authentication/network failures stop release. */
 export function lookupVersion(name, version, run = command) {
-  const result = run('npm', ['view', `${name}@${version}`, '--json']);
+  const result = run('npm', ['view', `${name}@${version}`, '--json', '--prefer-online']);
   let value;
   try { value = JSON.parse(result.stdout); } catch { /* Invalid output fails closed below. */ }
   if (result.status !== 0) {
@@ -77,16 +82,18 @@ export async function waitForPublishedPackages(version, commit, {
   lookup = (name, version, remaining) => lookupVersion(name, version,
     (program, args) => command(program, args, bridgeDirectory, Math.ceil(remaining))),
   sleep = delay, now = () => performance.now(),
-  timeoutMs = 300_000, intervalMs = 10_000, log = console.log,
+  timeoutMs = VISIBILITY_TIMEOUT_MS, intervalMs = VISIBILITY_INITIAL_INTERVAL_MS,
+  maxIntervalMs = VISIBILITY_MAX_INTERVAL_MS, backoffFactor = VISIBILITY_BACKOFF_FACTOR, log = console.log,
 } = {}) {
   const deadline = now() + timeoutMs;
   const confirmed = new Map();
-  const timeoutError = () => new Error(`Timed out waiting for npm visibility: ${PACKAGE_NAMES.filter((name) => !confirmed.has(name)).map((name) => `${name}@${version}`).join(', ')}. Retry this same source commit after registry metadata is visible.`);
+  const timeoutError = () => new Error(`Timed out waiting for npm visibility: ${PACKAGE_NAMES.filter((name) => !confirmed.has(name)).map((name) => `${name}@${version}`).join(', ')}. Retry the tag step for this same source commit after registry metadata is visible. Do not republish.`);
   const remainingBudget = () => {
     const remaining = deadline - now();
     if (remaining <= 0) throw timeoutError();
     return remaining;
   };
+  let pauseMs = intervalMs;
   for (;;) {
     const pending = releasePlan(version, commit, (name) => {
       if (confirmed.has(name)) return confirmed.get(name);
@@ -97,10 +104,14 @@ export async function waitForPublishedPackages(version, commit, {
       if (metadata !== undefined) confirmed.set(name, metadata);
       return metadata;
     }).filter(({ publish }) => publish).map(({ name }) => `${name}@${version}`);
-    if (pending.length === 0) return;
+    if (pending.length === 0) {
+      log(`npm visibility confirmed: ${PACKAGE_NAMES.map((name) => `${name}@${version}`).join(', ')}`);
+      return;
+    }
     const remaining = remainingBudget();
     log(`Waiting for npm visibility: ${pending.join(', ')} (${Math.ceil(remaining / 1000)}s remaining)`);
-    await sleep(Math.min(intervalMs, remaining));
+    await sleep(Math.min(pauseMs, remaining));
+    pauseMs = Math.min(Math.floor(pauseMs * backoffFactor), maxIntervalMs);
   }
 }
 
@@ -135,14 +146,65 @@ export function packPackages(version, commit, outputDirectory) {
   } finally { rmSync(temporary, { recursive: true, force: true }); }
 }
 
-export function publishPackages(plan, artifacts, publish = (path) => checked('npm', ['publish', path, '--ignore-scripts', '--provenance', '--access', 'public'])) {
-  for (const entry of plan) {
-    if (entry.publish) {
-      const artifact = artifacts.find(({ name }) => name === entry.name);
-      if (!artifact) throw new Error(`Missing artifact for ${entry.name}`);
-      publish(artifact.path);
-    }
+/** npm prints this only after the registry PUT succeeds. Provenance notices are earlier and are not acceptance. */
+export function assertPublishAccepted(name, version, output) {
+  const marker = `+ ${name}@${version}`;
+  const accepted = String(output ?? '').split(/\r?\n/).some((line) => line.trim() === marker);
+  if (!accepted) {
+    const detail = String(output ?? '').trim() || '(empty)';
+    throw new Error(`npm did not accept ${name}@${version}. Expected a line ${JSON.stringify(marker)}. Output: ${detail}`);
   }
+}
+
+function defaultPublish(path) {
+  const args = ['publish', path, '--ignore-scripts', '--provenance', '--access', 'public'];
+  const result = command('npm', args);
+  const output = [result.stdout, result.stderr].filter(Boolean).join('\n');
+  if (result.status !== 0) throw new Error(`npm ${args.join(' ')} failed (exit ${result.status}): ${output}`);
+  return output;
+}
+
+export function publishPackages(plan, artifacts, publish = defaultPublish, { version, log = console.log } = {}) {
+  if (!version) throw new Error('publishPackages requires a version');
+  for (const entry of plan) {
+    if (!entry.publish) {
+      log(`Skip ${entry.name}@${version}: already published from this commit`);
+      continue;
+    }
+    const artifact = artifacts.find(({ name }) => name === entry.name);
+    if (!artifact) throw new Error(`Missing artifact for ${entry.name}`);
+    log(`Publishing ${entry.name}@${version} (${artifact.path})`);
+    let output;
+    try { output = publish(artifact.path); }
+    catch (error) { throw new Error(`Rejected ${entry.name}@${version}: ${error.message}`); }
+    const text = String(output ?? '');
+    if (text.trim()) log(text.trim());
+    assertPublishAccepted(entry.name, version, text);
+    log(`Accepted ${entry.name}@${version}`);
+  }
+}
+
+/** Tag is safe to re-run by itself: wait for visibility, push only when this commit has no tag yet. */
+export async function releaseTag(version, commit, {
+  check = checkReleaseTag,
+  wait = waitForPublishedPackages,
+  push = (tagVersion, tagCommit) => checked('git', ['push', 'origin', `${tagCommit}:refs/tags/bridge-v${tagVersion}`]),
+  log = console.log,
+} = {}) {
+  const tag = `bridge-v${version}`;
+  const already = () => {
+    log(`Release tag ${tag} already points at ${commit}.`);
+  };
+  if (check(version, commit)) { already(); return; }
+  await wait(version, commit);
+  if (check(version, commit)) { already(); return; }
+  try { push(version, commit); }
+  catch (error) {
+    if (!check(version, commit)) throw error;
+    already();
+    return;
+  }
+  log(`Pushed release tag ${tag} at ${commit}.`);
 }
 
 async function main() {
@@ -161,9 +223,7 @@ async function main() {
   }
   if (!['preflight', 'publish', 'tag'].includes(action)) throw new Error('Expected check-version, preflight, pack, publish or tag');
   if (action === 'tag') {
-    checkReleaseTag(version, commit);
-    await waitForPublishedPackages(version, commit);
-    if (!checkReleaseTag(version, commit)) checked('git', ['push', 'origin', `${commit}:refs/tags/bridge-v${version}`]);
+    await releaseTag(version, commit);
     return;
   }
   const plan = releasePlan(version, commit);
@@ -173,7 +233,7 @@ async function main() {
     if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\n`);
   } else {
     const temporary = mkdtempSync(join(tmpdir(), 'ftown-artifacts-'));
-    try { publishPackages(plan, packPackages(version, commit, temporary)); }
+    try { publishPackages(plan, packPackages(version, commit, temporary), undefined, { version }); }
     finally { rmSync(temporary, { recursive: true, force: true }); }
   }
 }

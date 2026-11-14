@@ -23,9 +23,14 @@ network and unexpected response errors stop the release.
 An existing version must have a `gitHead` matching the workflow checkout.
 Otherwise bump the version and merge again. A same-commit retry skips packages
 that already exist, publishes the missing packages in `ftown`, `ftown-bridge`
-order, then creates the release tag. An existing tag is accepted only when it
-resolves to that commit. This permits recovery when only the first package was
-published. A manual rerun must select the same commit as the original release.
+order, and logs each skip or acceptance. The publish step fails when npm does
+not print `+ name@version` after the registry PUT. npm returns before the
+public packument updates, so the tag job then polls for up to 20 minutes with
+exponential backoff. It pushes `bridge-vVERSION` only when that tag is absent.
+Re-running the tag job does not publish again. An existing tag is accepted only
+when it resolves to that commit. This permits recovery when only the first
+package was published. A manual rerun must select the same commit as the
+original release.
 
 ## First publication and npm authorization
 
@@ -75,10 +80,11 @@ paths. It selects the canonical npm payload once, records the source `gitHead`,
 then repacks it under each name. The artifact test compares every extracted
 file and its mode, normalizing only the package name.
 
-The workflow alone runs `publish` after the panel release and `tag` after both
-packages exist. These commands repeat the registry/tag checks; `publish` uses
-the tarballs with scripts disabled because the build and parity checks already
-ran. `tag` refuses to proceed while either package is missing.
+The workflow alone runs `publish` after the panel release. `tag` is a later job
+and runs only after that publish succeeds. These commands repeat the registry
+and tag checks; `publish` uses the tarballs with scripts disabled because the
+build and parity checks already ran. `tag` refuses to proceed while either
+package is missing and can be re-run by itself.
 
 For a local setup smoke, use `npx --yes file:/absolute/path/to/ftown-VERSION.tgz setup`
 from a temporary working directory with a fresh temporary HOME, USERPROFILE and
