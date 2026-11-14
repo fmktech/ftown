@@ -12,7 +12,7 @@ test('scripts are a pure function of the seed and profile', () => {
   assert.notDeepEqual(buildScripts(7, 'short', deriveRng), buildScripts(7, 'soak', deriveRng));
 });
 
-test('every seed and profile: early ask, 1–2 later asks, root answers, both mail directions, within workloadEndMs with start offset', () => {
+test('every seed and profile: early ask, 1–2 later asks, root answers, both mail directions, within workloadEndMs and overlapping fault window', () => {
   for (const profile of RUN_PROFILES) {
     const { faultWindowStartMs, workloadEndMs } = PROFILE[profile];
     const [minChildSleep, maxChildSleep] = CHILD_ACTION_SLEEP_MS[profile];
@@ -28,22 +28,38 @@ test('every seed and profile: early ask, 1–2 later asks, root answers, both ma
         assert.ok(!s[role].steps.some((x) => x.do === 'exit'));
         const endAt = MAX_START_OFFSET_MS[role] + sleepTotal(s[role]);
         assert.ok(endAt <= workloadEndMs, `${profile} seed ${seed} ${role} endAt=${endAt} > ${workloadEndMs}`);
-        if (role !== 'root') {
-          const actionSleeps = s[role].steps.slice(s[role].steps[1]?.do === 'ask' ? 3 : 1);
+
+        const midOffset = MAX_START_OFFSET_MS[role] / 2;
+        let cum = 0;
+        const beginTimes: Array<{ do: string; t: number }> = [];
+        for (const st of s[role].steps) {
+          beginTimes.push({ do: st.do, t: midOffset + cum });
+          if (st.do === 'sleep') cum += st.ms;
+        }
+        const inWindow = (t: number) => t >= faultWindowStartMs && t <= workloadEndMs;
+        if (role === 'root') {
+          const rootMails = beginTimes.filter((x) => x.do === 'mail_send');
+          const inWin = rootMails.filter((x) => inWindow(x.t)).length;
+          assert.ok(inWin >= 2, `${profile} seed ${seed} root mails in window: ${inWin}`);
+        } else {
+          const statusIdx = s[role].steps.findIndex((x) => x.do === 'status' && x.headline === `${role} working`);
+          const afterStatus = s[role].steps.slice(statusIdx + 1);
+          const actionSleeps = afterStatus[0]?.do === 'sleep' ? afterStatus.slice(1) : afterStatus;
           for (const st of actionSleeps) {
             if (st.do === 'sleep') assert.ok(st.ms >= minChildSleep && st.ms <= maxChildSleep, `${profile} ${role} sleep ${st.ms}`);
           }
+          const ma = beginTimes.filter((x) => x.do === 'mail_send' || x.do === 'ask');
+          const inWin = ma.filter((x) => inWindow(x.t)).length;
+          assert.ok(inWin >= 2 && inWin * 2 >= ma.length, `${profile} seed ${seed} ${role}: ${inWin}/${ma.length} in window`);
+          assert.equal(s[role].answerRoutedQuestions, false);
+          assert.ok(s[role].steps.some((x) => x.do === 'mail_send' && x.to === 'parent'));
+          assert.deepEqual(s[role].steps.at(-1), { do: 'hook', event: 'Stop' });
+          asks += s[role].steps.filter((x) => x.do === 'ask').length;
+          if (s[role].steps[1]?.do === 'ask') early += 1;
         }
-        if (role === 'root') continue;
-        assert.equal(s[role].answerRoutedQuestions, false);
-        assert.ok(s[role].steps.some((x) => x.do === 'mail_send' && x.to === 'parent'));
-        assert.deepEqual(s[role].steps.at(-1), { do: 'hook', event: 'Stop' });
-        asks += s[role].steps.filter((x) => x.do === 'ask').length;
-        if (s[role].steps[1]?.do === 'ask') early += 1;
       }
       assert.equal(early, 1, `${profile} seed ${seed}: early asks`);
       assert.ok(asks >= 2 && asks <= 3, `${profile} seed ${seed}: ${asks} asks`);
-      if (profile === 'short') assert.ok(MAX_START_OFFSET_MS.root + sleepTotal(s.root) >= faultWindowStartMs, `${profile} seed ${seed}: root ends before fault window`);
     }
   }
 });

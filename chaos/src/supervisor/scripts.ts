@@ -1,5 +1,5 @@
 // Seed-derived fake-agent scripts, one per role. Pure: same seed => same scripts.
-import { ROLES } from '../contract.ts';
+import { PROFILE, ROLES } from '../contract.ts';
 import type { AgentScript, AgentStep, DeriveRng, MailType, Rng, Role, RunProfile } from '../contract.ts';
 
 export type Scripts = Record<Role, AgentScript>;
@@ -39,8 +39,11 @@ function rootScript(rng: Rng, profile: RunProfile): AgentScript {
   const nextMail = counter('root');
   // Children are created after root; under QEMU four creates take ~16 s, so root waits far longer.
   const steps: AgentStep[] = [sleep(rng, ROOT_FIRST_SLEEP_MS[0], ROOT_FIRST_SLEEP_MS[1]), { do: 'hook', event: 'UserPromptSubmit' }, { do: 'status', state: 'working', headline: 'root working' }];
+  // Hold until faultWindowStartMs (assuming half of MAX_START_OFFSET_MS.root) so mails overlap faults.
+  const hold = Math.max(0, PROFILE[profile].faultWindowStartMs - MAX_START_OFFSET_MS.root / 2 - stepsTotal(steps));
+  if (hold > 0) steps.push({ do: 'sleep', ms: hold });
   const mails = rng.int(2, 4);
-  const mailSleep: readonly [number, number] = profile === 'short' ? [1_000, 4_000] : [1_000, 10_000];
+  const mailSleep: readonly [number, number] = profile === 'short' ? [1_000, 3_000] : [15_000, 35_000];
   for (let i = 0; i < mails; i++) {
     const to = rng.pick(CHILDREN);
     steps.push({ do: 'mail_send', to, type: rng.pick(ROOT_MAIL_TYPES), body: mailBody(nextMail(), 'root', to) });
@@ -49,9 +52,13 @@ function rootScript(rng: Rng, profile: RunProfile): AgentScript {
   return { role: 'root', steps, readMailOnNudge: true, answerRoutedQuestions: true };
 }
 
+function stepsTotal(steps: readonly AgentStep[]): number {
+  return steps.reduce((n, s) => n + (s.do === 'sleep' ? s.ms : 0), 0);
+}
+
 /** Sum of the script's sleeps: a lower bound on when its last step runs, relative to its start. */
 export function sleepTotal(script: AgentScript): number {
-  return script.steps.reduce((n, s) => n + (s.do === 'sleep' ? s.ms : 0), 0);
+  return stepsTotal(script.steps);
 }
 
 /** Children start after root (they are created later), so this margin covers creation skew plus CLI time. */
@@ -61,16 +68,16 @@ export const ROOT_IDLE_NUDGE_TAG = 1999;
 
 /** Conservative upper bound on each role's start offset in guest ms since t0 (bring-up is ~45 s total). */
 export const MAX_START_OFFSET_MS: Readonly<Record<Role, number>> = {
-  root: 30_000,
+  root: 20_000,
   child1: 45_000,
   child2: 45_000,
   child3: 45_000,
 };
 
-/** Per-action sleep range for children, by profile (keeps short within workloadEndMs including start offset). */
+/** Per-action sleep range for children, by profile (spreads actions across fault window within workloadEndMs). */
 export const CHILD_ACTION_SLEEP_MS: Record<RunProfile, readonly [number, number]> = {
-  short: [1_000, 3_000],
-  soak: [1_000, 20_000],
+  short: [500, 1_200],
+  soak: [15_000, 30_000],
 };
 
 function childScript(role: Role, rng: Rng, early: boolean, asks: number, profile: RunProfile): AgentScript {
@@ -82,12 +89,16 @@ function childScript(role: Role, rng: Rng, early: boolean, asks: number, profile
   };
   const steps: AgentStep[] = [];
   // The early ask goes out once every session exists (ids.json complete) and well before the
-  // fault window opens at FAULT_WINDOW_START_MS, so root can answer it unfaulted.
+  // fault window opens at faultWindowStartMs, so root can answer it unfaulted.
   if (early) steps.push({ do: 'sleep', ms: EARLY_ASK_DELAY_MS }, ask());
   steps.push(sleep(rng, 2_000, 6_000), { do: 'hook', event: 'UserPromptSubmit' }, { do: 'status', state: 'working', headline: `${role} working` });
+  // Hold until faultWindowStartMs (assuming half of MAX_START_OFFSET_MS[role]) so actions overlap faults.
+  const hold = Math.max(0, PROFILE[profile].faultWindowStartMs - MAX_START_OFFSET_MS[role] / 2 - stepsTotal(steps));
+  if (hold > 0) steps.push({ do: 'sleep', ms: hold });
   const actions = rng.int(3, 6);
   const askAt = new Set<number>();
   while (askAt.size < asks) askAt.add(rng.int(0, actions - 1));
+  let sentInLoop = 0;
   for (let i = 0; i < actions; i++) {
     if (askAt.has(i)) steps.push(ask());
     switch (rng.int(0, 3)) {
@@ -96,6 +107,7 @@ function childScript(role: Role, rng: Rng, early: boolean, asks: number, profile
         break;
       case 1:
         steps.push({ do: 'mail_send', to: 'parent', type: rng.pick(CHILD_MAIL_TYPES), body: mailBody(nextMail(), role, 'root') });
+        sentInLoop++;
         break;
       case 2:
         steps.push({ do: 'status', state: rng.pick(['working', 'blocked'] as const), headline: `${role} step ${i + 1}` });
@@ -105,7 +117,10 @@ function childScript(role: Role, rng: Rng, early: boolean, asks: number, profile
     }
     steps.push(sleep(rng, ...CHILD_ACTION_SLEEP_MS[profile]));
   }
-  // Always at least one child -> parent mail, then go idle so mail to this child nudges it.
+  // Ensure at least two mail_send/ask steps inside the fault window, then final result + Stop.
+  if (sentInLoop === 0 && asks === 0) {
+    steps.push({ do: 'mail_send', to: 'parent', type: 'message', body: mailBody(nextMail(), role, 'root') });
+  }
   steps.push({ do: 'mail_send', to: 'parent', type: 'result', body: mailBody(nextMail(), role, 'root') });
   steps.push({ do: 'hook', event: 'Stop' });
   return { role, steps, readMailOnNudge: true, answerRoutedQuestions: false };
