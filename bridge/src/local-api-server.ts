@@ -1361,13 +1361,17 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
             jsonResponse(res, 409, { error: 'Cannot mark card done: linked PR required' });
             return;
           }
-          let pr: { state: string } | null = null;
+          let pr: { status: { state: string }; fresh: boolean } | null = null;
           try {
-            pr = await coordination.prStatus(targetSession.pullRequestUrl);
+            pr = await coordination.prStatusFresh(targetSession.pullRequestUrl);
           } catch {
             pr = null;
           }
-          const prState = pr?.state ?? 'unknown';
+          if (pr && !pr.fresh) {
+            jsonResponse(res, 409, { error: 'Checking PR status, retry in ~1 min' });
+            return;
+          }
+          const prState = pr?.status.state ?? 'unknown';
           if (prState !== 'passed' && prState !== 'merged') {
             jsonResponse(res, 409, { error: `PR checks are ${prState}; wait for green` });
             return;

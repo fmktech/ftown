@@ -783,6 +783,7 @@ program
       store,
       attention: attentionStore,
       prStatus: async (url) => (await pullRequestStatuses.get([url])).statuses[0] ?? null,
+      prStatusFresh: (url) => pullRequestStatuses.getFresh(url),
       mail: mailStore,
       publishSession: (session) => { void centrifugo.publishSessionUpdate(userId, session); },
       now: Date.now,

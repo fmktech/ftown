@@ -1330,14 +1330,19 @@ describe('LocalApiServer coordination routes and attention tree events (via disp
   it('enforces requireGreenPr on PUT /api/sessions/:id/card when state=done and allows parent --force', async (t) => {
     const f = await coordFixture(t);
     const prStates = new Map<string, 'in_progress' | 'failed' | 'passed' | 'merged' | 'closed' | 'unknown'>();
+    let throwPr = false;
+    let notFresh = false;
     const coord = createCoordination({
       store: f.store,
       attention: new AttentionStore((id) => f.store.sessionDir(id), 500),
-      prStatus: async (url) => ({
-        state: prStates.get(url) ?? 'unknown',
-        stale: false,
-        checkedAt: '2026-11-13T12:00:00.000Z',
-      }),
+      prStatus: async () => null,
+      prStatusFresh: async (url) => {
+        if (throwPr) throw new Error('gh failed');
+        return {
+          status: { state: prStates.get(url) ?? 'unknown', stale: false, checkedAt: '2026-11-13T12:00:00.000Z' },
+          fresh: !notFresh,
+        };
+      },
       mail: { unreadCount: async () => 0 },
       publishSession: () => {},
       now: () => Date.parse('2026-11-13T12:00:00.000Z'),
@@ -1387,6 +1392,24 @@ describe('LocalApiServer coordination routes and attention tree events (via disp
     assert.equal(selfForce.status, 409);
     const otherForce = await f.call('PUT', '/api/sessions/pr-guarded/card', { state: 'done', headline: 'done', force: true }, undefined, 'child-a');
     assert.equal(otherForce.status, 409);
+
+    // closed / unknown / throwing / not-fresh PR status -> refused
+    await makeChild('pr-odd', prUrl);
+    for (const state of ['closed', 'unknown'] as const) {
+      prStates.set(prUrl, state);
+      const r = await f.call('PUT', '/api/sessions/pr-odd/card', { state: 'done', headline: 'done' });
+      assert.equal(r.status, 409, state);
+      assert.match(String(r.body.error), new RegExp(`PR checks are ${state}; wait for green`));
+    }
+    throwPr = true;
+    assert.equal((await f.call('PUT', '/api/sessions/pr-odd/card', { state: 'done', headline: 'done' })).status, 409);
+    throwPr = false;
+    notFresh = true;
+    prStates.set(prUrl, 'passed');
+    const stale = await f.call('PUT', '/api/sessions/pr-odd/card', { state: 'done', headline: 'done' });
+    assert.equal(stale.status, 409);
+    assert.match(String(stale.body.error), /retry in ~1 min/);
+    notFresh = false;
 
     // Passed -> 200
     prStates.set(prUrl, 'passed');

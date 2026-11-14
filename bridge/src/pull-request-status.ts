@@ -147,7 +147,28 @@ export class PullRequestStatusService {
     return this.read(urls, false);
   }
 
-  private async read(urls: readonly string[], foreground: boolean): Promise<{ observations: PullRequestObservation[]; nextRefreshAt: string }> {
+  /**
+   * Gate-time read: the cached entry is used only when younger than maxAgeMs (merged is final);
+   * otherwise one refresh bypasses the TTL. `fresh` is false when the refresh could not run
+   * (quota spacing, cooldown, failure), so callers must not trust the state.
+   */
+  async getFresh(url: string, maxAgeMs = 15_000): Promise<{ status: PullRequestStatus; fresh: boolean } | null> {
+    const started = this.now();
+    let last: PullRequestObservation | undefined;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const { observations } = await this.read([url], true, true);
+      last = observations[0];
+      if (!last) return null;
+      if (last.state === 'merged' || (last.checkedAt !== null && Date.parse(last.checkedAt) >= started - maxAgeMs && !(last.reason && last.reason !== 'no_checks'))) {
+        const { headOid: _h, attempt: _a, ...status } = last;
+        return { status, fresh: true };
+      }
+    }
+    const { headOid: _h, attempt: _a, ...status } = last!;
+    return { status, fresh: false };
+  }
+
+  private async read(urls: readonly string[], foreground: boolean, forceFresh = false): Promise<{ observations: PullRequestObservation[]; nextRefreshAt: string }> {
     const keys: string[] = [];
     for (const value of urls) {
       const key = this.entry(value);
@@ -159,7 +180,7 @@ export class PullRequestStatusService {
       const now = this.now();
       this.launches = this.launches.filter(time => time > now - HOUR);
       const allowed = Math.max(this.cooldown, (this.launches.at(-1) ?? -Infinity) + MINUTE, this.launches.length >= 60 ? this.launches[0] + HOUR : 0);
-      const due = (key: string) => { const e = this.cache.get(key); return !!e && e.state !== 'merged' && now >= e.nextAttempt && (e.checkedAt === null || now >= e.checkedAt + ttl(e.state)); };
+      const due = (key: string) => { const e = this.cache.get(key); return !!e && e.state !== 'merged' && (forceFresh && keys.includes(key) ? true : now >= e.nextAttempt) && (forceFresh && keys.includes(key) ? e.checkedAt === null || now > e.checkedAt + 15_000 : e.checkedAt === null || now >= e.checkedAt + ttl(e.state)); };
       const sort = (a: Entry, b: Entry) => a.lastAttempt - b.lastAttempt || a.used - b.used;
       const foregroundDue = (foreground ? keys : []).filter(due).map(key => this.cache.get(key)!).sort(sort);
       const backgroundDue = [...this.background].filter(due).map(key => this.cache.get(key)!).sort(sort);

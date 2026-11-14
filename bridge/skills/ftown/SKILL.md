@@ -174,7 +174,7 @@ child by hand, and `done`/`drop`/`todo` set the state directly. Every plan
 change emits one `plan` tree event (`<id> <state>: <title>`, plus
 ` → ready: …` when items become ready). Exit codes: 0 ok, 1 error, 2 usage.
 
-**Delegating work.** Delegate implementation to ftown child sessions (`ftown sessions create --parent ...`) rather than in-process subagents — only sessions appear on the board and dashboard (cards, events, digests, parent-first questions). For children that open PRs, pass `--require-green-pr` so the child cannot set its card to `done` until its linked PR is green/merged (parent can bypass with `ftown status set --force`).
+**Delegating work.** Delegate implementation to ftown child sessions (`ftown sessions create --parent ...`) rather than in-process subagents — only sessions appear on the board and dashboard (cards, events, digests, parent-first questions). For children that open PRs, pass `--require-green-pr` so the child cannot set its card to `done` until its linked PR is green/merged (parent can bypass with `ftown status set --force`). The gate is advisory against a hostile child: any local process can present the parent's id (same trust model as the local CLI); it stops honest mistakes, not malicious agents.
 A child session may use its own subagents for reviews and lookups. Pick the CLI and model with `ftown quota --json` (see `references/quota.md`).
 
 ## Manager brief
