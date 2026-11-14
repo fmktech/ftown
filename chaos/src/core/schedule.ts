@@ -87,6 +87,7 @@ function drawFault(
 
 export const buildSchedule: BuildSchedule = (_seed, level, rng) => {
   validateFaults(FAULTS);
+  if (level !== 'off' && level !== 'low' && level !== 'high') throw new Error(`schedule: unknown level ${String(level)}`);
   if (level === 'off') return [];
 
   const shortCount = level === 'low' ? rng.int(2, 4) : rng.int(3, 5);

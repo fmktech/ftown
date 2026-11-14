@@ -104,3 +104,19 @@ test('validateFaults rejects inverted and invalid ranges', () => {
   assert.throws(() => validateFaults([bad({ short: [Number.NaN, 1] })]), /inverted/);
   assert.throws(() => validateFaults([{ ...clockSpec, jump: { short: [2, 1], long: [1, 1] } }]), /inverted/);
 });
+
+test('unknown level throws', () => {
+  assert.throws(() => buildSchedule(1, 'medium' as ChaosLevel, deriveRng(1, 'faults')), /unknown level/);
+});
+
+// Golden schedules. Any change to the FAULTS table or to the drawing order changes every seed's
+// schedule; this test is what catches it. Update deliberately, never to make a run green.
+const GOLDEN_LOW = [{"id":"f1","kind":"bridge_sigterm","target":"bridge","atMs":33774,"durationMs":2162,"jumpMs":null,"long":false},{"id":"f2","kind":"agent_kill9","target":"child2","atMs":53561,"durationMs":0,"jumpMs":null,"long":false},{"id":"f3","kind":"clock_jump_back","target":"clock","atMs":107214,"durationMs":0,"jumpMs":-30000,"long":false},{"id":"f4","kind":"agent_kill9","target":"child3","atMs":206230,"durationMs":0,"jumpMs":null,"long":false}];
+const GOLDEN_HIGH = [{"id":"f1","kind":"bridge_sigterm","target":"bridge","atMs":33774,"durationMs":2162,"jumpMs":null,"long":false},{"id":"f2","kind":"agent_kill9","target":"child2","atMs":53561,"durationMs":0,"jumpMs":null,"long":false},{"id":"f3","kind":"clock_jump_fwd","target":"clock","atMs":83795,"durationMs":0,"jumpMs":2100000,"long":true},{"id":"f4","kind":"agent_sigstop","target":"child3","atMs":99053,"durationMs":3000,"jumpMs":null,"long":false},{"id":"f5","kind":"clock_jump_back","target":"clock","atMs":206022,"durationMs":0,"jumpMs":-30000,"long":false},{"id":"f6","kind":"clock_jump_fwd","target":"clock","atMs":226696,"durationMs":0,"jumpMs":90000,"long":false}];
+
+test('golden schedule for seed 1, level low', () => {
+  assert.deepEqual(build(1, 'low'), GOLDEN_LOW);
+});
+test('golden schedule for seed 1, level high', () => {
+  assert.deepEqual(build(1, 'high'), GOLDEN_HIGH);
+});
