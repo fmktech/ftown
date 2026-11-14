@@ -30,7 +30,7 @@ export function mail(tag: string, o: Partial<MailObs> = {}): MailObs {
 export function session(role: Role, inbox: MailObs[] = [], o: Partial<SessionObs> = {}): SessionObs {
   return {
     role, status: 'running', tmuxAlive: true, procAlive: true, inbox, inboxParses: true,
-    attention: [], attentionParses: true, ...o,
+    attention: [], attentionParses: true, untaggedWakingMail: 0, ...o,
   };
 }
 
