@@ -19,7 +19,7 @@ export type StreamLabel =
   | 'workload.attention'
   | `agent.${string}`;
 
-/** Deterministic generator. deriveRng(seed, label) = SHA-256(`${seed}:${label}`) keyed stream. */
+/** Deterministic generator. deriveRng(seed, label) = SHA-256(`${seed}:${label}`) keyed stream. A label containing ':' throws. */
 export interface Rng {
   /** Uniform unsigned 32-bit integer. */
   u32(): number;
@@ -129,6 +129,11 @@ export interface ScheduledFault {
  *  - Every fault starts inside [FAULT_WINDOW_START_MS, FAULT_WINDOW_END_MS] and is healed
  *    before RUN_QUIESCE_MS begins.
  *  - The same (seed, level) always yields the same schedule.
+ *  - The FAULTS table is validated before use: duplicate kinds, a clock fault without a jump
+ *    range, a non-clock fault with one, or an empty/inverted range are rejected with an error.
+ *  - After the last scheduled fault the executor always performs one final heal: SIGCONT anything
+ *    still stopped and start the bridge if it is not running. It is logged as a fault record with
+ *    id 'heal', phase 'heal', kind of the last fault, target 'all'.
  */
 export type BuildSchedule = (seed: number, level: ChaosLevel, rng: Rng) => ScheduledFault[];
 
@@ -272,7 +277,7 @@ export type Rec =
   | { k: 'checkpoint'; t: number; name: string; final: boolean; snap: Snapshot }
   | { k: 'verdict'; prop: string; kind: PropKind; status: PropStatus; evidence: string[] };
 
-export const CONTRACT_VERSION = 1;
+export const CONTRACT_VERSION = 2;
 
 /** Operations the supervisor's workload driver performs through the real ftown CLI. */
 export type WorkloadOp =
@@ -363,13 +368,22 @@ export const HOST_PROTOCOL = {
   exit: 'CHAOS-EXIT',
 } as const;
 
-/** Exit codes of the in-guest supervisor and of the host runner. */
+/**
+ * Exit codes of the in-guest supervisor and of the host runner.
+ *  - violation: an always is violated, an unreachable was reached, or a declared always was
+ *    never evaluated (unexercised). A green run cannot be vacuous.
+ *  - infra: bring-up, drive or collect threw; the report then carries the infra error and no properties.
+ *  - reproDiverged: two runs of one seed produced different canonical logs.
+ *  - usage: bad command line (for example a malformed --seeds value).
+ * worst(codes): infra > reproDiverged > violation > ok; worst([]) = ok.
+ * Seed lists: "1-3,2,7" = [1,2,3,7] (sorted, de-duplicated); "", "3-1", "a", "1,,2" are rejected.
+ */
 export const EXIT = {
   ok: 0,
   violation: 1,
-  nondeterminism: 2,
   infra: 3,
-  unexercised: 4,
+  reproDiverged: 4,
+  usage: 64,
 } as const;
 
 /** Selftest output: one JSON object in the file `selftest.json`. Compared byte for byte across boots. */
