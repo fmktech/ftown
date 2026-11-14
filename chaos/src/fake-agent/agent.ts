@@ -10,6 +10,7 @@ import {
   parseMailRead,
   parseNudge,
   parseWaitAnswer,
+  normaliseCliError,
   parseWaitEventId,
 } from './parse.ts';
 import type { EscalationMail } from './parse.ts';
@@ -36,6 +37,8 @@ export interface AgentDeps {
   hook: (event: string) => Promise<boolean>;
   log: (e: AgentEvent) => void;
   stdinLines: AsyncIterable<string>;
+  /** Raw stderr+stdout of a failed call, for the (unhashed) sidecar file. */
+  rawFailure?: (cmd: string, r: CliResult) => void;
   /** Session id of another role (from CHAOS_IDS_FILE), or null when unknown. */
   resolveId?: (role: Role) => string | null;
   /** Ends the process for the `exit` step. Defaults to process.exit. */
@@ -55,7 +58,7 @@ const ASK_TIMEOUT_MS = 86_500_000;
 const ASK_WAIT_SECONDS = '86400';
 
 function failure(r: CliResult): string {
-  return r.code === 124 ? 'timeout' : `exit ${r.code}`;
+  return normaliseCliError(r.code, r.stdout, r.stderr);
 }
 
 export async function runAgent(deps: AgentDeps): Promise<AgentResult> {
@@ -68,6 +71,7 @@ export async function runAgent(deps: AgentDeps): Promise<AgentResult> {
   const pendingRouted: EscalationMail[] = [];
 
   const cliError = (cmd: string, r: CliResult): void => {
+    deps.rawFailure?.(cmd, r);
     log({ ev: 'cli_error', cmd, error: failure(r) });
   };
 

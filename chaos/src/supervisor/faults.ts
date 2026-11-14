@@ -17,6 +17,7 @@ export interface FaultActions {
 }
 
 export const SIGTERM_EXIT_BOUND_MS = 30_000;
+export const SIGKILL_EXIT_BOUND_MS = 10_000;
 
 interface Step {
   atMs: number;
@@ -53,6 +54,8 @@ async function applyStart(f: ScheduledFault, a: FaultActions): Promise<boolean> 
       if (!(await a.signalBridge('SIGTERM'))) return false;
       if (await a.waitBridgeExit(SIGTERM_EXIT_BOUND_MS)) return true;
       await a.signalBridge('SIGKILL');
+      // Heal must not start while the old bridge still holds its port and pid file.
+      await a.waitBridgeExit(SIGKILL_EXIT_BOUND_MS);
       return false;
     }
     case 'agent_kill9':
@@ -94,21 +97,59 @@ export interface ExecutorDeps {
   actions: FaultActions;
   roles: readonly Role[];
   log: (rec: Rec) => void;
+  /** Checked before each step; true ends the loop without the final heal (another loop failed). */
+  stopped?: () => boolean;
 }
 
-/** Runs the whole schedule; resolves after the final heal (immediately when the schedule is empty). */
+const BRIDGE_KINDS: readonly FaultKind[] = ['bridge_kill9', 'bridge_sigstop', 'bridge_sigterm'];
+
+/**
+ * Runs the whole schedule; resolves after the final heal (immediately when the schedule is empty).
+ * Every step fires at its own atMs, independent of slow earlier steps (a heal running up.sh does
+ * not delay other faults). Two orderings are kept: a fault's heal runs after its own start has
+ * finished, and bridge steps (start or heal) never overlap — a bridge step that is due while
+ * another is still running waits, and its record's t is the instant it actually applies.
+ */
 export async function runFaults(deps: ExecutorDeps): Promise<void> {
   const { clock, actions, log } = deps;
+  let bridgeLock: Promise<unknown> = Promise.resolve();
+  const withBridge = <T>(f: () => Promise<T>): Promise<T> => {
+    const p = bridgeLock.then(f);
+    bridgeLock = p.catch(() => undefined);
+    return p;
+  };
+  /** Resolves with the instant the start actually applied (null when stopped). */
+  const starts = new Map<number, Promise<number | null>>();
+  const tasks: Promise<unknown>[] = [];
   for (const s of timeline(deps.schedule)) {
-    const wait = s.atMs - clock.now();
-    if (wait > 0) await clock.sleep(wait);
-    const t = clock.now();
-    const ok = s.phase === 'start' ? await applyStart(s.fault, actions) : await applyHeal(s.fault, actions);
-    log({ k: 'fault', t, id: s.fault.id, phase: s.phase, kind: s.fault.kind, target: s.fault.target, ok });
+    const task = (async (): Promise<number | null> => {
+      let due = s.atMs;
+      if (s.phase === 'heal') {
+        // A start delayed behind a bridge heal still holds for its full duration.
+        const startedAt = await starts.get(s.seq);
+        if (startedAt === null || startedAt === undefined) return null;
+        due = Math.max(due, startedAt + s.fault.durationMs);
+      }
+      const wait = due - clock.now();
+      if (wait > 0) await clock.sleep(wait);
+      if (deps.stopped?.()) return null;
+      const apply = async (): Promise<number> => {
+        const t = clock.now();
+        const ok = s.phase === 'start' ? await applyStart(s.fault, actions) : await applyHeal(s.fault, actions);
+        log({ k: 'fault', t, id: s.fault.id, phase: s.phase, kind: s.fault.kind, target: s.fault.target, ok });
+        return t;
+      };
+      return BRIDGE_KINDS.includes(s.fault.kind) ? withBridge(apply) : apply();
+    })();
+    if (s.phase === 'start') starts.set(s.seq, task);
+    tasks.push(task);
   }
-  if (deps.schedule.length === 0) return;
+  await Promise.all(tasks);
+  if (deps.schedule.length === 0 || deps.stopped?.()) return;
   const last: FaultKind = deps.schedule[deps.schedule.length - 1].kind;
-  const t = clock.now();
-  const ok = await finalHeal(actions, deps.roles);
-  log({ k: 'fault', t, id: 'heal', phase: 'heal', kind: last, target: 'all', ok });
+  await withBridge(async () => {
+    const t = clock.now();
+    const ok = await finalHeal(actions, deps.roles);
+    log({ k: 'fault', t, id: 'heal', phase: 'heal', kind: last, target: 'all', ok });
+  });
 }

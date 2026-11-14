@@ -87,8 +87,22 @@ test('sigterm that does not exit in time is killed and logged ok=false', async (
   const done = runFaults({ clock, schedule: [f('f1', 'bridge_sigterm', 'bridge', 20_000, 1_000)], actions: fakeActions(calls, { exitInTime: false }), roles: ROLES, log: (r) => recs.push(r) });
   await clock.advance(30_000);
   await done;
-  assert.deepEqual(calls.slice(0, 4), ['bridge SIGTERM', 'wait 30000', 'bridge SIGKILL', 'up']);
+  assert.deepEqual(calls.slice(0, 5), ['bridge SIGTERM', 'wait 30000', 'bridge SIGKILL', 'wait 10000', 'up']);
   assert.equal(recs[0].k === 'fault' && recs[0].ok, false);
+});
+
+test('stopped() ends the loop before the next step and skips the final heal', async () => {
+  const clock = fakeClock();
+  const calls: string[] = [];
+  const recs: Rec[] = [];
+  let stop = false;
+  const done = runFaults({ clock, schedule: [f('f1', 'agent_kill9', 'child1', 20_000, 0), f('f2', 'agent_kill9', 'child2', 40_000, 0)], actions: fakeActions(calls), roles: ROLES, log: (r) => recs.push(r), stopped: () => stop });
+  await clock.advance(25_000);
+  stop = true;
+  await clock.advance(30_000);
+  await done;
+  assert.deepEqual(calls, ['child1 SIGKILL']);
+  assert.equal(recs.length, 1);
 });
 
 test('empty schedule: no records, no final heal', async () => {
@@ -97,4 +111,33 @@ test('empty schedule: no records, no final heal', async () => {
   await runFaults({ clock: fakeClock(), schedule: [], actions: fakeActions(calls), roles: ROLES, log: (r) => recs.push(r) });
   assert.deepEqual(calls, []);
   assert.deepEqual(recs, []);
+});
+
+test('a slow heal does not delay other faults; a bridge step waits for the running bridge heal', async () => {
+  const clock = fakeClock();
+  const calls: string[] = [];
+  const recs: Rec[] = [];
+  const base = fakeActions(calls);
+  const actions: FaultActions = {
+    ...base,
+    async bridgeUp() {
+      calls.push('up begin');
+      await clock.sleep(26_000);
+      calls.push('up end');
+      return base.bridgeUp();
+    },
+  };
+  const schedule = [
+    f('f1', 'bridge_kill9', 'bridge', 20_000, 3_000),
+    f('f2', 'agent_kill9', 'child1', 30_000, 0),
+    f('f3', 'bridge_sigstop', 'bridge', 35_000, 2_000),
+  ];
+  const done = runFaults({ clock, schedule, actions, roles: ROLES, log: (r) => recs.push(r) });
+  await clock.advance(100_000);
+  await done;
+  assert.deepEqual(
+    recs.map((r) => (r.k === 'fault' ? `${r.t} ${r.id} ${r.phase}` : '')),
+    ['20000 f1 start', '30000 f2 start', '23000 f1 heal', '49000 f3 start', '51000 f3 heal', '51000 heal heal'],
+  );
+  assert.deepEqual(calls.slice(0, 6), ['bridge SIGKILL', 'up begin', 'child1 SIGKILL', 'up end', 'up', 'bridge SIGSTOP']);
 });

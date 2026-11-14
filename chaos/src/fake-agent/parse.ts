@@ -157,3 +157,37 @@ export function parseWaitEventId(stderr: string): string | null {
   const m = /Waiting for an answer \(attention (\S+?)\)\.\.\./.exec(stderr) ?? /Event id: (\S+?)\. /.exec(stderr);
   return m ? m[1] : null;
 }
+
+/**
+ * Normalised reason for a failed CLI call. The first matching rule wins; the result never
+ * contains ids, ports, paths or times. Rules come from the real CLI error paths:
+ *  - bridge/src/security/bridge/local-client.ts:27  `Bridge security: bridge_offline` (envelope POST not ok)
+ *    and :12-32 other typed codes (upgrade_required, wrong_context, expired); errors.ts:8 message shape
+ *    `Bridge security: <code>`; identity.ts:27 key_unavailable; execute.ts:37 outcome_unknown/permission_denied
+ *  - bridge/src/cli-client.ts:20,22  `Bridge not running (no valid <path>)…` / `Invalid <path> — missing port or token`
+ *  - bridge/src/cli-client.ts:35  `HTTP <status>` or the bridge's `error` string (local-api-server.ts:651,975:
+ *    `Session not found`, `Unauthorized`)
+ *  - bridge/src/attention-cli.ts:278  `Attention item <id> is already resolved` (exit 5; 403 => exit 4 at :354)
+ *  - Node fetch failures (`fetch failed`, ECONNREFUSED/ECONNRESET/UND_ERR_*) when the bridge socket is down
+ *  - the agent's own timeout (exit code 124 from cli.ts run())
+ */
+export function normaliseCliError(code: number, stdout: string, stderr: string): string {
+  const text = `${stderr}\n${stdout}`;
+  const rules: [RegExp, string][] = [
+    [/Bridge security: bridge_offline|bridge_offline/, 'bridge_offline'],
+    [/Bridge not running|missing port or token|ECONNREFUSED|ECONNRESET|EPIPE|UND_ERR|fetch failed|cannot connect|socket hang up/i, 'bridge_unreachable'],
+    [/\bUnauthorized\b|\bHTTP 40[13]\b|\b401\b|invalid token/i, 'unauthorized'],
+    [/already resolved|already answered/i, 'attention_already_resolved'],
+    [/permission_denied|\bForbidden\b|\bHTTP 403\b/i, 'permission_denied'],
+    [/not found|unknown_session|\bHTTP 404\b|No session matching/i, 'not_found'],
+    [/Bridge security: (expired|wrong_context|key_unavailable|outcome_unknown|upgrade_required)/, ''],
+    [/timed out|\bTimeoutError\b|\bETIMEDOUT\b/i, 'timeout'],
+  ];
+  if (code === 124) return 'timeout';
+  for (const [re, reason] of rules) {
+    const m = re.exec(text);
+    if (!m) continue;
+    return reason === '' ? m[1] : reason;
+  }
+  return `exit ${code}`;
+}
