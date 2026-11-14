@@ -1,15 +1,14 @@
 # Worker coordination examples
 
 Read `../SKILL.md` for identity, reporting and cleanup, and
-`sessions.md` for the command reference. No special orchestrator mode is needed.
+`sessions.md` for commands. No special orchestrator mode is needed.
 
 List existing sessions before creating another worker. Give each worker a
-bounded task, clear writable files and checks; save the returned
-`session.id`. Omit `--shell` to inherit your harness. Before picking a CLI,
+bounded task, clear writable files and checks; save `session.id`. Omit `--shell` to inherit your harness. Before picking a CLI,
 model and effort, run `ftown quota --json` and follow `quota.md` (owner
 tiers first); never route to `exhausted`.
 
-Keep the plan on the manager — the manager's plan, not a ticket system.
+Keep the plan on the manager, not in a ticket system.
 Add steps with `ftown plan add` (`--after`/`--priority` set precedence;
 ready = every `after` done or dropped) and create each child with
 `--plan-item`, so its item starts and completes with the child:
@@ -41,3 +40,5 @@ for the whole job.
 After accepting a result, clean up with
 `ftown sessions remove <worker-id>`, which retires a clean, merged or pushed
 worktree and otherwise keeps it and says why.
+
+Use `--require-green-pr` for PR-opening children.

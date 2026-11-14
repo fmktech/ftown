@@ -711,3 +711,24 @@ test('create_session forwards planItem and maps PlanItemError to a client error'
   await send('drop', { command: 'claude', bridgeId: 'bridge', planItem: 'not-an-id' });
   assert.equal(inputs.at(-1)?.planItem, undefined);
 });
+
+test('create_session forwards requireGreenPr only when strictly true', async () => {
+  const responses: CommandResponse[] = [];
+  const inputs: Array<{ requireGreenPr?: boolean }> = [];
+  const handler = createCommandHandler({
+    bridgeId: 'bridge',
+    sessionController: {
+      create: async (input: { requireGreenPr?: boolean }) => {
+        inputs.push(input);
+        return { id: 'child', name: 'child', command: 'claude', status: 'running', bridgeId: 'bridge', createdAt: '', updatedAt: '' };
+      },
+    } as unknown as SessionController,
+    publishCommandResponse: async (response) => { responses.push(response); },
+  });
+  await handler({ type: 'create_session', requestId: 'rgp-1', payload: { command: 'claude', bridgeId: 'bridge', requireGreenPr: true } });
+  assert.equal(responses.at(-1)?.success, true);
+  assert.equal(inputs[0]?.requireGreenPr, true);
+
+  await handler({ type: 'create_session', requestId: 'rgp-2', payload: { command: 'claude', bridgeId: 'bridge', requireGreenPr: false } });
+  assert.equal(inputs[1]?.requireGreenPr, undefined);
+});

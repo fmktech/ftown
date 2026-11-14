@@ -22,6 +22,7 @@ const PREVIEW_FRAME_NOT_READY = [
   /Cannot find context with specified id/i,
   /Element is not attached to the DOM/i,
   /Target closed/i,
+  /Target page, context or browser has been closed/i,
 ];
 
 /**

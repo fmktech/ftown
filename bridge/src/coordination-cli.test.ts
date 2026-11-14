@@ -329,6 +329,18 @@ test('HTTP errors exit 1 with the server message', async () => {
   assert.match(err.join('\n'), /Session not found/);
 });
 
+test('status set --force maps force:true and 409 exits 5 with the message', async () => {
+  const { deps, calls } = harness(() => makeCard({ state: 'done', headline: 'forced' }));
+  assert.equal(await runStatus(['set', '--state', 'done', '--headline', 'forced', '--force'], deps), 0);
+  assert.deepEqual(calls[0].body, { state: 'done', headline: 'forced', force: true });
+
+  const conflict = harness(() => {
+    throw Object.assign(new Error('PR checks are in_progress; wait for green'), { status: 409 });
+  });
+  assert.equal(await runStatus(['set', '--state', 'done', '--headline', 'ship'], conflict.deps), 5);
+  assert.match(conflict.err.join('\n'), /PR checks are in_progress; wait for green/);
+});
+
 // ───────────────────────── board ─────────────────────────
 
 test('board maps since/ready/all to the query and prints formatBoard plus cursor', async () => {

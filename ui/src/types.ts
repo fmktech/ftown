@@ -27,6 +27,7 @@ export interface Session {
   antigravitySessionId?: string;
   command?: string;
   parentSessionId?: string;
+  requireGreenPr?: boolean;
   pullRequestUrl?: string;
   pullRequestReviewGeneration?: string;
   runtime?: 'tmux' | 'direct';

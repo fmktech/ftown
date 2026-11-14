@@ -502,4 +502,31 @@ describe("SessionWorkspace overview toggle", () => {
     expect(screen.queryByRole("tab", { name: "Overview" })).toBeNull();
     expect(screen.queryByRole("tabpanel", { name: "Overview" })).toBeNull();
   });
+
+  it("shows PR ◷ / PR ✓ / PR ✗ suffix on the one-line row only when requireGreenPr is true", () => {
+    const manager = managerSession();
+    const pending = session("c-pend", { name: "PendingPR", parentSessionId: "manager", requireGreenPr: true, card: card("working", { headline: "waiting" }) });
+    const passed = session("c-pass", { name: "PassedPR", parentSessionId: "manager", requireGreenPr: true, card: card("working", { headline: "ready" }) });
+    const failed = session("c-fail", { name: "FailedPR", parentSessionId: "manager", requireGreenPr: true, card: card("working", { headline: "broken" }) });
+    const plain = session("c-plain", { name: "PlainPR", parentSessionId: "manager", card: card("working", { headline: "normal" }) });
+    const baseDerived = { status: "running" as const, activity: "unknown" as const, openAttention: 0, unreadMail: 0, previews: [] };
+    const snapshot: OverviewSnapshot = {
+      board: {
+        rootId: "manager",
+        cards: [
+          snapCard("c-pend", "PendingPR", pending.card, { derived: { ...baseDerived, pr: { url: "https://github.com/o/r/pull/1", state: "in_progress", stale: false, checkedAt: null } } }),
+          snapCard("c-pass", "PassedPR", passed.card, { derived: { ...baseDerived, pr: { url: "https://github.com/o/r/pull/2", state: "passed", stale: false, checkedAt: null } } }),
+          snapCard("c-fail", "FailedPR", failed.card, { derived: { ...baseDerived, pr: { url: "https://github.com/o/r/pull/3", state: "failed", stale: false, checkedAt: null } } }),
+          snapCard("c-plain", "PlainPR", plain.card, { derived: { ...baseDerived, pr: { url: "https://github.com/o/r/pull/4", state: "in_progress", stale: false, checkedAt: null } } }),
+        ],
+      },
+      events: [],
+      attention: [],
+    };
+    renderOverview(manager, [manager, pending, passed, failed, plain], { snapshot });
+    expect(screen.getByRole("button", { name: /PendingPR/ }).textContent).toContain("PR ◷");
+    expect(screen.getByRole("button", { name: /PassedPR/ }).textContent).toContain("PR ✓");
+    expect(screen.getByRole("button", { name: /FailedPR/ }).textContent).toContain("PR ✗");
+    expect(screen.getByRole("button", { name: /PlainPR/ }).textContent).not.toContain("PR ");
+  });
 });

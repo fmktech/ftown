@@ -156,3 +156,26 @@ test('contradictory merged flag and state never produce a fresh merge fact', asy
   for (const item of observations.slice(0, 4)) { assert.equal(item.state, 'unknown'); assert.equal(item.reason, 'unavailable'); assert.equal(item.stale, true); }
   assert.equal(observations[4].state, 'merged'); assert.equal(observations[4].stale, false);
 });
+
+test('getFresh reuses a cache younger than 15s, refetches an older one, and reports unrefreshable status as not fresh', async () => {
+  let now = 1_000_000, calls = 0, next = 'SUCCESS';
+  const service = new PullRequestStatusService(() => now, async () => { calls++; return reply([pr(next)]); });
+  assert.deepEqual([(await service.getFresh(url(1)))?.status.state, (await service.getFresh(url(1)))?.fresh, calls], ['passed', true, 1]);
+  // Stale 'passed' (older than 15s but inside the 5 min TTL, past the 1 min spacing) is refetched and becomes failed.
+  now += 61_000; next = 'FAILURE';
+  const failed = await service.getFresh(url(1));
+  assert.deepEqual([failed?.status.state, failed?.fresh, calls], ['failed', true, 2]);
+  // A fixed PR is not kept refused by a stale 'failed'.
+  now += 61_000; next = 'SUCCESS';
+  assert.equal((await service.getFresh(url(1)))?.status.state, 'passed');
+  // Inside the 1 min launch spacing a stale entry cannot be refreshed: not fresh.
+  now += 20_000; next = 'FAILURE';
+  const blocked = await service.getFresh(url(1));
+  assert.deepEqual([blocked?.fresh, calls], [false, 3]);
+});
+
+test('getFresh is not fresh when the refresh is rate limited', async () => {
+  let now = 1_000_000;
+  const limited = new PullRequestStatusService(() => now, async () => ({ stdout: 'HTTP/2 429\r\nRetry-After: 900\r\n\r\n{}', stderr: '', exitCode: 1 }));
+  assert.equal((await limited.getFresh(url(1)))?.fresh, false);
+});

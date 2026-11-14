@@ -17,11 +17,12 @@ top-level `~/.ftown/ftown` dispatcher.
 # List sessions (JSON)
 ftown sessions list
 
-# Spawn a child agent (uses FTOWN_SESSION_ID for --parent)
+# Spawn a child agent (uses FTOWN_SESSION_ID for --parent; --require-green-pr blocks done until PR CI is green)
 ftown sessions create \
   --prompt "Review the auth module and summarize" \
   --workdir /path/to/repo \
   --name auth-review \
+  --require-green-pr \
   --parent
 
 # Metadata
@@ -64,8 +65,11 @@ card wakes nobody. The target defaults to `FTOWN_SESSION_ID`; `--session-id
 ftown status [--json] [--session-id <id>]
 
 # Update my card (omitted fields unchanged; first write needs --state and --headline)
+# --force bypasses --require-green-pr only when called by the session's parent (exits 5 on 409).
+# The gate is advisory: any local process can present the parent's id (local CLI trust model);
+# it stops honest mistakes, not malicious agents. PR status is fetched fresh (<=15s) at the gate.
 ftown status set [--state <s>] [--headline <t>] [--progress <d>/<t>|--no-progress] \
-  [--on human|parent|external|session:<id>] [--text <t>] [--next <t>|--no-next] [--session-id <id>]
+  [--on human|parent|external|session:<id>] [--text <t>] [--next <t>|--no-next] [--force] [--session-id <id>]
 
 # Remove my card
 ftown status clear [--session-id <id>]

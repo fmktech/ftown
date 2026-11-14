@@ -427,3 +427,9 @@ test('create --plan-item maps to body.planItem and requires --parent/--parent-id
   assert.equal(requests.at(-1)?.method, 'POST');
   assert.deepEqual(requests.at(-1)?.body, { parentSessionId: 'p-uuid', prompt: 'work', planItem: 'p3' });
 }, (request) => ({ session: { id: 'child', name: 'child', status: 'running' } })));
+
+test('create --require-green-pr maps to body.requireGreenPr', async () => fixture(async (requests) => {
+  assert.equal(await runSessions(['create', '--prompt', 'work', '--parent-id', 'p-uuid', '--require-green-pr']), 0);
+  assert.equal(requests.at(-1)?.method, 'POST');
+  assert.deepEqual(requests.at(-1)?.body, { parentSessionId: 'p-uuid', prompt: 'work', requireGreenPr: true });
+}, () => ({ session: { id: 'child', name: 'child', status: 'running' } })));
