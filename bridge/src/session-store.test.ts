@@ -1,6 +1,6 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { mkdtemp, rm, stat, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -30,6 +30,58 @@ describe('SessionStore session snapshot persistence', () => {
     await reloaded.saveSession(cleared);
     assert.equal(Object.hasOwn((await store.loadSession(session.id))!, 'pullRequestUrl'), false);
     assert.equal((await reloaded.listSessions()).find((item) => item.id === session.id)?.pullRequestUrl, undefined);
+  });
+
+  it('normalizes legacy shellType agy to canonical antigravity on loadSession and listSessions', async () => {
+    const store = new SessionStore(dir);
+    const sessionDir = join(dir, 'sessions', 'legacy-agy');
+    await mkdir(sessionDir, { recursive: true });
+    await writeFile(
+      join(sessionDir, 'session.json'),
+      JSON.stringify({
+        id: 'legacy-agy',
+        name: 'legacy agy',
+        command: 'agy --dangerously-skip-permissions',
+        status: 'error',
+        shellType: 'agy',
+        antigravitySessionId: 'conv-disk-1',
+        bridgeId: 'bridge-1',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }),
+      'utf-8',
+    );
+
+    const loaded = await store.loadSession('legacy-agy');
+    assert.equal(loaded?.shellType, 'antigravity');
+
+    const listed = await store.listSessions();
+    const listedLegacy = listed.find((s) => s.id === 'legacy-agy');
+    assert.equal(listedLegacy?.shellType, 'antigravity');
+  });
+
+  it('normalizes legacy shellType agy to canonical antigravity in listArchived', async () => {
+    const store = new SessionStore(dir);
+    await writeFile(
+      join(dir, 'archive.jsonl'),
+      JSON.stringify({
+        id: 'archived-agy',
+        name: 'archived agy',
+        command: 'agy',
+        status: 'completed',
+        shellType: 'agy',
+        antigravitySessionId: 'conv-archived-1',
+        bridgeId: 'bridge-1',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        removedAt: new Date().toISOString(),
+      }) + '\n',
+      'utf-8',
+    );
+
+    const archived = await store.listArchived();
+    const found = archived.find((r) => r.id === 'archived-agy');
+    assert.equal(found?.shellType, 'antigravity');
   });
 
   it('never exposes a partial JSON snapshot to concurrent readers', async () => {
