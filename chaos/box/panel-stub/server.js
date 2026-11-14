@@ -14,5 +14,9 @@ http
     res.writeHead(200, { 'content-type': 'text/plain' });
     res.end(req.method === 'HEAD' ? undefined : 'chaos panel stub\n');
   })
+  .on('error', (err) => {
+    process.stderr.write(`panel-stub: ${err.message}\n`);
+    process.exit(1);
+  })
   .listen(port, host);
 process.on('SIGTERM', () => process.exit(0));
