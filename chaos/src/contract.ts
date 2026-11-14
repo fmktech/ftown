@@ -193,6 +193,13 @@ export interface AgentLogLine {
   e: AgentEvent;
 }
 
+/**
+ * Mail bodies and question titles are self-describing so that no component needs a session id:
+ *   mail body      = `CHAOS-M-<n> from=<role|external> to=<role>`   (n unique per run)
+ *   question title = `CHAOS-Q-<n> from=<role>`                       (n unique per run)
+ *   question message = the title again; options are always ['yes', 'no'].
+ * The workload allocates n from 1; agent `role` allocates from 1000 * (index of role in ROLES + 1).
+ */
 /** Every mail body sent by the workload or an agent starts with this tag: `CHAOS-M-<n> `. */
 export const MAIL_TAG_RE = /^CHAOS-M-(\d+)\b/;
 /** Every question title starts with this tag: `CHAOS-Q-<n> `. */
