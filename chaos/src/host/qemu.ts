@@ -59,13 +59,13 @@ let counter = 0;
 export async function boot(p: GuestParams, outDir: string, timeoutSec: number): Promise<BootOutcome> {
   rmSync(outDir, { recursive: true, force: true });
   mkdirSync(outDir, { recursive: true });
-  writeFileSync(join(outDir, 'frames.txt'), '');
-  writeFileSync(join(outDir, 'console.log'), '');
   const name = `ftown-chaos-${process.pid}-${++counter}`;
+  // Outputs stay inside the container and are fetched with `docker cp` after it exits:
+  // a bind-mounted /out is not guaranteed to be visible on the host (Docker Desktop file
+  // sharing) at the moment the container exits.
   const dockerArgs = [
-    'run', '--rm', '--name', name, '--network', 'none',
-    '-v', `${CACHE_DIR}:/in:ro`, '-v', `${outDir}:/out`,
-    QEMU_IMAGE, ...qemuArgs(p),
+    'run', '--name', name, '--network', 'none', '-v', `${CACHE_DIR}:/in:ro`,
+    QEMU_IMAGE, 'sh', '-c', 'mkdir -p /out && : > /out/console.log && : > /out/frames.txt && exec "$@"', 'sh', ...qemuArgs(p),
   ];
   const started = performance.now();
   let timedOut = false;
@@ -73,12 +73,24 @@ export async function boot(p: GuestParams, outDir: string, timeoutSec: number): 
     timedOut = true;
     void run('docker', ['kill', name]);
   }, timeoutSec * 1000);
-  const r = await run('docker', dockerArgs);
-  clearTimeout(watchdog);
+  let r;
+  let oom = false;
+  let copied;
+  try {
+    r = await run('docker', dockerArgs);
+    clearTimeout(watchdog);
+    oom = (await run('docker', ['inspect', '-f', '{{.State.OOMKilled}}', name])).stdout.trim() === 'true';
+    copied = await run('docker', ['cp', `${name}:/out/.`, outDir]);
+  } finally {
+    clearTimeout(watchdog);
+    await run('docker', ['rm', '-f', name]);
+  }
   const wallMs = performance.now() - started;
   const infra = (msg: string): BootOutcome => ({ exitCode: EXIT.infra, infraError: msg, files: new Map(), wallMs });
   if (timedOut) return infra(`watchdog: no poweroff within ${timeoutSec}s (host wall clock)`);
+  if (oom) return infra('qemu container was OOM-killed: lower --jobs or --mem, or give Docker more memory');
   if (r.code !== 0) return infra(`qemu container exited ${r.code}: ${r.stderr.trim().slice(-500)}`);
+  if (copied.code !== 0) return infra(`docker cp of guest outputs failed: ${copied.stderr.trim()}`);
   try {
     const parsed = parseFrames(readFileSync(join(outDir, 'frames.txt'), 'latin1'));
     for (const [file, data] of parsed.files) writeFileSync(join(outDir, file), data);

@@ -8,8 +8,8 @@ export interface VmOptions {
   icountShift: number;
   /** Host wall-clock watchdog per boot, seconds. */
   timeoutSec: number;
-  /** Concurrent VMs. */
-  jobs: number;
+  /** Concurrent VMs; null = default (2, capped by Docker memory). */
+  jobs: number | null;
 }
 
 export type Command =
@@ -26,7 +26,7 @@ export const USAGE = `usage: npm run test:chaos -- <command> [flags]
   run --seeds 1-4 [--level high] [--times 2]    run seeds, compare runs of each seed
   repro --seed N [--times 5] [--level high]     (also: --repro N) one seed, several times
   campaign --seeds 1-20 [--times 2]             run + chaos/out/campaign.json
-common: --jobs 2  --mem 3072  --timeout <s>  --icount-shift 1`;
+common: --jobs N (default 2, capped by Docker memory)  --mem 3072 (selftest 1536)  --timeout <s>  --icount-shift 1`;
 
 /** Parses "1-4", "7", "1,3,5-7". Result sorted and unique. */
 export function parseSeedRange(spec: string): number[] {
@@ -86,10 +86,10 @@ export function parseArgs(argv: readonly string[]): Command {
 
   const isSelftest = sub === 'selftest';
   const vm: VmOptions = {
-    memMb: flags.has('mem') ? posInt('mem', flags.get('mem')!, 256) : 3072,
+    memMb: flags.has('mem') ? posInt('mem', flags.get('mem')!, 1536) : isSelftest ? 1536 : 3072,
     icountShift: flags.has('icount-shift') ? posInt('icount-shift', flags.get('icount-shift')!, 0) : 1,
     timeoutSec: flags.has('timeout') ? posInt('timeout', flags.get('timeout')!) : isSelftest ? 900 : 3600,
-    jobs: flags.has('jobs') ? posInt('jobs', flags.get('jobs')!) : 2,
+    jobs: flags.has('jobs') ? posInt('jobs', flags.get('jobs')!) : null,
   };
   if (vm.icountShift > 10) throw new UsageError('--icount-shift must be 0..10');
   const defaultTimes = sub === 'repro' ? 5 : 2;
@@ -112,4 +112,10 @@ export function parseArgs(argv: readonly string[]): Command {
   if (spec === undefined) throw new UsageError(`${sub} needs --seeds`);
   seeds = parseSeedRange(spec);
   return { cmd: sub === 'campaign' ? 'campaign' : 'run', seeds, level, times, vm };
+}
+
+/** Default concurrency: 2, but only as many VMs as fit in Docker's memory (guest RAM + 512 MiB each, 80% of total). Pure. */
+export function defaultJobs(dockerMemBytes: number, memMb: number): number {
+  const perVm = (memMb + 512) * 1024 * 1024;
+  return Math.max(1, Math.min(2, Math.floor((dockerMemBytes * 0.8) / perVm)));
 }

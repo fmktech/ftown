@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseArgs, parseSeedRange, UsageError } from './args.ts';
+import { defaultJobs, parseArgs, parseSeedRange, UsageError } from './args.ts';
 
 test('seed ranges', () => {
   assert.deepEqual(parseSeedRange('1-4'), [1, 2, 3, 4]);
@@ -17,15 +17,18 @@ test('build', () => {
 });
 
 test('selftest defaults and flags', () => {
-  const c = parseArgs(['selftest', '--times', '3', '--mem', '1024', '--jobs', '1']);
-  assert.deepEqual(c, { cmd: 'selftest', times: 3, vm: { memMb: 1024, icountShift: 1, timeoutSec: 900, jobs: 1 } });
+  const c = parseArgs(['selftest', '--times', '3', '--mem', '2048', '--jobs', '1']);
+  assert.deepEqual(c, { cmd: 'selftest', times: 3, vm: { memMb: 2048, icountShift: 1, timeoutSec: 900, jobs: 1 } });
+  const d = parseArgs(['selftest']);
+  assert.ok(d.cmd === 'selftest');
+  assert.deepEqual([d.vm.memMb, d.vm.jobs], [1536, null]);
   assert.equal(parseArgs(['selftest']).cmd === 'selftest' && (parseArgs(['selftest']) as { times: number }).times, 2);
 });
 
 test('run, campaign and repro', () => {
   const r = parseArgs(['run', '--seeds', '1-4']);
   assert.ok(r.cmd === 'run');
-  assert.deepEqual([r.seeds, r.level, r.times, r.vm.jobs], [[1, 2, 3, 4], 'high', 2, 2]);
+  assert.deepEqual([r.seeds, r.level, r.times, r.vm.jobs], [[1, 2, 3, 4], 'high', 2, null]);
   const c = parseArgs(['campaign', '--seeds', '1-20', '--times', '2', '--level', 'low']);
   assert.ok(c.cmd === 'campaign');
   assert.deepEqual([c.seeds.length, c.level], [20, 'low']);
@@ -43,9 +46,17 @@ test('usage errors', () => {
   const bad = [
     ['run'], ['frob'], ['run', '--seeds'], ['run', '--seeds', '1', '--level', 'max'], ['selftest', '--times', '0'],
     ['build', '--times', '2'], ['run', '--seeds', '1', '--wat', '1'], ['repro'], ['repro', '--seed', '1', '--repro', '2'],
-    ['selftest', 'extra'], ['run', '--seeds', '1', '--seeds', '2'], ['selftest', '--icount-shift', '11'],
+    ['selftest', 'extra'], ['run', '--seeds', '1', '--seeds', '2'], ['selftest', '--icount-shift', '11'], ['selftest', '--mem', '1024'],
   ];
   for (const argv of bad) assert.throws(() => parseArgs(argv), UsageError, argv.join(' '));
   assert.deepEqual(parseArgs([]), { cmd: 'help' });
   assert.deepEqual(parseArgs(['run', '-h']), { cmd: 'help' });
+});
+
+test('default jobs fit Docker memory', () => {
+  const GiB = 1024 ** 3;
+  assert.equal(defaultJobs(4 * GiB, 3072), 1);
+  assert.equal(defaultJobs(4 * GiB, 1024), 2);
+  assert.equal(defaultJobs(64 * GiB, 3072), 2);
+  assert.equal(defaultJobs(1 * GiB, 3072), 1);
 });
