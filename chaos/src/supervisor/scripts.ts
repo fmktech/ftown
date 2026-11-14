@@ -225,9 +225,16 @@ export function buildScripts(seed: number, profile: RunProfile, deriveRng: Deriv
   for (const role of CHILDREN) out[role] = childScript(role, deriveRng(seed, `agent.${role}`), asks.early === role, asks.later[role], profile);
   // Guaranteed nudge: once every child has finished its script (and sent Stop, so it is idle),
   // root sends one waking 'task' mail to a child, then goes idle itself.
-  const childEnd = Math.max(...CHILDREN.map((r) => estimatedDuration(out[r])));
   const to = rootRng.pick(CHILDREN);
-  root.steps.push({ do: 'sleep', ms: Math.max(1_000, childEnd + IDLE_MARGIN_MS - estimatedDuration(root)) });
+  if (profile === 'short') {
+    // In short, children are idle between turns and the contract's 80 s tail + 60 s nudge
+    // re-check cover a busy recipient, so tag-1999 follows an >= 8 s idle sleep directly.
+    root.steps.push({ do: 'sleep', ms: IDLE_SLEEP_MIN_MS.short });
+  } else {
+    // In soak, keep the strict childEnd + IDLE_MARGIN_MS coupling so all children are idle.
+    const childEnd = Math.max(...CHILDREN.map((r) => estimatedDuration(out[r])));
+    root.steps.push({ do: 'sleep', ms: Math.max(1_000, childEnd + IDLE_MARGIN_MS - estimatedDuration(root)) });
+  }
   pushTurn(root.steps, [{ do: 'mail_send', to, type: 'task', body: mailBody(ROOT_IDLE_NUDGE_TAG, 'root', to) }]);
   return out;
 }

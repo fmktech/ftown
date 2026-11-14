@@ -180,7 +180,7 @@ test('every profile satisfies the contract quiesce sizing rule', () => {
   }
 });
 
-test('every seed: root sends a waking mail to a child after all children have gone idle', () => {
+test('every seed: root sends a waking mail (after >=8s idle in short, after all children idle in soak)', () => {
   for (const profile of RUN_PROFILES) {
     for (let seed = 1; seed <= 200; seed++) {
       const s = buildScripts(seed, profile, deriveRng);
@@ -190,8 +190,16 @@ test('every seed: root sends a waking mail to a child after all children have go
       assert.ok(last.do === 'mail_send' && last.type === 'task' && last.to !== 'root' && last.to !== 'parent');
       assert.deepEqual(steps.at(-1), { do: 'hook', event: 'Stop' });
       const sentAt = steps.slice(0, i).reduce((n, x) => n + stepCostMs(x), 0);
-      const childEnd = Math.max(estimatedDuration(s.child1), estimatedDuration(s.child2), estimatedDuration(s.child3));
-      assert.ok(sentAt >= childEnd + IDLE_MARGIN_MS, `${profile} seed ${seed}: sentAt=${sentAt} < ${childEnd + IDLE_MARGIN_MS}`);
+      if (profile === 'short') {
+        // Short decouples tag-1999 from childEnd: turn-structured children are idle between turns
+        // and the contract's 80 s tail + 60 s nudge re-check cover a busy recipient.
+        const idleBefore = steps[i - 2];
+        assert.ok(idleBefore?.do === 'sleep' && idleBefore.ms >= IDLE_SLEEP_MIN_MS.short);
+      } else {
+        // Soak keeps the strict childEnd + IDLE_MARGIN_MS coupling.
+        const childEnd = Math.max(estimatedDuration(s.child1), estimatedDuration(s.child2), estimatedDuration(s.child3));
+        assert.ok(sentAt >= childEnd + IDLE_MARGIN_MS, `${profile} seed ${seed}: sentAt=${sentAt} < ${childEnd + IDLE_MARGIN_MS}`);
+      }
       assert.ok(sleepTotal(s.root) > 0);
     }
   }
