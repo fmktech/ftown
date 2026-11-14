@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Board v3 — minimal</title>
+<style>
+:root{
+  --bg-base:#0a0a0d;--bg-hover:rgba(255,255,255,.035);
+  --text-primary:#e8e8f0;--text-secondary:#aaaac0;--text-muted:#8585a3;--text-faint:#5c5c78;
+  --accent:#00ff88;--status-pending:#ffaa00;--status-error:#ff4466;--shell-generic:#00bfff;--pr-merged:#a78bfa;
+  --font-mono:"JetBrains Mono","Fira Code","Cascadia Code",ui-monospace,Menlo,monospace;
+  --font-sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  color-scheme:dark;
+}
+@media (prefers-color-scheme:light){:root:not([data-theme=dark]){
+  --bg-base:#fbfbfc;--bg-hover:rgba(0,0,0,.035);
+  --text-primary:#18181f;--text-secondary:#4a4a5c;--text-muted:#6e6e84;--text-faint:#a0a0b2;
+  --accent:#00804a;--status-pending:#a35f00;--status-error:#c4102c;--shell-generic:#0070b4;--pr-merged:#6a4bd0;
+  color-scheme:light;
+}}
+:root[data-theme=light]{
+  --bg-base:#fbfbfc;--bg-hover:rgba(0,0,0,.035);
+  --text-primary:#18181f;--text-secondary:#4a4a5c;--text-muted:#6e6e84;--text-faint:#a0a0b2;
+  --accent:#00804a;--status-pending:#a35f00;--status-error:#c4102c;--shell-generic:#0070b4;--pr-merged:#6a4bd0;
+  color-scheme:light;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg-base);color:var(--text-primary)}
+body{font:13px/1.5 var(--font-sans);-webkit-font-smoothing:antialiased;overflow-x:hidden}
+button{font:inherit;color:inherit;background:none;border:0;padding:0;margin:0;text-align:left;cursor:pointer}
+:focus{outline:none}
+:focus-visible{outline:1px solid var(--text-muted);outline-offset:2px;border-radius:3px}
+.wrap{max-width:760px;margin:0 auto;padding:20px 16px 72px}
+.mono{font-family:var(--font-mono);font-variant-numeric:tabular-nums}
+
+/* chrome: plain text controls */
+.bar{display:flex;gap:14px;align-items:baseline;font:11px var(--font-mono);color:var(--text-faint);margin-bottom:36px}
+.bar .sp{flex:1}
+.bar button{color:var(--text-faint);padding:4px 0}
+.bar button:hover{color:var(--text-secondary)}
+.bar button[aria-pressed=true],.bar button[aria-selected=true]{color:var(--text-primary)}
+
+/* manager line: same shape as the hook activity line */
+.mgr{display:flex;gap:10px;align-items:baseline;min-width:0;margin-bottom:36px}
+.mgr b{font-weight:600;font-size:15px;flex-shrink:0}
+.mgr .st{font:italic 12px var(--font-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+
+/* groups */
+.grp{margin-bottom:28px}
+.lbl{display:flex;gap:8px;align-items:baseline;width:100%;font:11px var(--font-mono);color:var(--text-faint);padding:4px 0;min-width:0}
+button.lbl:hover{color:var(--text-secondary)}
+.lbl .chev{width:14px;flex-shrink:0;text-align:center}
+.lbl .nw{white-space:nowrap;flex-shrink:0}
+.lbl .peek{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;opacity:.75}
+.lbl.loud{color:var(--status-pending)}
+.grp[data-open=false] .body{display:none}
+.grp.fold .body{padding-top:2px}
+
+/* row: glyph · name · headline */
+.row{display:flex;gap:10px;align-items:baseline;width:100%;padding:5px 0;min-width:0;border-radius:3px}
+.row:hover{background:var(--bg-hover);box-shadow:-8px 0 0 var(--bg-hover),8px 0 0 var(--bg-hover)}
+.g{width:14px;flex-shrink:0;text-align:center;font-family:var(--font-mono);font-size:12px}
+.n{font-weight:500;flex-shrink:0;max-width:46%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.h{color:var(--text-muted);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.r{font:11px var(--font-mono);color:var(--text-faint);flex-shrink:0;white-space:nowrap}
+.r.age{opacity:0}
+.row:hover .r.age,.row:focus-visible .r.age,.item[data-open=true] .r.age{opacity:1}
+.item[data-open=true] .h{white-space:normal;overflow:visible}
+.item[data-open=true] .n{max-width:none}
+/* the only loud thing: rows that need someone */
+.item.att .n{font-weight:600}
+.item.att .h{color:var(--text-primary)}
+.r.you{color:var(--status-pending)}
+.item.quiet .n{color:var(--text-muted);font-weight:400}
+.item.quiet .h{color:var(--text-faint)}
+.item.plan .n{color:var(--text-secondary);font-weight:400}
+.item.plan .g{color:var(--text-faint);font-size:11px}
+
+/* details: hidden until asked for */
+.d{display:none;margin:2px 0 12px 24px;font:11px/1.75 var(--font-mono);color:var(--text-secondary)}
+.item[data-open=true] .d{display:block}
+.f{display:flex;gap:12px;min-width:0}
+.k{width:68px;flex-shrink:0;color:var(--text-faint)}
+.v{min-width:0;overflow-wrap:anywhere}
+.v i{font-style:italic}
+.dim{color:var(--text-faint)}
+.opt{color:var(--text-primary);margin-right:14px;white-space:nowrap}
+.opt:hover{color:var(--status-pending)}
+
+/* events */
+.ev{display:flex;gap:10px;align-items:baseline;width:100%;padding:2px 0;font:11px/1.7 var(--font-mono);color:var(--text-muted);min-width:0}
+.ev .t{width:38px;flex-shrink:0;color:var(--text-faint)}
+.ev .who{width:132px;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-secondary)}
+.ev .s{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ev[data-open=true] .s{white-space:normal;overflow-wrap:anywhere}
+.ev.faint,.ev.faint .who{color:var(--text-faint)}
+.more{font:11px var(--font-mono);color:var(--text-faint);padding:6px 0 0 48px}
+.more:hover{color:var(--text-secondary)}
+.brief{margin-left:22px;color:var(--text-secondary);max-width:60ch}
+.brief p{margin:0 0 8px}
+.foot{margin-top:48px;font:11px var(--font-mono);color:var(--text-faint)}
+kbd{font:inherit;color:var(--text-muted)}
+@media (max-width:520px){
+  .wrap{padding:16px 16px 56px}
+  .n{max-width:42%}
+  .ev .who{width:84px}
+  .k{width:58px}
+  .foot .keys{display:none}
+}
+@media (hover:none){.r.age{display:none}.item[data-open=true] .r.age{display:inline;opacity:1}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="bar" role="toolbar" aria-label="view">
+    <button data-tab="live" aria-selected="true">live</button>
+    <button data-tab="sample" aria-selected="false">all states (sample)</button>
+    <span class="sp"></span>
+    <button id="det" aria-pressed="false" title="expand every row (d)">details</button>
+    <button id="thm" title="switch light / dark">theme</button>
+  </div>
+  <div id="app"></div>
+  <div class="foot"><span id="snap"></span><span class="keys"> · <kbd>j</kbd>/<kbd>k</kbd> move · <kbd>enter</kbd> expand · <kbd>d</kbd> details · <kbd>e</kbd> events · <kbd>esc</kbd> collapse</span></div>
+</div>
+<script>
+const BOARD = {"rootId":"c58db0f3-15a9-41f4-a840-16ac7e7d5079","cursor":44,"cards":[{"sessionId":"a3090edb-4536-4dbe-a1e2-ee5c226521ef","name":"overview-demo","parentSessionId":"c58db0f3-15a9-41f4-a840-16ac7e7d5079","declared":{"state":"done","headline":"Overview demo running on :18040","updatedAt":"2026-11-13T23:15:56.301Z"},"derived":{"status":"running","activity":"idle","idleSince":"2026-11-13T23:16:13.561Z","openAttention":0,"unreadMail":0,"previews":[],"shellType":"grok"},"stale":false},{"sessionId":"7d80c1af-1c22-4d1e-ade9-ce52a1f9b11c","name":"overview-tabs-fix","parentSessionId":"c58db0f3-15a9-41f4-a840-16ac7e7d5079","declared":{"state":"working","headline":"Merging Overview into workspace tabs","updatedAt":"2026-11-13T23:46:19.655Z"},"derived":{"status":"running","activity":"unknown","openAttention":0,"unreadMail":0,"previews":[],"shellType":"opencode"},"stale":false},{"sessionId":"5de01434-32fb-4f1f-8a74-9c711001b8bc","name":"flake-fix","parentSessionId":"c58db0f3-15a9-41f4-a840-16ac7e7d5079","declared":{"state":"done","headline":"Flake fixed","updatedAt":"2026-11-13T23:50:08.725Z"},"derived":{"status":"running","activity":"unknown","openAttention":0,"unreadMail":0,"previews":[],"shellType":"muse"},"stale":false},{"sessionId":"dcc86546-6846-4610-95fe-30143dfb9a5a","name":"board-design-v3","parentSessionId":"c58db0f3-15a9-41f4-a840-16ac7e7d5079","declared":{"state":"working","headline":"Board v3: minimal design","updatedAt":"2026-11-13T23:51:58.513Z"},"derived":{"status":"running","activity":"tool_use","openAttention":0,"unreadMail":0,"previews":[],"shellType":"claude","model":"claude-fable-5-2"},"stale":false}],"rollup":{"working":2,"blocked":0,"waiting_review":0,"done":2,"failed":0,"unset":0}};
+const EVENTS = {"events":[{"seq":1,"ts":"2026-11-13T22:50:55.460Z","sessionId":"9ce70f0b-5214-431c-bb06-7fc7432e38a9","sessionName":"coordB-B2-cont","kind":"result","summary":"B2 DONE | files: local-api-server.ts(+test), attention-routing.ts(+test), wiring.ts(+test), attention-store.ts (optional expectRoute only) | gate: ./node_modules/.bin/tsc --noEmit exit 0; node --impor"},{"seq":2,"ts":"2026-11-13T22:52:08.396Z","sessionId":"9ce70f0b-5214-431c-bb06-7fc7432e38a9","sessionName":"coordB-B2-cont","kind":"result","summary":"B2 DONE | files: local-api-server.ts(+test), attention-routing.ts(+test), wiring.ts(+test), attention-store.ts (optional expectRoute only) | gate: ./node_modules/.bin/tsc --noEmit exit 0; node --impor"},{"seq":3,"ts":"2026-11-13T22:53:03.912Z","sessionId":"c58db0f3-15a9-41f4-a840-16ac7e7d5079","sessionName":"ftown_1","kind":"status","summary":"working: Phase B integration: full suites, smoke, PR"},{"seq":4,"ts":"2026-11-13T22:53:21.037Z","sessionId":"c58db0f3-15a9-41f4-a840-16ac7e7d5079","sessionName":"ftown_1","kind":"status","summary":"working: Phase B integration: suites, smoke, PR"},{"seq":5,"ts":"2026-11-13T22:53:59.245Z","sessionId":"5eccde52-fd1b-4c9c-b4e8-03fe18b93a3f","sessionName":"coord-A5-api-wiring","kind":"idle","summary":"coord-A5-api-wiring idle for 2m"},{"seq":6,"ts":"2026-11-13T22:54:11.696Z","sessionId":"9ce70f0b-5214-431c-bb06-7fc7432e38a9","sessionName":"coordB-B2-cont","kind":"idle","summary":"coordB-B2-cont idle for 2m"},{"seq":7,"ts":"2026-11-13T22:55:12.984Z","sessionId":"c58db0f3-15a9-41f4-a840-16ac7e7d5079","sessionName":"ftown_1","kind":"status","summary":"working: Phase B: suites green, smoke test next"},{"seq":8,"ts":"2026-11-13T22:55:32.728Z","sessionId":"c58db0f3-15a9-41f4-a840-16ac7e7d5079","sessionName":"ftown_1","kind":"status","summary":"working: Phase B: committed, isolated smoke test running"},{"seq":9,"ts":"2026-11-13T22:57:54.813Z","sessionId":"2e01b33b-fb06-4f7d-a1b1-94d5b5b1929b","sessionName":"skill-delegation-rule","kind":"status","summary":"working: Adding delegation rule to skill"},{"seq":10,"ts":"2026-11-13T22:58:25.711Z","sessionId":"2e01b33b-fb06-4f7d-a1b1-94d5b5b1929b","sessionName":"skill-delegation-rule","kind":"status","summary":"done: Delegation rule added"},{"seq":11,"ts":"2026-11-13T22:58:25.896Z","sessionId":"2e01b33b-fb06-4f7d-a1b1-94d5b5b1929b","sessionName":"skill-delegation-rule","kind":"result","summary":"skill rule DONE | gate: cd bridge && node --import tsx --test src/orchestration-coordination-contract.test.ts passes (4/4 pass)"},{"seq":12,"ts":"2026-11-13T23:00:31.532Z","sessionId":"6000d238-7eb9-42c7-88f6-4f0035bf15b7","sessionName":"chip-placement","kind":"status","summary":"working: Moving card chip below hook line"},{"seq":13,"ts":"2026-11-13T23:02:05.771Z","sessionId":"6000d238-7eb9-42c7-88f6-4f0035bf15b7","sessionName":"chip-placement","kind":"status","summary":"done: Chip moved"},{"seq":14,"ts":"2026-11-13T23:02:05.956Z","sessionId":"6000d238-7eb9-42c7-88f6-4f0035bf15b7","sessionName":"chip-placement","kind":"result","summary":"chip placement DONE | files: ui/src/components/SessionList.tsx | gate: vitest (SessionCardChip.test, Dashboard.test \u2014 no SessionList test file exists) 156/156 passed, tsc --noEmit clean, nothing commi"},{"seq":15,"ts":"2026-11-13T23:04:07.475Z","sessionId":"094df962-45d5-4bf1-aa0f-fe4d40993c68","sessionName":"fix-ui-smoke","kind":"status","summary":"working: Fixing UI smoke bugs 2 & 3"},{"seq":16,"ts":"2026-11-13T23:04:19.315Z","sessionId":"2dd8b542-87a7-4bac-94ce-1b1280c8e3f7","sessionName":"fix-bridge-smoke","kind":"status","summary":"working: Fixing parent-exit escalation and archived worktree"},{"seq":17,"ts":"2026-11-13T23:04:40.878Z","sessionId":"c58db0f3-15a9-41f4-a840-16ac7e7d5079","sessionName":"ftown_1","kind":"status","summary":"working: Phase B: fixing 4 smoke-test bugs before PR"},{"seq":18,"ts":"2026-11-13T23:05:30.793Z","sessionId":"a3090edb-4536-4dbe-a1e2-ee5c226521ef","sessionName":"overview-demo","kind":"status","summary":"working: Standing up Overview demo"},{"seq":19,"ts":"2026-11-13T23:05:50.195Z","sessionId":"6000d238-7eb9-42c7-88f6-4f0035bf15b7","sessionName":"chip-placement","kind":"status","summary":"done: Chip as plain text line"},{"seq":20,"ts":"2026-11-13T23:05:50.370Z","sessionId":"6000d238-7eb9-42c7-88f6-4f0035bf15b7","sessionName":"chip-placement","kind":"result","summary":"chip redesign DONE | files: ui/src/components/SessionCardChip.tsx, SessionCardChip.test.tsx, SessionList.tsx | gate: vitest 157/157 (incl. new SessionCardChip cases), tsc --noEmit clean, nothing commi"},{"seq":21,"ts":"2026-11-13T23:08:48.221Z","sessionId":"d1e17e1f-6245-4b1a-aeeb-c5e160fb4918","sessionName":"board-design","kind":"status","summary":"working: Designing new board"},{"seq":22,"ts":"2026-11-13T23:13:35.943Z","sessionId":"d1e17e1f-6245-4b1a-aeeb-c5e160fb4918","sessionName":"board-design","kind":"result","summary":"board design DONE | preview registered on my session (board-v2.html; tabs: live data = real board+events snapshot, all states = sample data) | notes: /Users/fkesheh/projects/ftown/.claude/worktrees/co"},{"seq":23,"ts":"2026-11-13T23:13:36.084Z","sessionId":"d1e17e1f-6245-4b1a-aeeb-c5e160fb4918","sessionName":"board-design","kind":"status","summary":"done: Board v2 design ready"},{"seq":24,"ts":"2026-11-13T23:15:43.595Z","sessionId":"d1e17e1f-6245-4b1a-aeeb-c5e160fb4918","sessionName":"board-design","kind":"idle","summary":"board-design idle for 2m"},{"seq":25,"ts":"2026-11-13T23:15:56.167Z","sessionId":"a3090edb-4536-4dbe-a1e2-ee5c226521ef","sessionName":"overview-demo","kind":"result","summary":"demo READY | url: http://localhost:18040/connect#invite=%7B%22version%22%3A1%2C%22invitationId%22%3A%22d1473144-a9bc-4051-b498-73a60de6a86c%22%2C%22ownerId%22%3A%22solo%3A97597cba-3e67-4281-a341-25c07"},{"seq":26,"ts":"2026-11-13T23:15:56.302Z","sessionId":"a3090edb-4536-4dbe-a1e2-ee5c226521ef","sessionName":"overview-demo","kind":"status","summary":"done: Overview demo running on :18040"},{"seq":27,"ts":"2026-11-13T23:18:13.574Z","sessionId":"a3090edb-4536-4dbe-a1e2-ee5c226521ef","sessionName":"overview-demo","kind":"idle","summary":"overview-demo idle for 2m"},{"seq":28,"ts":"2026-11-13T23:18:34.974Z","sessionId":"c58db0f3-15a9-41f4-a840-16ac7e7d5079","sessionName":"ftown_1","kind":"status","summary":"working: Phase B: waiting on 2 smoke fixes, then re-smoke + PR"},{"seq":29,"ts":"2026-11-13T23:20:49.777Z","sessionId":"094df962-45d5-4bf1-aa0f-fe4d40993c68","sessionName":"fix-ui-smoke","kind":"status","summary":"done: Fixed live escalation note + per-session needs-human inbox preference"},{"seq":30,"ts":"2026-11-13T23:20:55.049Z","sessionId":"094df962-45d5-4bf1-aa0f-fe4d40993c68","sessionName":"fix-ui-smoke","kind":"result","summary":"fix-ui-smoke DONE | files: ui/src/hooks/useAllSessionEvents.ts(+test), ui/src/lib/hook-events.ts(+test), ui/src/components/SessionInbox.tsx (isWithParent now delegates to shared isWithParentNotice). R"},{"seq":31,"ts":"2026-11-13T23:20:58.886Z","sessionId":"2dd8b542-87a7-4bac-94ce-1b1280c8e3f7","sessionName":"fix-bridge-smoke","kind":"status","summary":"done: Parent-exit escalation and archived worktree fixed"},{"seq":32,"ts":"2026-11-13T23:20:59.068Z","sessionId":"2dd8b542-87a7-4bac-94ce-1b1280c8e3f7","sessionName":"fix-bridge-smoke","kind":"result","summary":"fix-bridge-smoke DONE | files: bridge/src/coordination/wiring.ts(+test), bridge/src/index.ts, bridge/src/local-api-server.ts(+test), bridge/src/session-controller.ts(+test) | gate: node --import tsx -"},{"seq":33,"ts":"2026-11-13T23:28:21.311Z","sessionId":"094df962-45d5-4bf1-aa0f-fe4d40993c68","sessionName":"fix-ui-smoke","kind":"status","summary":"done: Review fixes: debounced+bounded reconcile reads, clear surfaces yielded item, proof-based pruning"},{"seq":34,"ts":"2026-11-13T23:28:21.513Z","sessionId":"094df962-45d5-4bf1-aa0f-fe4d40993c68","sessionName":"fix-ui-smoke","kind":"result","summary":"fix-ui-smoke DONE (review fixes applied) | files: ui/src/hooks/useAllSessionEvents.ts(+test), ui/src/lib/hook-events.ts(+test), ui/src/components/SessionInbox.tsx. (1) Stamped-publication reconciles n"},{"seq":35,"ts":"2026-11-13T23:28:51.809Z","sessionId":"9063bcc1-876f-4d32-819f-649b5c2e94a0","sessionName":"final-verify","kind":"status","summary":"working: Final phase B verification"},{"seq":36,"ts":"2026-11-13T23:34:57.860Z","sessionId":"9063bcc1-876f-4d32-819f-649b5c2e94a0","sessionName":"final-verify","kind":"result","summary":"final verify DONE | suites: bridge tsc 0, ui tsc 0; bridge npm test only the 7 known claude --model failures in agent-commands.test.ts (2 extra 5MB-hook timing tests failed only under concurrent build"},{"seq":37,"ts":"2026-11-13T23:34:58.052Z","sessionId":"9063bcc1-876f-4d32-819f-649b5c2e94a0","sessionName":"final-verify","kind":"status","summary":"done: Phase B verified"},{"seq":38,"ts":"2026-11-13T23:35:24.756Z","sessionId":"c58db0f3-15a9-41f4-a840-16ac7e7d5079","sessionName":"ftown_1","kind":"status","summary":"waiting_review: Phase B PR #208 open; phase C next"},{"seq":39,"ts":"2026-11-13T23:39:46.793Z","sessionId":"c58db0f3-15a9-41f4-a840-16ac7e7d5079","sessionName":"ftown_1","kind":"pr","summary":"PR failed: https://github.com/fmktech/ftown/pull/208","ref":"https://github.com/fmktech/ftown/pull/208"},{"seq":40,"ts":"2026-11-13T23:46:19.656Z","sessionId":"7d80c1af-1c22-4d1e-ade9-ce52a1f9b11c","sessionName":"overview-tabs-fix","kind":"status","summary":"working: Merging Overview into workspace tabs"},{"seq":41,"ts":"2026-11-13T23:48:31.557Z","sessionId":"5de01434-32fb-4f1f-8a74-9c711001b8bc","sessionName":"flake-fix","kind":"status","summary":"working: Fixing flaky routing-service test"},{"seq":42,"ts":"2026-11-13T23:50:05.733Z","sessionId":"5de01434-32fb-4f1f-8a74-9c711001b8bc","sessionName":"flake-fix","kind":"result","summary":"flake fix DONE | root cause: test waited for quota collect with a fixed 50x setImmediate poll; the collect sits behind an async loadRoutingConfig fs read, so under CI load the fs completion needs more"},{"seq":43,"ts":"2026-11-13T23:50:08.748Z","sessionId":"5de01434-32fb-4f1f-8a74-9c711001b8bc","sessionName":"flake-fix","kind":"status","summary":"done: Flake fixed"},{"seq":44,"ts":"2026-11-13T23:51:58.514Z","sessionId":"dcc86546-6846-4610-95fe-30143dfb9a5a","sessionName":"board-design-v3","kind":"status","summary":"working: Board v3: minimal design"}],"cursor":44};
+
+/* ---------- tokens ---------- */
+const GLYPH = {working:'▸',blocked:'⚠',waiting_review:'◷',done:'✓',failed:'✗',unset:'○',question:'?'};
+const COLOR = {working:'var(--accent)',blocked:'var(--status-pending)',waiting_review:'var(--shell-generic)',
+  done:'var(--text-muted)',failed:'var(--status-error)',unset:'var(--text-faint)',question:'var(--status-pending)'};
+const LABEL = {working:'working',blocked:'blocked',waiting_review:'waiting review',done:'done',failed:'failed',unset:'no card'};
+
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const col = (c, html) => `<span style="color:${c}">${html}</span>`;
+function age(ms){ const s=Math.max(0,Math.round(ms/1000)); if(s<60)return s+'s'; const m=Math.round(s/60); if(m<60)return m+'m'; const h=Math.floor(m/60); return h+'h'+(m%60?(' '+m%60+'m'):''); }
+const hhmm = ts => ts.slice(11,16);
+
+/* ---------- live view model (real `ftown board --json --all` + `ftown events --since 0`) ---------- */
+function liveModel(){
+  const evs = EVENTS.events || [];
+  const now = Date.parse(evs.length ? evs[evs.length-1].ts : new Date().toISOString());
+  const rootEvs = evs.filter(e => e.sessionId === BOARD.rootId);
+  const lastStatus = [...rootEvs].reverse().find(e => e.kind === 'status');
+  const mgr = {name: rootEvs[0]?.sessionName || 'manager', state:'unset', headline:''};
+  if (lastStatus){ const i = lastStatus.summary.indexOf(': '); mgr.state = lastStatus.summary.slice(0,i); mgr.headline = lastStatus.summary.slice(i+2); }
+  const rows = (BOARD.cards||[]).map(c => {
+    const d = c.declared || {}, v = c.derived || {};
+    return {id:c.sessionId, name:c.name, state:d.state||'unset', headline:d.headline||'', updatedAt:d.updatedAt, stale:!!c.stale,
+      blockedOn:d.blockedOn, progress:d.progress, next:d.next, activity:v.activity, toolName:v.toolName, idleSince:v.idleSince,
+      status:v.status, openAttention:v.openAttention||0, unreadMail:v.unreadMail||0, previews:v.previews||[],
+      shellType:v.shellType, model:v.model, worktree:v.worktree, pr:v.pr};
+  });
+  return {now, mgr, rows, planned:[], events:evs, brief:null, rootId:BOARD.rootId, snap:'snapshot '+hhmm(new Date(now).toISOString())+' UTC · real board + events'};
+}
+
+/* ---------- sample view model (invented, one of every state) ---------- */
+function sampleModel(){
+  const now = Date.parse('2026-11-13T23:52:00Z');
+  const ago = m => new Date(now - m*60000).toISOString();
+  const rows = [
+    {id:'s1',name:'api-migrate',state:'failed',headline:'Migration 0042 failed: FK constraint on sessions.parent_id',updatedAt:ago(6),status:'exited',
+      pr:{num:212,checks:'failed'},worktree:{branch:'ftown/api-migrate',dirty:true,ahead:3},shellType:'claude',model:'opus-5-5',owner:'you'},
+    {id:'s2',name:'schema-pick',state:'blocked',headline:'Enum or lookup table for card states?',updatedAt:ago(9),blockedOn:{kind:'human',text:'needs a schema decision'},
+      question:{title:'Enum or lookup table for card states?',route:'human',note:'ftown_1: affects the 0043 migration, not mine to decide',options:['enum','lookup table','defer to phase C']},
+      activity:'idle',idleSince:ago(9),shellType:'claude',model:'fable-5-2',owner:'you'},
+    {id:'s3',name:'quota-router',state:'blocked',headline:'Waiting for api-migrate before wiring the router',updatedAt:ago(5),blockedOn:{kind:'session',text:'api-migrate must land first'},
+      activity:'idle',idleSince:ago(5),shellType:'opencode',owner:'ftown_1'},
+    {id:'s4',name:'worktree-prune',state:'waiting_review',headline:'Prune: decide() + retain reasons',updatedAt:ago(2),pr:{num:210,checks:'passed'},
+      worktree:{branch:'ftown/worktree-prune',dirty:true,ahead:5},unreadMail:2,previews:['prune-plan.html'],shellType:'claude',model:'fable-5-2'},
+    {id:'s5',name:'overview-rows',state:'working',headline:'OverviewRow + groupChildrenByState',updatedAt:ago(1),progress:{done:4,total:7},
+      next:'wire expand state, then tests',activity:'tool_use',toolName:'Bash',pr:{num:214,checks:'running'},worktree:{branch:'ftown/overview-rows',ahead:2},shellType:'claude',model:'fable-5-2'},
+    {id:'s6',name:'events-hook',state:'working',headline:'useTreeEvents long-poll over the events route',updatedAt:ago(3),activity:'thinking',
+      question:{title:'Poll interval: 2s or 5s?',route:'parent'},shellType:'grok'},
+    {id:'s7',name:'docs-sync',state:'working',headline:'Syncing C4 docs after the coordination refactor',updatedAt:ago(14),stale:true,activity:'idle',idleSince:ago(11),shellType:'muse'},
+    {id:'s8',name:'scratch',state:'unset',headline:'',activity:'idle',idleSince:ago(31),shellType:'pi'},
+    {id:'s9',name:'chip-placement',state:'done',headline:'Chip as plain text line',updatedAt:ago(46),pr:{num:209,checks:'merged'},shellType:'claude'},
+    {id:'s10',name:'flake-fix',state:'done',headline:'Flake fixed',updatedAt:ago(22),worktree:{branch:'ftown/flake-fix',retained:'unpushed commits'},status:'running',shellType:'muse'},
+    {id:'s11',name:'final-verify',state:'done',headline:'Phase B verified',updatedAt:ago(17),status:'exited',shellType:'claude'},
+  ];
+  const planned = [
+    {name:'timeline-hook',headline:'Dashboard hook over the tree events route',after:[]},
+    {name:'todo-contract',headline:'Freeze the planned-items contract (id, title, after[])',after:['timeline-hook']},
+    {name:'board-tests',headline:'Rewrite SessionOverview tests around rows and groups',after:['overview-rows','timeline-hook']},
+    {name:'release-notes',headline:'Phase B notes for ui-v0.20',after:['api-migrate']},
+  ];
+  const E = (m,name,kind,summary) => ({ts:ago(m),sessionName:name,sessionId:name,kind,summary});
+  const events = [
+    E(46,'chip-placement','status','done: Chip as plain text line'),
+    E(46,'chip-placement','result','chip redesign DONE | files: SessionCardChip.tsx | gate: tsc 0'),
+    E(31,'scratch','idle','scratch idle for 2m'),
+    E(22,'flake-fix','status','done: Flake fixed'),
+    E(17,'final-verify','result','final verify DONE | suites: bridge tsc 0, ui tsc 0'),
+    E(14,'docs-sync','status','working: Syncing C4 docs after the coordination refactor'),
+    E(12,'ftown_1','note','Phase C starts once #210 merges'),
+    E(9,'schema-pick','attention','question: Enum or lookup table for card states?'),
+    E(8,'ftown_1','attention','escalated schema-pick to the human'),
+    E(6,'api-migrate','pr','PR failed: #212'),
+    E(6,'api-migrate','status','failed: Migration 0042 failed: FK constraint on sessions.parent_id'),
+    E(5,'quota-router','status','blocked: Waiting for api-migrate before wiring the router'),
+    E(3,'events-hook','attention','question: Poll interval: 2s or 5s?'),
+    E(2,'worktree-prune','status','waiting_review: Prune: decide() + retain reasons'),
+    E(1,'overview-rows','status','working: OverviewRow + groupChildrenByState'),
+  ].map((e,i) => ({...e,seq:i+1}));
+  return {now, mgr:{name:'ftown_1',state:'working',headline:'Phase C: board rows, events hook, migration'}, rows, planned, events,
+    brief:{updatedAt:ago(12),text:['Phase B is merged; phase C replaces the Overview table with one-line rows.','Order: migration first, then router, then the board. Do not start release notes until api-migrate is green.']},
+    rootId:'ftown_1', snap:'invented data · one of every state'};
+}
+
+/* ---------- derivations ---------- */
+// The only loud rows: failed, blocked, or a question escalated to the human.
+function attention(r){
+  if (r.question && r.question.route === 'human') return 'you';
+  if (r.state === 'failed') return r.owner || 'you';
+  if (r.state === 'blocked') return r.owner || (r.blockedOn && r.blockedOn.kind === 'human' ? 'you' : 'manager');
+  return null;
+}
+const ATT_ORDER = {failed:0, blocked:1};
+const youFirst = r => attention(r) === 'you' ? 0 : 1;
+const ACT_ORDER = {waiting_review:0, working:1, unset:2};
+const byNewest = (a,b) => (Date.parse(b.updatedAt||0)||0) - (Date.parse(a.updatedAt||0)||0);
+
+function facts(r, m){
+  const out = [];
+  const add = (k,v) => out.push(`<div class="f"><span class="k">${k}</span><span class="v">${v}</span></div>`);
+  let st = col(COLOR[r.state], esc(LABEL[r.state]));
+  if (r.progress && r.progress.total > 0 && r.state !== 'done') st += ` ${r.progress.done}/${r.progress.total}`;
+  if (r.updatedAt) st += ` <span class="dim">· updated ${age(m.now - Date.parse(r.updatedAt))} ago</span>`;
+  if (r.stale) st += ` ${col('var(--status-pending)','· stale')}`;
+  add('state', st);
+  if (r.blockedOn) add('blocked', `on ${esc(r.blockedOn.kind)}: ${esc(r.blockedOn.text)}`);
+  if (r.question){
+    const q = r.question, mine = q.route === 'human';
+    add('question', `${esc(q.title)} <span class="dim">· ${mine ? 'for you' : 'with ' + esc(m.mgr.name)}</span>`);
+    if (q.note) add('', `<span class="dim">${esc(q.note)}</span>`);
+    if (q.options) add('', q.options.map((o,i) => `<button class="opt" type="button">${String.fromCharCode(97+i)}) ${esc(o)}</button>`).join(''));
+  } else if (r.openAttention) add('question', `${r.openAttention} open`);
+  if (r.next) add('next', esc(r.next));
+  let act = '';
+  if (r.status === 'exited') act = '<span class="dim">■ session exited</span>';
+  else if (r.activity === 'tool_use') act = `<i>⚙ using ${esc(r.toolName || 'a tool')}</i>`;
+  else if (r.activity === 'thinking') act = '<i>◌ thinking…</i>';
+  else if (r.activity === 'idle') act = `<span class="dim">◦ idle${r.idleSince ? ' ' + age(m.now - Date.parse(r.idleSince)) : ''}${r.state === 'done' ? ' · session still open' : ''}</span>`;
+  if (act) add('activity', act);
+  if (r.pr){
+    const c = {passed:['✓','var(--accent)','checks passed'],running:['◌','var(--status-pending)','checks running'],
+      failed:['✗','var(--status-error)','checks failed'],merged:['⬥','var(--pr-merged)','merged']}[r.pr.checks];
+    add('pr', `#${r.pr.num}${c ? ' ' + col(c[1], c[0] + ' ' + c[2]) : ''}`);
+  }
+  if (r.worktree){
+    const w = r.worktree, bits = [esc(w.branch)];
+    if (w.dirty) bits.push('dirty'); if (w.ahead) bits.push('↑' + w.ahead);
+    if (w.retained) bits.push('retained: ' + esc(w.retained));
+    add('worktree', '⎇ ' + bits.join(' <span class="dim">·</span> '));
+  }
+  if (r.unreadMail) add('mail', `${r.unreadMail} unread`);
+  if (r.previews && r.previews.length) add('preview', r.previews.map(p => esc(p.name || p)).join(', '));
+  if (r.shellType) add('agent', `<span class="dim">${esc(r.shellType)}${r.model ? ' · ' + esc(r.model) : ''}</span>`);
+  const mine = m.events.filter(e => e.sessionId === r.id || (e.sessionId === e.sessionName && e.sessionName === r.name)).slice(-3).reverse();
+  mine.forEach((e,i) => add(i ? '' : 'events', `<span class="dim">${hhmm(e.ts)}</span> ${esc(firstSeg(e.summary))}`));
+  return out.join('');
+}
+const firstSeg = s => { const i = s.indexOf(' | '); return i < 0 ? s : s.slice(0,i) + ' …'; };
+
+function rowHtml(r, m, kind){
+  const who = attention(r);
+  const q = who === 'you' && r.question;
+  const key = q ? 'question' : r.state;
+  const gcol = r.stale && r.state === 'working' ? 'var(--text-muted)' : COLOR[key];
+  const cls = kind === 'att' ? 'att' : (r.state === 'done' || r.state === 'unset') ? 'quiet' : '';
+  const right = kind === 'att'
+    ? `<span class="r ${who === 'you' ? 'you' : ''}">${who === 'you' ? 'you' : esc(who === 'manager' ? m.mgr.name : who)}</span>`
+    : (r.updatedAt ? `<span class="r age">${age(m.now - Date.parse(r.updatedAt))}</span>` : '');
+  const headline = r.headline || (r.state === 'unset' ? 'no status declared' : '');
+  const op = isOpen(r.id);
+  return `<div class="item ${cls}" data-key="${esc(r.id)}" data-open="${op}">
+    <button class="row" type="button" aria-expanded="${op}" aria-label="${esc(LABEL[r.state])}: ${esc(r.name)} — ${esc(headline)}">
+      <span class="g" style="color:${gcol}" aria-hidden="true">${GLYPH[key]}</span><span class="n">${esc(r.name)}</span><span class="h">${esc(headline)}</span>${right}
+    </button>
+    <div class="d">${facts(r, m)}</div>
+  </div>`;
+}
+
+function fold(id, label, count, peek, body, open){
+  return `<section class="grp fold" data-id="${id}" data-open="${open}">
+    <button class="lbl" type="button" aria-expanded="${open}"><span class="chev" aria-hidden="true">${open ? '▾' : '▸'}</span><span class="nw">${label}${count !== '' ? ' · ' + count : ''}</span><span class="peek">${peek}</span></button>
+    <div class="body">${body}</div></section>`;
+}
+
+function eventsHtml(m){
+  const KG = {idle:'◦',result:'◆',pr:'⬥',note:'✎',attention:'?',mail:'✉',preview:'▣',exit:'■'};
+  const list = [];
+  for (const e of m.events){ const p = list[list.length-1];
+    if (p && p.sessionName === e.sessionName && p.kind === e.kind && p.summary === e.summary) { p.n++; p.ts = e.ts; } else list.push({...e, n:1}); }
+  list.reverse();
+  let lastT = '';
+  const line = e => {
+    let g = KG[e.kind] || '·', c = 'inherit', s = e.summary;
+    if (e.kind === 'status'){ const i = s.indexOf(': '); const stt = s.slice(0,i); if (GLYPH[stt]){ g = GLYPH[stt]; c = COLOR[stt]; s = s.slice(i+2); } }
+    const t = hhmm(e.ts), showT = t !== lastT; lastT = t;
+    return `<button type="button" class="ev ${e.kind === 'idle' ? 'faint' : ''}" data-open="false"><span class="t">${showT ? t : ''}</span><span class="who">${esc(e.sessionName)}</span><span class="s"><span style="color:${c}">${g}</span> ${esc(s)}${e.n > 1 ? ' <span class="dim">×' + e.n + '</span>' : ''}</span></button>`;
+  };
+  const head = list.slice(0,12).map(line).join('');
+  const rest = list.slice(12);
+  const tail = rest.length ? `<div class="rest" hidden>${rest.map(line).join('')}</div><button type="button" class="more">show ${rest.length} older</button>` : '';
+  const last = list[0];
+  const peek = last ? `last ${hhmm(last.ts)} ${esc(last.sessionName)} ${esc(firstSeg(last.summary))}` : '';
+  return fold('events', 'events', m.events.length, peek, head + tail, OPEN.events);
+}
+
+/* ---------- render ---------- */
+let TAB = 'live', ALL = false;
+const OPENROWS = new Set();
+const isOpen = k => ALL || OPENROWS.has(k);
+const OPEN = {planned:false, done:false, events:false, brief:false};
+const MODELS = {live: liveModel(), sample: sampleModel()};
+
+function render(){
+  const m = MODELS[TAB];
+  const att = m.rows.filter(r => attention(r)).sort((a,b) => youFirst(a) - youFirst(b) || (ATT_ORDER[a.state] ?? -1) - (ATT_ORDER[b.state] ?? -1) || byNewest(a,b));
+  const rest = m.rows.filter(r => !attention(r));
+  const active = rest.filter(r => r.state !== 'done').sort((a,b) => ACT_ORDER[a.state] - ACT_ORDER[b.state] || byNewest(a,b));
+  const done = rest.filter(r => r.state === 'done').sort(byNewest);
+  let h = `<div class="mgr"><b>${esc(m.mgr.name)}</b><span class="st" style="color:${COLOR[m.mgr.state] || 'var(--text-muted)'}">${GLYPH[m.mgr.state] || '○'} ${esc(LABEL[m.mgr.state] || m.mgr.state)}${m.mgr.headline ? ' · ' + esc(m.mgr.headline) : ''}</span></div>`;
+  if (att.length) h += `<section class="grp"><div class="lbl loud"><span class="chev" aria-hidden="true"></span><span>needs attention · ${att.length}</span></div>${att.map(r => rowHtml(r, m, 'att')).join('')}</section>`;
+  if (active.length) h += `<section class="grp"><div class="lbl"><span class="chev" aria-hidden="true"></span><span>active · ${active.length}</span></div>${active.map(r => rowHtml(r, m)).join('')}</section>`;
+  else if (!att.length) h += `<section class="grp"><div class="lbl"><span class="chev"></span><span>nothing running</span></div></section>`;
+  // future todo list: planned, not yet started, in precedence order
+  const pBody = m.planned.map((p,i) => `<div class="item plan" data-key="plan:${esc(p.name)}" data-open="${isOpen('plan:'+p.name)}"><button class="row" type="button" aria-expanded="${isOpen('plan:'+p.name)}"><span class="g" aria-hidden="true">${i+1}</span><span class="n">${esc(p.name)}</span><span class="h">${esc(p.headline)}</span></button>
+      <div class="d"><div class="f"><span class="k">after</span><span class="v">${p.after.length ? p.after.map(esc).join(', ') : '<span class="dim">nothing — ready to start</span>'}</span></div></div></div>`).join('')
+    || `<div class="more" style="padding-left:24px;cursor:default">nothing planned · todo items are not in the contract yet</div>`;
+  h += fold('planned', 'planned', m.planned.length || '', m.planned.length ? 'next: ' + esc(m.planned[0].name) : 'none', pBody, OPEN.planned);
+  if (done.length) h += fold('done', 'done', done.length, done.map(r => esc(r.name)).join(', '), done.map(r => rowHtml(r, m)).join(''), OPEN.done);
+  h += eventsHtml(m);
+  if (m.brief) h += fold('brief', 'brief', '', 'updated ' + age(m.now - Date.parse(m.brief.updatedAt)) + ' ago', `<div class="brief">${m.brief.text.map(t => `<p>${esc(t)}</p>`).join('')}</div>`, OPEN.brief);
+  document.getElementById('app').innerHTML = h;
+  document.getElementById('snap').textContent = m.snap;
+}
+
+function setOpen(item, open){ item.dataset.open = open; OPENROWS[open ? 'add' : 'delete'](item.dataset.key); const b = item.querySelector('.row'); if (b) b.setAttribute('aria-expanded', open); }
+function toggleAll(){ ALL = !ALL; OPENROWS.clear(); document.getElementById('det').setAttribute('aria-pressed', ALL); document.querySelectorAll('.item').forEach(i => setOpen(i, ALL)); }
+function toggleFold(id){ OPEN[id] = !OPEN[id]; const f = document.activeElement && document.activeElement.closest('.grp'); render(); if (f){ const b = document.querySelector(`.grp[data-id="${f.dataset.id}"] .lbl`); if (b) b.focus(); } }
+
+document.addEventListener('click', e => {
+  const t = e.target.closest('button'); if (!t) return;
+  if (t.dataset.tab){ TAB = t.dataset.tab; document.querySelectorAll('[data-tab]').forEach(b => b.setAttribute('aria-selected', b === t)); render(); return; }
+  if (t.id === 'det') return toggleAll();
+  if (t.id === 'thm'){ const r = document.documentElement; const cur = r.dataset.theme || (matchMedia('(prefers-color-scheme:light)').matches ? 'light' : 'dark'); r.dataset.theme = cur === 'light' ? 'dark' : 'light'; return; }
+  if (t.classList.contains('row')){ const i = t.closest('.item'); return setOpen(i, i.dataset.open !== 'true'); }
+  if (t.classList.contains('lbl')) return toggleFold(t.closest('.grp').dataset.id);
+  if (t.classList.contains('ev')){ t.dataset.open = t.dataset.open !== 'true'; return; }
+  if (t.classList.contains('more')){ const r = t.previousElementSibling; if (r && r.classList.contains('rest')){ r.hidden = false; t.remove(); } }
+});
+document.addEventListener('keydown', e => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const stops = [...document.querySelectorAll('#app .row, #app button.lbl')].filter(el => el.offsetParent !== null);
+  const i = stops.indexOf(document.activeElement);
+  if (e.key === 'j' || e.key === 'ArrowDown'){ e.preventDefault(); (stops[Math.min(i+1, stops.length-1)] || stops[0])?.focus(); }
+  else if (e.key === 'k' || e.key === 'ArrowUp'){ e.preventDefault(); (stops[Math.max(i-1, 0)] || stops[0])?.focus(); }
+  else if (e.key === 'd') toggleAll();
+  else if (e.key === 'e'){ OPEN.events = !OPEN.events; render(); }
+  else if (e.key === 'Escape'){ if (ALL) toggleAll(); else document.querySelectorAll('.item[data-open=true]').forEach(x => setOpen(x, false)); }
+});
+render();
+</script>
+</body>
+</html>

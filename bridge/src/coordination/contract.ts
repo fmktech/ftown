@@ -5,6 +5,7 @@
  */
 import type { Activity } from '../attention-events.js';
 import type { PullRequestState } from '../pull-request-status-protocol.js';
+import type { PlanView } from './contract-c.js';
 import type { MailMessage, Session, SessionStatus } from '../types.js';
 
 // ───────────────────────── Session card (declared by the agent) ─────────────────────────
@@ -72,6 +73,8 @@ export interface CardDerived {
 }
 
 export interface SessionCard {
+  /** phase C: true for retired (archived) children included by board(all) */
+  archived?: boolean;
   sessionId: string;
   name: string;
   parentSessionId?: string;
@@ -110,7 +113,7 @@ export const TREE_EVENTS_COMPACT_AT = 6_000;
 export const TREE_EVENTS_MAX_WAIT_MS = 300_000;
 export const TREE_EVENT_SUMMARY_MAX = 300;
 
-export const TREE_EVENT_KINDS = ['status', 'attention', 'pr', 'preview', 'exit', 'idle', 'result', 'mail'] as const;
+export const TREE_EVENT_KINDS = ['status', 'attention', 'pr', 'preview', 'exit', 'idle', 'result', 'mail', 'plan', 'removed'] as const;
 export type TreeEventKind = typeof TREE_EVENT_KINDS[number];
 
 export interface TreeEvent {
@@ -145,6 +148,8 @@ export interface TreeEventLogApi {
 export type BoardRollupKey = CardState | 'unset';
 
 export interface Board {
+  /** phase C: the root's plan, ordered */
+  plan?: PlanView;
   rootId: string;
   /** tree event head at render time; pass back as `since` */
   cursor: number;
@@ -165,6 +170,8 @@ export interface BoardQuery {
 }
 
 export interface BoardDeps {
+  /** phase C: archived session records */
+  listArchived?(): Promise<Session[]>;
   loadSession(id: string): Promise<Session | null>;
   listSessions(): Promise<Session[]>;
   attention(id: string): Promise<{ activity: Activity; openCount: number }>;

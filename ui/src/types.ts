@@ -35,6 +35,7 @@ export interface Session {
   preview?: SessionPreviewDescriptor;
   card?: SessionCard;
   brief?: { text?: string; notes: { ts: string; text: string }[]; updatedAt: string };
+  plan?: { seq: number; items: Array<{ id: string; title: string; note?: string; after: string[]; priority: 1 | 2 | 3; state: 'todo' | 'started' | 'done' | 'dropped'; sessionId?: string; createdAt: string; updatedAt: string }> };
   worktree?: { repoRoot: string; path: string; branch: string; base: string; createdByBridge: true; retained?: { reason: string; at: string } };
 }
 

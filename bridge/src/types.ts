@@ -1,5 +1,6 @@
 import type { SessionCardDeclared } from './coordination/contract.js';
 import type { SessionBrief, SessionWorktree } from './coordination/contract-b.js';
+import type { SessionPlan } from './coordination/contract-c.js';
 // Derived from the harness registry (single source of truth for supported
 // harnesses); re-exported here so existing `from './types.js'` imports keep working.
 // Type-only, so this adds no runtime dependency on harness-registry.js.
@@ -72,6 +73,8 @@ export interface Session {
   card?: SessionCardDeclared;
   /** Manager brief (coordination phase B). */
   brief?: SessionBrief;
+  /** Plan list on a parent session (coordination phase C). */
+  plan?: SessionPlan;
   /** Bridge-owned git worktree (coordination phase B). */
   worktree?: SessionWorktree;
 }
