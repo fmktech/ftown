@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
 import type { Session, SessionCard, SessionStatus } from "@/types";
 import { markdownPreviewDocument } from "@/lib/session-preview";
 import { relativeTime } from "@/lib/relative-time";
@@ -400,6 +400,27 @@ function OverviewFold({ label, peek, open, onToggle, children }: { label: string
 const PLAN_MARKS = { ready: "→", waiting: "·", started: "▸", done: "✓", dropped: "✗" } as const;
 const EVENTS_PAGE = 12;
 
+const ROW_SELECTOR = "[data-overview-row]";
+/** Elements that consume keys themselves: text entry plus the terminal's xterm region. */
+const KEY_SINK_SELECTOR = "input,textarea,select,iframe,[contenteditable=''],[contenteditable='true'],.xterm,[role='textbox'],[role='listbox'],[role='grid'],[role='slider'],[role='combobox']";
+/** While an overlay with its own keys is open the Overview stays out of the way. */
+const OPEN_OVERLAY_SELECTOR = "[role='dialog'],[role='alertdialog'],[role='menu'],[aria-modal='true'],dialog[open]";
+
+/** False when the element or an ancestor is removed from the DOM or display:none (mounted but hidden). */
+function isDisplayed(element: HTMLElement): boolean {
+  for (let node: HTMLElement | null = element; node; node = node.parentElement) {
+    if (node.hidden || node.ownerDocument.defaultView?.getComputedStyle(node).display === "none") return false;
+  }
+  return true;
+}
+
+/** j/ArrowDown focuses the next row (the first when none is focused yet); k/ArrowUp the previous. */
+function moveRowFocus(rows: ReadonlyArray<HTMLElement>, target: HTMLElement | null, key: string): void {
+  const index = target ? rows.indexOf(target) : -1;
+  if (key === "j" || key === "ArrowDown") rows[Math.min(rows.length - 1, index + 1)]?.focus();
+  else rows[Math.max(0, index - 1)]?.focus();
+}
+
 /** Manager view for a session with children: one line per child, folded groups for the rest. */
 export function SessionOverview(props: SessionOverviewProps) {
   const { session, sessions, snapshot, now = Date.now() } = props;
@@ -409,6 +430,27 @@ export function SessionOverview(props: SessionOverviewProps) {
   const [eventLimit, setEventLimit] = useState(EVENTS_PAGE);
   const [unwrapped, setUnwrapped] = useState<ReadonlySet<string>>(new Set());
   const rootRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    // With no row focused yet (the document itself holds focus) the Overview's own handler never
+    // fires, so listen globally. Only j/k: from outside the Overview the arrows must keep their
+    // native behaviour (page scrolling). Never take keys from text entry, the terminal, or an open
+    // dialog/menu, and do nothing while the Overview is mounted but hidden.
+    function onDocumentKeyDown(event: globalThis.KeyboardEvent): void {
+      const target = event.target as HTMLElement | null;
+      const root = rootRef.current;
+      if (event.metaKey || event.ctrlKey || event.altKey || !target || !root || !isDisplayed(root)) return;
+      if (target.closest(KEY_SINK_SELECTOR) || root.ownerDocument.querySelector(OPEN_OVERLAY_SELECTOR)) return;
+      if (root.contains(target)) return;
+      if (event.key !== "j" && event.key !== "k") return;
+      const rows = Array.from(root.querySelectorAll<HTMLElement>(ROW_SELECTOR));
+      if (rows.length === 0) return;
+      event.preventDefault();
+      moveRowFocus(rows, target, event.key);
+    }
+    document.addEventListener("keydown", onDocumentKeyDown);
+    return () => document.removeEventListener("keydown", onDocumentKeyDown);
+  }, []);
 
   const entries = buildEntries(childSessionsOf(session, sessions), props);
   if (entries.length === 0) return null;
@@ -436,15 +478,11 @@ export function SessionOverview(props: SessionOverviewProps) {
 
   const onKeyDown = (event: KeyboardEvent<HTMLElement>) => {
     const target = event.target as HTMLElement;
-    if (event.metaKey || event.ctrlKey || event.altKey || target.closest("input,textarea,iframe,select")) return;
-    const focusable = Array.from(rootRef.current?.querySelectorAll<HTMLElement>("[data-overview-row]") ?? []);
-    const index = focusable.indexOf(target);
-    if (event.key === "j" || event.key === "ArrowDown") {
+    if (event.metaKey || event.ctrlKey || event.altKey || target.closest(KEY_SINK_SELECTOR)) return;
+    const focusable = Array.from(rootRef.current?.querySelectorAll<HTMLElement>(ROW_SELECTOR) ?? []);
+    if (event.key === "j" || event.key === "ArrowDown" || event.key === "k" || event.key === "ArrowUp") {
       event.preventDefault();
-      focusable[Math.min(focusable.length - 1, index + 1)]?.focus();
-    } else if (event.key === "k" || event.key === "ArrowUp") {
-      event.preventDefault();
-      focusable[Math.max(0, index - 1)]?.focus();
+      moveRowFocus(focusable, target, event.key);
     } else if (event.key === "d") {
       setAllOpen(current => !current);
       setToggled(new Set());

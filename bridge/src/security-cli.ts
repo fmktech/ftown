@@ -29,7 +29,38 @@ export function invitationLink(invitation: BridgeInvitation, apiUrl = 'https://f
   return url.href;
 }
 
-export async function runSecurity(argv: string[]): Promise<number> {
+/** A probe of the solo panel origin may take at most this long before falling back to the hosted link. */
+const SOLO_PROBE_TIMEOUT_MS = 1500;
+
+/** The one /api/security/info field that identifies whose panel answered; extra fields are ignored. */
+type FrontInfo = { bridgeId?: unknown };
+
+/**
+ * A --solo bridge serves its panel on its own front origin (persisted in the
+ * pointer as soloOrigin), so its invitation links belong there, not on the
+ * hosted one. The origin is still verified to name THIS bridge: a stale or
+ * wrong pointer must never hand the invitation to a different bridge's panel.
+ * Null keeps the hosted flow (hosted pointers, --local bridges, a front that
+ * no longer answers with this bridge's identity).
+ */
+export async function soloPanelOrigin(soloOrigin: string | undefined, bridgeId: string | undefined, fetchImpl: typeof fetch = fetch): Promise<string | null> {
+  if (!soloOrigin || !bridgeId) return null;
+  try {
+    const response = await fetchImpl(new URL('/api/security/info', soloOrigin), { signal: AbortSignal.timeout(SOLO_PROBE_TIMEOUT_MS) });
+    if (!response.ok) return null;
+    const info = (await response.json()) as FrontInfo;
+    return info.bridgeId === bridgeId ? soloOrigin : null;
+  } catch { return null; }
+}
+
+/** The base an invitation link is printed on: the solo panel origin when it verifies, else the configured API origin. */
+export async function invitationOrigin(soloOrigin: string | undefined, bridgeId: string | undefined,
+  apiUrl: string | undefined, fetchImpl: typeof fetch = fetch): Promise<string> {
+  return (await soloPanelOrigin(soloOrigin, bridgeId, fetchImpl)) ?? apiUrl ?? 'https://ftown.ia.br';
+}
+
+export async function runSecurity(argv: string[], send: typeof securityCommand = securityCommand,
+  fetchImpl: typeof fetch = fetch): Promise<number> {
   const program = new Command().name('ftown security').description('Manage this bridge’s encrypted endpoint trust')
     .option('--data-dir <path>', 'Bridge instance data directory').exitOverride();
   const pointer = () => readLocalPointer(program.opts().dataDir as string | undefined);
@@ -38,8 +69,8 @@ export async function runSecurity(argv: string[]): Promise<number> {
     .action(async options => {
       const current = pointer();
       if (accountManaged(current.ownerId)) throw new SecurityCliRefusal(ACCOUNT_MANAGED_INVITE_MESSAGE);
-      const invite = await securityCommand(current, 'security_invite', { label: String(options.label) }) as unknown as BridgeInvitation;
-      console.log(invitationLink(invite, current.apiUrl));
+      const invite = await send(current, 'security_invite', { label: String(options.label) }) as unknown as BridgeInvitation;
+      console.log(invitationLink(invite, await invitationOrigin(current.soloOrigin, current.bridgeId, current.apiUrl, fetchImpl)));
     });
   program.command('devices').description('List locally approved encrypted endpoints').action(async () => {
     const result = await securityCommand(pointer(), 'security_devices'); console.log(JSON.stringify(result));

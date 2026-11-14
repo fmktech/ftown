@@ -47,7 +47,7 @@ const itemSchema = z.object({
   escalationNote: z.string().max(ESCALATION_NOTE_MAX).optional(),
   answeredBy: answeredBySchema.optional(),
   fingerprint: z.string(), sourceId: z.string().optional(), reason: z.string().optional(),
-}).strict();
+});
 const ledgerSchema = z.object({
   version: z.literal(1), epoch: z.string().guid(), sequence: z.number().int().nonnegative(),
   prunedThrough: z.number().int().nonnegative(),
@@ -67,7 +67,29 @@ export interface AttentionRecordOptions { prompt?: AttentionPrompt; promptOrigin
 export class AttentionError extends Error {
   constructor(readonly code: string, message: string, readonly status = 400) { super(message); }
 }
-const publicItem = ({ fingerprint: _fingerprint, sourceId: _sourceId, reason: _reason, ...item }: StoredItem): AttentionItem => item;
+function publicItem(item: StoredItem): AttentionItem {
+  const result: AttentionItem = {
+    id: item.id,
+    sequence: item.sequence,
+    type: item.type,
+    title: item.title,
+    message: item.message,
+    createdAt: item.createdAt,
+    lastSeenAt: item.lastSeenAt,
+    occurrences: item.occurrences,
+  };
+  if (item.acknowledgedAt !== undefined) result.acknowledgedAt = item.acknowledgedAt;
+  if (item.resolvedAt !== undefined) result.resolvedAt = item.resolvedAt;
+  if (item.resolution !== undefined) result.resolution = item.resolution;
+  if (item.prompt !== undefined) result.prompt = item.prompt;
+  if (item.answer !== undefined) result.answer = item.answer;
+  if (item.route !== undefined) result.route = item.route;
+  if (item.routedTo !== undefined) result.routedTo = item.routedTo;
+  if (item.escalatedAt !== undefined) result.escalatedAt = item.escalatedAt;
+  if (item.escalationNote !== undefined) result.escalationNote = item.escalationNote;
+  if (item.answeredBy !== undefined) result.answeredBy = item.answeredBy;
+  return result;
+}
 
 export const SUBAGENT_IDLE_DELAY_MS = 120_000;
 /** Compatibility for existing consumers of the previous exported constant. */

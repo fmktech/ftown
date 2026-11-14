@@ -60,6 +60,27 @@ function makeItem(overrides: Partial<PlanItem> = {}): PlanItem {
   };
 }
 
+/** Handler for a mutation followed by its fresh PlanView + sessions confirmation GETs. */
+function mutationHandler(
+  item: PlanItem,
+  view: PlanView,
+  sessions: Array<{ id: string; name: string }> = [],
+): Handler {
+  return (call) => {
+    if (call.method === 'GET' && call.path === '/api/sessions') return { sessions };
+    if (call.method === 'GET') return view;
+    return { item };
+  };
+}
+
+function confirmCalls(mutation: RecordedCall, sessionId: string = SELF): RecordedCall[] {
+  return [
+    mutation,
+    { method: 'GET', path: `/api/sessions/${sessionId}/plan`, body: undefined },
+    { method: 'GET', path: '/api/sessions', body: undefined },
+  ];
+}
+
 function makeView(): PlanView {
   return {
     items: [
@@ -319,25 +340,30 @@ test('list with no items prints the empty message; --json still passes through',
 
 test('add joins the title, POSTs supplied fields and prints the created item', async () => {
   const created = makeItem({ id: 'p7', title: 'Fix the thing', note: 'details', after: ['p1'], priority: 1 });
-  const { deps, calls, out } = harness(() => ({ item: created }));
+  const { deps, calls, out } = harness(mutationHandler(created, { items: [created], ready: [] }));
   const code = await runPlan(['add', 'Fix', 'the', 'thing', '--note', 'details', '--after', 'p1', '--priority', '1'], deps);
   assert.equal(code, 0);
-  assert.deepEqual(calls, [
-    {
+  assert.deepEqual(
+    calls,
+    confirmCalls({
       method: 'POST',
       path: `/api/sessions/${SELF}/plan`,
       body: { title: 'Fix the thing', note: 'details', after: ['p1'], priority: 1 },
-    },
-  ]);
+    }),
+  );
   assert.deepEqual(out, ['· p7 [P1] Fix the thing  (after p1)']);
 });
 
 test('add with only a title sends no optional keys', async () => {
-  const { deps, calls, out } = harness(() => ({ item: makeItem({ id: 'p2', title: 'Solo task' }) }));
+  const solo = makeItem({ id: 'p2', title: 'Solo task' });
+  const { deps, calls, out } = harness(mutationHandler(solo, { items: [solo], ready: ['p2'] }));
   assert.equal(await runPlan(['add', 'Solo task'], deps), 0);
-  assert.deepEqual(calls, [{ method: 'POST', path: `/api/sessions/${SELF}/plan`, body: { title: 'Solo task' } }]);
-  // Single-item responses carry no PlanView, so readiness is not inferred.
-  assert.deepEqual(out, ['· p2 [P2] Solo task']);
+  assert.deepEqual(
+    calls,
+    confirmCalls({ method: 'POST', path: `/api/sessions/${SELF}/plan`, body: { title: 'Solo task' } }),
+  );
+  // Readiness comes from the fresh PlanView, not the single-item response.
+  assert.deepEqual(out, ['→ p2 [P2] Solo task']);
 });
 
 test('add --json passes the created payload through and honours --session-id', async () => {
@@ -370,12 +396,19 @@ test('add usage errors exit 2 and make no request', async () => {
 
 test('start PATCHes state started with the child session id', async () => {
   const started = makeItem({ state: 'started', sessionId: 'child-9' });
-  const { deps, calls, out } = harness(() => ({ item: started }));
+  const { deps, calls, out } = harness(
+    mutationHandler(started, { items: [started], ready: [] }, [{ id: 'child-9', name: 'worker-nine' }]),
+  );
   assert.equal(await runPlan(['start', 'p1', '--session', 'child-9'], deps), 0);
-  assert.deepEqual(calls, [
-    { method: 'PATCH', path: `/api/sessions/${SELF}/plan/p1`, body: { state: 'started', sessionId: 'child-9' } },
-  ]);
-  assert.deepEqual(out, ['▸ p1 [P2] Write the plan CLI  (→ child-9)']);
+  assert.deepEqual(
+    calls,
+    confirmCalls({
+      method: 'PATCH',
+      path: `/api/sessions/${SELF}/plan/p1`,
+      body: { state: 'started', sessionId: 'child-9' },
+    }),
+  );
+  assert.deepEqual(out, ['▸ p1 [P2] Write the plan CLI  (→ worker-nine)']);
 });
 
 test('start requires --session and valid ids (usage exit 2, no request)', async () => {
@@ -395,17 +428,18 @@ test('start requires --session and valid ids (usage exit 2, no request)', async 
 });
 
 test('done, drop and todo PATCH the mapped state and print the item', async () => {
-  const cases: Array<{ argv: string[]; state: PlanItem['state']; line: string }> = [
-    { argv: ['done', 'p1'], state: 'done', line: '✓ p1 [P2] Write the plan CLI' },
-    { argv: ['drop', 'p1'], state: 'dropped', line: '✗ p1 [P2] Write the plan CLI' },
-    { argv: ['todo', 'p1'], state: 'todo', line: '· p1 [P2] Write the plan CLI' },
+  const cases: Array<{ argv: string[]; state: PlanItem['state']; ready: string[]; line: string }> = [
+    { argv: ['done', 'p1'], state: 'done', ready: [], line: '✓ p1 [P2] Write the plan CLI' },
+    { argv: ['drop', 'p1'], state: 'dropped', ready: [], line: '✗ p1 [P2] Write the plan CLI' },
+    { argv: ['todo', 'p1'], state: 'todo', ready: ['p1'], line: '→ p1 [P2] Write the plan CLI' },
   ];
-  for (const { argv, state, line } of cases) {
-    const { deps, calls, out } = harness(() => ({ item: makeItem({ state }) }));
+  for (const { argv, state, ready, line } of cases) {
+    const item = makeItem({ state });
+    const { deps, calls, out } = harness(mutationHandler(item, { items: [item], ready }));
     assert.equal(await runPlan(argv, deps), 0, argv.join(' '));
     assert.deepEqual(
       calls,
-      [{ method: 'PATCH', path: `/api/sessions/${SELF}/plan/p1`, body: { state } }],
+      confirmCalls({ method: 'PATCH', path: `/api/sessions/${SELF}/plan/p1`, body: { state } }),
       argv.join(' '),
     );
     assert.deepEqual(out, [line], argv.join(' '));
@@ -422,40 +456,119 @@ test('state verbs reject invalid item ids with exit 2 and no request', async () 
 
 test('state verbs --json passes the payload through', async () => {
   const payload = { item: makeItem({ state: 'done' }) };
-  const { deps, out } = harness(() => payload);
+  const { deps, calls, out } = harness(() => payload);
   assert.equal(await runPlan(['done', 'p1', '--json'], deps), 0);
+  assert.deepEqual(calls, [
+    { method: 'PATCH', path: `/api/sessions/${SELF}/plan/p1`, body: { state: 'done' } },
+  ]);
   assert.deepEqual(JSON.parse(out.join('\n')), payload);
+});
+
+test('mutation confirmation uses the fresh PlanView item and child names', async () => {
+  // Mutation payload is stale; the fresh view carries the authoritative title/session.
+  const stale = makeItem({ id: 'p1', title: 'Stale title', state: 'started', sessionId: 'child-9' });
+  const fresh = makeItem({ id: 'p1', title: 'Fresh title', state: 'started', sessionId: 'child-9' });
+  const view: PlanView = { items: [fresh], ready: [] };
+  const { deps, calls, out } = harness(
+    mutationHandler(stale, view, [{ id: 'child-9', name: 'worker-nine' }]),
+  );
+  assert.equal(await runPlan(['start', 'p1', '--session', 'child-9'], deps), 0);
+  assert.equal(calls.filter((call) => call.method === 'GET' && call.path.endsWith('/plan')).length, 1);
+  assert.equal(calls.filter((call) => call.path === '/api/sessions').length, 1);
+  assert.deepEqual(out, ['▸ p1 [P2] Fresh title  (→ worker-nine)']);
+});
+
+test('mutation confirmation falls back to the child id for an unknown session', async () => {
+  const started = makeItem({ id: 'p1', state: 'started', sessionId: 'child-gone' });
+  const { deps, out } = harness(mutationHandler(started, { items: [started], ready: [] }, []));
+  assert.equal(await runPlan(['start', 'p1', '--session', 'child-gone'], deps), 0);
+  assert.deepEqual(out, ['▸ p1 [P2] Write the plan CLI  (→ child-gone)']);
+});
+
+test('mutation succeeds even when both confirmation GETs fail: prints payload, warns, exit 0', async () => {
+  const started = makeItem({ id: 'p1', state: 'started', sessionId: 'child-9' });
+  const { deps, calls, out, err } = harness((call) => {
+    if (call.method === 'GET') throw new Error('bridge unreachable');
+    return { item: started };
+  });
+  assert.equal(await runPlan(['start', 'p1', '--session', 'child-9'], deps), 0);
+  assert.equal(calls.length, 3);
+  assert.deepEqual(out, ['▸ p1 [P2] Write the plan CLI  (→ child-9)']);
+  assert.match(err.join('\n'), /warning/);
+  assert.match(err.join('\n'), /bridge unreachable/);
+});
+
+test('mutation confirmation is best-effort per GET: plan fails, names still resolve', async () => {
+  const started = makeItem({ id: 'p1', state: 'started', sessionId: 'child-9' });
+  const { deps, out, err } = harness((call) => {
+    if (call.method === 'GET' && call.path === '/api/sessions') {
+      return { sessions: [{ id: 'child-9', name: 'worker-nine' }] };
+    }
+    if (call.method === 'GET') throw new Error('plan read failed');
+    return { item: started };
+  });
+  assert.equal(await runPlan(['start', 'p1', '--session', 'child-9'], deps), 0);
+  assert.deepEqual(out, ['▸ p1 [P2] Write the plan CLI  (→ worker-nine)']);
+  assert.match(err.join('\n'), /warning/);
+});
+
+test('mutation confirmation is best-effort per GET: sessions fails, ready mark still applies', async () => {
+  const todo = makeItem({ id: 'p1', state: 'todo' });
+  const { deps, out, err } = harness((call) => {
+    if (call.method === 'GET' && call.path === '/api/sessions') throw new Error('sessions read failed');
+    if (call.method === 'GET') return { items: [todo], ready: ['p1'] };
+    return { item: todo };
+  });
+  assert.equal(await runPlan(['todo', 'p1'], deps), 0);
+  assert.deepEqual(out, ['→ p1 [P2] Write the plan CLI']);
+  assert.match(err.join('\n'), /warning/);
 });
 
 // ───────────────────────── edit ─────────────────────────
 
 test('edit PATCHes only the supplied fields', async () => {
   const edited = makeItem({ title: 'New title', priority: 1 });
-  const { deps, calls, out } = harness(() => ({ item: edited }));
+  const { deps, calls, out } = harness(mutationHandler(edited, { items: [edited], ready: ['p1'] }));
   assert.equal(await runPlan(['edit', 'p1', '--title', 'New title', '--priority', '1'], deps), 0);
-  assert.deepEqual(calls, [
-    { method: 'PATCH', path: `/api/sessions/${SELF}/plan/p1`, body: { title: 'New title', priority: 1 } },
-  ]);
-  assert.deepEqual(out, ['· p1 [P1] New title']);
+  assert.deepEqual(
+    calls,
+    confirmCalls({
+      method: 'PATCH',
+      path: `/api/sessions/${SELF}/plan/p1`,
+      body: { title: 'New title', priority: 1 },
+    }),
+  );
+  assert.deepEqual(out, ['→ p1 [P1] New title']);
 });
 
 test('edit --no-note and --no-after clear via null and empty list', async () => {
-  const { deps, calls } = harness(() => ({ item: makeItem() }));
+  const item = makeItem();
+  const { deps, calls } = harness(mutationHandler(item, { items: [item], ready: [] }));
   assert.equal(await runPlan(['edit', 'p1', '--no-note', '--no-after'], deps), 0);
-  assert.deepEqual(calls, [
-    { method: 'PATCH', path: `/api/sessions/${SELF}/plan/p1`, body: { note: null, after: [] } },
-  ]);
+  assert.deepEqual(
+    calls,
+    confirmCalls({
+      method: 'PATCH',
+      path: `/api/sessions/${SELF}/plan/p1`,
+      body: { note: null, after: [] },
+    }),
+  );
 });
 
 test('edit --note and --after set values; combined patch is exact', async () => {
-  const { deps, calls } = harness(() => ({ item: makeItem({ after: ['p2'] }) }));
+  const item = makeItem({ after: ['p2'] });
+  const { deps, calls } = harness(mutationHandler(item, { items: [item], ready: [] }));
   assert.equal(
     await runPlan(['edit', 'p1', '--note', 'fresh note', '--after', 'p2,p3', '--session-id', 'other-7'], deps),
     0,
   );
-  assert.deepEqual(calls, [
-    { method: 'PATCH', path: '/api/sessions/other-7/plan/p1', body: { note: 'fresh note', after: ['p2', 'p3'] } },
-  ]);
+  assert.deepEqual(
+    calls,
+    confirmCalls(
+      { method: 'PATCH', path: '/api/sessions/other-7/plan/p1', body: { note: 'fresh note', after: ['p2', 'p3'] } },
+      'other-7',
+    ),
+  );
 });
 
 test('edit with nothing to change or bad values exits 2 and makes no request', async () => {
@@ -476,8 +589,11 @@ test('edit with nothing to change or bad values exits 2 and makes no request', a
 
 test('edit --json passes the payload through', async () => {
   const payload = { item: makeItem({ title: 'Renamed' }) };
-  const { deps, out } = harness(() => payload);
+  const { deps, calls, out } = harness(() => payload);
   assert.equal(await runPlan(['edit', 'p1', '--title', 'Renamed', '--json'], deps), 0);
+  assert.deepEqual(calls, [
+    { method: 'PATCH', path: `/api/sessions/${SELF}/plan/p1`, body: { title: 'Renamed' } },
+  ]);
   assert.deepEqual(JSON.parse(out.join('\n')), payload);
 });
 

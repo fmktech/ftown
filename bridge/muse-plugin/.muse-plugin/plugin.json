@@ -4,7 +4,7 @@
   "name": "ftown",
   "displayName": "ftown",
   "version": "0.1.0",
-  "description": "ftown session lifecycle hooks: native session id capture and inbox mail delivery.",
+  "description": "ftown session lifecycle hooks: activity events and inbox mail delivery.",
   "compat": {
     "source": "native",
     "manifestDir": ".muse-plugin"
@@ -22,6 +22,46 @@
         ],
         "timeoutMs": 5000,
         "statusMessage": "ftown session start"
+      },
+      {
+        "id": "ftown-user-prompt-submit",
+        "event": "UserPromptSubmit",
+        "command": [
+          "sh",
+          "hooks/ftown-user-prompt-submit.sh"
+        ],
+        "timeoutMs": 5000,
+        "statusMessage": "ftown prompt"
+      },
+      {
+        "id": "ftown-pre-tool-use",
+        "event": "PreToolUse",
+        "command": [
+          "sh",
+          "hooks/ftown-pre-tool-use.sh"
+        ],
+        "timeoutMs": 5000,
+        "statusMessage": "ftown tool start"
+      },
+      {
+        "id": "ftown-post-tool-use",
+        "event": "PostToolUse",
+        "command": [
+          "sh",
+          "hooks/ftown-post-tool-use.sh"
+        ],
+        "timeoutMs": 5000,
+        "statusMessage": "ftown tool end"
+      },
+      {
+        "id": "ftown-post-tool-use-failure",
+        "event": "PostToolUseFailure",
+        "command": [
+          "sh",
+          "hooks/ftown-post-tool-use-failure.sh"
+        ],
+        "timeoutMs": 5000,
+        "statusMessage": "ftown tool end"
       },
       {
         "id": "ftown-stop",

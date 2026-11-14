@@ -7,11 +7,16 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { classifyAttentionHook } from './attention-events.js';
 
 const execFileAsync = promisify(execFile);
 
 const BUNDLE_DIR = fileURLToPath(new URL('../muse-plugin', import.meta.url));
 const SESSION_START_SCRIPT = join(BUNDLE_DIR, 'hooks', 'ftown-session-start.sh');
+const USER_PROMPT_SCRIPT = join(BUNDLE_DIR, 'hooks', 'ftown-user-prompt-submit.sh');
+const PRE_TOOL_SCRIPT = join(BUNDLE_DIR, 'hooks', 'ftown-pre-tool-use.sh');
+const POST_TOOL_SCRIPT = join(BUNDLE_DIR, 'hooks', 'ftown-post-tool-use.sh');
+const POST_TOOL_FAILURE_SCRIPT = join(BUNDLE_DIR, 'hooks', 'ftown-post-tool-use-failure.sh');
 const STOP_SCRIPT = join(BUNDLE_DIR, 'hooks', 'ftown-stop.sh');
 
 // Stdin shapes copied from /tmp/muse-hook-probe2/fire-baseline.log.
@@ -179,7 +184,7 @@ describe('muse process fixture early exit', () => {
 });
 
 describe('muse plugin bundle', () => {
-  it('declares SessionStart + Stop hooks only, with argv commands and 5s timeouts', () => {
+  it('declares activity hooks plus SessionStart and Stop, with argv commands and 5s timeouts', () => {
     const manifest = JSON.parse(
       readFileSync(join(BUNDLE_DIR, '.muse-plugin', 'plugin.json'), 'utf8'),
     ) as {
@@ -193,6 +198,10 @@ describe('muse plugin bundle', () => {
       manifest.capabilities.hooks.map((hook) => [hook.event, hook.command, hook.timeoutMs]),
       [
         ['SessionStart', ['sh', 'hooks/ftown-session-start.sh'], 5000],
+        ['UserPromptSubmit', ['sh', 'hooks/ftown-user-prompt-submit.sh'], 5000],
+        ['PreToolUse', ['sh', 'hooks/ftown-pre-tool-use.sh'], 5000],
+        ['PostToolUse', ['sh', 'hooks/ftown-post-tool-use.sh'], 5000],
+        ['PostToolUseFailure', ['sh', 'hooks/ftown-post-tool-use-failure.sh'], 5000],
         ['Stop', ['sh', 'hooks/ftown-stop.sh'], 5000],
       ],
     );
@@ -201,7 +210,7 @@ describe('muse plugin bundle', () => {
   });
 
   it('ships unique executable scripts, never symlinks', () => {
-    for (const script of [SESSION_START_SCRIPT, STOP_SCRIPT, join(BUNDLE_DIR, 'lib', 'ftown-hook.sh')]) {
+    for (const script of [SESSION_START_SCRIPT, USER_PROMPT_SCRIPT, PRE_TOOL_SCRIPT, POST_TOOL_SCRIPT, POST_TOOL_FAILURE_SCRIPT, STOP_SCRIPT, join(BUNDLE_DIR, 'lib', 'ftown-hook.sh')]) {
       const stat = lstatSync(script);
       assert.equal(stat.isSymbolicLink(), false, `${script} must not be a symlink`);
       assert.equal(stat.isFile(), true);
@@ -213,7 +222,14 @@ describe('muse plugin bundle', () => {
 describe('muse hook scripts', () => {
   it('exit 0 silently when FTOWN_SESSION_ID is unset (no network)', async () => {
     const stub = await startStubBridge();
-    for (const [script, stdin] of [[SESSION_START_SCRIPT, SESSION_START_STDIN], [STOP_SCRIPT, STOP_STDIN]] as const) {
+    for (const [script, stdin] of [
+      [SESSION_START_SCRIPT, SESSION_START_STDIN],
+      [USER_PROMPT_SCRIPT, SESSION_START_STDIN],
+      [PRE_TOOL_SCRIPT, SESSION_START_STDIN],
+      [POST_TOOL_SCRIPT, SESSION_START_STDIN],
+      [POST_TOOL_FAILURE_SCRIPT, SESSION_START_STDIN],
+      [STOP_SCRIPT, STOP_STDIN],
+    ] as const) {
       const result = await runScript(script, stdin, scriptEnv(stub, { FTOWN_SESSION_ID: undefined }));
       assert.equal(result.exitCode, 0);
       assert.equal(result.stdout, '');
@@ -355,5 +371,52 @@ describe('muse hook scripts', () => {
       session_id: '',
       cwd: '',
     });
+  });
+
+  it('maps prompt and tool hooks onto board activity and leaves mail on Stop', async () => {
+    const stub = await startStubBridge();
+    const sid = '01a0d03f-c337-7b60-92c8-0c4278a7360b';
+    const cwd = '/private/tmp/muse-hook-probe2/proj';
+    const base = { session_id: sid, cwd };
+    const prompt = await runScript(USER_PROMPT_SCRIPT, JSON.stringify({ ...base, hook_event_name: 'UserPromptSubmit', prompt: 'say hi' }), scriptEnv(stub));
+    const pre = await runScript(PRE_TOOL_SCRIPT, JSON.stringify({ ...base, hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_use_id: 'toolu_1', tool_input: { command: 'ls' }, tool_response: 'nope' }), scriptEnv(stub));
+    const post = await runScript(POST_TOOL_SCRIPT, JSON.stringify({ ...base, hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_use_id: 'toolu_1', tool_input: { command: 'ls' }, tool_response: 'secret-output' }), scriptEnv(stub));
+    const failed = await runScript(POST_TOOL_FAILURE_SCRIPT, JSON.stringify({ ...base, hook_event_name: 'PostToolUseFailure', tool_name: 'Bash', tool_use_id: 'toolu_2', error: 'boom', tool_response: 'secret-output' }), scriptEnv(stub));
+
+    assert.equal(prompt.exitCode, 0);
+    assert.equal(prompt.stdout, '');
+    assert.equal(prompt.proxyRequest, undefined);
+    assert.equal(pre.stdout, '');
+    assert.equal(post.stdout, '');
+    assert.equal(failed.stdout, '');
+    const bodies = stub.requests.filter((request) => request.method === 'POST').map((request) => JSON.parse(request.body) as Record<string, unknown>);
+    assert.equal(bodies.length, 4);
+    assert.deepEqual(bodies[0], {
+      ftown_session_id: 'ftown-sid-1', ftown_session_source: 'env', hook_event_name: 'UserPromptSubmit',
+      session_id: sid, cwd, prompt: 'say hi',
+    });
+    assert.deepEqual(bodies[1], {
+      ftown_session_id: 'ftown-sid-1', hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_use_id: 'toolu_1',
+    });
+    assert.deepEqual(bodies[2], {
+      ftown_session_id: 'ftown-sid-1', hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_use_id: 'toolu_1',
+    });
+    assert.deepEqual(bodies[3], {
+      ftown_session_id: 'ftown-sid-1', hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_use_id: 'toolu_2',
+    });
+    for (const body of bodies.slice(1)) {
+      assert.deepEqual(Object.keys(body).sort(), ['ftown_session_id', 'hook_event_name', 'tool_name', 'tool_use_id']);
+      const raw = JSON.stringify(body);
+      assert.equal(raw.includes('ls'), false);
+      assert.equal(raw.includes('secret-output'), false);
+      assert.equal(raw.includes('nope'), false);
+      assert.equal(raw.includes('boom'), false);
+      assert.equal('tool_input' in body, false);
+      assert.equal('args' in body, false);
+      assert.equal('tool_response' in body, false);
+    }
+    assert.equal(classifyAttentionHook('SessionStart', {}).activity, undefined);
+    assert.deepEqual(bodies.map((body) => classifyAttentionHook(String(body.hook_event_name), body).activity), ['thinking', 'tool_use', 'thinking', 'thinking']);
+    assert.equal(stub.requests.some((request) => request.method === 'GET'), false);
   });
 });
