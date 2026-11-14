@@ -185,7 +185,7 @@ export interface ProfileTiming {
 
 export const PROFILE: Record<RunProfile, ProfileTiming> = {
   short: { faultWindowStartMs: 75_000, faultWindowEndMs: 115_000, quiesceMs: 90_000, checkpointEveryMs: 15_000, workloadEndMs: 110_000 },
-  soak: { faultWindowStartMs: 90_000, faultWindowEndMs: 330_000, quiesceMs: 150_000, checkpointEveryMs: 30_000, workloadEndMs: 450_000 },
+  soak: { faultWindowStartMs: 90_000, faultWindowEndMs: 330_000, quiesceMs: 150_000, checkpointEveryMs: 30_000, workloadEndMs: 330_000 },
 };
 
 // ───────────────────────────── fake agent ─────────────────────────────
