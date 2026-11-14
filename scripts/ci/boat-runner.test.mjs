@@ -275,3 +275,61 @@ test("CLI download is quiet but still reports errors", async () => {
   const args = r.curlArgs.split(" ");
   for (const flag of ["--fail", "--silent", "--show-error", "--location"]) assert(args.includes(flag), flag);
 });
+test("exec stream error frames are decoded and malformed ones rejected", () => {
+  assert.deepEqual(parseExecFrame('{"type":"error","error":"box_direct_failed","message":"ECONNRESET"}'), { type: "error", error: "box_direct_failed", message: "ECONNRESET" });
+  assert.throws(() => parseExecFrame('{"type":"error","error":"box_direct_failed"}'));
+  assert.throws(() => parseExecFrame('{"type":"error","error":1,"message":"x"}'));
+});
+
+// Drives the real main() through a full centrifugo lifecycle whose exec stream dies mid-run.
+async function streamDropRun(mode) {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "boat-stream-drop-test-")));
+  const bin = join(dir, "bin"); mkdirSync(bin);
+  const boat = `#!/bin/sh
+echo "$@" >> "${dir}/boat-calls"
+for a in "$@"; do case "$a" in -*) ;; *) sub="$a"; break;; esac; done
+case "$sub" in
+  login) cat > "${dir}/stdin" ;;
+  new) echo '{"event":"created","id":"bx_abc123"}' ;;
+  scp) ;;
+  exec) case "$*" in *--stream*) printf '%s\\n' '{"type":"started"}' '{"type":"stdout","data":"partial output\\n"}'; ${mode === "error-frame" ? `printf '%s\\n' '{"type":"error","error":"box_direct_failed","message":"ECONNRESET: socket closed"}'; ` : ""}exit 1 ;; *) ;; esac ;;
+  delete) touch "${dir}/deleted"; echo '{"operation":{"kind":"sandbox","reason":"explicit","stage":"removing","targetId":"bx_abc123"}}' ;;
+  info) if [ -f "${dir}/deleted" ]; then echo '{"code":"not_found","status":404}'; exit 1; fi; echo '{"state":"ready"}' ;;
+  "") echo "boat 1.0.0" ;;
+esac
+`;
+  writeFileSync(join(dir, "boat-src"), boat);
+  writeFileSync(join(bin, "curl"), `#!/bin/sh
+while [ $# -gt 0 ]; do if [ "$1" = "-o" ]; then cp "${dir}/boat-src" "$2"; fi; shift; done
+`);
+  chmodSync(join(bin, "curl"), 0o755);
+  const repo = join(dir, "repo"); mkdirSync(repo);
+  const git = (...args) => execFileSync("git", args, { cwd: repo, stdio: "ignore", env: { PATH: process.env.PATH, HOME: dir, GIT_CONFIG_NOSYSTEM: "1", GIT_AUTHOR_NAME: "CI Test", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "CI Test", GIT_COMMITTER_EMAIL: "t@example.invalid" } });
+  writeFileSync(join(repo, "f"), "x\n"); git("init"); git("add", "f"); git("commit", "-m", "init");
+  const previousPath = process.env.PATH, previousCwd = process.cwd();
+  process.chdir(repo);
+  process.env.PATH = `${bin}:${previousPath}`;
+  const env = { INPUT_JOB: "centrifugo", CI_EVENT: "push", GITHUB_RUN_ID: "123", GITHUB_RUN_ATTEMPT: "1", BOAT_API_KEY: "test-key" };
+  let error;
+  try { await main({ env, retryDelaysMs: [1, 1] }); } catch (e) { error = e; }
+  finally { process.chdir(previousCwd); process.env.PATH = previousPath; }
+  const calls = readFileSync(join(dir, "boat-calls"), "utf8");
+  rmSync(dir, { recursive: true, force: true });
+  return { error, calls };
+}
+test("an exec stream that ends without an exit frame fails as a named platform failure, not a bare unconfirmed completion", async () => {
+  const r = await streamDropRun("silent");
+  assert.match(r.error.message, /sandbox bx_abc123/);
+  assert.match(r.error.message, /without an exit frame/);
+  assert.match(r.error.message, /state after the failure: ready/);
+  assert.match(r.error.message, /not a test failure/);
+  assert(r.calls.includes("delete"), "cleanup still deletes the sandbox");
+});
+test("a platform error frame is surfaced with its sandbox state instead of a frame parse error", async () => {
+  const r = await streamDropRun("error-frame");
+  assert.match(r.error.message, /box_direct_failed/);
+  assert.match(r.error.message, /ECONNRESET/);
+  assert.match(r.error.message, /sandbox bx_abc123/);
+  assert.match(r.error.message, /state after the failure: ready/);
+  assert(!r.error.message.includes("Invalid execution frame"));
+});
