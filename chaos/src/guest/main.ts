@@ -1,6 +1,7 @@
 // Guest entry point, exec'd by /init with CHAOS_CMD / CHAOS_SEED / CHAOS_LEVEL.
 import { EXIT, type ChaosLevel } from '../contract.ts';
-import { emitExit, emitFile } from './emit.ts';
+import { existsSync } from 'node:fs';
+import { EXIT_SENT_MARKER, emitExit, emitFile } from './emit.ts';
 import { runSelftest } from './selftest.ts';
 
 interface SupervisorModule {
@@ -44,7 +45,8 @@ try {
   code = EXIT.infra;
 }
 try {
-  emitExit(code);
+  // Exactly one CHAOS-EXIT: the code runSeed returned, unless the supervisor already sent one.
+  if (!existsSync(EXIT_SENT_MARKER)) emitExit(code);
 } catch (err) {
   console.error(`chaos-main: cannot emit exit: ${String(err)}`);
 }

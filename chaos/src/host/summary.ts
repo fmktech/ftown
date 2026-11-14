@@ -1,6 +1,7 @@
 // Pure comparison, summary and exit-code logic for the host runner.
 import { createHash } from 'node:crypto';
 import { EXIT } from '../contract.ts';
+import { worst } from '../core/evaluate.ts';
 
 export function sha256(data: Uint8Array | string): string {
   return createHash('sha256').update(data).digest('hex');
@@ -22,6 +23,8 @@ export interface SeedSummary {
   hRun: string | null;
   violated: string[];
   wallSec: number;
+  /** Wall seconds of each boot, in run order. */
+  bootWallSec: number[];
   exitCode: number;
   nondeterminism: string | null;
   infraError: string | null;
@@ -61,29 +64,19 @@ export function violatedProps(canon: string): string[] {
   return [...out].sort();
 }
 
-/** Severity order for combining exit codes: higher wins. */
-const RANK: Record<number, number> = {
-  [EXIT.ok]: 0,
-  [EXIT.violation]: 1,
-  [EXIT.reproDiverged]: 2,
-  [EXIT.infra]: 3,
-};
-
+/** Worst exit code (core worst(): infra > reproDiverged > violation > ok); unknown guest codes count as infra. */
 export function worstExit(codes: readonly number[]): number {
-  let worst: number = EXIT.ok;
-  for (const c of codes) {
-    const code = c in RANK ? c : EXIT.infra; // unknown guest code counts as infra
-    if (RANK[code] > RANK[worst]) worst = code;
-  }
-  return worst;
+  const known: readonly number[] = [EXIT.ok, EXIT.violation, EXIT.reproDiverged, EXIT.infra];
+  return worst(codes.map((c) => (known.includes(c) ? c : EXIT.infra)));
 }
 
 /** Combines the boots of one seed. */
 export function summarizeSeed(seed: number, boots: readonly BootResult[]): SeedSummary {
   const wallSec = boots.reduce((s, b) => s + b.wallMs, 0) / 1000;
+  const bootWallSec = boots.map((b) => Math.round(b.wallMs / 100) / 10);
   const infra = boots.find((b) => b.infraError !== null);
   if (infra) {
-    return { seed, hRun: null, violated: [], wallSec, exitCode: EXIT.infra, nondeterminism: null, infraError: infra.infraError };
+    return { seed, hRun: null, violated: [], wallSec, bootWallSec, exitCode: EXIT.infra, nondeterminism: null, infraError: infra.infraError };
   }
   const first = boots[0];
   let nondeterminism: string | null = null;
@@ -101,6 +94,7 @@ export function summarizeSeed(seed: number, boots: readonly BootResult[]): SeedS
     hRun: first.hash,
     violated: violatedProps(first.content ?? ''),
     wallSec,
+    bootWallSec,
     exitCode: nondeterminism !== null ? EXIT.reproDiverged : worstExit([first.exitCode]),
     nondeterminism,
     infraError: null,
@@ -111,7 +105,7 @@ export function formatSeedLine(s: SeedSummary): string {
   const h = s.hRun === null ? '-'.repeat(12) : s.hRun.slice(0, 12);
   const v = s.violated.length === 0 ? '-' : s.violated.join(',');
   const tag = s.infraError !== null ? ` INFRA: ${s.infraError}` : s.nondeterminism !== null ? ' NONDETERMINISTIC' : '';
-  return `seed ${s.seed}  H_run=${h}  violated=${v}  wall=${s.wallSec.toFixed(1)}s  exit=${s.exitCode}${tag}`;
+  return `seed ${s.seed}  H_run=${h}  violated=${v}  wall=${s.wallSec.toFixed(1)}s (${s.bootWallSec.map((w) => w.toFixed(1)).join('+')})  exit=${s.exitCode}${tag}`;
 }
 
 /** Removes kernel printk timestamps so console logs compare on content only. */
