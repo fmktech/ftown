@@ -1,0 +1,7 @@
+# BuildKit per-Dockerfile ignore (build context = repo root).
+*
+!bridge
+!chaos
+**/node_modules
+bridge/dist
+**/.git
