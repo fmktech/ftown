@@ -5,6 +5,9 @@ import type { AgentScript, AgentStep, DeriveRng, MailType, Rng, Role } from '../
 export type Scripts = Record<Role, AgentScript>;
 
 /** Root's first sleep: the ids file must list every role before root's first mail (main.ts enforces it). */
+/** Delay of the early ask after its child starts: covers creating the remaining children (~16 s in QEMU). */
+export const EARLY_ASK_DELAY_MS = 25_000;
+
 export const ROOT_FIRST_SLEEP_MS: readonly [number, number] = [45_000, 50_000];
 
 const CHILDREN: readonly Role[] = ['child1', 'child2', 'child3'];
@@ -63,7 +66,9 @@ function childScript(role: Role, rng: Rng, early: boolean, asks: number): AgentS
     return { do: 'ask', title, message: title, options: ['yes', 'no'] };
   };
   const steps: AgentStep[] = [];
-  if (early) steps.push(ask());
+  // The early ask goes out once every session exists (ids.json complete) and well before the
+  // fault window opens at FAULT_WINDOW_START_MS, so root can answer it unfaulted.
+  if (early) steps.push({ do: 'sleep', ms: EARLY_ASK_DELAY_MS }, ask());
   steps.push(sleep(rng, 2_000, 6_000), { do: 'hook', event: 'UserPromptSubmit' }, { do: 'status', state: 'working', headline: `${role} working` });
   const actions = rng.int(3, 6);
   const askAt = new Set<number>();
