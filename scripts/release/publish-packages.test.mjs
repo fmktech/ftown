@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import * as publisher from './publish-packages.mjs';
-import { checkReleaseTag, lookupVersion, packPackages, parsePackResult, publishPackages, releasePlan, waitForPublishedPackages } from './publish-packages.mjs';
+import { assertPublishAccepted, checkReleaseTag, isStagedVersionConflict, lookupVersion, packPackages, parsePackResult, publishPackages, releasePlan, releaseTag, VISIBILITY_BACKOFF_FACTOR, VISIBILITY_INITIAL_INTERVAL_MS, VISIBILITY_MAX_INTERVAL_MS, VISIBILITY_TIMEOUT_MS, waitForPublishedPackages } from './publish-packages.mjs';
 
 const commit = 'a'.repeat(40);
 const version = '1.2.3';
@@ -23,7 +23,14 @@ test('visible same-commit versions need no wait', async () => {
   const clock = visibilityClock();
   await waitForPublishedPackages(version, commit, { ...clock, lookup: () => metadata });
   assert.deepEqual(clock.sleeps, []);
-  assert.deepEqual(clock.messages, []);
+  assert.deepEqual(clock.messages, ['npm visibility confirmed: ftown@1.2.3, ftown-bridge@1.2.3']);
+});
+
+test('visibility wait defaults cover the observed provenance lag and back off', () => {
+  assert.equal(VISIBILITY_TIMEOUT_MS, 20 * 60 * 1000);
+  assert.equal(VISIBILITY_INITIAL_INTERVAL_MS, 5_000);
+  assert.equal(VISIBILITY_MAX_INTERVAL_MS, 30_000);
+  assert.equal(VISIBILITY_BACKOFF_FACTOR, 2);
 });
 
 test('tag verification waits for delayed visibility and polls only missing versions', async () => {
@@ -40,18 +47,19 @@ test('tag verification waits for delayed visibility and polls only missing versi
         stdout: JSON.stringify(visible ? { ...metadata, name } : { error: { code: 'E404' } }) }));
     } });
   assert.deepEqual(calls, ['ftown', 'ftown-bridge', 'ftown', 'ftown-bridge', 'ftown-bridge']);
-  assert.deepEqual(clock.sleeps, [20, 20]);
-  assert.equal(clock.messages.length, 2);
+  assert.deepEqual(clock.sleeps, [20, 40]);
+  assert.equal(clock.messages.length, 3);
   assert.match(clock.messages[0], /Waiting for npm visibility: ftown@1\.2\.3, ftown-bridge@1\.2\.3/);
   assert.match(clock.messages[1], /Waiting for npm visibility: ftown-bridge@1\.2\.3/);
+  assert.match(clock.messages[2], /npm visibility confirmed: ftown@1\.2\.3, ftown-bridge@1\.2\.3/);
 });
 
-test('missing versions have a finite deadline and the final sleep respects the remaining budget', async () => {
+test('missing versions have a finite deadline and backoff sleeps stay inside the remaining budget', async () => {
   const clock = visibilityClock();
   await assert.rejects(waitForPublishedPackages(version, commit, { ...clock,
-    timeoutMs: 50, intervalMs: 20, lookup: () => undefined }), /Timed out.*ftown@1\.2\.3.*ftown-bridge@1\.2\.3.*same source commit/);
-  assert.deepEqual(clock.sleeps, [20, 20, 10]);
-  assert.equal(clock.now(), 50);
+    timeoutMs: 45, intervalMs: 10, maxIntervalMs: 40, backoffFactor: 2, lookup: () => undefined }), /Timed out.*ftown@1\.2\.3.*ftown-bridge@1\.2\.3.*same source commit.*Do not republish/);
+  assert.deepEqual(clock.sleeps, [10, 20, 15]);
+  assert.equal(clock.now(), 45);
 });
 
 test('lookup duration consumes the deadline and no fresh request starts after it', async () => {
@@ -141,7 +149,7 @@ test('exact versions absent or from the same commit form retryable release plans
 test('registry absence is distinct from authentication, network and malformed responses', () => {
   const run = (status, value, stderr = '') => (program, args) => {
     assert.equal(program, 'npm');
-    assert.deepEqual(args, ['view', 'ftown@1.2.3', '--json']);
+    assert.deepEqual(args, ['view', 'ftown@1.2.3', '--json', '--prefer-online']);
     return { status, stdout: JSON.stringify(value), stderr };
   };
   assert.equal(lookupVersion('ftown', version, run(1, { error: { code: 'E404' } })), undefined);
@@ -154,21 +162,109 @@ test('registry absence is distinct from authentication, network and malformed re
   assert.throws(() => releasePlan(version, commit, () => { throw new Error('network'); }), /network/);
 });
 
+function accepted(name) { return `npm notice\n+ ${name}@${version}\n`; }
+
 test('publication is ftown first and a partial failure retries only the missing package', () => {
   const registry = new Map();
   const artifacts = [{ name: 'ftown', path: 'ftown.tgz' }, { name: 'ftown-bridge', path: 'bridge.tgz' }];
   const published = [];
+  const logs = [];
   assert.throws(() => publishPackages(releasePlan(version, commit, (name) => registry.get(name)), artifacts, (path) => {
     published.push(path);
     if (path === 'bridge.tgz') throw new Error('temporary npm failure');
     registry.set('ftown', metadata);
-  }), /temporary npm failure/);
+    return accepted('ftown');
+  }, { version, log: (message) => logs.push(message) }), /Rejected ftown-bridge@1\.2\.3: temporary npm failure/);
   assert.deepEqual(published, ['ftown.tgz', 'bridge.tgz']);
+  assert.deepEqual(logs.filter((message) => message.startsWith('Accepted')), ['Accepted ftown@1.2.3']);
   const retry = [];
-  publishPackages(releasePlan(version, commit, (name) => registry.get(name)), artifacts, (path) => retry.push(path));
+  publishPackages(releasePlan(version, commit, (name) => registry.get(name)), artifacts, (path) => {
+    retry.push(path);
+    return accepted('ftown-bridge');
+  }, { version, log: (message) => logs.push(message) });
   assert.deepEqual(retry, ['bridge.tgz']);
+  assert.ok(logs.includes('Skip ftown@1.2.3: already published from this commit'));
+  assert.ok(logs.includes('Accepted ftown-bridge@1.2.3'));
   const reversePartial = releasePlan(version, commit, (name) => name === 'ftown-bridge' ? metadata : undefined);
   assert.deepEqual(reversePartial.map(({ publish }) => publish), [true, false]);
+});
+
+test('publish acceptance requires the registry success line and ignores provenance-only output', () => {
+  assert.doesNotThrow(() => assertPublishAccepted('ftown', version, `npm notice\n+ ftown@${version}\n`));
+  for (const output of ['', 'npm notice Signed provenance statement', `+ ftown-bridge@${version}`, `+ ftown@${version} (dry-run)`, `+ ftown@9.9.9`]) {
+    assert.throws(() => assertPublishAccepted('ftown', version, output), /did not accept ftown@1\.2\.3/);
+  }
+  const logs = [];
+  assert.throws(() => publishPackages(
+    [{ name: 'ftown', publish: true }],
+    [{ name: 'ftown', path: 'ftown.tgz' }],
+    () => 'npm notice Publishing',
+    { version, log: (message) => logs.push(message) },
+  ), /did not accept ftown@1\.2\.3/);
+  assert.deepEqual(logs, ['Publishing ftown@1.2.3 (ftown.tgz)', 'npm notice Publishing']);
+  assert.throws(() => publishPackages([{ name: 'ftown', publish: true }], [], () => accepted('ftown'), { version }), /Missing artifact/);
+  assert.throws(() => publishPackages([], [], () => ''), /requires a version/);
+});
+
+function stagedConflict(name, stagedVersion = version) {
+  return `npm error code E409\nnpm error 409 Conflict - PUT https://registry.npmjs.org/${name} - Cannot publish over previously staged version "${stagedVersion}".`;
+}
+
+test('a staged E409 is already published and does not block the next package', () => {
+  assert.equal(isStagedVersionConflict(version, stagedConflict('ftown')), true);
+  assert.equal(isStagedVersionConflict(version, stagedConflict('ftown-bridge')), true);
+  assert.equal(isStagedVersionConflict(version, stagedConflict('ftown', '9.9.9')), false);
+  assert.equal(isStagedVersionConflict(version, stagedConflict('ftown').replace('E409', 'E404')), false);
+  assert.equal(isStagedVersionConflict(version, `npm error code E409\nCannot publish over previously published version "${version}".`), false);
+  const logs = [];
+  const published = [];
+  publishPackages(
+    [{ name: 'ftown', publish: true }, { name: 'ftown-bridge', publish: true }],
+    [{ name: 'ftown', path: 'ftown.tgz' }, { name: 'ftown-bridge', path: 'bridge.tgz' }],
+    (path) => {
+      published.push(path);
+      if (path === 'ftown.tgz') throw new Error(stagedConflict('ftown'));
+      return accepted('ftown-bridge');
+    },
+    { version, log: (message) => logs.push(message) },
+  );
+  assert.deepEqual(published, ['ftown.tgz', 'bridge.tgz']);
+  assert.ok(logs.includes(`Staged ftown@${version}: already accepted by the registry; waiting for visibility`));
+  assert.ok(logs.includes(`Accepted ftown-bridge@${version}`));
+  assert.throws(() => publishPackages(
+    [{ name: 'ftown', publish: true }],
+    [{ name: 'ftown', path: 'ftown.tgz' }],
+    () => { throw new Error(`npm error code E409\nCannot publish over previously published version "${version}".`); },
+    { version, log: () => {} },
+  ), /Rejected ftown@1\.2\.3/);
+});
+
+test('release tag waits once, pushes once, and a same-commit retry neither waits nor pushes', async () => {
+  const events = [];
+  const present = { current: false };
+  const check = () => { events.push('check'); return present.current; };
+  const wait = async () => { events.push('wait'); };
+  const push = () => { events.push('push'); present.current = true; };
+  const log = (message) => events.push(message);
+  await releaseTag(version, commit, { check, wait, push, log });
+  assert.deepEqual(events, ['check', 'wait', 'check', 'push', `Pushed release tag bridge-v${version} at ${commit}.`]);
+  await releaseTag(version, commit, { check, wait, push, log });
+  assert.deepEqual(events.at(-1), `Release tag bridge-v${version} already points at ${commit}.`);
+  assert.equal(events.filter((event) => event === 'push').length, 1);
+  assert.equal(events.filter((event) => event === 'wait').length, 1);
+});
+
+test('release tag treats a lost push race as success and still fails a real push error', async () => {
+  let calls = 0;
+  const check = () => { calls += 1; return calls > 2; };
+  const logs = [];
+  await releaseTag(version, commit, {
+    check, wait: async () => {}, push: () => { throw new Error('update rejected'); }, log: (message) => logs.push(message),
+  });
+  assert.match(logs.at(-1), /already points at/);
+  await assert.rejects(releaseTag(version, commit, {
+    check: () => false, wait: async () => {}, push: () => { throw new Error('remote down'); }, log: () => {},
+  }), /remote down/);
 });
 
 test('release tags allow same-commit retries including annotated tags and reject collisions/errors', () => {
