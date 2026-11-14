@@ -854,3 +854,50 @@ test('answer stores answeredBy (defaults to human when omitted, persists session
     name: 'orchestrator',
   });
 });
+
+test('public items expose only the allowlist; an extra stored field never leaves the store', async t => {
+  const f = await fixture(t);
+  const allowed = ['id', 'sequence', 'type', 'title', 'message', 'createdAt', 'lastSeenAt', 'occurrences', 'acknowledgedAt', 'resolvedAt', 'resolution', 'prompt', 'answer', 'route', 'routedTo', 'escalatedAt', 'escalationNote', 'answeredBy'];
+  const created = (await f.store.record('s1', 'Notification', needsInput('Allowlist check'), { prompt: mailPrompt() }))!;
+  for (const internal of ['fingerprint', 'sourceId', 'reason']) assert.equal(Object.hasOwn(created, internal), false, internal);
+  assert.ok(Object.keys(created).every((key) => allowed.includes(key)), Object.keys(created).join(','));
+  assert.deepEqual(created.prompt, mailPrompt());
+
+  const routed = await f.store.setRoute('s1', created.id, { route: 'parent', routedTo: 'parent-1' });
+  assert.equal(routed?.route, 'parent');
+  assert.equal(routed?.routedTo, 'parent-1');
+
+  const ledgerPath = join(f.dir, 's1/attention.json');
+  const raw = JSON.parse(await readFile(ledgerPath, 'utf8')) as { events: Array<Record<string, unknown>> };
+  raw.events[0].extraInternalField = 'should-not-leak';
+  raw.events[0].debugPayload = { secret: 12345 };
+  await writeFile(ledgerPath, JSON.stringify(raw));
+
+  const reloaded = new AttentionStore(f.resolve);
+  const page = await reloaded.list('s1');
+  assert.equal(page.events.length, 1);
+  const listed = page.events[0];
+  assert.equal(listed.id, created.id);
+  assert.equal(listed.route, 'parent');
+  assert.deepEqual(listed.prompt, mailPrompt());
+  for (const leaked of ['extraInternalField', 'debugPayload', 'fingerprint', 'sourceId', 'reason']) assert.equal(Object.hasOwn(listed, leaked), false, leaked);
+  assert.ok(Object.keys(listed).every((key) => allowed.includes(key)), Object.keys(listed).join(','));
+  assert.equal(JSON.stringify(listed).includes('should-not-leak'), false);
+  assert.equal(JSON.stringify(page).includes('should-not-leak'), false);
+  assert.equal(page.latest?.id, created.id);
+  assert.equal(Object.hasOwn(page.latest!, 'extraInternalField'), false);
+
+  const snapshot = await reloaded.explicitSnapshot('s1');
+  assert.equal(snapshot.attention?.id, created.id);
+  assert.equal(Object.hasOwn(snapshot.attention!, 'extraInternalField'), false);
+
+  const viaWait = await reloaded.waitForItem('s1', created.id, 0);
+  assert.equal(Object.hasOwn(viaWait, 'extraInternalField'), false);
+  assert.ok(Object.keys(viaWait).every((key) => allowed.includes(key)));
+
+  const answered = await reloaded.answer('s1', created.id, [{ selected: [0] }]);
+  assert.equal(answered.item.resolution, 'answered');
+  assert.deepEqual(answered.item.answeredBy, { kind: 'human' });
+  assert.ok(Object.keys(answered.item).every((key) => allowed.includes(key)), Object.keys(answered.item).join(','));
+  assert.equal(Object.hasOwn(answered.item, 'extraInternalField'), false);
+});

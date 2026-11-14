@@ -949,6 +949,9 @@ program
         JSON.stringify({
           port: hookPort,
           apiUrl: opts.apiUrl,
+          // --solo only: the panel's own front origin, where invitation links belong.
+          // The typeof guard keeps the extracted startup harness (index-readiness) able to run this write without the solo block.
+          ...(typeof solo !== 'undefined' && solo ? { soloOrigin: `http://localhost:${solo.front.port}` } : {}),
           token: apiToken,
           dataDir, ownerId: auth.ownerId, endpoint: security.endpoint,
           bridgeId,

@@ -2,6 +2,7 @@ import type { Command } from 'commander';
 import type { BridgePointer } from './wire-types.js';
 import type { BridgeInvitation } from './security/protocol.js';
 import { securityCommand } from './cli-client.js';
+import { invitationLink, invitationOrigin } from './security-cli.js';
 import { readFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
@@ -33,9 +34,7 @@ export async function localAdminRequest<T>(pointer: Pointer, path: string, metho
 
 export async function pairLocalBrowser(pointer: Pointer): Promise<void> {
   const invitation = await securityCommand(pointer, 'security_invite', { label: 'Browser' }) as unknown as BridgeInvitation;
-  const url = new URL('/connect', pointer.apiUrl ?? 'https://ftown.ia.br');
-  url.hash = `invite=${encodeURIComponent(JSON.stringify(invitation))}`;
-  console.log(url.href);
+  console.log(invitationLink(invitation, await invitationOrigin(pointer.soloOrigin, pointer.bridgeId, pointer.apiUrl)));
 }
 
 export function registerLocalBrowserCommands(program: Command): void {

@@ -282,6 +282,102 @@ describe("SessionOverview", () => {
     expect(screen.getByRole("button", { name: /events · 1/ }).getAttribute("aria-expanded")).toBe("false");
   });
 
+  it("focuses rows with j/k before any row has focus, one row at a time, without taking keys from inputs or the terminal", () => {
+    const manager = managerSession({ brief: undefined });
+    const children = [
+      session("a", { name: "Alpha", parentSessionId: "manager" }),
+      session("b", { name: "Beta", parentSessionId: "manager" }),
+      session("c", { name: "Gamma", parentSessionId: "manager" }),
+    ];
+    renderOverview(manager, [manager, ...children]);
+    const rows = screen.getAllByRole("button").filter(button => button.hasAttribute("data-overview-row"));
+    const [alpha, beta, gamma] = rows;
+    const input = document.createElement("input");
+    const textbox = document.createElement("div");
+    textbox.setAttribute("role", "textbox");
+    textbox.tabIndex = 0;
+    const termArea = document.createElement("textarea");
+    const terminal = document.createElement("div");
+    terminal.className = "xterm";
+    terminal.appendChild(termArea);
+    document.body.append(input, textbox, terminal);
+    try {
+      // Nothing in the Overview has focus yet: j still lands on the first row…
+      fireEvent.keyDown(document.body, { key: "j" });
+      expect(document.activeElement).toBe(alpha);
+      // …and each press moves exactly one row, even though both the section and document
+      // listeners could see the event.
+      fireEvent.keyDown(alpha!, { key: "j" });
+      expect(document.activeElement).toBe(beta);
+      fireEvent.keyDown(beta!, { key: "j" });
+      expect(document.activeElement).toBe(gamma);
+      fireEvent.keyDown(gamma!, { key: "j" });
+      expect(document.activeElement).toBe(gamma);
+      fireEvent.keyDown(gamma!, { key: "k" });
+      expect(document.activeElement).toBe(beta);
+      // Arrows from the document keep their native scrolling behaviour; they only walk rows
+      // once focus is inside the Overview.
+      const outside = document.activeElement;
+      fireEvent.keyDown(document.body, { key: "ArrowDown" });
+      expect(document.activeElement).toBe(outside);
+      fireEvent.keyDown(document.body, { key: "ArrowUp" });
+      expect(document.activeElement).toBe(outside);
+      // Text entry keeps its keys…
+      input.focus();
+      fireEvent.keyDown(input, { key: "j" });
+      expect(document.activeElement).toBe(input);
+      // …as do ARIA interactive roles…
+      textbox.focus();
+      fireEvent.keyDown(textbox, { key: "j" });
+      expect(document.activeElement).toBe(textbox);
+      // …and the terminal, even for a bare keydown in its region.
+      termArea.focus();
+      fireEvent.keyDown(termArea, { key: "j" });
+      fireEvent.keyDown(terminal, { key: "j" });
+      expect(document.activeElement).toBe(termArea);
+    } finally {
+      input.remove();
+      textbox.remove();
+      terminal.remove();
+    }
+  });
+
+  it("ignores j/k while a dialog or menu is open, and stops listening once unmounted", () => {
+    const manager = managerSession({ brief: undefined });
+    const children = [session("a", { name: "Alpha", parentSessionId: "manager" })];
+    const view = renderOverview(manager, [manager, ...children]);
+    const [alpha] = screen.getAllByRole("button").filter(button => button.hasAttribute("data-overview-row"));
+    const dialog = document.createElement("div");
+    dialog.setAttribute("role", "dialog");
+    document.body.append(dialog);
+    try {
+      fireEvent.keyDown(document.body, { key: "j" });
+      expect(document.activeElement).toBe(document.body);
+      dialog.remove();
+      fireEvent.keyDown(document.body, { key: "j" });
+      expect(document.activeElement).toBe(alpha);
+      view.unmount();
+      fireEvent.keyDown(document.body, { key: "j" });
+      expect(document.activeElement).toBe(document.body);
+    } finally {
+      dialog.remove();
+    }
+  });
+
+  it("does not move focus while the Overview is mounted but hidden", () => {
+    const manager = managerSession({ brief: undefined });
+    const children = [session("a", { name: "Alpha", parentSessionId: "manager" })];
+    const view = renderOverview(manager, [manager, ...children]);
+    const section = screen.getByRole("region", { name: "Overview: Manager" });
+    section.style.display = "none";
+    fireEvent.keyDown(document.body, { key: "j" });
+    expect(document.activeElement).toBe(document.body);
+    section.style.display = "";
+    fireEvent.keyDown(document.body, { key: "j" });
+    expect(document.activeElement).toBe(screen.getAllByRole("button").find(button => button.hasAttribute("data-overview-row")));
+    view.unmount();
+  });
+
   it("derives a grey stale glyph for a working card not updated for over 10 minutes", () => {
     const manager = managerSession({ brief: undefined });
     renderOverview(manager, [manager, session("a", { name: "Alpha", parentSessionId: "manager", card: card("working", { updatedAt: minutesAgo(20) }) })]);

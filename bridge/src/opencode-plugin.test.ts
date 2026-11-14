@@ -1,5 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { classifyAttentionHook } from './attention-events.js';
 import { registerFtownOpencodePlugin as registerNative } from '../opencode-plugin/ftown.js';
 
 // Unit business mocks sit behind the injected encrypted-CLI transport seam. Hooks retain their separate credential.
@@ -179,6 +180,124 @@ it('ordinary model/session errors preserve later idle polling and native mail de
   await f.event('session.error', { sessionID: 'ses_root' });
   f.setMessages([{ id: 'after-error', body: 'later', from: 'parent' }]); await f.advance();
   assert.equal(f.prompts.length, 1); assert.equal(f.prompts[0].path.id, 'ses_root');
+});
+
+function hookBodies(requests: { url: string; init?: RequestInit }[]) {
+  return requests.filter(r => r.url.endsWith('/hook')).map(r => JSON.parse(String(r.init?.body)) as { hook_event_name: string; tool_name?: string; tool_use_id?: string; tool_input?: unknown; session_id?: string });
+}
+
+it('maps a user prompt and real tool boundaries onto thinking, tool_use, and idle', async t => {
+  const f = fixture(t); f.setMessages([]);
+  await f.event('session.created', { info: { id: 'ses_root' } });
+  await f.event('message.updated', { info: { id: 'msg_user', sessionID: 'ses_root', role: 'user' } });
+  await f.event('session.status', { sessionID: 'ses_root', status: { type: 'busy' } });
+  await f.event('message.part.updated', { part: { type: 'text', sessionID: 'ses_root', text: 'looking' } });
+  await f.event('message.part.updated', { part: { type: 'tool', sessionID: 'ses_root', callID: 'call_1', tool: 'bash', state: { status: 'pending', input: { command: 'ls' } } } });
+  await f.event('message.part.updated', { part: { type: 'tool', sessionID: 'ses_root', callID: 'call_1', tool: 'bash', state: { status: 'running', input: { command: 'ls' } } } });
+  await f.hooks['tool.execute.before']({ tool: 'bash', sessionID: 'ses_root', callID: 'call_1' }, { args: { command: 'ls' } });
+  await f.event('message.part.updated', { part: { type: 'tool', sessionID: 'ses_root', callID: 'call_1', tool: 'bash', state: { status: 'completed', input: { command: 'ls' }, output: 'secret-output' } } });
+  await f.hooks['tool.execute.after']({ tool: 'bash', sessionID: 'ses_root', callID: 'call_1' }, { output: 'secret-output' });
+  await f.event('message.part.updated', { part: { type: 'tool', sessionID: 'ses_child', callID: 'call_child', tool: 'bash', state: { status: 'running', input: {} } } });
+  await f.event('session.idle', { sessionID: 'ses_root' });
+
+  const hooks = hookBodies(f.requests);
+  const activity = hooks.map(hook => classifyAttentionHook(hook.hook_event_name, hook).activity);
+  assert.deepEqual(activity, [undefined, 'thinking', 'tool_use', 'thinking', 'idle']);
+  const pre = hooks.find(hook => hook.hook_event_name === 'PreToolUse');
+  assert.deepEqual(pre, { hook_event_name: 'PreToolUse', ftown_session_id: 'ftown-session', tool_name: 'bash', tool_use_id: 'call_1' });
+  const post = hooks.find(hook => hook.hook_event_name === 'PostToolUse');
+  assert.deepEqual(post, { hook_event_name: 'PostToolUse', ftown_session_id: 'ftown-session', tool_name: 'bash', tool_use_id: 'call_1' });
+  const toolRaw = JSON.stringify(hooks.filter(hook => hook.hook_event_name === 'PreToolUse' || hook.hook_event_name === 'PostToolUse'));
+  assert.equal(toolRaw.includes('secret-output'), false);
+  assert.equal(toolRaw.includes('ls'), false);
+  assert.equal(toolRaw.includes('tool_input'), false);
+  assert.equal(toolRaw.includes('args'), false);
+  assert.equal(f.prompts.length, 0, 'busy turn does not wake');
+  f.setMessages([{ id: 'after', body: 'later', from: 'parent' }]);
+  await f.advance();
+  assert.equal(f.prompts.length, 1, 'idle still delivers mail once');
+});
+
+it('a busy status with no prompt still posts one PreToolUse and does not repeat it', async t => {
+  const f = fixture(t); f.setMessages([]);
+  await f.event('session.created', { info: { id: 'ses_root' } });
+  await f.event('session.status', { sessionID: 'ses_root', status: 'busy' });
+  await f.event('session.status', { sessionID: 'ses_root', status: { type: 'busy' } });
+  await f.event('message.part.updated', { part: { type: 'reasoning', sessionID: 'ses_root' } });
+  const names = hookBodies(f.requests).map(hook => hook.hook_event_name);
+  assert.deepEqual(names.filter(name => name === 'PreToolUse'), ['PreToolUse']);
+  assert.equal(classifyAttentionHook('PreToolUse', {}).activity, 'tool_use');
+});
+
+it('a failed tool part posts PostToolUse and classifies as thinking', async t => {
+  const f = fixture(t); f.setMessages([]);
+  await f.event('session.created', { info: { id: 'ses_root' } });
+  await f.event('message.part.updated', { part: { type: 'tool', sessionID: 'ses_root', callID: 'call_err', tool: 'read', state: { status: 'error', error: 'missing' } } });
+  const hooks = hookBodies(f.requests);
+  const post = hooks.find(hook => hook.hook_event_name === 'PostToolUse');
+  assert.equal(post?.tool_name, 'read');
+  assert.equal(post?.tool_use_id, 'call_err');
+  assert.equal(JSON.stringify(post).includes('missing'), false);
+  assert.equal('tool_input' in (post ?? {}), false);
+  assert.equal(classifyAttentionHook('PostToolUse', post ?? {}).activity, 'thinking');
+});
+
+it('tool.execute hooks return before a slow bridge and send no tool input', async t => {
+  let release: () => void = () => {};
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const requests: { url: string; init?: RequestInit }[] = [];
+  const hooks = registerFtownOpencodePlugin({ session: {
+    get: async () => ({ data: { id: 'ses_root' } }),
+  } } as any, {
+    env: { FTOWN_SESSION_ID: 'ftown-session', FTOWN_HOOK_PORT: '4321', FTOWN_HOOK_TOKEN: 'secret' },
+    readBridgePointer: async () => null,
+    schedule: () => 0,
+    cancel: () => {},
+    fetch: async (url: string, init?: RequestInit) => {
+      const body = String(init?.body ?? '');
+      if (body.includes('PreToolUse') || body.includes('PostToolUse')) {
+        requests.push({ url, init });
+        await gate;
+      }
+      return { ok: true, json: async () => ({ ok: true }) };
+    },
+  } as any);
+  t.after(() => { release(); hooks.dispose(); });
+  await hooks.event({ event: { type: 'session.created', properties: { info: { id: 'ses_root' } } } });
+
+  const before = hooks['tool.execute.before'](
+    { tool: 'bash', sessionID: 'ses_root', callID: 'call_slow' },
+    { args: { command: 'secret-ls', path: '/tmp/private' } },
+  );
+  const beforeSettled = await Promise.race([
+    Promise.resolve(before).then(() => 'done' as const),
+    new Promise<'timeout'>(resolve => setTimeout(() => resolve('timeout'), 80)),
+  ]);
+  assert.equal(beforeSettled, 'done');
+  for (let i = 0; i < 20 && requests.length < 1; i++) await tick();
+  assert.equal(requests.length, 1);
+
+  const after = hooks['tool.execute.after'](
+    { tool: 'bash', sessionID: 'ses_root', callID: 'call_slow' },
+    { output: 'secret-output' },
+  );
+  const afterSettled = await Promise.race([
+    Promise.resolve(after).then(() => 'done' as const),
+    new Promise<'timeout'>(resolve => setTimeout(() => resolve('timeout'), 80)),
+  ]);
+  assert.equal(afterSettled, 'done');
+  for (let i = 0; i < 20 && requests.length < 2; i++) await tick();
+  assert.equal(requests.length, 2);
+
+  const bodies = requests.map(request => JSON.parse(String(request.init?.body)) as Record<string, unknown>);
+  assert.deepEqual(bodies[0], { ftown_session_id: 'ftown-session', hook_event_name: 'PreToolUse', tool_name: 'bash', tool_use_id: 'call_slow' });
+  assert.deepEqual(bodies[1], { ftown_session_id: 'ftown-session', hook_event_name: 'PostToolUse', tool_name: 'bash', tool_use_id: 'call_slow' });
+  const raw = JSON.stringify(bodies);
+  assert.equal(raw.includes('secret-ls'), false);
+  assert.equal(raw.includes('secret-output'), false);
+  assert.equal(raw.includes('/tmp/private'), false);
+  assert.equal(raw.includes('tool_input'), false);
+  assert.equal(raw.includes('args'), false);
 });
 
 it('late-loaded plugin disables native wake when another pre-existing root is verified', async t => {

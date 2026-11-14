@@ -1,12 +1,19 @@
 #!/bin/sh
 # ftown shared Muse hook helper (POSIX sh — invoked by the per-event hook
 # wrappers with argv, never symlinked).
-# Usage: ftown-hook.sh session-start|stop   (hook JSON payload on stdin)
+# Usage: ftown-hook.sh session-start|user-prompt-submit|pre-tool-use|post-tool-use|stop
+#        (hook JSON payload on stdin)
 #
 # SessionStart: POST the native session_id + cwd + ftown ids to bridge /hook
-# (same route/shape as the pi/opencode hook posts).
-# Stop: POST the hook, then drain the inbox; pending mail is emitted as
-# hookSpecificOutput.additionalContext JSON (never a decision object).
+# (same route/shape as the pi/opencode hook posts). SessionStart is not an
+# activity event. UserPromptSubmit / PreToolUse / PostToolUse are posted under
+# those names so the board can classify thinking / tool_use / thinking.
+# PreToolUse and PostToolUse send only ftown_session_id, hook_event_name,
+# tool_name, and tool_use_id. Tool arguments and results stay off the wire.
+# PostToolUseFailure uses the same PostToolUse post: the failed call is over
+# and the turn continues. Stop: POST the hook, then drain the inbox; pending
+# mail is emitted as hookSpecificOutput.additionalContext JSON (never a
+# decision object). Mail delivery stays on Stop only.
 #
 # Always exits 0 and stays silent unless there is mail to deliver: hooks must
 # be fast fire-and-forget (5s budget) and never break the agent session.
@@ -14,6 +21,11 @@
 EVENT="${1:-}"
 case "$EVENT" in
   session-start) HOOK_EVENT="SessionStart" ;;
+  user-prompt-submit) HOOK_EVENT="UserPromptSubmit" ;;
+  pre-tool-use) HOOK_EVENT="PreToolUse" ;;
+  # Success and failure both mean the tool call is finished and the turn goes
+  # on. PostToolUse classifies as thinking; postToolUseFailure would go idle.
+  post-tool-use) HOOK_EVENT="PostToolUse" ;;
   stop) HOOK_EVENT="Stop" ;;
   *) exit 0 ;;
 esac
@@ -73,12 +85,37 @@ CANDIDATES_EOF
   return 1
 }
 
+# Tool posts are an allowlist: identity plus the tool name and call id.
+# Arguments, results, errors, cwd, and the native session id are not forwarded.
+if [ "$HOOK_EVENT" = "PreToolUse" ] || [ "$HOOK_EVENT" = "PostToolUse" ]; then
+  PAYLOAD=$(printf '%s' "$INPUT" | jq -c \
+    --arg sid "$FTOWN_SESSION_ID" \
+    --arg ev "$HOOK_EVENT" \
+    '{ftown_session_id: $sid, hook_event_name: $ev}
+     + (if (.tool_name | type) == "string" then {tool_name: .tool_name} else {} end)
+     + (if (.tool_use_id | type) == "string" then {tool_use_id: .tool_use_id} else {} end)' \
+    2>/dev/null) || PAYLOAD=$(jq -n -c --arg sid "$FTOWN_SESSION_ID" --arg ev "$HOOK_EVENT" \
+    '{ftown_session_id: $sid, hook_event_name: $ev}')
+  [ -n "$PAYLOAD" ] || exit 0
+  post_hook "$PAYLOAD"
+  exit 0
+fi
+
+# SessionStart, UserPromptSubmit, and Stop keep the original envelope.
+# Mail drain stays on Stop only.
+EXTRA=$(printf '%s' "$INPUT" | jq -c --arg ev "$HOOK_EVENT" '
+  if $ev == "UserPromptSubmit" then
+    if (.prompt | type) == "string" then {prompt: .prompt} else {} end
+  else {} end
+' 2>/dev/null) || true
+[ -n "${EXTRA:-}" ] || EXTRA='{}'
 PAYLOAD=$(jq -n -c \
   --arg sid "$FTOWN_SESSION_ID" \
   --arg ev "$HOOK_EVENT" \
   --arg nsid "${NATIVE_SID:-}" \
   --arg cwd "${NATIVE_CWD:-}" \
-  '{ftown_session_id: $sid, ftown_session_source: "env", hook_event_name: $ev, session_id: $nsid, cwd: $cwd}' \
+  --argjson extra "$EXTRA" \
+  '{ftown_session_id: $sid, ftown_session_source: "env", hook_event_name: $ev, session_id: $nsid, cwd: $cwd} + $extra' \
   2>/dev/null) || exit 0
 [ -n "$PAYLOAD" ] || exit 0
 post_hook "$PAYLOAD"

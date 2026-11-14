@@ -180,13 +180,37 @@ function asItem(data: unknown): PlanItem {
   throw new Error('Invalid plan response');
 }
 
-function printItem(deps: PlanCliDeps, data: unknown, json: boolean): void {
+async function printItem(
+  deps: PlanCliDeps,
+  sessionId: string,
+  data: unknown,
+  json: boolean,
+): Promise<void> {
   if (json) {
     deps.log(JSON.stringify(data, null, 2));
     return;
   }
-  // No PlanView in a single-item response, so readiness is never inferred.
-  deps.log(formatPlanItem(asItem(data), new Set<string>()));
+  const mutated = asItem(data);
+  // The mutation already succeeded: a failed confirmation GET must not turn
+  // it into an error. Fall back to the mutation payload and warn on stderr.
+  let view: PlanView = { items: [], ready: [] };
+  try {
+    view = asPlanView(await deps.api('GET', planPath(sessionId)));
+  } catch (error) {
+    deps.errorLog(
+      `ftown plan: warning: could not refresh the plan (${error instanceof Error ? error.message : String(error)}); showing the mutation result`,
+    );
+  }
+  let childNames = new Map<string, string>();
+  try {
+    childNames = parseSessionNames(await deps.api('GET', '/api/sessions'));
+  } catch (error) {
+    deps.errorLog(
+      `ftown plan: warning: could not load session names (${error instanceof Error ? error.message : String(error)}); showing session ids`,
+    );
+  }
+  const fresh = view.items.find((item) => item.id === mutated.id) ?? mutated;
+  deps.log(formatPlanItem(fresh, new Set<string>(view.ready), childNames));
 }
 
 // ───────────────────────── commands ─────────────────────────
@@ -250,7 +274,7 @@ async function addPlan(deps: PlanCliDeps, titleParts: string[], opts: AddOptions
   const sessionId = requireSessionId(opts.sessionId, deps.env);
   const body = buildAddBody(titleParts, opts);
   const data = await deps.api('POST', planPath(sessionId), body);
-  printItem(deps, data, opts.json === true);
+  await printItem(deps, sessionId, data, opts.json === true);
 }
 
 async function startPlan(deps: PlanCliDeps, rawId: string, opts: StartOptions): Promise<void> {
@@ -262,7 +286,7 @@ async function startPlan(deps: PlanCliDeps, rawId: string, opts: StartOptions): 
   const childId = parseChildSessionId(opts.session);
   const body: { state: PlanState; sessionId: string } = { state: 'started', sessionId: childId };
   const data = await deps.api('PATCH', itemPath(sessionId, itemId), body);
-  printItem(deps, data, opts.json === true);
+  await printItem(deps, sessionId, data, opts.json === true);
 }
 
 async function setPlanState(
@@ -274,7 +298,7 @@ async function setPlanState(
   const sessionId = requireSessionId(opts.sessionId, deps.env);
   const itemId = parsePlanItemId(rawId);
   const data = await deps.api('PATCH', itemPath(sessionId, itemId), { state });
-  printItem(deps, data, opts.json === true);
+  await printItem(deps, sessionId, data, opts.json === true);
 }
 
 export function buildEditPatch(opts: EditOptions): {
@@ -327,7 +351,7 @@ async function editPlan(deps: PlanCliDeps, rawId: string, opts: EditOptions): Pr
   const itemId = parsePlanItemId(rawId);
   const patch = buildEditPatch(opts);
   const data = await deps.api('PATCH', itemPath(sessionId, itemId), patch);
-  printItem(deps, data, opts.json === true);
+  await printItem(deps, sessionId, data, opts.json === true);
 }
 
 async function removePlan(deps: PlanCliDeps, rawId: string, opts: ListOptions): Promise<void> {

@@ -86,6 +86,11 @@ export function registerFtownOpencodePlugin(client, options = {}) {
   let inflight = false;
   let seen = new Set();
   const postedPromptIds = new Set();
+  // One Pre/Post per tool call. Bus parts and tool.execute hooks share this set.
+  const postedTools = new Set();
+  // A real user prompt already reported thinking. A bare busy/text signal then
+  // must not overwrite it with a nameless PreToolUse.
+  let reportedThinking = false;
   let retryAt = 0;
   let retryDelay = 5_000;
 
@@ -128,12 +133,23 @@ export function registerFtownOpencodePlugin(client, options = {}) {
     return lastResponse;
   }
 
+  function toolHookBody(eventName, data) {
+    const body = { ftown_session_id: ftownSessionId, hook_event_name: eventName };
+    if (typeof data.tool_name === 'string' && data.tool_name) body.tool_name = data.tool_name;
+    if (typeof data.tool_use_id === 'string' && data.tool_use_id) body.tool_use_id = data.tool_use_id;
+    return body;
+  }
+
   async function postHook(eventName, data = {}) {
     if (!ftownSessionId || !currentSessionId || closed) return;
-    await request('/hook', { method: 'POST', body: JSON.stringify({
-      ftown_session_id: ftownSessionId, ftown_session_source: 'env',
-      hook_event_name: eventName, session_id: currentSessionId, ...data,
-    }) });
+    const toolEvent = eventName === 'PreToolUse' || eventName === 'PostToolUse';
+    const body = toolEvent
+      ? toolHookBody(eventName, data)
+      : {
+          ftown_session_id: ftownSessionId, ftown_session_source: 'env',
+          hook_event_name: eventName, session_id: currentSessionId, ...data,
+        };
+    await request('/hook', { method: 'POST', body: JSON.stringify(body) });
   }
 
   function schedulePoll() {
@@ -184,7 +200,10 @@ export function registerFtownOpencodePlugin(client, options = {}) {
 
   async function identify(properties, created = false) {
     const info = properties?.info;
-    const id = properties?.sessionID ?? info?.sessionID ?? (created ? info?.id : undefined);
+    const part = properties?.part;
+    const partSession = part && typeof part === 'object' && typeof part.sessionID === 'string' ? part.sessionID : undefined;
+    // message.part.updated carries the session on the part, not at the top.
+    const id = properties?.sessionID ?? info?.sessionID ?? partSession ?? (created ? info?.id : undefined);
     if (typeof id !== 'string' || !id.trim() || closed) return false;
     if (created && info?.parentID) { childSessions.add(id); return false; }
     if (childSessions.has(id)) return false;
@@ -236,6 +255,7 @@ export function registerFtownOpencodePlugin(client, options = {}) {
         const info = event.properties?.info;
         if (info?.role === 'user') {
           busy = true;
+          reportedThinking = true;
           const messageId = info?.id;
           if (typeof messageId === 'string' && messageId) {
             if (postedPromptIds.has(messageId)) break;
@@ -245,17 +265,33 @@ export function registerFtownOpencodePlugin(client, options = {}) {
         }
         break;
       }
-      case 'session.status':
-        if (event.properties?.status?.type === 'busy') { busy = true; await postHook('PreToolUse'); break; }
-        if (event.properties?.status?.type !== 'idle') break;
+      case 'message.part.updated':
+        await notePart(event.properties?.part);
+        break;
+      case 'session.status': {
+        // Status is { type } today; a bare string must still count as busy so
+        // mail stays suppressed for the whole turn.
+        const rawStatus = event.properties?.status;
+        const statusType = typeof rawStatus === 'string' ? rawStatus : rawStatus?.type;
+        if (statusType === 'busy') {
+          busy = true;
+          await postCoarseActivity();
+          break;
+        }
+        if (statusType !== 'idle') break;
         // falls through
+      }
       case 'session.idle':
         busy = false;
+        reportedThinking = false;
+        postedTools.clear();
         await postHook('Stop');
         await poll();
         break;
       case 'session.error':
         busy = false;
+        reportedThinking = false;
+        postedTools.clear();
         await postHook('SessionEnd', { reason: event.type });
         await poll();
         break;
@@ -267,9 +303,83 @@ export function registerFtownOpencodePlugin(client, options = {}) {
     schedulePoll();
   }
 
-  return { event: async ({ event }) => {
-    try { await handleEvent(event); } catch { /* Never break the agent TUI. */ }
-  }, dispose };
+  // No user-prompt event yet. One nameless PreToolUse still marks the bridge
+  // busy (same names markAgentBusy accepts) so a thinking-only turn is not
+  // unknown and mail is not delivered into it. It does not repeat, and it
+  // does not run after UserPromptSubmit has already reported thinking.
+  async function postCoarseActivity() {
+    if (reportedThinking) return;
+    reportedThinking = true;
+    await postHook('PreToolUse');
+  }
+
+  async function notePart(part) {
+    if (!part || typeof part !== 'object') return;
+    if (part.type === 'text' || part.type === 'reasoning') {
+      busy = true;
+      await postCoarseActivity();
+      return;
+    }
+    if (part.type !== 'tool') return;
+    const status = part.state && typeof part.state === 'object' ? part.state.status : undefined;
+    const callID = typeof part.callID === 'string' ? part.callID : undefined;
+    const toolName = typeof part.tool === 'string' ? part.tool : undefined;
+    if (status === 'pending' || status === 'running') {
+      busy = true;
+      await postToolPhase('pre', { tool: toolName, callID });
+      return;
+    }
+    if (status === 'completed' || status === 'error') {
+      await postToolPhase('post', { tool: toolName, callID });
+    }
+  }
+
+  // null means this phase was already posted for the call. The returned object
+  // is the allowlisted tool fields only — never args, input, or output.
+  function claimTool(phase, fields) {
+    const callID = typeof fields.callID === 'string' && fields.callID ? fields.callID : undefined;
+    const marker = `${phase}:${callID ?? ''}`;
+    if (callID && postedTools.has(marker)) return null;
+    if (callID) postedTools.add(marker);
+    const toolName = typeof fields.tool === 'string' && fields.tool ? fields.tool : undefined;
+    if (phase === 'pre') busy = true;
+    else reportedThinking = true;
+    return {
+      ...(toolName ? { tool_name: toolName } : {}),
+      ...(callID ? { tool_use_id: callID } : {}),
+    };
+  }
+
+  async function postToolPhase(phase, fields) {
+    const data = claimTool(phase, fields);
+    if (!data) return;
+    await postHook(phase === 'pre' ? 'PreToolUse' : 'PostToolUse', data);
+  }
+
+  // OpenCode awaits a hook's return value. Do not return this promise: a slow
+  // /hook must not delay the tool. postHook is not awaited either.
+  function onToolHook(phase, input) {
+    void (async () => {
+      try {
+        const sessionID = input && typeof input.sessionID === 'string' ? input.sessionID : undefined;
+        if (!sessionID || !await identify({ sessionID })) return;
+        const callID = input && typeof input.callID === 'string' ? input.callID : undefined;
+        const tool = input && typeof input.tool === 'string' ? input.tool : undefined;
+        const data = claimTool(phase, { tool, callID });
+        if (!data) return;
+        void postHook(phase === 'pre' ? 'PreToolUse' : 'PostToolUse', data).catch(() => {});
+      } catch { /* Never block or break the tool call. */ }
+    })().catch(() => {});
+  }
+
+  return {
+    event: async ({ event }) => {
+      try { await handleEvent(event); } catch { /* Never break the agent TUI. */ }
+    },
+    'tool.execute.before': (input) => { onToolHook('pre', input); },
+    'tool.execute.after': (input) => { onToolHook('post', input); },
+    dispose,
+  };
 }
 
 export const FtownOpencodePlugin = async ({ client }) => {

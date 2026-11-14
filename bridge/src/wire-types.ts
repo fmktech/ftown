@@ -8,6 +8,8 @@ export interface BridgePointer {
   port: number;
   token: string;
   bridgeId?: string;
+  /** --solo only: the panel's own front origin (e.g. http://localhost:8040); invitation links are printed on it. */
+  soloOrigin?: string;
   pid?: number;
   startedAt?: string;
   harness?: string;
