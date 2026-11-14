@@ -190,7 +190,7 @@ export interface ProfileTiming {
 }
 
 export const PROFILE: Record<RunProfile, ProfileTiming> = {
-  short: { faultWindowStartMs: 75_000, faultWindowEndMs: 115_000, quiesceMs: 105_000, checkpointEveryMs: 15_000, workloadEndMs: 140_000 },
+  short: { faultWindowStartMs: 75_000, faultWindowEndMs: 115_000, quiesceMs: 135_000, checkpointEveryMs: 15_000, workloadEndMs: 170_000 },
   soak: { faultWindowStartMs: 90_000, faultWindowEndMs: 330_000, quiesceMs: 150_000, checkpointEveryMs: 30_000, workloadEndMs: 330_000 },
 };
 
