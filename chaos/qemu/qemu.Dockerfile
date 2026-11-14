@@ -1,6 +1,8 @@
 # QEMU runner for the host's native architecture. The guest is always x86_64.
 # qemu-system-x86_64 is rebuilt from the pinned Debian source (minimal TCG-only x86_64 config);
 # firmware and runtime libraries come from the pinned Debian package. Optional build args:
+# TLBFIX=1 (default, required for reproducible runs) applies patches/tlb-deterministic-resize.patch:
+# stock 7.2 sizes the softmmu TLB from host realtime, which leaks into guest PTE Accessed/Dirty bits.
 # PATCH=1 applies patches/icount-warp-race.patch (unproven, off by default); TRACE=1 adds
 # investigation-only tracing (patches/trace.py). Neither is used for real runs.
 FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS build
@@ -15,8 +17,10 @@ RUN sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/debian.s
 COPY patches/ /src/patches/
 # PATCH=1 applies the (unproven) icount warp patch, off by default; TRACE=1 adds investigation-only tracing (never for real runs).
 ARG PATCH=0
+ARG TLBFIX=1
 ARG TRACE=0
 RUN cd /src/qemu-7.2+dfsg \
+ && if [ "$TLBFIX" = 1 ]; then patch -p1 --fuzz=0 < /src/patches/tlb-deterministic-resize.patch; fi \
  && if [ "$PATCH" = 1 ]; then patch -p1 --fuzz=0 < /src/patches/icount-warp-race.patch; fi \
  && if [ "$TRACE" = 1 ]; then python3 /src/patches/trace.py .; fi \
  && mkdir b && cd b \
