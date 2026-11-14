@@ -64,7 +64,9 @@ export const PARENT_OF: Readonly<Record<Role, Role | null>> = {
 export type ChaosLevel = 'off' | 'low' | 'high';
 
 // ───────────────────────────── FAULTS table ─────────────────────────────
-// ORDER IS PART OF THE SEED CONTRACT. Append only.
+// THE WHOLE TABLE (order, length, ranges) IS PART OF THE SEED CONTRACT. Any change, including an
+// appended row, changes the schedule of every seed: bump CONTRACT_VERSION and re-record known seeds.
+// A golden-schedule test in core pins this.
 
 export type FaultKind =
   | 'bridge_kill9'
