@@ -86,6 +86,15 @@ export async function runAgent(deps: AgentDeps): Promise<AgentResult> {
   };
 
   const doRead = async (): Promise<void> => {
+    try {
+      await readOnce();
+    } catch {
+      // A failing read must never reject the chain or end the process.
+      log({ ev: 'cli_error', cmd: 'mail read', error: 'exception' });
+    }
+  };
+
+  const readOnce = async (): Promise<void> => {
     const r = await cli(['harness', '--json', 'mail', 'read'], { timeoutMs: MAIL_READ_TIMEOUT_MS });
     if (r.code !== 0) {
       cliError('mail read', r);
@@ -216,7 +225,11 @@ export async function runAgent(deps: AgentDeps): Promise<AgentResult> {
         await enqueueRead();
         return;
       case 'ask':
-        background.push(ask());
+        background.push(
+          ask().catch(() => {
+            log({ ev: 'cli_error', cmd: 'attention', error: 'exception' });
+          }),
+        );
         return;
       case 'answer_routed': {
         const q = pendingRouted.shift();
@@ -252,7 +265,11 @@ export async function runAgent(deps: AgentDeps): Promise<AgentResult> {
 
   for (const step of script.steps) {
     if (exited !== null) break;
-    await runStep(step);
+    try {
+      await runStep(step);
+    } catch {
+      log({ ev: 'cli_error', cmd: step.do, error: 'exception' });
+    }
   }
 
   await stdinDone;

@@ -4,21 +4,7 @@ import { createInterface } from 'node:readline';
 import { GUEST } from '../contract.ts';
 import type { AgentScript } from '../contract.ts';
 import { runAgent } from './agent.ts';
-import { epochClock, fileLogger, idsFromFile, isRole, realCli, realHook } from './cli.ts';
-
-function parseArgs(argv: string[]): { role: string | undefined; script: string | undefined } {
-  let role: string | undefined;
-  let script: string | undefined;
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === '--role') role = argv[++i];
-    else if (a.startsWith('--role=')) role = a.slice('--role='.length);
-    else if (a === '--script') script = argv[++i];
-    else if (a.startsWith('--script=')) script = a.slice('--script='.length);
-    // Unknown arguments (added by the bridge) are ignored.
-  }
-  return { role, script };
-}
+import { epochClock, parseArgs, fileLogger, idsFromFile, isRole, realCli, realHook } from './cli.ts';
 
 async function main(): Promise<void> {
   const { role, script: scriptPath } = parseArgs(process.argv.slice(2));

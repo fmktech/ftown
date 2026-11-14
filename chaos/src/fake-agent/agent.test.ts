@@ -256,3 +256,22 @@ test('exit step logs exit, calls exit and skips later steps', async () => {
   assert.deepEqual(t.exits, [7]);
   assert.equal(r.exitCode, 7);
 });
+
+test('a throwing mail read is a cli_error; later reads still run and the agent finishes', async () => {
+  let n = 0;
+  const t = setup({ steps: [{ do: 'mail_read' }, { do: 'mail_read' }] }, () => {
+    n++;
+    if (n === 1) return ok('this is not json');
+    if (n === 2) throw new Error('spawn blew up');
+    return inbox();
+  });
+  t.stdin.push(NUDGE);
+  t.stdin.end();
+  const r = await t.run();
+  assert.equal(r.exitCode, null);
+  assert.deepEqual(t.events.filter((e) => e.ev === 'cli_error'), [
+    { ev: 'cli_error', cmd: 'mail read', error: 'unparseable output' },
+    { ev: 'cli_error', cmd: 'mail read', error: 'exception' },
+  ]);
+  assert.equal(t.calls.length, 3);
+});

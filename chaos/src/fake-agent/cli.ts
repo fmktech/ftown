@@ -1,16 +1,17 @@
 // Real implementations of the fake agent's injected dependencies. Node built-ins only.
 import { spawn } from 'node:child_process';
-import { appendFileSync, readFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { GUEST, ROLES } from '../contract.ts';
 import type { AgentEvent, AgentLogLine, Clock, Role } from '../contract.ts';
 import type { CliOpts, CliResult } from './agent.ts';
 
-const DEFAULT_FTOWN_CLI = '/opt/ftown/bridge/dist/ftown-cli.js';
+const DEFAULT_FTOWN_CLI = `${GUEST.bridgeDir}/dist/ftown-cli.js`;
+const DEFAULT_HOOK_SCRIPT = `${GUEST.bridgeDir}/hooks/notify.sh`;
 const DEFAULT_TIMEOUT_MS = 120_000;
 const HOOK_TIMEOUT_MS = 10_000;
 
-function run(
+export function run(
   file: string,
   args: string[],
   opts: { stdin?: string; timeoutMs?: number; onStderr?: (chunk: string) => void },
@@ -62,8 +63,7 @@ export function realCli(): (args: string[], opts?: CliOpts) => Promise<CliResult
  */
 export function realHook(): (event: string) => Promise<boolean> {
   return async (event) => {
-    const script = process.env.CHAOS_HOOK_SCRIPT;
-    if (!script) return false;
+    const script = process.env.CHAOS_HOOK_SCRIPT || DEFAULT_HOOK_SCRIPT;
     // notify.sh always exits 0 (even with the bridge unreachable), so ok only means "exit code 0".
     const payload = JSON.stringify({ hook_event_name: event, session_id: process.env.FTOWN_SESSION_ID ?? '' });
     const r = await run('/bin/bash', [script], { stdin: payload, timeoutMs: HOOK_TIMEOUT_MS });
@@ -89,6 +89,7 @@ export function idsFromFile(path: string | undefined): (role: Role) => string | 
 export function fileLogger(dir: string, role: Role, clock: Clock): (e: AgentEvent) => void {
   const file = join(dir, `${role}.jsonl`);
   return (e) => {
+    mkdirSync(dir, { recursive: true });
     const line: AgentLogLine = { t: clock.now(), role, e };
     appendFileSync(file, `${JSON.stringify(line)}\n`);
   };
@@ -110,4 +111,18 @@ export function epochClock(path: string): Clock {
 
 export function isRole(value: string): value is Role {
   return (ROLES as readonly string[]).includes(value);
+}
+
+/** Arguments are `--role <r> --script <p>` (or `--k=v`); anything else, e.g. from the bridge, is ignored. */
+export function parseArgs(argv: string[]): { role: string | undefined; script: string | undefined } {
+  let role: string | undefined;
+  let script: string | undefined;
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--role') role = argv[++i];
+    else if (a.startsWith('--role=')) role = a.slice('--role='.length);
+    else if (a === '--script') script = argv[++i];
+    else if (a.startsWith('--script=')) script = a.slice('--script='.length);
+  }
+  return { role, script };
 }
