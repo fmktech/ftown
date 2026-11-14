@@ -4,7 +4,9 @@ set -eu
 . "$(dirname "$0")/env.sh"
 
 mkdir -p "$CHAOS_RUN/agents" "$CHAOS_RUN/scripts" "$CHAOS_OUT" "$CHAOS_TMUX_TMPDIR" "$CHAOS_DATA_DIR/solo/bin" /work
-chown ftown:ftown "$CHAOS_RUN" "$CHAOS_RUN/agents" "$CHAOS_RUN/scripts" "$CHAOS_TMUX_TMPDIR" /work
+# /run/chaos: root-owned 0755 (t0, ids.json readable by ftown); agents/ scripts/ tmux/ owned by ftown.
+chown root:root "$CHAOS_RUN"; chmod 0755 "$CHAOS_RUN"
+chown ftown:ftown "$CHAOS_RUN/agents" "$CHAOS_RUN/scripts" "$CHAOS_TMUX_TMPDIR" /work
 chmod 0700 "$CHAOS_TMUX_TMPDIR"
 
 # Seed the pinned hub binary + archive-digest sidecar (hub-manager cache hit, no download).
