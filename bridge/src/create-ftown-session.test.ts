@@ -1555,3 +1555,48 @@ describe('createFtownSession — plan-item binding', () => {
     assert.equal(worktreeCalls.length, 0, 'worktree api create never called');
   });
 });
+
+describe('requireGreenPr plumbing and briefing', () => {
+  it('parseCreateSessionBody accepts strict true for requireGreenPr', () => {
+    assert.equal(parseCreateSessionBody({ requireGreenPr: true }).requireGreenPr, true);
+    assert.equal(parseCreateSessionBody({ requireGreenPr: false }).requireGreenPr, undefined);
+    assert.equal(parseCreateSessionBody({ requireGreenPr: 'true' }).requireGreenPr, undefined);
+    assert.equal(parseCreateSessionBody({}).requireGreenPr, undefined);
+  });
+
+  it('buildChildBriefing appends green PR instructions only when requireGreenPr is true', () => {
+    const plain = buildChildBriefing({
+      childName: 'worker',
+      childId: 'c1',
+      parentName: 'orch',
+      parentId: 'p1',
+    });
+    assert.doesNotMatch(plain, /ftown sessions pr/);
+
+    const guarded = buildChildBriefing({
+      childName: 'worker',
+      childId: 'c1',
+      parentName: 'orch',
+      parentId: 'p1',
+      requireGreenPr: true,
+    });
+    assert.match(guarded, /not done until its PR is green/i);
+    assert.match(guarded, /ftown sessions pr <url>/);
+    assert.match(guarded, /flakes are failures/i);
+    assert.match(guarded, /only then set the card done/i);
+  });
+
+  it('createFtownSession persists requireGreenPr and includes it in child briefing', async () => {
+    const harness = fakeDeps([fakeSession('parent')]);
+    const created = await createFtownSession(harness.deps, {
+      name: 'pr-worker',
+      shellType: 'claude',
+      parentSessionId: 'parent',
+      prompt: 'ship feature',
+      requireGreenPr: true,
+    });
+    assert.equal(created.requireGreenPr, true);
+    assert.equal(harness.saved[0].requireGreenPr, true);
+    assert.match(harness.runs[0].command, /not done until its PR is green/i);
+  });
+});

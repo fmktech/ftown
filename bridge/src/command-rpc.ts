@@ -458,6 +458,7 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
               suppressBriefing: payload.suppressBriefing,
               createMissingWorkingDir: payload.createMissingWorkingDir,
               planItem: planItemFromPayload(payload as { planItem?: unknown }),
+              ...(payload.requireGreenPr === true ? { requireGreenPr: true } : {}),
             },
           );
           response = { requestId: command.requestId, success: true, data: { session: toWireSession(session) } };

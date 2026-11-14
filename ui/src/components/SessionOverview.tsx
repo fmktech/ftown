@@ -126,6 +126,7 @@ export interface OverviewEntry {
   unreadMail: number;
   prUrl?: string;
   prState?: string;
+  requireGreenPr?: boolean;
   worktree?: Session["worktree"];
   previews: string[];
   agent: string;
@@ -201,6 +202,7 @@ function buildEntries(children: ReadonlyArray<Session>, props: SessionOverviewPr
       unreadMail: card.derived.unreadMail,
       prUrl: card.derived.pr?.url ?? session?.pullRequestUrl,
       prState: card.derived.pr?.state,
+      requireGreenPr: session?.requireGreenPr,
       worktree: session?.worktree,
       previews: card.derived.previews,
       agent: agentLabel(card.derived.shellType ?? session?.shellType, card.derived.model ?? session?.model),
@@ -218,6 +220,7 @@ function buildEntries(children: ReadonlyArray<Session>, props: SessionOverviewPr
       ...shared(child.id, child.card, undefined, undefined, 0),
       unreadMail: 0,
       prUrl: child.pullRequestUrl,
+      requireGreenPr: child.requireGreenPr,
       worktree: child.worktree,
       previews: child.preview?.files.map(file => file.fileName) ?? [],
       agent: agentLabel(child.shellType, child.model),
@@ -311,6 +314,17 @@ interface RowContext {
 }
 type SnapshotOverviewItems = OverviewSnapshot["attention"];
 
+function prRequirementBadge(entry: OverviewEntry): { label: string; color: string } | null {
+  if (!entry.requireGreenPr) return null;
+  if (entry.prState === "passed" || entry.prState === "merged") {
+    return { label: "PR ✓", color: "var(--status-running)" };
+  }
+  if (entry.prState === "failed" || entry.prState === "closed") {
+    return { label: "PR ✗", color: "var(--status-error)" };
+  }
+  return { label: "PR ◷", color: entry.prState === "in_progress" || entry.prUrl ? "var(--status-pending)" : "var(--text-faint)" };
+}
+
 function OverviewRow({ entry, owner, open, onToggle, context, faint = false }: {
   entry: OverviewEntry;
   owner?: AttentionOwner;
@@ -329,6 +343,7 @@ function OverviewRow({ entry, owner, open, onToggle, context, faint = false }: {
   const activity = activityText(entry, now);
   const questions = context.items.filter(item => item.sessionId === entry.id && !item.event.resolvedAt);
   const recent = context.events.filter(event => event.sessionId === entry.id).slice(-3).reverse();
+  const prBadge = prRequirementBadge(entry);
   const stateLabel = retired
     ? "retired"
     : card
@@ -349,6 +364,7 @@ function OverviewRow({ entry, owner, open, onToggle, context, faint = false }: {
         {retired && <span style={{ ...MONO, color: "var(--text-faint)", flexShrink: 0 }}>retired</span>}
         <span style={{ color: faint ? "var(--text-faint)" : "var(--text-primary)", fontWeight: loud ? 600 : 500, flexShrink: 0 }}>{entry.name}</span>
         <span title={headline} style={{ color: faint ? "var(--text-faint)" : loud ? "var(--text-primary)" : "var(--text-muted)", flex: 1, minWidth: 0, ...(open ? { overflowWrap: "anywhere" } : { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }) }}>{headline}</span>
+        {prBadge && <span style={{ ...MONO, color: prBadge.color, flexShrink: 0 }}>{prBadge.label}</span>}
         {card && <span className="ov-age" style={{ ...MONO, color: "var(--text-faint)", flexShrink: 0 }}>{relativeTime(card.updatedAt, now)}</span>}
         {owner && <span style={{ ...MONO, color: owner === "you" ? "var(--status-pending)" : "var(--text-faint)", flexShrink: 0 }}>{owner === "you" ? "you" : managerName}</span>}
       </button>

@@ -138,7 +138,7 @@ interface SessionsOptions {
   createWorkdir?: boolean; worktree?: boolean; branch?: string; base?: string;
   keepWorktree?: boolean; forceWorktree?: boolean; to?: string;
   offset?: string; limit?: string; pattern?: string;
-  planItem?: string;
+  planItem?: string; requireGreenPr?: boolean;
   children?: boolean; siblings?: boolean; keys?: boolean; type?: string; thread?: string;
   peek?: boolean; all?: boolean; sessionId?: string; message?: string; messageFile?: string; id?: string; title?: string; clear?: boolean;
   option?: string[]; multi?: boolean; text?: boolean; questionsJson?: string; wait?: boolean; timeout?: string;
@@ -167,6 +167,7 @@ function sessionProgram(): Command {
     .option('--name <label>', 'Dashboard name').option('--command <cmd>', 'Full command override')
     .option('--parent', 'Link to the current session').option('--parent-id <uuid>', 'Explicit parent session')
     .option('--plan-item <id>', 'Start this todo item (p<n>) on the parent plan; requires --parent or --parent-id')
+    .option('--require-green-pr', 'Require a green linked PR before the child can set its card to done')
     .option('--model <name>', 'Model override')
     .option('--orchestrator', 'Compatibility flag (no additional prompt or environment changes)')
     .action((_opts, cmd: Command) => run('create', [], cmd));
@@ -522,6 +523,7 @@ async function executeSessionCommand(cmd: SessionCommand, rest: string[], option
         if (parentId) body.parentSessionId = parentId;
         else if (useParent) body.parentSessionId = true;
         if (planItem) body.planItem = planItem;
+        if (options.requireGreenPr) body.requireGreenPr = true;
         if (createWorkdir) body.createMissingWorkingDir = true;
         if (useWorktree) {
           if (branch !== undefined || base !== undefined) {

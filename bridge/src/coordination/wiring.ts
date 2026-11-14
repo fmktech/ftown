@@ -74,6 +74,7 @@ export interface Coordination {
   plan: PlanStore;
   digest: DigestProvider;
   mailSink: MailEventSink;
+  prStatus(url: string): Promise<CoordinationPrStatusResult | null>;
   emit(session: Session, kind: TreeEventKind, summary: string, ref?: string): Promise<void>;
   /**
    * `snapshot`, when passed, is the session as it existed before the record was
@@ -309,5 +310,16 @@ export function createCoordination(deps: CoordinationDeps): Coordination {
     },
   };
 
-  return { cards, events, board, plan, digest, mailSink, emit, onSessionExit, onSessionStart };
+  return {
+    cards,
+    events,
+    board,
+    plan,
+    digest,
+    mailSink,
+    prStatus: (url) => deps.prStatus(url),
+    emit,
+    onSessionExit,
+    onSessionStart,
+  };
 }

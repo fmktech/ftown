@@ -1327,6 +1327,88 @@ describe('LocalApiServer coordination routes and attention tree events (via disp
     assert.equal((afterClear.body as unknown as SessionCard).declared, null);
   });
 
+  it('enforces requireGreenPr on PUT /api/sessions/:id/card when state=done and allows parent --force', async (t) => {
+    const f = await coordFixture(t);
+    const prStates = new Map<string, 'in_progress' | 'failed' | 'passed' | 'merged' | 'closed' | 'unknown'>();
+    const coord = createCoordination({
+      store: f.store,
+      attention: new AttentionStore((id) => f.store.sessionDir(id), 500),
+      prStatus: async (url) => ({
+        state: prStates.get(url) ?? 'unknown',
+        stale: false,
+        checkedAt: '2026-11-13T12:00:00.000Z',
+      }),
+      mail: { unreadCount: async () => 0 },
+      publishSession: () => {},
+      now: () => Date.parse('2026-11-13T12:00:00.000Z'),
+    });
+    f.server.setCoordination(coord);
+
+    const makeChild = async (id: string, pullRequestUrl?: string) => {
+      await f.store.saveSession({
+        id,
+        name: id,
+        command: 'claude',
+        status: 'running',
+        bridgeId: 'bridge-1',
+        createdAt: '2026-11-13T11:00:00.000Z',
+        updatedAt: '2026-11-13T11:00:00.000Z',
+        parentSessionId: 'root-1',
+        requireGreenPr: true,
+        ...(pullRequestUrl ? { pullRequestUrl } : {}),
+      });
+    };
+
+    // No linked PR -> 409
+    await makeChild('pr-none');
+    const noPr = await f.call('PUT', '/api/sessions/pr-none/card', { state: 'done', headline: 'done' });
+    assert.equal(noPr.status, 409);
+    assert.match(String(noPr.body.error), /linked PR required/);
+
+    // Non-done states are allowed without a PR
+    const working = await f.call('PUT', '/api/sessions/pr-none/card', { state: 'working', headline: 'coding' });
+    assert.equal(working.status, 200);
+
+    // Pending (in_progress) and failed -> 409
+    const prUrl = 'https://github.com/org/repo/pull/99';
+    await makeChild('pr-guarded', prUrl);
+    prStates.set(prUrl, 'in_progress');
+    const pending = await f.call('PUT', '/api/sessions/pr-guarded/card', { state: 'done', headline: 'done' });
+    assert.equal(pending.status, 409);
+    assert.match(String(pending.body.error), /PR checks are in_progress; wait for green/);
+
+    prStates.set(prUrl, 'failed');
+    const failed = await f.call('PUT', '/api/sessions/pr-guarded/card', { state: 'done', headline: 'done' });
+    assert.equal(failed.status, 409);
+    assert.match(String(failed.body.error), /PR checks are failed; wait for green/);
+
+    // Force by non-parent (no caller, self, or sibling) -> 409
+    const selfForce = await f.call('PUT', '/api/sessions/pr-guarded/card', { state: 'done', headline: 'done', force: true }, undefined, 'pr-guarded');
+    assert.equal(selfForce.status, 409);
+    const otherForce = await f.call('PUT', '/api/sessions/pr-guarded/card', { state: 'done', headline: 'done', force: true }, undefined, 'child-a');
+    assert.equal(otherForce.status, 409);
+
+    // Passed -> 200
+    prStates.set(prUrl, 'passed');
+    const passed = await f.call('PUT', '/api/sessions/pr-guarded/card', { state: 'done', headline: 'green' });
+    assert.equal(passed.status, 200);
+
+    // Merged -> 200
+    await makeChild('pr-merged', 'https://github.com/org/repo/pull/100');
+    prStates.set('https://github.com/org/repo/pull/100', 'merged');
+    const merged = await f.call('PUT', '/api/sessions/pr-merged/card', { state: 'done', headline: 'merged' });
+    assert.equal(merged.status, 200);
+
+    // Force by parent -> 200 and emits status tree event noting the force
+    await makeChild('pr-forced', prUrl);
+    prStates.set(prUrl, 'failed');
+    const forced = await f.call('PUT', '/api/sessions/pr-forced/card', { state: 'done', headline: 'forced done', force: true }, undefined, 'root-1');
+    assert.equal(forced.status, 200);
+    const eventsRes = await f.call('GET', '/api/sessions/root-1/events');
+    const events = (eventsRes.body as { events: Array<{ sessionId: string; kind: string; summary: string }> }).events;
+    assert.ok(events.some((e) => e.sessionId === 'pr-forced' && e.kind === 'status' && /forced by parent/i.test(e.summary)));
+  });
+
   it('serves GET /api/sessions/:id/board with query filtering and strict parameter validation', async (t) => {
     const f = await coordFixture(t);
 

@@ -85,6 +85,8 @@ export interface CreateFtownSessionInput {
   worktree?: CreateSessionWorktreeInput;
   /** Parent-plan item id (`p<n>`) this child starts; requires a parent. */
   planItem?: string;
+  /** Require a linked PR with green/merged checks before the card can be set to done. */
+  requireGreenPr?: boolean;
 }
 
 export async function resolveParentSessionId(
@@ -104,15 +106,22 @@ interface ChildBriefingParams {
   childId: string;
   parentName: string;
   parentId: string;
+  requireGreenPr?: boolean;
 }
 
 /** One compact paragraph injected into a child agent's first input. */
 export function buildChildBriefing(params: ChildBriefingParams): string {
-  return (
+  const base =
     `[ftown] You are child session '${params.childName}' (${params.childId}), ` +
     `spawned by parent '${params.parentName}' (${params.parentId}). ` +
     `Report completion with ` +
-    `ftown harness mail send --parent --type result "<result>" (use --type escalation when blocked).`
+    `ftown harness mail send --parent --type result "<result>" (use --type escalation when blocked).`;
+  if (!params.requireGreenPr) return base;
+  return (
+    `${base} ` +
+    `This task is not done until its PR is green: push the branch, open the PR, ` +
+    `link it with \`ftown sessions pr <url>\`, fix CI failures yourself (flakes are failures), ` +
+    `and only then set the card done.`
   );
 }
 
@@ -558,6 +567,7 @@ async function createFtownSessionImpl(
       antigravitySessionId: input.antigravitySessionId,
       env: sessionEnv,
       parentSessionId,
+      ...(input.requireGreenPr ? { requireGreenPr: true } : {}),
       runtime: deps.runner.getPreferredRuntime(),
       ...(worktree ? { worktree } : {}),
     };
@@ -583,6 +593,7 @@ async function createFtownSessionImpl(
             childId: sessionId,
             parentName,
             parentId: parentSessionId,
+            requireGreenPr: input.requireGreenPr,
           })
         : undefined;
     const briefing = childBriefing;
@@ -753,6 +764,7 @@ export function parseCreateSessionBody(
       typeof body.planItem === 'string' && /^p\d{1,6}$/.test(body.planItem)
         ? body.planItem
         : undefined,
+    requireGreenPr: body.requireGreenPr === true ? true : undefined,
   };
 }
 
