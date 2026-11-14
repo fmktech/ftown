@@ -78,4 +78,4 @@ Why 5? Test-harness error classification is string-enumeration-based rather than
 - Verification: re-run e2e on CI for the new head; the previously failing shard must pass, plus one repeat dispatch for stability.
 
 ## Resolution
-- Pending CI verification on the fix head.
+- Verified: run 43622056977 (head bb40326) — `direct-transport-e2e (3/3)` passes (5m36s) with all shards green.
