@@ -15,6 +15,9 @@ t0=$(date +%s%N)
 step up /opt/chaos/box/up.sh
 echo "solo start: $(( ($(date +%s%N) - t0) / 1000000 )) ms"
 
+echo 1 > /run/chaos/t0; echo '{}' > /run/chaos/ids.json
+step run-chaos-layout as_ftown sh -c 'cat /run/chaos/t0 /run/chaos/ids.json >/dev/null && touch /run/chaos/agents/w && rm /run/chaos/agents/w'
+step hook-script as_ftown sh -c 'command -v jq curl bash >/dev/null && cmp "$CHAOS_HOOK_SCRIPT" /home/ftown/.ftown/notify.sh'
 cat > /run/chaos/scripts/sleeper.sh <<'S'
 #!/bin/sh
 echo "fake agent $FTOWN_SESSION_ID up"

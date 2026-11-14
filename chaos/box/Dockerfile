@@ -35,7 +35,7 @@ RUN set -eu; \
 # ---------- the box ----------
 FROM --platform=linux/amd64 ${NODE_IMAGE}
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      tmux git zsh procps ca-certificates util-linux iproute2 kmod busybox-static \
+      tmux git zsh procps ca-certificates util-linux iproute2 kmod busybox-static jq curl \
     && rm -rf /var/lib/apt/lists/*
 # uid 1000 is "node" in the base image; rename it to ftown.
 RUN groupmod --new-name ftown node \
@@ -54,4 +54,7 @@ USER ftown
 ENV HOME=/home/ftown
 RUN cd /home/ftown && node /opt/ftown/bridge/dist/ftown-cli.js setup
 USER root
+# CHAOS_HOOK_SCRIPT: the bridge's own hooks/notify.sh from this build, unmodified (needs bash, jq, curl).
+RUN cmp /opt/ftown/bridge/hooks/notify.sh /home/ftown/.ftown/notify.sh && command -v jq curl bash >/dev/null
+ENV CHAOS_HOOK_SCRIPT=/opt/ftown/bridge/hooks/notify.sh
 CMD ["/bin/sh"]

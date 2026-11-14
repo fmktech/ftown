@@ -107,3 +107,15 @@ PATH=/opt/chaos-bin:/home/ftown/.ftown/bin:/usr/local/bin:/usr/bin:/bin`, run vi
 
 The bridge log under `--network none` shows no network error; startup reaches
 `[Bridge] Ready and listening for commands`. Solo front listens on `:::8040`.
+
+## Hook script and /run/chaos layout (contract v3)
+
+- `CHAOS_HOOK_SCRIPT=/opt/ftown/bridge/hooks/notify.sh` — the bridge's own script from this
+  build, unmodified (build asserts it is byte-identical to the copy setup installs at
+  `/home/ftown/.ftown/notify.sh`, `bridge/src/install-notify-script.ts:5,17`). Exported in the image
+  ENV and by `as_ftown`. It needs bash, jq, curl (`bridge/hooks/notify.sh:8-65`), all installed.
+  It finds the bridge via `FTOWN_BRIDGE_POINTER` (`notify.sh:17`), which the bridge sets for its
+  children (`bridge/src/index.ts:215`); outside a session set `FTOWN_BRIDGE_POINTER=/data/bridge.json`.
+- `/run/chaos` is root:root 0755 (so `t0` and `ids.json` written by the root supervisor are
+  readable by ftown); `agents/`, `scripts/`, `tmux/` are owned by ftown. Smoke step
+  `run-chaos-layout` checks both.
