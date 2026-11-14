@@ -23,7 +23,10 @@ test('normaliseError never leaks raw text', () => {
   assert.equal(normaliseError(124, 'whatever 127.0.0.1:8040'), 'timeout');
   assert.equal(normaliseError(1, 'Error: connect ECONNREFUSED 127.0.0.1:41234'), 'bridge_down');
   assert.equal(normaliseError(1, 'fetch failed'), 'bridge_down');
-  assert.equal(normaliseError(4, 'permission_denied for abc-123'), 'rejected:4');
+  assert.equal(normaliseError(4, 'permission_denied for abc-123'), 'rejected:permission_denied');
+  assert.equal(normaliseError(1, 'Bridge not running'), 'bridge_down');
+  assert.equal(normaliseError(1, 'Bridge security: bridge_offline'), 'bridge_down');
+  assert.equal(normaliseError(1, 'connected to something odd 10.0.0.1'), 'rejected:exit_1');
 });
 
 test('runWorkload logs ok and normalised failures at the planned times', async () => {
@@ -40,6 +43,7 @@ test('runWorkload logs ok and normalised failures at the planned times', async (
     idOf: (r) => (r === 'child3' ? null : `id-${r}`),
     send: async (id, type, body) => {
       sent.push(`${id} ${type} ${body}`);
+      await clock.sleep(700);
       return id === 'id-child2' ? { code: 1, stdout: '', stderr: 'ECONNREFUSED' } : { code: 0, stdout: 'mail x sent', stderr: '' };
     },
     log: (r) => recs.push(r),

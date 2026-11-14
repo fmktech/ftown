@@ -87,8 +87,22 @@ test('sigterm that does not exit in time is killed and logged ok=false', async (
   const done = runFaults({ clock, schedule: [f('f1', 'bridge_sigterm', 'bridge', 20_000, 1_000)], actions: fakeActions(calls, { exitInTime: false }), roles: ROLES, log: (r) => recs.push(r) });
   await clock.advance(30_000);
   await done;
-  assert.deepEqual(calls.slice(0, 4), ['bridge SIGTERM', 'wait 30000', 'bridge SIGKILL', 'up']);
+  assert.deepEqual(calls.slice(0, 5), ['bridge SIGTERM', 'wait 30000', 'bridge SIGKILL', 'wait 10000', 'up']);
   assert.equal(recs[0].k === 'fault' && recs[0].ok, false);
+});
+
+test('stopped() ends the loop before the next step and skips the final heal', async () => {
+  const clock = fakeClock();
+  const calls: string[] = [];
+  const recs: Rec[] = [];
+  let stop = false;
+  const done = runFaults({ clock, schedule: [f('f1', 'agent_kill9', 'child1', 20_000, 0), f('f2', 'agent_kill9', 'child2', 40_000, 0)], actions: fakeActions(calls), roles: ROLES, log: (r) => recs.push(r), stopped: () => stop });
+  await clock.advance(25_000);
+  stop = true;
+  await clock.advance(30_000);
+  await done;
+  assert.deepEqual(calls, ['child1 SIGKILL']);
+  assert.equal(recs.length, 1);
 });
 
 test('empty schedule: no records, no final heal', async () => {

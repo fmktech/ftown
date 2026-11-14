@@ -2,6 +2,7 @@
 // 'external' to a random role, sent through the real CLI on the unfaulted control path.
 import { FAULT_WINDOW_END_MS, ROLES } from '../contract.ts';
 import type { Clock, DeriveRng, MailType, Rec, Role } from '../contract.ts';
+import { normaliseCliError } from '../fake-agent/parse.ts';
 
 export interface PlannedMail {
   atMs: number;
@@ -27,13 +28,18 @@ export function planWorkload(seed: number, deriveRng: DeriveRng, startMs: number
 
 export type OpError = 'bridge_down' | 'timeout' | `rejected:${string}`;
 
-/** Normalise a failed CLI call to bridge_down | timeout | rejected:<code> (never raw text). */
+/** Fixed guest time of the first possible workload slot (the plan adds 5–15 s to it). */
+export const WORKLOAD_START_MS = 15_000;
+
+/**
+ * Normalise a failed CLI call from its exit code and the fake agent's fixed reason tokens
+ * (normaliseCliError): bridge_down | timeout | rejected:<token>. Never raw text.
+ */
 export function normaliseError(code: number, stderr: string, stdout = ''): OpError {
-  if (code === 124) return 'timeout';
-  const text = `${stderr}\n${stdout}`;
-  if (/ECONNREFUSED|ECONNRESET|EPIPE|socket hang up|bridge\.json|not running|bridge (?:is )?(?:not|un)|no bridge|fetch failed|connect/i.test(text)) return 'bridge_down';
-  if (/timed? ?out|ETIMEDOUT/i.test(text)) return 'timeout';
-  return `rejected:${code}`;
+  const token = normaliseCliError(code, stdout, stderr);
+  if (token === 'timeout') return 'timeout';
+  if (token === 'bridge_offline' || token === 'bridge_unreachable') return 'bridge_down';
+  return `rejected:${token.replace(/ /g, '_')}`;
 }
 
 export interface SendResult {
@@ -50,20 +56,25 @@ export interface WorkloadDeps {
   /** `ftown harness mail send <id> --type <t> <body>` as the bridge user. */
   send: (id: string, type: MailType, body: string) => Promise<SendResult>;
   log: (rec: Rec) => void;
+  /** Checked before each send; true ends the loop (another loop failed). */
+  stopped?: () => boolean;
 }
 
 export async function runWorkload(deps: WorkloadDeps): Promise<void> {
   for (const m of deps.plan) {
     const wait = m.atMs - deps.clock.now();
     if (wait > 0) await deps.clock.sleep(wait);
+    if (deps.stopped?.()) return;
     const op = { op: 'mail_send' as const, tag: m.tag, to: m.to, type: m.type };
+    // t is the instant the call starts, so cause precedes effect in the canonical order.
+    const t = deps.clock.now();
     const id = deps.idOf(m.to);
     if (id === null) {
-      deps.log({ k: 'op', t: deps.clock.now(), op, ok: false, error: 'rejected:no_session' });
+      deps.log({ k: 'op', t, op, ok: false, error: 'rejected:no_session' });
       continue;
     }
     const r = await deps.send(id, m.type, `${m.tag} from=external to=${m.to}`);
     const ok = r.code === 0;
-    deps.log({ k: 'op', t: deps.clock.now(), op, ok, error: ok ? null : normaliseError(r.code, r.stderr, r.stdout) });
+    deps.log({ k: 'op', t, op, ok, error: ok ? null : normaliseError(r.code, r.stderr, r.stdout) });
   }
 }

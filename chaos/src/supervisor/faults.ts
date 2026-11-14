@@ -17,6 +17,7 @@ export interface FaultActions {
 }
 
 export const SIGTERM_EXIT_BOUND_MS = 30_000;
+export const SIGKILL_EXIT_BOUND_MS = 10_000;
 
 interface Step {
   atMs: number;
@@ -53,6 +54,8 @@ async function applyStart(f: ScheduledFault, a: FaultActions): Promise<boolean> 
       if (!(await a.signalBridge('SIGTERM'))) return false;
       if (await a.waitBridgeExit(SIGTERM_EXIT_BOUND_MS)) return true;
       await a.signalBridge('SIGKILL');
+      // Heal must not start while the old bridge still holds its port and pid file.
+      await a.waitBridgeExit(SIGKILL_EXIT_BOUND_MS);
       return false;
     }
     case 'agent_kill9':
@@ -94,6 +97,8 @@ export interface ExecutorDeps {
   actions: FaultActions;
   roles: readonly Role[];
   log: (rec: Rec) => void;
+  /** Checked before each step; true ends the loop without the final heal (another loop failed). */
+  stopped?: () => boolean;
 }
 
 /** Runs the whole schedule; resolves after the final heal (immediately when the schedule is empty). */
@@ -102,6 +107,7 @@ export async function runFaults(deps: ExecutorDeps): Promise<void> {
   for (const s of timeline(deps.schedule)) {
     const wait = s.atMs - clock.now();
     if (wait > 0) await clock.sleep(wait);
+    if (deps.stopped?.()) return;
     const t = clock.now();
     const ok = s.phase === 'start' ? await applyStart(s.fault, actions) : await applyHeal(s.fault, actions);
     log({ k: 'fault', t, id: s.fault.id, phase: s.phase, kind: s.fault.kind, target: s.fault.target, ok });
