@@ -50,6 +50,9 @@ for a in $(cat /proc/cmdline); do
   esac
 done
 export CHAOS_CMD CHAOS_SEED CHAOS_LEVEL
+# Inside the VM the clock is the guest's own (instruction-counted), so the supervisor may jump it.
+# Never set this anywhere else (e.g. Docker bring-up shares the host clock).
+export CHAOS_ALLOW_CLOCK=1
 echo "chaos-init: cmd=$CHAOS_CMD seed=$CHAOS_SEED level=$CHAOS_LEVEL"
 
 rm -f /run/chaos-exit-sent
