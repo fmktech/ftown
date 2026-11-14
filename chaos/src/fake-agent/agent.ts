@@ -28,6 +28,17 @@ export interface CliOpts {
   onStderr?: (chunk: string) => void;
 }
 
+export interface AgentState {
+  nextTag: number;
+  cursor: number;
+}
+
+export interface StateStore {
+  /** Returns null when no state file exists yet; throws on corrupt/unreadable state. */
+  load(): AgentState | null;
+  save(state: AgentState): void;
+}
+
 export interface AgentDeps {
   script: AgentScript;
   clock: Clock;
@@ -41,7 +52,11 @@ export interface AgentDeps {
   rawFailure?: (cmd: string, r: CliResult) => void;
   /** Session id of another role (from CHAOS_IDS_FILE), or null when unknown. */
   resolveId?: (role: Role) => string | null;
-  /** Ends the process for the `exit` step. Defaults to process.exit. */
+  /** Per-role persistent state ({ nextTag, cursor }). */
+  state?: StateStore;
+  /** Writes fatal diagnostics. Defaults to process.stderr.write. */
+  stderr?: (msg: string) => void;
+  /** Ends the process for the `exit` step or fatal error. Defaults to process.exit. */
   exit?: (code: number) => void;
   pid?: number;
 }
@@ -66,7 +81,11 @@ export async function runAgent(deps: AgentDeps): Promise<AgentResult> {
   const role = script.role;
   const resolveId = deps.resolveId ?? (() => null);
   let nextTag = 1000 * (ROLES.indexOf(role) + 1);
+  let cursor = 0;
   let exited: number | null = null;
+  const persist = (): void => {
+    deps.state?.save({ nextTag, cursor });
+  };
   const background: Promise<void>[] = [];
   const pendingRouted: EscalationMail[] = [];
 
@@ -151,6 +170,7 @@ export async function runAgent(deps: AgentDeps): Promise<AgentResult> {
   const sendMail = async (to: Role | 'parent', type: MailType, body: string): Promise<void> => {
     const target: Role = to === 'parent' ? (PARENT_OF[role] ?? role) : to;
     const tag = `CHAOS-M-${nextTag++}`;
+    persist();
     const text = `${tag} from=${role} to=${target}${body ? ` ${body}` : ''}`;
     const record = (accepted: boolean, error: string | null): void => {
       log({ ev: 'mail_sent', tag, to: target, type, accepted, error });
@@ -176,6 +196,7 @@ export async function runAgent(deps: AgentDeps): Promise<AgentResult> {
 
   const ask = async (): Promise<void> => {
     const title = `CHAOS-Q-${nextTag++} from=${role}`;
+    persist();
     const askTag = askTagOf(title) ?? title;
     let seen = '';
     let sent = false;
@@ -259,20 +280,42 @@ export async function runAgent(deps: AgentDeps): Promise<AgentResult> {
       case 'exit':
         exited = step.code;
         log({ ev: 'exit', code: step.code });
+        cursor += 1;
+        persist();
         (deps.exit ?? ((c: number) => process.exit(c)))(step.code);
         return;
     }
   };
 
   log({ ev: 'start', pid: deps.pid ?? process.pid });
+  if (deps.state) {
+    try {
+      const loaded = deps.state.load();
+      if (loaded !== null) {
+        nextTag = loaded.nextTag;
+        cursor = loaded.cursor;
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log({ ev: 'cli_error', cmd: 'state', error: 'corrupt state file' });
+      (deps.stderr ?? ((m: string) => process.stderr.write(m)))(`corrupt state file for ${role}: ${msg}\n`);
+      (deps.exit ?? ((c: number) => process.exit(c)))(1);
+      return { exitCode: 1 };
+    }
+  }
   const stdinDone = consumeStdin();
 
-  for (const step of script.steps) {
+  for (let i = cursor; i < script.steps.length; i++) {
     if (exited !== null) break;
+    const step = script.steps[i];
     try {
       await runStep(step);
     } catch {
       log({ ev: 'cli_error', cmd: step.do, error: 'exception' });
+    }
+    if (exited === null) {
+      cursor = i + 1;
+      persist();
     }
   }
 
