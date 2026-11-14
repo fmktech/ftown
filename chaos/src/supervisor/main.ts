@@ -11,6 +11,7 @@ import { realClock, writeT0 } from '../core/clock.ts';
 import { deriveRng } from '../core/rng.ts';
 import { buildSchedule } from '../core/schedule.ts';
 import { takeSnapshot } from '../observe/snapshot.ts';
+import { emitFile, FRAME_PORT } from '../guest/emit.ts';
 import { checkpoint, runCheckpoints } from './checkpoints.ts';
 import { runFaults } from './faults.ts';
 import type { FaultActions } from './faults.ts';
@@ -131,18 +132,15 @@ function makeActions(): FaultActions & { pid(): number | null } {
   };
 }
 
-interface EmitFile {
-  name: string;
-  path: string;
-}
-
-/** Hands the output files to the host via chaos/src/guest/emit.ts when it exists; otherwise they stay in outDir. */
-async function emitOut(files: readonly EmitFile[], code: number): Promise<void> {
-  const modPath = new URL('../guest/emit.ts', import.meta.url);
-  if (!existsSync(modPath)) return;
-  const mod = (await import(modPath.href)) as Record<string, unknown>;
-  const fn = (mod.emitFiles ?? mod.emit) as ((files: readonly EmitFile[], exitCode: number) => unknown) | undefined;
-  if (typeof fn === 'function') await fn(files, code);
+/**
+ * Sends the output files to the host as frames (guest/emit.ts). The port is $CHAOS_FRAMES (Docker
+ * bring-up) or /dev/ttyS1; when neither exists the files stay in GUEST.outDir only. The guest
+ * entry point sends CHAOS-EXIT itself.
+ */
+async function emitOut(names: readonly string[]): Promise<void> {
+  const port = process.env.CHAOS_FRAMES || FRAME_PORT;
+  if (!process.env.CHAOS_FRAMES && !existsSync(port)) return;
+  for (const name of names) emitFile(name, await readFile(join(GUEST.outDir, name)), port);
 }
 
 async function writeSideFiles(): Promise<void> {
@@ -157,9 +155,17 @@ async function writeSideFiles(): Promise<void> {
     }
   }
   await writeFile(join(GUEST.outDir, 'side-agents.jsonl'), agents);
+  // Raw stderr of the agents' CLI calls (<role>.stderr.log), copied as side-<role>.stderr.log.
+  for (const role of ROLES) {
+    try {
+      await writeFile(join(GUEST.outDir, `side-${role}.stderr.log`), await readFile(join(GUEST.agentLogDir, `${role}.stderr.log`)));
+    } catch {
+      /* none */
+    }
+  }
 }
 
-const OUT_FILES = ['canon.jsonl', 'verdicts.json', 'side-bridge.log', 'side-tmux.txt', 'side-agents.jsonl'];
+const OUT_FILES = ['canon.jsonl', 'verdicts.json', 'side-bridge.log', 'side-tmux.txt', 'side-agents.jsonl', ...ROLES.map((r) => `side-${r}.stderr.log`)];
 
 async function finish(rec: Recorder, verdicts: Extract<Rec, { k: 'verdict' }>[], exitCode: number, error: string | null): Promise<number> {
   const canon = encodeLog([...rec.canonical(), ...verdicts]);
@@ -169,8 +175,7 @@ async function finish(rec: Recorder, verdicts: Extract<Rec, { k: 'verdict' }>[],
   await writeFile(join(GUEST.outDir, 'verdicts.json'), `${JSON.stringify(report, null, 2)}\n`);
   await writeSideFiles().catch(() => undefined);
   await down().catch(() => undefined);
-  const files = OUT_FILES.map((name) => ({ name, path: join(GUEST.outDir, name) })).filter((f) => existsSync(f.path));
-  await emitOut(files, exitCode);
+  await emitOut(OUT_FILES.filter((name) => existsSync(join(GUEST.outDir, name))));
   return exitCode;
 }
 

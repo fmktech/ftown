@@ -17,13 +17,16 @@ function counter(role: Role): () => number {
 const mailBody = (n: number, from: Role, to: Role): string => `CHAOS-M-${n} from=${from} to=${to}`;
 const sleep = (rng: Rng, lo: number, hi: number): AgentStep => ({ do: 'sleep', ms: rng.int(lo, hi) });
 
-/** Which children ask, and how many asks in total (1–2, at least one). Drawn from the root's stream. */
-function chooseAskers(rng: Rng): Role[] {
+/**
+ * Ask plan, drawn from the root's stream: one child asks first thing (before the fault window
+ * opens, so a fault can never remove every ask) plus 1–2 later asks by seed-chosen children.
+ */
+function chooseAsks(rng: Rng): { early: Role; later: Record<Role, number> } {
+  const early = rng.pick(CHILDREN);
+  const later: Record<Role, number> = { root: 0, child1: 0, child2: 0, child3: 0 };
   const count = rng.int(1, 2);
-  const pool = [...CHILDREN];
-  const out: Role[] = [];
-  for (let i = 0; i < count; i++) out.push(pool.splice(rng.int(0, pool.length - 1), 1)[0]);
-  return out;
+  for (let i = 0; i < count; i++) later[rng.pick(CHILDREN)] += 1;
+  return { early, later };
 }
 
 function rootScript(rng: Rng): AgentScript {
@@ -40,18 +43,21 @@ function rootScript(rng: Rng): AgentScript {
   return { role: 'root', steps, readMailOnNudge: true, answerRoutedQuestions: true };
 }
 
-function childScript(role: Role, rng: Rng, asks: number): AgentScript {
+function childScript(role: Role, rng: Rng, early: boolean, asks: number): AgentScript {
   const nextMail = counter(role);
   const nextAsk = counter(role);
-  const steps: AgentStep[] = [sleep(rng, 2_000, 6_000), { do: 'hook', event: 'UserPromptSubmit' }, { do: 'status', state: 'working', headline: `${role} working` }];
+  const ask = (): AgentStep => {
+    const title = `CHAOS-Q-${nextAsk()} from=${role}`;
+    return { do: 'ask', title, message: title, options: ['yes', 'no'] };
+  };
+  const steps: AgentStep[] = [];
+  if (early) steps.push(ask());
+  steps.push(sleep(rng, 2_000, 6_000), { do: 'hook', event: 'UserPromptSubmit' }, { do: 'status', state: 'working', headline: `${role} working` });
   const actions = rng.int(3, 6);
   const askAt = new Set<number>();
   while (askAt.size < asks) askAt.add(rng.int(0, actions - 1));
   for (let i = 0; i < actions; i++) {
-    if (askAt.has(i)) {
-      const title = `CHAOS-Q-${nextAsk()} from=${role}`;
-      steps.push({ do: 'ask', title, message: title, options: ['yes', 'no'] });
-    }
+    if (askAt.has(i)) steps.push(ask());
     switch (rng.int(0, 3)) {
       case 0:
         steps.push({ do: 'hook', event: 'PreToolUse' }, { do: 'hook', event: 'PostToolUse' });
@@ -76,8 +82,8 @@ function childScript(role: Role, rng: Rng, asks: number): AgentScript {
 export function buildScripts(seed: number, deriveRng: DeriveRng): Scripts {
   const rootRng = deriveRng(seed, 'agent.root');
   const root = rootScript(rootRng);
-  const askers = chooseAskers(rootRng);
+  const asks = chooseAsks(rootRng);
   const out = { root } as Scripts;
-  for (const role of CHILDREN) out[role] = childScript(role, deriveRng(seed, `agent.${role}`), askers.includes(role) ? 1 : 0);
+  for (const role of CHILDREN) out[role] = childScript(role, deriveRng(seed, `agent.${role}`), asks.early === role, asks.later[role]);
   return out;
 }

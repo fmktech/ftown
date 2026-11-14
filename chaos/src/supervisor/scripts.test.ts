@@ -9,13 +9,14 @@ test('scripts are a pure function of the seed', () => {
   assert.notDeepEqual(buildScripts(7, deriveRng), buildScripts(8, deriveRng));
 });
 
-test('every seed: 1–2 asks across children, root answers, both mail directions, children never exit', () => {
+test('every seed: one first-step ask plus 1–2 later asks, root answers, both mail directions, children never exit', () => {
   for (let seed = 1; seed <= 200; seed++) {
     const s = buildScripts(seed, deriveRng);
     assert.equal(s.root.readMailOnNudge, true);
     assert.equal(s.root.answerRoutedQuestions, true);
     assert.ok(s.root.steps.some((x) => x.do === 'mail_send' && x.to !== 'root'));
     let asks = 0;
+    let early = 0;
     for (const role of ROLES) {
       assert.equal(s[role].role, role);
       assert.ok(!s[role].steps.some((x) => x.do === 'exit'));
@@ -25,8 +26,10 @@ test('every seed: 1–2 asks across children, root answers, both mail directions
       assert.ok(s[role].steps.some((x) => x.do === 'mail_send' && x.to === 'parent'));
       assert.deepEqual(s[role].steps.at(-1), { do: 'hook', event: 'Stop' });
       asks += s[role].steps.filter((x) => x.do === 'ask').length;
+      if (s[role].steps[0].do === 'ask') early += 1;
     }
-    assert.ok(asks >= 1 && asks <= 2, `seed ${seed}: ${asks} asks`);
+    assert.equal(early, 1, `seed ${seed}: early asks`);
+    assert.ok(asks >= 2 && asks <= 3, `seed ${seed}: ${asks} asks`);
   }
 });
 
