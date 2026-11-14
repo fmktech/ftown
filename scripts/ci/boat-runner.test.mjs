@@ -120,6 +120,8 @@ test("an e2e shard is validated and forwarded; other jobs and malformed shards a
   assert.deepEqual(remoteEnvironment(base), ["CI=true", "GITHUB_WORKSPACE=/home/user/repo", "GITHUB_RUN_ID=123", "GITHUB_RUN_ATTEMPT=1"]);
   for (const shard of ["4/3", "0/3", "1/0", "1/10", "1", "1/3 --grep x", "1/3;id"]) assert.throws(() => validate({ ...base, shard }), /Invalid shard/);
   assert.throws(() => validate({ ...base, job: "gitleaks", shard: "1/3" }), /Invalid shard/);
+  assert.equal(validate({ ...base, job: "unit" }), "boat");
+  assert.throws(() => validate({ ...base, job: "unit", shard: "1/3" }), /Invalid shard/);
 });
 test("remote environment is an explicit allowlist, with no key", () => {
   const i = { ...base, job: "bridge-version", baseSha: "a".repeat(40), headSha: "b".repeat(40) };

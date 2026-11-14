@@ -4,7 +4,7 @@ import { chmod, cp, lstat, mkdir, mkdtemp, readdir, rm } from "node:fs/promises"
 import { basename, resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const jobs = new Set(["e2e", "release-artifacts", "gitleaks", "bridge-version", "centrifugo"]);
+const jobs = new Set(["e2e", "unit", "release-artifacts", "gitleaks", "bridge-version", "centrifugo"]);
 const shaPattern = /^[0-9a-f]{40}$/;
 const shardPattern = /^([1-9])\/([1-9])$/;
 const idPattern = /^bx_[a-z0-9]+$/;

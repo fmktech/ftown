@@ -4,7 +4,7 @@ umask 022
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)
 cd "$root"
 job=${1:-}
-case "$job" in e2e|release-artifacts|gitleaks|bridge-version|centrifugo) ;; *) echo "Invalid CI job" >&2; exit 2;; esac
+case "$job" in e2e|unit|release-artifacts|gitleaks|bridge-version|centrifugo) ;; *) echo "Invalid CI job" >&2; exit 2;; esac
 source scripts/ci/setup-runtime.sh
 case "$job" in
   release-artifacts)
@@ -34,14 +34,19 @@ case "$job" in
     fi
     ;;
   centrifugo) bash scripts/ci/validate-centrifugo.sh ;;
+  unit)
+    node --test scripts/ci/boat-runner.test.mjs scripts/ci/bridge-version.test.mjs
+    node --test e2e/scripts/setup-browser-trust.test.mjs
+    (cd e2e && npm ci)
+    (cd ui && npm ci && npm test && node --test ../e2e/scripts/ci-fixtures.test.mjs)
+    (cd bridge && npm ci && npm run build && npm test && node --test ../scripts/release/*.test.mjs)
+    ;;
   e2e)
-    # A shard runs one slice of the Playwright suite on its own stack; unit suites run once, on the first shard.
+    # A shard runs one slice of the Playwright suite on its own stack.
     shard=${E2E_SHARD:-}
     if [[ -n $shard ]]; then
       [[ $shard =~ ^([1-9])/([1-9])$ ]] && (( BASH_REMATCH[1] <= BASH_REMATCH[2] )) || { echo "Invalid E2E shard" >&2; exit 2; }
     fi
-    unit=1; [[ -z $shard || $shard == 1/* ]] || unit=0
-    (( ! unit )) || node --test scripts/ci/boat-runner.test.mjs scripts/ci/bridge-version.test.mjs
     # Reject all inherited endpoint, credential and test-selector overrides before sourcing fixtures.
     for name in DATABASE_URL MIGRATION_DATABASE_URL PGHOST PGPORT PGUSER PGDATABASE PGPASSWORD PGOPTIONS PGSERVICE PGSERVICEFILE FTOWN_PUBLIC_URL NEXT_PUBLIC_CENTRIFUGO_URL FTOWN_DATA_DIR REGISTRATION_ENABLED FTOWN_ACCOUNT_CREATE_PER_IP_HOUR FTOWN_ACCOUNT_CREATE_GLOBAL_DAY FTOWN_ACCOUNT_WRITES_PER_10MIN FTOWN_MAX_ACCOUNTS E2E_DIR E2E_BROWSER_HOME E2E_SECOND_BRIDGE_HOME E2E_PUBLIC_URL E2E_UI_PORT E2E_TLS_PORT NODE_EXTRA_CA_CERTS AUTH_SECRET CENTRIFUGO_API_KEY CENTRIFUGO_TOKEN_SECRET; do
       if printenv "$name" >/dev/null; then echo "Inherited override $name rejected" >&2; exit 1; fi
@@ -92,12 +97,11 @@ JS
     zsh -c 'autoload -Uz compaudit; compaudit' 2>/dev/null | xargs -r sudo chmod -R g-w,o-w || true
     zsh -c 'autoload -Uz compaudit; compaudit' || true
     bash "$E2E_DIR/scripts/gen-certs.sh"
-    (( ! unit )) || node --test "$E2E_DIR/scripts/setup-browser-trust.test.mjs"
     trust_started=1; node "$E2E_DIR/scripts/setup-browser-trust.mjs"
     infra_started=1; (cd "$E2E_DIR" && docker compose up -d --build --wait && docker compose ps)
     (cd "$E2E_DIR" && npm ci && node scripts/setup-db.mjs)
-    (cd ui && npm ci && { (( ! unit )) || { npm test && node --test ../e2e/scripts/ci-fixtures.test.mjs; }; } && npm run build)
-    (cd bridge && npm ci && npm run build && { (( ! unit )) || { npm test && node --test ../scripts/release/*.test.mjs; }; })
+    (cd ui && npm ci && npm run build)
+    (cd bridge && npm ci && npm run build)
     MIGRATION_DATABASE_URL="$DATABASE_URL" timeout 120s node e2e/scripts/rate-limit-db.ts
     timeout 120s node bridge/scripts/centrifugo-security-smoke.mjs
     (cd "$E2E_DIR" && npx playwright install --with-deps --no-shell chromium)
