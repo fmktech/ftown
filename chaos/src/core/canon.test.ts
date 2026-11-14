@@ -75,3 +75,19 @@ test('unknown kind and non-finite numbers throw', () => {
   assert.throws(() => encodeRec({ k: 'nope' } as unknown as Rec));
   assert.throws(() => encodeRec({ k: 'run', seed: Number.NaN, level: 'off', contract: 3 }));
 });
+
+test('only plain data is allowed: integers, strings, booleans, null, arrays, plain objects', () => {
+  const withE = (e: unknown) => ({ k: 'agent', t: 1, role: 'root', e }) as unknown as Rec;
+  assert.throws(() => encodeRec({ k: 'run', seed: 1.5, level: 'off', contract: 3 }), /non-integer/);
+  assert.throws(() => encodeRec({ k: 'run', seed: Number.POSITIVE_INFINITY, level: 'off', contract: 3 }));
+  assert.throws(() => encodeRec(withE({ ev: 'x', d: new Date(0) })), /plain/);
+  assert.throws(() => encodeRec(withE({ ev: 'x', d: new Map() })), /plain/);
+  assert.throws(() => encodeRec(withE({ ev: 'x', d: new Set() })), /plain/);
+  class C { a = 1; }
+  assert.throws(() => encodeRec(withE({ ev: 'x', d: new C() })), /plain/);
+  assert.throws(() => encodeRec(withE({ ev: 'x', d: 1n })), /unsupported/);
+  assert.equal(encodeRec(withE({ ev: 'x', d: Object.create(null) })), '{"k":"agent","t":1,"role":"root","e":{"d":{},"ev":"x"}}');
+  for (const bad of [{ k: 'nope' }, { k: '__proto__' }, { k: 'toString' }, {}, null]) {
+    assert.throws(() => encodeRec(bad as unknown as Rec), /unknown record kind/);
+  }
+});

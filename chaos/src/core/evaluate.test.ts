@@ -40,19 +40,45 @@ test('sometimes never affects the exit code', () => {
   }
 });
 
-test('a throwing property is violated with evidence', () => {
-  const r = evaluate([mk('T', 'sometimes', () => { throw new Error('boom'); })], log);
-  assert.equal(r.verdicts[0]!.status, 'violated');
-  assert.deepEqual(r.verdicts[0]!.evidence, ['property threw: boom']);
-  assert.equal(r.exitCode, EXIT.ok, 'only always/unreachable affect the exit code');
-  const r2 = evaluate([mk('T', 'always', () => { throw new Error('boom'); })], log);
-  assert.equal(r2.exitCode, EXIT.violation);
+test('a crashed check is violated and fails the run for every kind', () => {
+  for (const kind of ['always', 'sometimes', 'unreachable'] as const) {
+    const r = evaluate([mk('T', kind, () => { throw new Error('boom'); })], log);
+    assert.equal(r.verdicts[0]!.status, 'violated');
+    assert.deepEqual(r.verdicts[0]!.evidence, ['property threw: boom']);
+    assert.equal(r.exitCode, EXIT.violation, kind);
+  }
 });
 
-test('a status invalid for the kind is violated', () => {
-  const r = evaluate([fixed('X', 'always', { status: 'hit', evidence: [] })], log);
-  assert.equal(r.verdicts[0]!.status, 'violated');
-  assert.equal(r.exitCode, EXIT.violation);
+test('null/undefined result, invalid status and bad evidence are violated, never throw', () => {
+  const bads: Property['check'][] = [
+    () => null as unknown as PropResult,
+    () => undefined as unknown as PropResult,
+    () => ({ status: 'pass', evidence: 'x' as unknown as string[] }),
+    () => ({ status: 'pass', evidence: [1 as unknown as string] }),
+    () => ({ status: 'pass' }) as unknown as PropResult,
+  ];
+  for (const kind of ['always', 'sometimes'] as const) {
+    for (const check of bads) {
+      const r = evaluate([mk('X', kind, check)], log);
+      assert.equal(r.verdicts[0]!.status, 'violated');
+      assert.equal(r.exitCode, EXIT.violation);
+    }
+  }
+});
+
+test('a property cannot mutate the log seen by another', () => {
+  const mutator = mk('M', 'sometimes', (l) => {
+    try { (l as Rec[]).push({ k: 'run', seed: 9, level: 'off', contract: 3 }); } catch { /* frozen */ }
+    try { (l[0] as { seed: number }).seed = 99; } catch { /* frozen */ }
+    return { status: 'hit', evidence: [] };
+  });
+  let seen: readonly Rec[] = [];
+  const reader = mk('R', 'always', (l) => { seen = l; return { status: 'pass', evidence: [] }; });
+  const r = evaluate([mutator, reader], log);
+  assert.deepEqual(seen, log);
+  assert.equal(log[0]!.k === 'run' && log[0]!.seed, 1, 'caller log untouched');
+  assert.equal(r.verdicts[0]!.status, 'hit');
+  assert.ok(Object.isFrozen(seen));
 });
 
 test('properties never see verdict records', () => {

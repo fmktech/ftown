@@ -20,10 +20,12 @@ function nested(v: unknown): string {
     case 'boolean':
       return JSON.stringify(v);
     case 'number':
-      if (!Number.isFinite(v)) throw new Error(`canon: non-finite number ${v}`);
+      if (!Number.isInteger(v)) throw new Error(`canon: non-integer number ${v}`);
       return JSON.stringify(v);
     case 'object': {
       if (Array.isArray(v)) return `[${v.map((x) => nested(x === undefined ? null : x)).join(',')}]`;
+      const proto = Object.getPrototypeOf(v);
+      if (proto !== Object.prototype && proto !== null) throw new Error('canon: only plain objects are allowed');
       const o = v as Record<string, unknown>;
       const keys = Object.keys(o).filter((k) => o[k] !== undefined).sort();
       return `{${keys.map((k) => `${JSON.stringify(k)}:${nested(o[k])}`).join(',')}}`;
@@ -34,8 +36,8 @@ function nested(v: unknown): string {
 }
 
 export function encodeRec(rec: Rec): string {
-  const order = TOP_ORDER[rec.k];
-  if (order === undefined) throw new Error(`canon: unknown record kind ${String((rec as { k: unknown }).k)}`);
+  const order = Object.hasOwn(TOP_ORDER, rec?.k) ? TOP_ORDER[rec.k] : undefined;
+  if (order === undefined) throw new Error(`canon: unknown record kind ${String((rec as { k: unknown } | null)?.k)}`);
   const o = rec as unknown as Record<string, unknown>;
   const extra = Object.keys(o)
     .filter((k) => !order.includes(k) && o[k] !== undefined)
