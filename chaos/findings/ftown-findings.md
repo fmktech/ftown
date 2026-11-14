@@ -17,7 +17,7 @@ Findings with a security angle are not listed here or anywhere in the repository
 | Date | Contract | Profile / level | Seeds | Runs per seed | Pairs identical | Bridge violations |
 |---|---|---|---|---|---|---|
 | 2026-11-14 | v8 | short / off | 1 | 2 | yes | none |
-| 2026-11-14 | v8 | short / low | 1–4 | 2 | yes (4 of 4) | none |
+| 2026-11-14 | v8 | short / low | 1–4 | 2 | yes (4 of 4) | none reported by v8 (seed 2 contained an undetected F1 outage of ~51 s that old R2 missed; fixed in contract v9) |
 | 2026-11-14 | v6 | soak / high | 1 | 2 | yes | none in the pair; F1 found in an earlier run of this seed with clock faults |
 
 A short run takes about 3.7 minutes of wall time on a lightly loaded host.
@@ -39,18 +39,16 @@ until the next scheduled heal. Without the clock jump the same restart succeeds.
 - Found by: seed 1, level high, long-form run (today: `--profile soak --level high`).
 - Limits of the evidence: one run per condition, taken before the harness was shown to be
   deterministic. Re-confirm with a soak pair before relying on exact timings. The reproduction
-  commands in the detail file predate run profiles and need `--profile soak` added. An attempt on
-  2026-11-14 with `--profile short --level low` (seed 2, plus candidates 23, 54, 295) did not
-  reproduce an R2 violation on pre-fix commit `309b678`.
+  commands in the detail file predate run profiles and need `--profile soak` added.
 - Suggested direction: measure the deadline with a monotonic clock.
-- Fix confirmation (2026-11-14, fix commit `a33c8bc`, #226): not reproduced with the current
-  harness; fix unconfirmed by chaos run. Scenario: seed 2, `--profile short --level low`.
-  Pre-fix (`309b678`, `--times 1`): `H_run=1101fd58e651`, `violated=-`, `exit=0` (bridge logged
-  `hub did not become healthy within 30000ms`, but overlapping `f2`/`f3` faults restarted the
-  bridge before the next checkpoint; candidates 23, 54, and 295 also exited `0` with
-  `violated=-`). Post-fix (`2bdd0cf5`, `--times 2`): `H_run=1101fd58e651`, `violated=-`, `exit=0`,
-  identical pair (`initramfsSha256=36b866bcb620cc2888a977e0e23dc10400b5bf319fa474c7075f5102227b5168`,
-  reusing existing `ftown-chaos-box:dev` image `9531f49b34e1`).
+- Fix confirmation (2026-11-14, fix commit `a33c8bc`, #226): confirmed on contract v9 with
+  seed 2 (`--profile short --level low`, `f1` `bridge_kill9` at 83,531 ms followed by
+  `clock_jump_fwd` +90,000 ms at 107,248 ms). Pre-fix (`bridge/` at `309b678` on v9 harness,
+  source fingerprint `5297ec8714be`): `H_run=6587cd4c9479`, `exit=1`, `R2` violated
+  (`heal failed: f1 bridge_kill9 t=86100 doneT=108327`), `side-bridge.log` recorded
+  `hub did not become healthy within 30000ms` and checkpoints `cp6`–`cp8` showed `bridgeAlive: false`.
+  Post-fix (source fingerprint `5f6a682a4488`, `--times 2`): identical pair `H_run=85caa5790c30`,
+  `exit=0`, `R2` passed, checkpoints `cp8`–`cp9` showed `bridgeAlive: true` and `bridgeResponsive: true`.
 
 ## Observations
 
