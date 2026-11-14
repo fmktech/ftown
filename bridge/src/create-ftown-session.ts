@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
 
 import { buildPiCommand, buildSessionCommand } from './agent-commands.js';
+import { ensureAntigravityWorkdirTrust } from './antigravity-trust.js';
 import { ensureCodexWorkdirTrust } from './codex-installer.js';
 import {
   HARNESSES,
@@ -664,6 +665,11 @@ async function createFtownSessionImpl(
       // Codex blocks on an interactive "Do you trust this directory?" prompt
       // unless the resolved workdir is trusted in ~/.codex/config.toml.
       ensureCodexWorkdirTrust(workingDir ?? process.cwd());
+    }
+    if (effectiveInput.shellType === 'antigravity') {
+      // agy blocks on a "trust this folder?" prompt unless the resolved workdir
+      // is listed in ~/.gemini/antigravity-cli/settings.json trustedWorkspaces.
+      ensureAntigravityWorkdirTrust(workingDir ?? process.cwd());
     }
 
     await staggerHarnessSpawn(effectiveInput.shellType);
