@@ -217,11 +217,14 @@ export function newlyReady(before: readonly PlanItem[], after: readonly PlanItem
   return readyIds(after).filter((id) => !previous.has(id));
 }
 
-function eventSummary(item: Pick<PlanItem, 'id' | 'state' | 'title'>, before: readonly PlanItem[], after: readonly PlanItem[]): string {
-  const base = `${item.id} ${item.state}: ${item.title}`;
+function withReady(base: string, before: readonly PlanItem[], after: readonly PlanItem[]): string {
   const ready = newlyReady(before, after);
   if (ready.length === 0) return base;
   return `${base} → ready: ${ready.join(', ')}`;
+}
+
+function eventSummary(item: Pick<PlanItem, 'id' | 'state' | 'title'>, before: readonly PlanItem[], after: readonly PlanItem[]): string {
+  return withReady(`${item.id} ${item.state}: ${item.title}`, before, after);
 }
 
 function rejectUnknown(record: Record<string, unknown>, allowed: ReadonlySet<string>): string[] {
@@ -492,7 +495,7 @@ export class PlanStore {
       const existing = plan.items.find((item) => item.id === itemId);
       if (!existing) throw new PlanValidationError(`Plan item ${itemId} does not exist`);
       const next = applyRemove(plan, itemId, this.stamp());
-      return { plan: next, summary: eventSummary(existing, plan.items, next.items) };
+      return { plan: next, summary: withReady(`${existing.id} removed: ${existing.title}`, plan.items, next.items) };
     });
   }
 
@@ -528,6 +531,28 @@ export class PlanStore {
     const primary = next.items.find((item) => item.id === matches[0]?.id);
     if (!primary) return;
     await this.persist(fresh, { plan: next, summary: eventSummary(primary, fresh.plan.items, next.items), item: primary });
+  }
+
+  /**
+   * Returns every item with this child and state `started` to `todo` and clears sessionId.
+   * No match, or a missing parent, is a no-op. One event: `<id> todo: <title> (session removed)`.
+   */
+  async releaseForChild(parentId: string, childId: string): Promise<void> {
+    const seen = await this.deps.loadSession(parentId);
+    if (!seen) return;
+    const fresh = await this.deps.loadSession(parentId);
+    if (!fresh?.plan) return;
+    const matches = fresh.plan.items.filter((item) => item.sessionId === childId && item.state === 'started');
+    if (matches.length === 0) return;
+    const stamp = this.stamp();
+    let next = fresh.plan;
+    for (const match of matches) {
+      next = applyPatch(next, { id: match.id, state: 'todo' }, stamp);
+    }
+    const primary = next.items.find((item) => item.id === matches[0]?.id);
+    if (!primary) return;
+    const summary = withReady(`${primary.id} todo: ${primary.title} (session removed)`, fresh.plan.items, next.items);
+    await this.persist(fresh, { plan: next, summary, item: primary });
   }
 
   private stamp(): string {

@@ -815,9 +815,40 @@ describe('BoardService', () => {
     assert.equal(newest.parentSessionId, 'root');
     assert.ok(!attentionCalls.includes('a50'));
     assert.deepEqual(prCalls, []);
-    assert.equal(board.rollup.done, 50);
+    assert.equal(board.rollup.done, 0);
     assert.equal(board.rollup.working, 1);
     assert.equal(board.rollup.unset, 1);
+  });
+
+  it('excludes an archived working child from the rollup and keeps its last card', async () => {
+    const root = makeSession({ id: 'root', name: 'root' });
+    const live = makeSession({
+      id: 'live',
+      name: 'live',
+      parentSessionId: 'root',
+      status: 'running',
+      createdAt: '2026-11-13T10:00:00.000Z',
+      card: { state: 'working', headline: 'still going', updatedAt: '2026-11-13T10:05:00.000Z' },
+    });
+    const retiredWorking = {
+      ...makeSession({
+        id: 'old',
+        name: 'old-worker',
+        parentSessionId: 'root',
+        status: 'completed',
+        card: { state: 'working', headline: 'was working', updatedAt: '2026-11-13T09:00:00.000Z' },
+      }),
+      removedAt: '2026-11-13T11:00:00.000Z',
+    } satisfies ArchivedSession;
+    const env = createFakeEnv([root, live]);
+    env.deps.listArchived = async () => [retiredWorking];
+    const board = await new BoardService(env.deps).board({ sessionId: 'root', all: true });
+    const archived = board.cards.find((card) => card.sessionId === 'old');
+    assert.equal(archived?.archived, true);
+    assert.equal(archived?.declared?.state, 'working');
+    assert.equal(board.rollup.working, 1);
+    assert.equal(board.rollup.done, 0);
+    assert.equal(board.rollup.unset, 0);
   });
 
   it('keeps the newest archive tombstone and drops archived rows that have no events when since is set', async () => {

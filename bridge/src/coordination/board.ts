@@ -273,8 +273,11 @@ export class BoardService implements BoardServiceApi {
       );
     }
 
+    // Rollup counts live work. Archived children stay on the board under --all
+    // (suffixed "(retired)") and do not add to a state bucket.
     const rollup = emptyRollup();
     for (const c of cards) {
+      if (c.archived) continue;
       const key: BoardRollupKey = c.declared?.state ?? 'unset';
       rollup[key] += 1;
     }

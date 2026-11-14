@@ -321,14 +321,19 @@ function OverviewRow({ entry, owner, open, onToggle, context, faint = false }: {
 }) {
   const { now, managerName } = context;
   const card = entry.card;
-  const glyph = card ? cardStateStyle(card.state) : { icon: "○", color: "var(--text-faint)" };
-  const glyphColor = entry.stale ? "var(--text-faint)" : faint && card?.state === "done" ? "var(--text-faint)" : glyph.color;
+  const retired = entry.archived;
+  const glyph = retired ? { icon: "⌀", color: "var(--text-faint)" } : card ? cardStateStyle(card.state) : { icon: "○", color: "var(--text-faint)" };
+  const glyphColor = retired || entry.stale || (faint && card?.state === "done") ? "var(--text-faint)" : glyph.color;
   const headline = card?.headline || card?.blockedOn?.text || "";
   const loud = owner !== undefined;
   const activity = activityText(entry, now);
   const questions = context.items.filter(item => item.sessionId === entry.id && !item.event.resolvedAt);
   const recent = context.events.filter(event => event.sessionId === entry.id).slice(-3).reverse();
-  const stateLabel = card ? `${card.state === "blocked" && card.blockedOn ? `blocked on ${card.blockedOn.kind}` : cardStateLabel(card.state)}${card.progress && card.progress.total > 0 && card.state !== "done" ? ` ${card.progress.done}/${card.progress.total}` : ""} · updated ${relativeTime(card.updatedAt, now)}${entry.stale ? " · stale" : ""}` : null;
+  const stateLabel = retired
+    ? "retired"
+    : card
+      ? `${card.state === "blocked" && card.blockedOn ? `blocked on ${card.blockedOn.kind}` : cardStateLabel(card.state)}${card.progress && card.progress.total > 0 && card.state !== "done" ? ` ${card.progress.done}/${card.progress.total}` : ""} · updated ${relativeTime(card.updatedAt, now)}${entry.stale ? " · stale" : ""}`
+      : null;
 
   return (
     <li className="ov-row" data-open={open} style={{ listStyle: "none" }}>
@@ -341,6 +346,7 @@ function OverviewRow({ entry, owner, open, onToggle, context, faint = false }: {
         style={{ ...resetButton, display: "flex", alignItems: "baseline", gap: 8, width: "100%", padding: "5px 4px", fontSize: 13, lineHeight: 1.4 }}
       >
         <span aria-hidden style={{ color: glyphColor, width: 12, flexShrink: 0 }}>{glyph.icon}</span>
+        {retired && <span style={{ ...MONO, color: "var(--text-faint)", flexShrink: 0 }}>retired</span>}
         <span style={{ color: faint ? "var(--text-faint)" : "var(--text-primary)", fontWeight: loud ? 600 : 500, flexShrink: 0 }}>{entry.name}</span>
         <span title={headline} style={{ color: faint ? "var(--text-faint)" : loud ? "var(--text-primary)" : "var(--text-muted)", flex: 1, minWidth: 0, ...(open ? { overflowWrap: "anywhere" } : { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }) }}>{headline}</span>
         {card && <span className="ov-age" style={{ ...MONO, color: "var(--text-faint)", flexShrink: 0 }}>{relativeTime(card.updatedAt, now)}</span>}
@@ -486,7 +492,7 @@ export function SessionOverview(props: SessionOverviewProps) {
           {plan && plan.items.length > 0 && (
             <OverviewFold label={`planned · ${activePlan}`} peek={nextItem ? `next: ${nextItem.title}` : undefined} open={openFolds.has("planned")} onToggle={() => toggleFold("planned")}>
               <ol style={{ margin: 0, padding: 0 }}>
-                {plan.items.map((item, index) => {
+                {plan.items.map((item) => {
                   const mark = item.state === "todo" ? (plan.ready.includes(item.id) ? PLAN_MARKS.ready : PLAN_MARKS.waiting) : PLAN_MARKS[item.state];
                   const key = `plan:${item.id}`;
                   const open = allOpen !== toggled.has(key);
@@ -498,7 +504,7 @@ export function SessionOverview(props: SessionOverviewProps) {
                         onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); setToggled(current => flip(current, key)); } }}
                         style={{ ...resetButton, display: "flex", alignItems: "baseline", gap: 8, width: "100%", padding: "5px 4px", fontSize: 13 }}>
                         <span aria-hidden style={{ ...MONO, color: "var(--text-faint)", width: 12, flexShrink: 0 }}>{mark}</span>
-                        <span style={{ ...MONO, color: "var(--text-faint)", flexShrink: 0 }}>{index + 1}</span>
+                        <span style={{ ...MONO, color: "var(--text-faint)", flexShrink: 0 }}>{item.id}</span>
                         <span style={{ color: dim ? "var(--text-faint)" : "var(--text-muted)", flex: 1, minWidth: 0, ...(open ? {} : { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }) }}>{item.title}</span>
                       </button>
                       {open && (

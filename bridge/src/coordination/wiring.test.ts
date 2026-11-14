@@ -823,4 +823,52 @@ describe('coordination wiring', () => {
     await h.coord.onSessionExit('root-1', root);
     assert.equal((h.fakeEvents.byRoot.get('root-1') ?? []).some((event) => event.sessionId === 'root-1' && event.kind === 'removed'), false);
   });
+
+  it('returns a removed child\'s started plan items to todo and still emits removed when release fails', async () => {
+    const h = createHarness();
+    const stamp = '2026-11-13T10:00:00.000Z';
+    const root = makeSession('root-1', {
+      name: 'Root',
+      status: 'running',
+      plan: {
+        seq: 3,
+        items: [
+          { id: 'p1', title: 'Build parser', after: ['p2'], priority: 2, state: 'started', sessionId: 'child-1', createdAt: stamp, updatedAt: stamp },
+          { id: 'p2', title: 'Leave me', after: [], priority: 2, state: 'todo', createdAt: stamp, updatedAt: stamp },
+          { id: 'p3', title: 'Other child', after: [], priority: 2, state: 'started', sessionId: 'child-9', createdAt: stamp, updatedAt: stamp },
+        ],
+      },
+    });
+    const child = makeSession('child-1', { name: 'Worker', parentSessionId: 'root-1', status: 'running' });
+    h.sessions.set(root.id, root);
+    h.sessions.set(child.id, child);
+
+    await h.coord.onSessionExit('child-1', child);
+    const items = h.sessions.get('root-1')?.plan?.items ?? [];
+    assert.equal(items.find((item) => item.id === 'p1')?.state, 'todo');
+    assert.equal(items.find((item) => item.id === 'p1')?.sessionId, undefined);
+    assert.equal(items.find((item) => item.id === 'p2')?.state, 'todo');
+    assert.equal(items.find((item) => item.id === 'p3')?.state, 'started');
+    assert.equal(items.find((item) => item.id === 'p3')?.sessionId, 'child-9');
+    const events = h.fakeEvents.byRoot.get('root-1') ?? [];
+    assert.equal(events.filter((event) => event.kind === 'removed').length, 1);
+    assert.equal(events.find((event) => event.kind === 'plan')?.summary, 'p1 todo: Build parser (session removed)');
+
+    const failing = createHarness({
+      createPlan: () => ({
+        get: async () => null,
+        add: async () => { throw new Error('not used'); },
+        patch: async () => { throw new Error('not used'); },
+        remove: async () => {},
+        startForChild: async () => {},
+        completeForChild: async () => {},
+        releaseForChild: async () => { throw new Error('plan down'); },
+      }) as unknown as ReturnType<NonNullable<CoordinationDeps['createPlan']>>,
+    });
+    failing.sessions.set('child-1', makeSession('child-1', { name: 'Worker', parentSessionId: 'root-1', status: 'running' }));
+    failing.sessions.set('root-1', makeSession('root-1', { name: 'Root', status: 'running' }));
+    await assert.doesNotReject(() => failing.coord.onSessionExit('child-1', failing.sessions.get('child-1')));
+    const failedEvents = failing.fakeEvents.byRoot.get('root-1') ?? [];
+    assert.equal(failedEvents.filter((event) => event.kind === 'removed').length, 1);
+  });
 });

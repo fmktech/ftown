@@ -152,6 +152,14 @@ export function createCoordination(deps: CoordinationDeps): Coordination {
     }
   }
 
+  const plan: PlanStore = (deps.createPlan ?? ((d) => new PlanStore(d)))({
+    loadSession: (id) => deps.store.loadSession(id),
+    saveSession: (session) => deps.store.saveSession(session),
+    publishSession: (session) => deps.publishSession(session),
+    emit: (parent, summary) => emit(parent, 'plan', summary),
+    now: deps.now,
+  });
+
   async function escalateExitingParent(sessionId: string): Promise<void> {
     if (!deps.attention.listRouted || !deps.attention.setRoute) return;
     await escalateParentChildren(sessionId, {
@@ -186,6 +194,15 @@ export function createCoordination(deps: CoordinationDeps): Coordination {
       // `removed` event. Stop passes a completed snapshot and stays an exit.
       if (session && snapshot !== undefined && !terminal && session.parentSessionId) {
         await emit(session, 'removed', 'removed');
+        // A started plan item was bound to this child. Put it back on the list.
+        try {
+          await plan.releaseForChild(session.parentSessionId, session.id);
+        } catch (error) {
+          console.warn(
+            '[Coordination] Failed to release plan item for removed child:',
+            error instanceof Error ? error.message : String(error),
+          );
+        }
       }
     } catch (error) {
       console.warn(
@@ -194,14 +211,6 @@ export function createCoordination(deps: CoordinationDeps): Coordination {
       );
     }
   }
-
-  const plan: PlanStore = (deps.createPlan ?? ((d) => new PlanStore(d)))({
-    loadSession: (id) => deps.store.loadSession(id),
-    saveSession: (session) => deps.store.saveSession(session),
-    publishSession: (session) => deps.publishSession(session),
-    emit: (parent, summary) => emit(parent, 'plan', summary),
-    now: deps.now,
-  });
 
   const cards: CardStoreApi = (deps.createCards ?? ((d) => new CardStore(d)))({
     loadSession: (id) => deps.store.loadSession(id),

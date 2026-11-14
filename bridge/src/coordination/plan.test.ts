@@ -414,7 +414,7 @@ test('store emits and publishes once per change and keeps the rest of the sessio
   await store.remove('s1', 'p1');
   assert.equal(emitted.length, 5);
   assert.equal(published.length, 5);
-  assert.equal(emitted[4].summary, 'p1 done: Renamed');
+  assert.equal(emitted[4].summary, 'p1 removed: Renamed');
   const saved = sessions.get('s1')?.plan;
   assert.deepEqual(saved?.items.map((entry) => entry.id), ['p2']);
   assert.deepEqual(saved?.items[0].after, []);
@@ -592,6 +592,57 @@ test('store publishes before emit, and an emit failure still leaves the plan pub
   } finally {
     console.warn = originalWarn;
   }
+});
+
+test('remove emits removed, not the item state, and names items that become ready', async () => {
+  const { sessions, emitted, store } = makeHarness();
+  sessions.set('s1', makeSession('s1'));
+  await store.add('s1', { title: 'Blocker' });
+  await store.add('s1', { title: 'Next', after: ['p1'] });
+  await store.remove('s1', 'p1');
+  assert.equal(emitted.at(-1)?.summary, 'p1 removed: Blocker → ready: p2');
+  assert.deepEqual(sessions.get('s1')?.plan?.items.map((entry) => entry.id), ['p2']);
+});
+
+test('releaseForChild returns started items to todo, clears the session, and emits once', async () => {
+  const { sessions, emitted, published, store, stats } = makeHarness();
+  sessions.set('s1', makeSession('s1', {
+    seq: 5,
+    items: [
+      item({ id: 'p1', title: 'Mine', state: 'started', sessionId: 'child-a', after: ['p2'] }),
+      item({ id: 'p2', title: 'Other', state: 'started', sessionId: 'child-b' }),
+      item({ id: 'p3', title: 'Waiting', state: 'todo', sessionId: 'child-a' }),
+      item({ id: 'p4', title: 'Also mine', state: 'started', sessionId: 'child-a' }),
+      item({ id: 'p5', title: 'Finished', state: 'done', sessionId: 'child-a' }),
+    ],
+  }));
+
+  await store.releaseForChild('missing', 'child-a');
+  await store.releaseForChild('s1', 'nobody');
+  assert.equal(stats.saves, 0);
+  assert.equal(emitted.length, 0);
+  assert.equal(published.length, 0);
+
+  await store.releaseForChild('s1', 'child-a');
+  assert.equal(stats.saves, 1);
+  assert.equal(emitted.length, 1);
+  assert.equal(published.length, 1);
+  assert.equal(emitted[0].summary, 'p1 todo: Mine (session removed) → ready: p4');
+  const saved = sessions.get('s1')?.plan?.items ?? [];
+  assert.deepEqual(saved.map((entry) => [entry.id, entry.state, entry.sessionId]), [
+    ['p1', 'todo', undefined],
+    ['p2', 'started', 'child-b'],
+    ['p3', 'todo', 'child-a'],
+    ['p4', 'todo', undefined],
+    ['p5', 'done', 'child-a'],
+  ]);
+  assert.equal(saved[0]?.updatedAt, NOW);
+  assert.equal(saved[3]?.updatedAt, NOW);
+  assert.equal(saved[1]?.updatedAt, T0);
+
+  const after = emitted.length;
+  await store.releaseForChild('s1', 'child-a');
+  assert.equal(emitted.length, after);
 });
 
 test('store does not reuse a removed id when the next item is added', async () => {

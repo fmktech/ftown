@@ -176,7 +176,7 @@ describe("SessionOverview", () => {
     const planItem = (id: string, title: string, state: PlanItem["state"], after: string[] = [], extra: Partial<PlanItem> = {}): PlanItem => ({ id, title, after, priority: 2, state, createdAt: minutesAgo(50), updatedAt: minutesAgo(40), ...extra });
     const plan: PlanView = { items: [planItem("p2", "write tests", "todo"), planItem("p3", "ship", "todo", ["p2"]), planItem("p1", "scaffold", "done")], ready: ["p2"] };
     const snapshot: OverviewSnapshot = {
-      board: { rootId: "manager", cards: [snapCard("live", "Live", live.card), snapCard("old", "Retired", card("done", { headline: "merged" }), { archived: true })], plan },
+      board: { rootId: "manager", cards: [snapCard("live", "Live", live.card), snapCard("old", "Retired", card("working", { headline: "merged" }), { archived: true })], plan },
       events: [
         { seq: 1, ts: minutesAgo(20), sessionId: "live", sessionName: "Live", kind: "status", summary: "working | extra" },
         { seq: 2, ts: minutesAgo(10), sessionId: "live", sessionName: "Live", kind: "pr", summary: "PR opened" },
@@ -185,13 +185,30 @@ describe("SessionOverview", () => {
       attention: [],
     };
     renderOverview(manager, [manager, live], { snapshot });
-    expect(screen.getByRole("button", { name: /done · 1/ }).textContent).toContain("Retired");
+    const doneFold = screen.getByRole("button", { name: /done · 1/ });
+    expect(doneFold.textContent).toContain("Retired");
+    fireEvent.click(doneFold);
+    const retiredRow = within(screen.getByRole("region", { name: "done" })).getByRole("button", { name: /Retired/ });
+    expect(retiredRow.textContent).toContain("⌀");
+    expect(retiredRow.textContent).toContain("retired");
+    expect(retiredRow.textContent).not.toContain("working");
+    expect(retiredRow.textContent).not.toContain("▸");
+    const glyph = retiredRow.querySelector("span[aria-hidden]");
+    expect(glyph?.textContent).toBe("⌀");
+    expect((glyph as HTMLElement).style.color).toBe("var(--text-faint)");
+    fireEvent.click(retiredRow);
+    expect(within(screen.getByRole("region", { name: "done" })).getAllByText("retired").length).toBeGreaterThan(0);
+    expect(within(screen.getByRole("region", { name: "done" })).queryByText(/^working/)).toBeNull();
 
     const planned = screen.getByRole("button", { name: /planned · 2/ });
     expect(planned.textContent).toContain("next: write tests");
     fireEvent.click(planned);
     const items = within(screen.getByRole("region", { name: "planned" })).getAllByRole("listitem");
-    expect(items.map(item => item.textContent?.slice(0, 20))).toEqual(["→1write tests", "·2ship", "✓3scaffold"].map(text => expect.stringContaining(text.slice(0, 6))));
+    expect(items.map(item => item.textContent ?? "")).toEqual([
+      expect.stringContaining("→p2write tests"),
+      expect.stringContaining("·p3ship"),
+      expect.stringContaining("✓p1scaffold"),
+    ]);
     fireEvent.click(within(items[1]!).getByRole("button"));
     expect(screen.getByText("after write tests")).toBeTruthy();
     fireEvent.click(within(items[0]!).getByRole("button"));
