@@ -70,6 +70,23 @@ async function selftest(times: number, vm: VmOptions): Promise<number> {
   return code;
 }
 
+async function selftestLong(times: number, seconds: number, vm: VmOptions): Promise<number> {
+  requireBuild();
+  const p: GuestParams = { cmd: 'selftest-long', seed: seconds, level: 'off', memMb: vm.memMb, icountShift: vm.icountShift };
+  console.log(`qemu: ${qemuArgs(p).join(' ')}`);
+  const results = await pool(vm.jobs, Array.from({ length: times }, (_, k) => async (): Promise<BootResult> => {
+    const o = await boot(p, join(OUT_DIR, 'selftest-long', `run${k + 1}`), vm.timeoutSec);
+    const f = o.files.get('long.jsonl');
+    console.log(`boot ${k + 1}: ${(o.wallMs / 1000).toFixed(1)}s exit=${o.exitCode}${o.infraError ? ` INFRA: ${o.infraError}` : ''}${f ? ` steps=${f.toString().split('\n').length - 1} sha256 ${sha256(f)}` : ''}`);
+    if (o.infraError === null && f === undefined) return { exitCode: EXIT.infra, infraError: 'no long.jsonl', hash: null, content: null, wallMs: o.wallMs };
+    return { exitCode: o.exitCode, infraError: o.infraError, hash: f ? sha256(f) : null, content: f ? f.toString('utf8') : null, wallMs: o.wallMs };
+  }));
+  const s = summarizeSeed(0, results);
+  if (s.nondeterminism !== null) console.log(s.nondeterminism);
+  console.log(s.exitCode === EXIT.ok ? `selftest --long: ${times} boots byte-identical` : `selftest --long: exit ${s.exitCode}${s.infraError ? ` ${s.infraError}` : ''}`);
+  return s.exitCode;
+}
+
 async function runSeeds(c: Extract<Command, { cmd: 'run' | 'campaign' }>): Promise<number> {
   requireBuild();
   mkdirSync(OUT_DIR, { recursive: true });
@@ -108,7 +125,7 @@ async function main(argv: string[]): Promise<number> {
       console.log(JSON.stringify(info, null, 2));
       return EXIT.ok;
     }
-    case 'selftest': return selftest(c.times, c.vm);
+    case 'selftest': return c.longSeconds === null ? selftest(c.times, c.vm) : selftestLong(c.times, c.longSeconds, c.vm);
     case 'run':
     case 'campaign': return runSeeds(c);
   }

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { qemuArgs } from './qemu.ts';
+import { qemuArgs, withDebugOverrides } from './qemu.ts';
 
 test('qemu command line is hermetic and deterministic', () => {
   const a = qemuArgs({ cmd: 'run', seed: 7, level: 'high', memMb: 3072, icountShift: 1 });
@@ -12,4 +12,14 @@ test('qemu command line is hermetic and deterministic', () => {
   assert.ok(!/virtio-rng|-qmp|-monitor|-netdev|localtime/.test(s));
   assert.deepEqual(a, qemuArgs({ cmd: 'run', seed: 7, level: 'high', memMb: 3072, icountShift: 1 }));
   assert.equal(a.filter((x) => x === '-serial').length, 2);
+});
+
+test('debug overrides', () => {
+  const a = qemuArgs({ cmd: 'selftest', seed: 0, level: 'off', memMb: 1536, icountShift: 1 });
+  assert.deepEqual(withDebugOverrides(a, {}), a);
+  const b = withDebugOverrides(a, { CHAOS_QEMU_SET: '-machine=q35,hpet=off;-icount=shift=3,sleep=off', CHAOS_QEMU_EXTRA: '-global x.y=1' });
+  assert.equal(b[b.indexOf('-machine') + 1], 'q35,hpet=off');
+  assert.equal(b[b.indexOf('-icount') + 1], 'shift=3,sleep=off');
+  assert.equal(b[b.indexOf('-kernel') - 2], '-global');
+  assert.throws(() => withDebugOverrides(a, { CHAOS_QEMU_SET: '-nope=1' }));
 });

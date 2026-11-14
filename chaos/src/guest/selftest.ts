@@ -66,3 +66,41 @@ export async function runSelftest(): Promise<SelftestReport> {
     nodeVersion: process.version,
   };
 }
+
+/**
+ * Long determinism probe (bridge-free reproducer for run-length divergence). For `seconds` of
+ * guest time it mixes CPU bursts, timers, process spawns (node startups, shell pipelines),
+ * tmpfs writes, memory growth and steady console output, and logs process.hrtime at every step.
+ * One JSON line per step: {"i":n,"step":"…","t":"<ns>"}. Two boots must give identical bytes.
+ */
+export async function runLongSelftest(seconds: number, log: (line: string) => void): Promise<string> {
+  const { spawn } = await import('node:child_process');
+  const t0 = process.hrtime.bigint();
+  const lines: string[] = [];
+  const keep: Buffer[] = [];
+  const mark = (i: number, step: string) => {
+    const line = JSON.stringify({ i, step, t: String(process.hrtime.bigint() - t0) });
+    lines.push(line);
+    if (i % 10 === 0) log(`long-probe ${line}`);
+  };
+  const run = (cmd: string, args: string[]) => new Promise<void>((res) => {
+    const c = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'inherit'] });
+    c.stdout.on('data', () => {});
+    c.on('close', () => res());
+  });
+  mkdirSync('/tmp/chaos-long', { recursive: true });
+  let s = 7;
+  const next = () => (s = (s * 1103515245 + 12345) % 2147483648);
+  for (let i = 0; process.hrtime.bigint() - t0 < BigInt(seconds) * 1_000_000_000n; i++) {
+    const kind = next() % 11;
+    if (kind === 0) { await run('node', ['-e', 'let x=0;for(let i=0;i<2e5;i++)x+=i;process.stdout.write(String(x))']); mark(i, 'node'); }
+    else if (kind === 1) { await run('sh', ['-c', 'seq 1 2000 | sort -r | head -c 100000 | wc -c']); mark(i, 'pipe'); }
+    else if (kind === 2) { await sleep(1 + (next() % 500)); mark(i, 'timer'); }
+    else if (kind === 3) { writeFileSync(`/tmp/chaos-long/f${i % 64}`, Buffer.alloc(256 * 1024, i % 256)); mark(i, 'write'); }
+    else if (kind === 4) { let x = 0; for (let k = 0; k < 3e6; k++) x = (x + k * 13) % 1_000_003; mark(i, x < 0 ? 'x' : 'cpu'); }
+    else if (kind === 5) { if (keep.length < 400) keep.push(Buffer.alloc(1024 * 1024, 1)); mark(i, 'mem'); }
+    else if (kind === 6) { log(`long-probe burst ${'x'.repeat(2000)}`); mark(i, 'console'); }
+    else { await sleep(200 + (next() % 2800)); mark(i, 'idle'); }
+  }
+  return lines.join('\n') + '\n';
+}

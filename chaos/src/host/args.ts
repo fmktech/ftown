@@ -16,14 +16,14 @@ export interface VmOptions {
 export type Command =
   | { cmd: 'help' }
   | { cmd: 'build'; image: string | null; checkRepro: boolean }
-  | { cmd: 'selftest'; times: number; vm: VmOptions }
+  | { cmd: 'selftest'; times: number; vm: VmOptions; longSeconds: number | null }
   | { cmd: 'run' | 'campaign'; seeds: number[]; level: ChaosLevel; times: number; vm: VmOptions };
 
 export class UsageError extends Error {}
 
 export const USAGE = `usage: npm run test:chaos -- <command> [flags]
   build [--image <tag>] [--check-repro]         build kernel, initramfs and qemu container into chaos/.cache/
-  selftest [--times 2]                          boot N times, require byte-identical selftest.json
+  selftest [--times 2] [--long <guest s>]       boot N times, require byte-identical selftest.json (--long: long probe)
   run --seeds 1-4 [--level high] [--times 2]    run seeds, compare runs of each seed
   repro --seed N [--times 5] [--level high]     (also: --repro N) one seed, several times
   campaign --seeds 1-20 [--times 2]             run + chaos/out/campaign.json
@@ -37,7 +37,7 @@ export function parseSeedRange(spec: string): number[] {
 }
 
 const BOOL_FLAGS = new Set(['check-repro']);
-const VALUE_FLAGS = new Set(['image', 'times', 'seeds', 'seed', 'repro', 'level', 'jobs', 'mem', 'timeout', 'icount-shift']);
+const VALUE_FLAGS = new Set(['long', 'image', 'times', 'seeds', 'seed', 'repro', 'level', 'jobs', 'mem', 'timeout', 'icount-shift']);
 
 function posInt(flag: string, v: string, min = 1): number {
   if (!/^\d+$/.test(v) || Number(v) < min) throw new UsageError(`--${flag} needs an integer >= ${min}, got ${JSON.stringify(v)}`);
@@ -72,7 +72,7 @@ export function parseArgs(argv: readonly string[]): Command {
 
   const allowed: Record<string, string[]> = {
     build: ['image', 'check-repro'],
-    selftest: ['times', 'jobs', 'mem', 'timeout', 'icount-shift'],
+    selftest: ['long', 'times', 'jobs', 'mem', 'timeout', 'icount-shift'],
     run: ['seeds', 'level', 'times', 'jobs', 'mem', 'timeout', 'icount-shift'],
     campaign: ['seeds', 'level', 'times', 'jobs', 'mem', 'timeout', 'icount-shift'],
     repro: ['seed', 'repro', 'level', 'times', 'jobs', 'mem', 'timeout', 'icount-shift'],
@@ -87,13 +87,13 @@ export function parseArgs(argv: readonly string[]): Command {
   const vm: VmOptions = {
     memMb: flags.has('mem') ? posInt('mem', flags.get('mem')!, 1536) : isSelftest ? 1536 : 3072,
     icountShift: flags.has('icount-shift') ? posInt('icount-shift', flags.get('icount-shift')!, 0) : 1,
-    timeoutSec: flags.has('timeout') ? posInt('timeout', flags.get('timeout')!) : isSelftest ? 300 : 1500,
+    timeoutSec: flags.has('timeout') ? posInt('timeout', flags.get('timeout')!) : isSelftest && !flags.has('long') ? 300 : 3600,
     jobs: flags.has('jobs') ? posInt('jobs', flags.get('jobs')!) : 1,
   };
   if (vm.icountShift > 10) throw new UsageError('--icount-shift must be 0..10');
   const defaultTimes = sub === 'repro' ? 5 : 2;
   const times = flags.has('times') ? posInt('times', flags.get('times')!) : defaultTimes;
-  if (isSelftest) return { cmd: 'selftest', times, vm };
+  if (isSelftest) return { cmd: 'selftest', times, vm, longSeconds: flags.has('long') ? posInt('long', flags.get('long')!) : null };
 
   const levelRaw = flags.get('level') ?? 'high';
   if (levelRaw !== 'off' && levelRaw !== 'low' && levelRaw !== 'high') throw new UsageError(`bad --level ${levelRaw}`);
