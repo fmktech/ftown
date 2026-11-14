@@ -6,9 +6,10 @@ import { PROFILE } from '../contract.ts';
 import type { Rec } from '../contract.ts';
 import { normaliseError, planWorkload, runWorkload } from './workload.ts';
 
-test('plan: deterministic, 5–15 s apart, tags from 1, ends by the fault window', () => {
+test('plan: deterministic, 5–15 s apart, tags from 1, ends by faultWindowEndMs and workloadEndMs', () => {
   for (const profile of ['short', 'soak'] as const) {
-    const endMs = PROFILE[profile].faultWindowEndMs;
+    const { faultWindowEndMs, workloadEndMs } = PROFILE[profile];
+    const endMs = Math.min(faultWindowEndMs, workloadEndMs);
     const p = planWorkload(1, deriveRng, 8_000, endMs);
     assert.deepEqual(p, planWorkload(1, deriveRng, 8_000, endMs));
     assert.ok(p.length >= (profile === 'short' ? 6 : 15), `${profile}: ${p.length}`);
@@ -16,7 +17,8 @@ test('plan: deterministic, 5–15 s apart, tags from 1, ends by the fault window
     p.forEach((m, i) => {
       assert.equal(m.tag, `CHAOS-M-${i + 1}`);
       assert.ok(m.atMs - prev >= 5_000 && m.atMs - prev <= 15_000);
-      assert.ok(m.atMs <= endMs);
+      assert.ok(m.atMs <= faultWindowEndMs);
+      assert.ok(m.atMs <= workloadEndMs);
       assert.notEqual(m.type, 'escalation');
       prev = m.atMs;
     });

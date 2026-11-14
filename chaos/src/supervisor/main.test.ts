@@ -30,8 +30,10 @@ test('agent cmdline match is exact-token', () => {
 });
 
 test('parseCli', () => {
-  assert.deepEqual(parseCli(['--seed', '3', '--level', 'high']), { seed: 3, level: 'high', profile: 'short' });
+  assert.deepEqual(parseCli(['--seed', '3', '--level', 'low']), { seed: 3, level: 'low', profile: 'short' });
   assert.deepEqual(parseCli(['--seed', '3', '--level', 'high', '--profile', 'soak']), { seed: 3, level: 'high', profile: 'soak' });
+  assert.equal(parseCli(['--seed', '3', '--level', 'high']), null);
+  assert.equal(parseCli(['--seed', '3', '--level', 'high', '--profile', 'short']), null);
   assert.equal(parseCli(['--seed', '3', '--level', 'low', '--profile', 'bogus']), null);
   assert.equal(parseCli(['--seed', 'x', '--level', 'high']), null);
   assert.equal(parseCli(['--seed', '3']), null);

@@ -21,6 +21,9 @@ export function parseRunEnv(
   if (!RUN_PROFILES.includes(profile as RunProfile)) {
     return { ok: false, code: EXIT.usage, error: `bad profile: ${JSON.stringify(profile)}` };
   }
+  if (profile === 'short' && level === 'high') {
+    return { ok: false, code: EXIT.usage, error: 'level high is not valid with profile short; use profile soak' };
+  }
   return { ok: true, seed, level, profile: profile as RunProfile };
 }
 

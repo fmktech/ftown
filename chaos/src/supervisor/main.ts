@@ -296,7 +296,7 @@ async function drive(seed: number, level: ChaosLevel, profile: RunProfile, clock
     runWorkload({
       clock,
       // Starts once every session exists; under icount that instant is itself deterministic.
-      plan: planWorkload(seed, deriveRng, Math.max(WORKLOAD_START_MS, clock.now()), timing.faultWindowEndMs),
+      plan: planWorkload(seed, deriveRng, Math.max(WORKLOAD_START_MS, clock.now()), Math.min(timing.faultWindowEndMs, timing.workloadEndMs)),
       idOf: (r) => ids[r],
       send: (id: string, type: MailType, body: string) => ftown(['harness', 'mail', 'send', id, '--type', type, body], { timeoutMs: CONTROL_TIMEOUT_MS }),
       log: rec.log,
@@ -362,7 +362,9 @@ export function parseCli(argv: readonly string[]): { seed: number; level: ChaosL
     else if (argv[i] === '--profile' && RUN_PROFILES.includes(argv[i + 1] as RunProfile)) profile = argv[++i] as RunProfile;
     else return null;
   }
-  return seed === null || level === null ? null : { seed, level, profile };
+  if (seed === null || level === null) return null;
+  if (profile === 'short' && level === 'high') return null;
+  return { seed, level, profile };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

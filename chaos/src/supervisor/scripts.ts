@@ -35,15 +35,16 @@ function chooseAsks(rng: Rng): { early: Role; later: Record<Role, number> } {
   return { early, later };
 }
 
-function rootScript(rng: Rng): AgentScript {
+function rootScript(rng: Rng, profile: RunProfile): AgentScript {
   const nextMail = counter('root');
   // Children are created after root; under QEMU four creates take ~16 s, so root waits far longer.
   const steps: AgentStep[] = [sleep(rng, ROOT_FIRST_SLEEP_MS[0], ROOT_FIRST_SLEEP_MS[1]), { do: 'hook', event: 'UserPromptSubmit' }, { do: 'status', state: 'working', headline: 'root working' }];
   const mails = rng.int(2, 4);
+  const mailSleep: readonly [number, number] = profile === 'short' ? [1_000, 4_000] : [1_000, 10_000];
   for (let i = 0; i < mails; i++) {
     const to = rng.pick(CHILDREN);
     steps.push({ do: 'mail_send', to, type: rng.pick(ROOT_MAIL_TYPES), body: mailBody(nextMail(), 'root', to) });
-    steps.push(sleep(rng, 1_000, 10_000));
+    steps.push(sleep(rng, mailSleep[0], mailSleep[1]));
   }
   return { role: 'root', steps, readMailOnNudge: true, answerRoutedQuestions: true };
 }
@@ -58,9 +59,17 @@ export const IDLE_MARGIN_MS = 30_000;
 /** Last tag of root's range (root's ordinary mails use 1000–1003). */
 export const ROOT_IDLE_NUDGE_TAG = 1999;
 
-/** Per-action sleep range for children, by profile (keeps short within workloadEndMs and overlapping the fault window). */
-const CHILD_ACTION_SLEEP_MS: Record<RunProfile, readonly [number, number]> = {
-  short: [6_000, 10_000],
+/** Conservative upper bound on each role's start offset in guest ms since t0 (bring-up is ~45 s total). */
+export const MAX_START_OFFSET_MS: Readonly<Record<Role, number>> = {
+  root: 30_000,
+  child1: 45_000,
+  child2: 45_000,
+  child3: 45_000,
+};
+
+/** Per-action sleep range for children, by profile (keeps short within workloadEndMs including start offset). */
+export const CHILD_ACTION_SLEEP_MS: Record<RunProfile, readonly [number, number]> = {
+  short: [1_000, 3_000],
   soak: [1_000, 20_000],
 };
 
@@ -104,7 +113,7 @@ function childScript(role: Role, rng: Rng, early: boolean, asks: number, profile
 
 export function buildScripts(seed: number, profile: RunProfile, deriveRng: DeriveRng): Scripts {
   const rootRng = deriveRng(seed, 'agent.root');
-  const root = rootScript(rootRng);
+  const root = rootScript(rootRng, profile);
   const asks = chooseAsks(rootRng);
   const out = { root } as Scripts;
   for (const role of CHILDREN) out[role] = childScript(role, deriveRng(seed, `agent.${role}`), asks.early === role, asks.later[role], profile);

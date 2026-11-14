@@ -18,10 +18,13 @@ test('parseRunEnv accepts valid seed, level, and profile', () => {
   });
 });
 
-test('parseRunEnv rejects missing or invalid CHAOS_PROFILE with EXIT.usage (64)', () => {
+test('parseRunEnv rejects missing, invalid CHAOS_PROFILE, or (short, high) with EXIT.usage (64)', () => {
   for (const profile of [undefined, '', 'fast', 'SHORT']) {
     const r = parseRunEnv({ CHAOS_SEED: '1', CHAOS_LEVEL: 'low', ...(profile === undefined ? {} : { CHAOS_PROFILE: profile }) });
     assert.equal(r.ok, false);
     if (!r.ok) assert.equal(r.code, EXIT.usage);
   }
+  const combo = parseRunEnv({ CHAOS_SEED: '1', CHAOS_LEVEL: 'high', CHAOS_PROFILE: 'short' });
+  assert.equal(combo.ok, false);
+  if (!combo.ok) assert.equal(combo.code, EXIT.usage);
 });

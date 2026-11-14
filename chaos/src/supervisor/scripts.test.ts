@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { deriveRng } from '../core/rng.ts';
 import { PROFILE, ROLES, RUN_PROFILES } from '../contract.ts';
-import { buildScripts, IDLE_MARGIN_MS, sleepTotal } from './scripts.ts';
+import { buildScripts, CHILD_ACTION_SLEEP_MS, IDLE_MARGIN_MS, MAX_START_OFFSET_MS, sleepTotal } from './scripts.ts';
 
 test('scripts are a pure function of the seed and profile', () => {
   for (const profile of RUN_PROFILES) {
@@ -12,9 +12,10 @@ test('scripts are a pure function of the seed and profile', () => {
   assert.notDeepEqual(buildScripts(7, 'short', deriveRng), buildScripts(7, 'soak', deriveRng));
 });
 
-test('every seed and profile: early ask, 1–2 later asks, root answers, both mail directions, within workloadEndMs and overlapping fault window', () => {
+test('every seed and profile: early ask, 1–2 later asks, root answers, both mail directions, within workloadEndMs with start offset', () => {
   for (const profile of RUN_PROFILES) {
     const { faultWindowStartMs, workloadEndMs } = PROFILE[profile];
+    const [minChildSleep, maxChildSleep] = CHILD_ACTION_SLEEP_MS[profile];
     for (let seed = 1; seed <= 200; seed++) {
       const s = buildScripts(seed, profile, deriveRng);
       assert.equal(s.root.readMailOnNudge, true);
@@ -25,8 +26,14 @@ test('every seed and profile: early ask, 1–2 later asks, root answers, both ma
       for (const role of ROLES) {
         assert.equal(s[role].role, role);
         assert.ok(!s[role].steps.some((x) => x.do === 'exit'));
-        assert.ok(sleepTotal(s[role]) <= workloadEndMs, `${profile} seed ${seed} ${role} sleepTotal=${sleepTotal(s[role])} > ${workloadEndMs}`);
-        if (role !== 'root') for (const st of s[role].steps.slice(2)) if (st.do === 'sleep') assert.ok(st.ms >= 1_000 && st.ms <= 20_000);
+        const endAt = MAX_START_OFFSET_MS[role] + sleepTotal(s[role]);
+        assert.ok(endAt <= workloadEndMs, `${profile} seed ${seed} ${role} endAt=${endAt} > ${workloadEndMs}`);
+        if (role !== 'root') {
+          const actionSleeps = s[role].steps.slice(s[role].steps[1]?.do === 'ask' ? 3 : 1);
+          for (const st of actionSleeps) {
+            if (st.do === 'sleep') assert.ok(st.ms >= minChildSleep && st.ms <= maxChildSleep, `${profile} ${role} sleep ${st.ms}`);
+          }
+        }
         if (role === 'root') continue;
         assert.equal(s[role].answerRoutedQuestions, false);
         assert.ok(s[role].steps.some((x) => x.do === 'mail_send' && x.to === 'parent'));
@@ -36,8 +43,18 @@ test('every seed and profile: early ask, 1–2 later asks, root answers, both ma
       }
       assert.equal(early, 1, `${profile} seed ${seed}: early asks`);
       assert.ok(asks >= 2 && asks <= 3, `${profile} seed ${seed}: ${asks} asks`);
-      if (profile === 'short') assert.ok(sleepTotal(s.root) >= faultWindowStartMs, `${profile} seed ${seed}: root ends before fault window`);
+      if (profile === 'short') assert.ok(MAX_START_OFFSET_MS.root + sleepTotal(s.root) >= faultWindowStartMs, `${profile} seed ${seed}: root ends before fault window`);
     }
+  }
+});
+
+test('every profile satisfies the contract quiesce sizing rule', () => {
+  for (const profile of RUN_PROFILES) {
+    const { faultWindowEndMs, quiesceMs, workloadEndMs } = PROFILE[profile];
+    assert.ok(
+      faultWindowEndMs + quiesceMs >= Math.max(workloadEndMs, faultWindowEndMs) + 80_000,
+      `${profile}: ${faultWindowEndMs + quiesceMs} < ${Math.max(workloadEndMs, faultWindowEndMs) + 80_000}`,
+    );
   }
 });
 
