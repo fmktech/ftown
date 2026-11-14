@@ -356,6 +356,11 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Monotonic ms for durations and deadlines; the wall clock stays for displayed timestamps only. */
+function monotonicNowMs(): number {
+  return performance.now();
+}
+
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -453,10 +458,10 @@ export async function startHub(opts: StartHubOptions): Promise<RunningHub> {
   const intervalMs = opts.healthIntervalMs ?? DEFAULT_HEALTH_INTERVAL_MS;
   const tryTimeoutMs = opts.healthTryTimeoutMs ?? DEFAULT_HEALTH_TRY_TIMEOUT_MS;
   const deadlineMs = opts.healthDeadlineMs ?? DEFAULT_HEALTH_DEADLINE_MS;
-  const deadline = Date.now() + deadlineMs;
+  const deadline = monotonicNowMs() + deadlineMs;
 
   let healthy = false;
-  while (Date.now() < deadline && !state.exit) {
+  while (monotonicNowMs() < deadline && !state.exit) {
     if (await probeHealth(healthUrl, tryTimeoutMs, fetchImpl)) {
       healthy = true;
       break;
@@ -485,8 +490,8 @@ export async function stopHub(dataDir: string): Promise<boolean> {
   const pid = Number.parseInt(raw.trim(), 10);
   if (!Number.isInteger(pid) || pid <= 0 || !pidAlive(pid)) return false;
   process.kill(pid, 'SIGTERM');
-  const deadline = Date.now() + STOP_GRACE_MS;
-  while (pidAlive(pid) && Date.now() < deadline) {
+  const deadline = monotonicNowMs() + STOP_GRACE_MS;
+  while (pidAlive(pid) && monotonicNowMs() < deadline) {
     await sleep(STOP_POLL_MS);
   }
   if (pidAlive(pid)) {
