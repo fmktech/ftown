@@ -39,8 +39,18 @@ until the next scheduled heal. Without the clock jump the same restart succeeds.
 - Found by: seed 1, level high, long-form run (today: `--profile soak --level high`).
 - Limits of the evidence: one run per condition, taken before the harness was shown to be
   deterministic. Re-confirm with a soak pair before relying on exact timings. The reproduction
-  commands in the detail file predate run profiles and need `--profile soak` added.
+  commands in the detail file predate run profiles and need `--profile soak` added. An attempt on
+  2026-11-14 with `--profile short --level low` (seed 2, plus candidates 23, 54, 295) did not
+  reproduce an R2 violation on pre-fix commit `309b678`.
 - Suggested direction: measure the deadline with a monotonic clock.
+- Fix confirmation (2026-11-14, fix commit `a33c8bc`, #226): not reproduced with the current
+  harness; fix unconfirmed by chaos run. Scenario: seed 2, `--profile short --level low`.
+  Pre-fix (`309b678`, `--times 1`): `H_run=1101fd58e651`, `violated=-`, `exit=0` (bridge logged
+  `hub did not become healthy within 30000ms`, but overlapping `f2`/`f3` faults restarted the
+  bridge before the next checkpoint; candidates 23, 54, and 295 also exited `0` with
+  `violated=-`). Post-fix (`2bdd0cf5`, `--times 2`): `H_run=1101fd58e651`, `violated=-`, `exit=0`,
+  identical pair (`initramfsSha256=36b866bcb620cc2888a977e0e23dc10400b5bf319fa474c7075f5102227b5168`,
+  reusing existing `ftown-chaos-box:dev` image `9531f49b34e1`).
 
 ## Observations
 
