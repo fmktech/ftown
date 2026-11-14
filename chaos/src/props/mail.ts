@@ -114,17 +114,21 @@ const M4: Property = {
     }
     const persistedUnacked = new Set<string>();
     const info: string[] = [];
+    const addPersistedUnacked = (role: Role, tag: string, type: MailType): void => {
+      if (type === 'fyi' || !MAIL_TAG_RE.test(tag)) return;
+      const key = `${role}\u0000${tag}`;
+      if (acceptedKeys.has(key) || persistedUnacked.has(key)) return;
+      persistedUnacked.add(key);
+      waking.set(role, (waking.get(role) ?? 0) + 1);
+      info.push(`persisted without ack: ${tag} to=${role}`);
+    };
     for (const r of log) {
-      if (r.k !== 'checkpoint') continue;
-      for (const s of r.snap.sessions) {
-        for (const m of s.inbox) {
-          if (m.type === 'fyi' || !MAIL_TAG_RE.test(m.tag)) continue;
-          const key = `${s.role}\u0000${m.tag}`;
-          if (acceptedKeys.has(key) || persistedUnacked.has(key)) continue;
-          persistedUnacked.add(key);
-          waking.set(s.role, (waking.get(s.role) ?? 0) + 1);
-          info.push(`persisted without ack: ${m.tag} to=${s.role}`);
+      if (r.k === 'checkpoint') {
+        for (const s of r.snap.sessions) {
+          for (const m of s.inbox) addPersistedUnacked(s.role, m.tag, m.type);
         }
+      } else if (r.k === 'agent' && r.e.ev === 'mail_received') {
+        addPersistedUnacked(r.role, r.e.tag, r.e.type);
       }
     }
     const nudged = new Map<Role, number>();
@@ -177,12 +181,12 @@ const M5: Property = {
     for (const r of log) {
       if (r.k === 'op' && r.t <= cp.t && r.op.op === 'mail_send') {
         const key = `${r.op.to}\u0000${r.op.tag}`;
-        if (r.ok) acceptedAt.set(key, r.t);
+        if (r.ok) recordEarliest(acceptedAt, key, r.t);
         else recordEarliest(attemptedAt, key, r.t);
       } else if (r.k === 'agent' && r.t <= cp.t) {
         if (r.e.ev === 'mail_sent') {
           const key = `${r.e.to}\u0000${r.e.tag}`;
-          if (r.e.accepted) acceptedAt.set(key, r.t);
+          if (r.e.accepted) recordEarliest(acceptedAt, key, r.t);
           else recordEarliest(attemptedAt, key, r.t);
         } else if (r.e.ev === 'hook_sent') {
           // hook ok only means the hook script exited 0 (notify.sh always exits 0), so a Stop

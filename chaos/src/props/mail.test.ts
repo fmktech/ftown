@@ -178,6 +178,22 @@ test('M4: failed send absent from inbox does not count; unacked fyi in inbox doe
   assert.deepEqual(run('M4', unackedFyi), { status: 'pass', evidence: [] });
 });
 
+test('M4: unacked waking mail only evidenced by mail_received is counted; absent everywhere is not', () => {
+  const receivedOnly: Rec[] = [
+    agentSent(1, 'child1', 'CHAOS-M-2005', 'root', 'result', false),
+    nudge(2, 'root', 1),
+    received(3, 'root', 'CHAOS-M-2005', 'result'),
+  ];
+  assert.deepEqual(run('M4', receivedOnly), { status: 'pass', evidence: ['persisted without ack: CHAOS-M-2005 to=root'] });
+
+  const absentEverywhere: Rec[] = [
+    opSend(1, 'CHAOS-M-1', 'root', 'task'),
+    agentSent(2, 'child1', 'CHAOS-M-2005', 'root', 'result', false),
+    nudge(3, 'root', 2),
+  ];
+  assert.deepEqual(run('M4', absentEverywhere), { status: 'violated', evidence: ['nudge excess to=root nudged=2 waking=1 untagged=0'] });
+});
+
 test('M1: failed send is not required to be delivered even if another mail passes', () => {
   const log = [
     opSend(1, 'CHAOS-M-1', 'child1'),
@@ -343,6 +359,35 @@ test('M5: unacknowledged-but-persisted pending mail violates when settled, passe
     checkpoint(95_000, [session('child1', [mail('CHAOS-M-2004', { delivered: false, type: 'task' })])], true),
   ];
   assert.deepEqual(run('M5', recentUnacked), { status: 'pass', evidence: ['pending, recipient not settled: CHAOS-M-2004 to=child1'] });
+});
+
+test('M5: min(att, seen) decides 75_000 boundary when both failed send and earlier checkpoint exist', () => {
+  // seen (20_000) < att (30_000): 95_000 - 20_000 = 75_000 -> violated
+  const seenEarlier = [
+    hookEv(10_000, 'child1', 'Stop'),
+    checkpoint(20_000, [session('child1', [mail('CHAOS-M-2006', { delivered: false, type: 'task' })])]),
+    agentSent(30_000, 'root', 'CHAOS-M-2006', 'child1', 'task', false),
+    checkpoint(95_000, [session('child1', [mail('CHAOS-M-2006', { delivered: false, type: 'task' })])], true),
+  ];
+  assert.deepEqual(run('M5', seenEarlier), { status: 'violated', evidence: ['pending CHAOS-M-2006 to=child1'] });
+
+  // att (20_000) < seen (30_000): 95_000 - 20_000 = 75_000 -> violated
+  const attEarlier = [
+    hookEv(10_000, 'child1', 'Stop'),
+    agentSent(20_000, 'root', 'CHAOS-M-2007', 'child1', 'task', false),
+    checkpoint(30_000, [session('child1', [mail('CHAOS-M-2007', { delivered: false, type: 'task' })])]),
+    checkpoint(95_000, [session('child1', [mail('CHAOS-M-2007', { delivered: false, type: 'task' })])], true),
+  ];
+  assert.deepEqual(run('M5', attEarlier), { status: 'violated', evidence: ['pending CHAOS-M-2007 to=child1'] });
+
+  // min(20_001, 30_000) = 20_001: 95_000 - 20_001 = 74_999 < 75_000 -> pass (not settled)
+  const justBelowBoundary = [
+    hookEv(10_000, 'child1', 'Stop'),
+    agentSent(20_001, 'root', 'CHAOS-M-2008', 'child1', 'task', false),
+    checkpoint(30_000, [session('child1', [mail('CHAOS-M-2008', { delivered: false, type: 'task' })])]),
+    checkpoint(95_000, [session('child1', [mail('CHAOS-M-2008', { delivered: false, type: 'task' })])], true),
+  ];
+  assert.deepEqual(run('M5', justBelowBoundary), { status: 'pass', evidence: ['pending, recipient not settled: CHAOS-M-2008 to=child1'] });
 });
 
 // C1
