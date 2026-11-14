@@ -148,3 +148,40 @@ test('a slow heal does not delay other faults; a bridge step waits for the runni
   );
   assert.deepEqual(calls.slice(0, 6), ['bridge SIGKILL', 'up begin', 'child1 SIGKILL', 'up end', 'up', 'bridge SIGSTOP']);
 });
+
+test('bridge faults run strictly sequentially even when fault 1 heal outlasts gap to fault 2', async () => {
+  const clock = fakeClock();
+  const calls: string[] = [];
+  const recs: Rec[] = [];
+  const base = fakeActions(calls);
+  const actions: FaultActions = {
+    ...base,
+    async signalBridge(sig) {
+      if (sig === 'SIGCONT') {
+        calls.push('sigcont begin');
+        await clock.sleep(10_000);
+        calls.push('sigcont end');
+      }
+      return base.signalBridge(sig);
+    },
+  };
+  // f1 heal is at 22_000 and takes 10_000 ms (doneT=32_000).
+  // f2 start is scheduled at 25_000, inside f1's heal; it must wait until f1 heal logs doneT.
+  const schedule = [
+    f('f1', 'bridge_sigstop', 'bridge', 20_000, 2_000),
+    f('f2', 'bridge_sigterm', 'bridge', 25_000, 2_000),
+  ];
+  const done = runFaults({ clock, schedule, actions, roles: ROLES, log: (r) => recs.push(r) });
+  await clock.advance(100_000);
+  await done;
+  assert.deepEqual(
+    recs.map((r) => (r.k === 'fault' ? `${r.id}:${r.phase}@${r.t}..${r.doneT}` : '')),
+    [
+      'f1:start@20000..20000',
+      'f1:heal@22000..32000',
+      'f2:start@32000..32000',
+      'f2:heal@34000..34000',
+      'heal:heal@34000..44000',
+    ],
+  );
+});

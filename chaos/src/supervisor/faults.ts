@@ -120,27 +120,55 @@ export async function runFaults(deps: ExecutorDeps): Promise<void> {
   };
   /** Resolves with the instant the start actually applied (null when stopped). */
   const starts = new Map<number, Promise<number | null>>();
+  /**
+   * Bridge faults execute strictly sequentially in schedule order: fault i+1's start waits
+   * until fault i's final step (heal if hasHeal, else start) has finished and logged doneT.
+   */
+  const bridgeDone = new Map<number, Promise<void>>();
+  const resolveBridgeDone = new Map<number, () => void>();
+  const prevBridgeOf = new Map<number, Promise<void>>();
+  let prevBridgeSeq: number | null = null;
+  deps.schedule.forEach((f, i) => {
+    if (!BRIDGE_KINDS.includes(f.kind)) return;
+    let res!: () => void;
+    const p = new Promise<void>((r) => { res = r; });
+    bridgeDone.set(i, p);
+    resolveBridgeDone.set(i, res);
+    if (prevBridgeSeq !== null) prevBridgeOf.set(i, bridgeDone.get(prevBridgeSeq)!);
+    prevBridgeSeq = i;
+  });
+
   const tasks: Promise<unknown>[] = [];
   for (const s of timeline(deps.schedule)) {
+    const isBridge = BRIDGE_KINDS.includes(s.fault.kind);
+    const isBridgeEnd = isBridge && (hasHeal(s.fault) ? s.phase === 'heal' : s.phase === 'start');
     const task = (async (): Promise<number | null> => {
-      let due = s.atMs;
-      if (s.phase === 'heal') {
-        // A start delayed behind a bridge heal still holds for its full duration.
-        const startedAt = await starts.get(s.seq);
-        if (startedAt === null || startedAt === undefined) return null;
-        due = Math.max(due, startedAt + s.fault.durationMs);
+      try {
+        let due = s.atMs;
+        if (s.phase === 'heal') {
+          // A start delayed behind a bridge heal still holds for its full duration.
+          const startedAt = await starts.get(s.seq);
+          if (startedAt === null || startedAt === undefined) return null;
+          due = Math.max(due, startedAt + s.fault.durationMs);
+        }
+        const wait = due - clock.now();
+        if (wait > 0) await clock.sleep(wait);
+        if (s.phase === 'start') {
+          const prev = prevBridgeOf.get(s.seq);
+          if (prev !== undefined) await prev;
+        }
+        if (deps.stopped?.()) return null;
+        const apply = async (): Promise<number> => {
+          const t = clock.now();
+          const ok = s.phase === 'start' ? await applyStart(s.fault, actions) : await applyHeal(s.fault, actions);
+          const doneT = clock.now();
+          log({ k: 'fault', t, doneT, id: s.fault.id, phase: s.phase, kind: s.fault.kind, target: s.fault.target, ok });
+          return t;
+        };
+        return isBridge ? await withBridge(apply) : await apply();
+      } finally {
+        if (isBridgeEnd) resolveBridgeDone.get(s.seq)?.();
       }
-      const wait = due - clock.now();
-      if (wait > 0) await clock.sleep(wait);
-      if (deps.stopped?.()) return null;
-      const apply = async (): Promise<number> => {
-        const t = clock.now();
-        const ok = s.phase === 'start' ? await applyStart(s.fault, actions) : await applyHeal(s.fault, actions);
-        const doneT = clock.now();
-        log({ k: 'fault', t, doneT, id: s.fault.id, phase: s.phase, kind: s.fault.kind, target: s.fault.target, ok });
-        return t;
-      };
-      return BRIDGE_KINDS.includes(s.fault.kind) ? withBridge(apply) : apply();
     })();
     if (s.phase === 'start') starts.set(s.seq, task);
     tasks.push(task);

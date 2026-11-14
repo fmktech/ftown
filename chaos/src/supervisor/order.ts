@@ -23,11 +23,24 @@ function roleIndex(r: Rec): number {
   return i;
 }
 
+function faultTie(a: Rec, b: Rec): number {
+  if (a.k !== 'fault' || b.k !== 'fault') return 0;
+  if (a.id !== b.id) return a.id < b.id ? -1 : 1;
+  if (a.phase !== b.phase) return a.phase < b.phase ? -1 : 1;
+  return 0;
+}
+
 export function compareRecs(a: Seq, b: Seq): number {
   const ka = KIND[a.rec.k];
   const kb = KIND[b.rec.k];
   if (ka < 0 || kb < 0) return ka - kb || a.seq - b.seq;
-  return tOf(a.rec) - tOf(b.rec) || ka - kb || roleIndex(a.rec) - roleIndex(b.rec) || a.seq - b.seq;
+  return (
+    tOf(a.rec) - tOf(b.rec) ||
+    ka - kb ||
+    roleIndex(a.rec) - roleIndex(b.rec) ||
+    faultTie(a.rec, b.rec) ||
+    a.seq - b.seq
+  );
 }
 
 export function canonicalOrder(items: readonly Seq[]): Rec[] {

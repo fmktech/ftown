@@ -41,3 +41,15 @@ test('run and schedule sort before everything', () => {
   ];
   assert.deepEqual(canonicalOrder(head).map((r) => r.k), ['run', 'schedule', 'op']);
 });
+
+test('fault records with equal t and non-role targets break ties by id then phase before seq', () => {
+  const faults: Seq[] = [
+    { rec: { k: 'fault', t: 100, doneT: 100, id: 'f2', phase: 'start', kind: 'bridge_kill9', target: 'bridge', ok: true }, seq: 0 },
+    { rec: { k: 'fault', t: 100, doneT: 100, id: 'f1', phase: 'start', kind: 'bridge_sigterm', target: 'bridge', ok: true }, seq: 1 },
+    { rec: { k: 'fault', t: 100, doneT: 100, id: 'f1', phase: 'heal', kind: 'bridge_sigterm', target: 'bridge', ok: true }, seq: 2 },
+  ];
+  assert.deepEqual(
+    canonicalOrder(faults).map((r) => (r.k === 'fault' ? `${r.id}:${r.phase}` : '')),
+    ['f1:heal', 'f1:start', 'f2:start'],
+  );
+});

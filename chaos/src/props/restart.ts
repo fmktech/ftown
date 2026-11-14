@@ -2,6 +2,8 @@
 import type { FaultKind, Property, PropResult, Rec } from '../contract.ts';
 
 export const GRACE_MS = 30_000;
+/** Mirrors CONTROL_TIMEOUT_MS in supervisor/main.ts: max guest time a responsiveness probe can take after c.t. */
+export const PROBE_WINDOW_MS = 20_000;
 
 const BRIDGE_FAULT_KINDS = new Set<FaultKind>([
   'bridge_kill9',
@@ -79,7 +81,12 @@ const r2: Property = {
       for (const c of evaluatedCheckpoints) {
         if (c.snap.bridgeAlive && c.snap.bridgeResponsive) continue;
 
-        const inside = intervals.some((inv) => c.t >= inv.startT && c.t <= inv.endT);
+        // A checkpoint's t is stamped before its responsiveness probe runs (up to PROBE_WINDOW_MS).
+        // When alive=true and responsive=false, exempt if [c.t, c.t + PROBE_WINDOW_MS] overlaps a granted
+        // fault interval; when alive=false, use c.t alone.
+        const inside = c.snap.bridgeAlive
+          ? intervals.some((inv) => c.t <= inv.endT && inv.startT <= c.t + PROBE_WINDOW_MS)
+          : intervals.some((inv) => c.t >= inv.startT && c.t <= inv.endT);
         if (inside) continue;
 
         let lastHeal: BridgeHeal | null = null;

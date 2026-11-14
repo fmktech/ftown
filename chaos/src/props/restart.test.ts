@@ -147,6 +147,47 @@ test('violated when bridge is alive but not responsive outside grace', () => {
   ]);
 });
 
+test('alive-but-unresponsive at 75000 with bridge fault starting at 75980 passes (probe window)', () => {
+  const log: Rec[] = [
+    cp(60_000, true, 'cp60'),
+    cp(75_000, true, 'cp75', false, false),
+    faultStart(75_980, 'f1', 'bridge_kill9', true, 75_980),
+    faultHeal(77_372, 'f1', 'bridge_kill9', true, 102_000),
+    cp(135_000, true, 'cp135'),
+  ];
+  const r = get('R2').check(log);
+  assert.equal(r.status, 'pass');
+  assert.deepEqual(r.evidence, []);
+});
+
+test('alive-but-unresponsive with no bridge fault within 20 s violates', () => {
+  const log: Rec[] = [
+    cp(60_000, true, 'cp60'),
+    cp(75_000, true, 'cp75', false, false),
+    faultStart(95_001, 'f1', 'bridge_kill9', true, 95_001),
+    faultHeal(97_000, 'f1', 'bridge_kill9', true, 120_000),
+  ];
+  const r = get('R2').check(log);
+  assert.equal(r.status, 'violated');
+  assert.deepEqual(r.evidence, [
+    'bridge down at cp75 t=75000 last bridge fault none healed doneT=none',
+  ]);
+});
+
+test('dead at c.t with a bridge fault starting 1 s later violates', () => {
+  const log: Rec[] = [
+    cp(60_000, true, 'cp60'),
+    cp(75_000, false, 'cp75', false, false),
+    faultStart(76_000, 'f1', 'bridge_kill9', true, 76_000),
+    faultHeal(78_000, 'f1', 'bridge_kill9', true, 100_000),
+  ];
+  const r = get('R2').check(log);
+  assert.equal(r.status, 'violated');
+  assert.deepEqual(r.evidence, [
+    'bridge down at cp75 t=75000 last bridge fault none healed doneT=none',
+  ]);
+});
+
 test('ok=false start grants no grace', () => {
   const log: Rec[] = [
     cp(60_000, true),
@@ -277,6 +318,15 @@ test('non-bridge faults are ignored', () => {
   assert.deepEqual(r.evidence, [
     'bridge down at cp70 t=70000 last bridge fault none healed doneT=none',
   ]);
+
+  // A non-bridge heal with ok=false is ignored by clause (1).
+  const okLog: Rec[] = [
+    cp(10_000, true),
+    faultStart(20_000, 'f1', 'agent_sigstop'),
+    faultHeal(23_000, 'f1', 'agent_sigstop', false, 23_000),
+    cp(30_000, true),
+  ];
+  assert.deepEqual(get('R2').check(okLog), { status: 'pass', evidence: [] });
 });
 
 test('empty log or log without checkpoints passes', () => {
