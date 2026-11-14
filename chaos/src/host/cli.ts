@@ -2,11 +2,10 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { EXIT } from '../contract.ts';
-import { defaultJobs, parseArgs, USAGE, UsageError, type Command, type VmOptions } from './args.ts';
+import { parseArgs, USAGE, UsageError, type Command, type VmOptions } from './args.ts';
 import { build, readBuildInfo } from './build.ts';
 import { boot, qemuArgs, type GuestParams } from './qemu.ts';
 import { OUT_DIR } from './paths.ts';
-import { run as runProc } from './proc.ts';
 import { differingKeys, formatSeedLine, normalizeConsole, sha256, summarizeSeed, worstExit, type BootResult, type SeedSummary } from './summary.ts';
 
 /** Runs tasks with at most `jobs` in flight; results keep input order. */
@@ -37,7 +36,7 @@ async function selftest(times: number, vm: VmOptions): Promise<number> {
   requireBuild();
   console.log(`qemu: ${qemuArgs(params('selftest', 0, 'off', vm)).join(' ')}`);
   const root = join(OUT_DIR, 'selftest');
-  const boots = await pool(vm.jobs ?? 1, Array.from({ length: times }, (_, k) => async () => {
+  const boots = await pool(vm.jobs, Array.from({ length: times }, (_, k) => async () => {
     const dir = join(root, `run${k + 1}`);
     const o = await boot(params('selftest', 0, 'off', vm), dir, vm.timeoutSec);
     console.log(`boot ${k + 1}: ${(o.wallMs / 1000).toFixed(1)}s exit=${o.exitCode}${o.infraError ? ` INFRA: ${o.infraError}` : ''}`);
@@ -75,7 +74,7 @@ async function runSeeds(c: Extract<Command, { cmd: 'run' | 'campaign' }>): Promi
   requireBuild();
   mkdirSync(OUT_DIR, { recursive: true });
   const tasks = c.seeds.flatMap((seed) => Array.from({ length: c.times }, (_, k) => ({ seed, k })));
-  const results = await pool(c.vm.jobs ?? 1, tasks.map(({ seed, k }) => async (): Promise<BootResult> => {
+  const results = await pool(c.vm.jobs, tasks.map(({ seed, k }) => async (): Promise<BootResult> => {
     const o = await boot(params('run', seed, c.level, c.vm), join(OUT_DIR, String(seed), `run${k + 1}`), c.vm.timeoutSec);
     const canon = o.files.get('canon.jsonl');
     if (o.infraError === null && canon === undefined) {
@@ -96,20 +95,12 @@ async function runSeeds(c: Extract<Command, { cmd: 'run' | 'campaign' }>): Promi
   return exit;
 }
 
-async function resolveJobs(vm: VmOptions): Promise<void> {
-  if (vm.jobs !== null) return;
-  const mem = Number((await runProc('docker', ['info', '--format', '{{.MemTotal}}'])).stdout.trim());
-  vm.jobs = Number.isFinite(mem) && mem > 0 ? defaultJobs(mem, vm.memMb) : 1;
-  console.log(`jobs: ${vm.jobs} (Docker memory ${(mem / 1024 ** 3).toFixed(1)} GiB, guest ${vm.memMb} MiB)`);
-}
-
 async function main(argv: string[]): Promise<number> {
   let c: Command;
   try { c = parseArgs(argv); } catch (err) {
     if (err instanceof UsageError) { console.error(`${err.message}\n${USAGE}`); return EXIT.usage; }
     throw err;
   }
-  if (c.cmd === 'selftest' || c.cmd === 'run' || c.cmd === 'campaign') await resolveJobs(c.vm);
   switch (c.cmd) {
     case 'help': console.log(USAGE); return EXIT.ok;
     case 'build': {
