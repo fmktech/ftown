@@ -132,31 +132,61 @@ export interface ScheduledFault {
  * Schedule rules (implemented by the scheduler, stated here so every task agrees):
  *  - level 'off': no faults.
  *  - level 'low': 2–4 short faults.
- *  - level 'high': 3–5 short faults plus exactly one long fault.
+ *  - level 'high': 3–5 short faults plus exactly one long fault. Only valid with profile 'soak':
+ *    a long fault outlasts bridge timeouts of 40–150 s and does not fit a short run. The scheduler
+ *    throws on (profile 'short', level 'high'); the host CLI rejects it as a usage error.
  *  - Faults are drawn from FAULTS in table order using only the 'faults' stream.
  *  - Faults never overlap on the same target. Bridge faults never overlap each other.
- *  - Every fault starts inside [FAULT_WINDOW_START_MS, FAULT_WINDOW_END_MS] and is healed
- *    before RUN_QUIESCE_MS begins.
- *  - The same (seed, level) always yields the same schedule.
+ *  - Every fault starts inside [faultWindowStartMs, faultWindowEndMs] of the run's profile and
+ *    is healed by faultWindowEndMs, so the quiesce period that follows has no active fault.
+ *  - The same (seed, level, profile) always yields the same schedule.
  *  - The FAULTS table is validated before use: duplicate kinds, a clock fault without a jump
  *    range, a non-clock fault with one, or an empty/inverted range are rejected with an error.
  *  - After the last scheduled fault the executor always performs one final heal: SIGCONT anything
  *    still stopped and start the bridge if it is not running. It is logged as a fault record with
  *    id 'heal', phase 'heal', kind of the last fault, target 'all'.
  */
-export type BuildSchedule = (seed: number, level: ChaosLevel, rng: Rng) => ScheduledFault[];
+export type BuildSchedule = (seed: number, level: ChaosLevel, profile: RunProfile, rng: Rng) => ScheduledFault[];
 
 /**
- * The window opens only after bring-up is complete: under the instruction-counted guest, creating
- * the four sessions through the CLI takes about 30 s of guest time. Everything that must exist
- * before the first fault (all sessions, the first ask and its answer) happens before this.
+ * Run length. 'short' is the default: about 3 minutes of guest time, for many seeds and quick
+ * determinism pairs. 'soak' is the long form (about 8 minutes) and the only one that carries
+ * long faults (level 'high'); it is for occasional and overnight runs.
  */
-export const FAULT_WINDOW_START_MS = 90_000;
-export const FAULT_WINDOW_END_MS = 330_000;
-/** After the last heal the supervisor waits this long with no faults before the final checkpoint. */
-export const RUN_QUIESCE_MS = 150_000;
-/** Bound used by "after heal" properties: violations are judged at the final checkpoint. */
-export const CHECKPOINT_EVERY_MS = 30_000;
+export type RunProfile = 'short' | 'soak';
+export const RUN_PROFILES: readonly RunProfile[] = ['short', 'soak'];
+export const DEFAULT_PROFILE: RunProfile = 'short';
+
+export interface ProfileTiming {
+  /**
+   * The window opens only after bring-up is complete: under the instruction-counted guest,
+   * creating the four sessions through the CLI takes about 45 s of guest time, and root's first
+   * mail and the guaranteed early ask and its answer follow. All of that precedes the first fault.
+   */
+  faultWindowStartMs: number;
+  /** Last instant a fault may start; every fault is also healed by this instant. */
+  faultWindowEndMs: number;
+  /** After faultWindowEndMs the supervisor waits this long with no faults, then takes the final checkpoint. */
+  quiesceMs: number;
+  /** Interval between periodic checkpoints. "After heal" properties are judged at the final one. */
+  checkpointEveryMs: number;
+  /**
+   * Every agent script's last step, and every workload op, must begin by this instant (guest ms
+   * since t0, so the agent's own start offset counts), so the workload overlaps the fault window
+   * and has finished well before the final checkpoint.
+   *
+   * Sizing rule: the bridge nudges a hooked session about unread mail 60 s after the mail (or
+   * after a restart re-arms it). The final checkpoint must therefore come more than 60 s after
+   * both the last waking mail and the last heal, with margin for a bridge restart (a few seconds):
+   * faultWindowEndMs + quiesceMs >= max(workloadEndMs, faultWindowEndMs) + 80_000.
+   */
+  workloadEndMs: number;
+}
+
+export const PROFILE: Record<RunProfile, ProfileTiming> = {
+  short: { faultWindowStartMs: 75_000, faultWindowEndMs: 115_000, quiesceMs: 90_000, checkpointEveryMs: 15_000, workloadEndMs: 110_000 },
+  soak: { faultWindowStartMs: 90_000, faultWindowEndMs: 330_000, quiesceMs: 150_000, checkpointEveryMs: 30_000, workloadEndMs: 330_000 },
+};
 
 // ───────────────────────────── fake agent ─────────────────────────────
 // The fake agent is the session command. It is a scripted stand-in for an LLM CLI.
@@ -293,7 +323,7 @@ export interface Snapshot {
 // H_run = sha256 of the file bytes. Two runs of one seed must produce identical bytes.
 
 export type Rec =
-  | { k: 'run'; seed: number; level: ChaosLevel; contract: number }
+  | { k: 'run'; seed: number; level: ChaosLevel; profile: RunProfile; contract: number }
   | { k: 'schedule'; faults: ScheduledFault[] }
   | { k: 'fault'; t: number; id: string; phase: 'start' | 'heal'; kind: FaultKind; target: string; ok: boolean }
   | { k: 'op'; t: number; op: WorkloadOp; ok: boolean; error: string | null }
@@ -301,7 +331,7 @@ export type Rec =
   | { k: 'checkpoint'; t: number; name: string; final: boolean; snap: Snapshot }
   | { k: 'verdict'; prop: string; kind: PropKind; status: PropStatus; evidence: string[] };
 
-export const CONTRACT_VERSION = 6;
+export const CONTRACT_VERSION = 7;
 
 /** Operations the supervisor's workload driver performs through the real ftown CLI. */
 export type WorkloadOp =

@@ -1,5 +1,4 @@
-// Periodic checkpoints (every CHECKPOINT_EVERY_MS) and the final checkpoint.
-import { CHECKPOINT_EVERY_MS } from '../contract.ts';
+// Periodic checkpoints (every checkpointEveryMs of the profile) and the final checkpoint.
 import type { Clock, Rec, Snapshot } from '../contract.ts';
 
 /** Poll interval of the stop flag between checkpoints (fixed). */
@@ -18,12 +17,12 @@ export async function checkpoint(deps: CheckpointDeps, name: string, final: bool
 }
 
 /**
- * Takes `cp<n>` at n * CHECKPOINT_EVERY_MS (n = 1, 2, …) until stop() returns true. A checkpoint
+ * Takes `cp<n>` at n * everyMs (n = 1, 2, …) until stop() returns true. A checkpoint
  * whose instant has passed while the previous one ran is taken late, never skipped.
  */
-export async function runCheckpoints(deps: CheckpointDeps, stop: () => boolean): Promise<void> {
+export async function runCheckpoints(deps: CheckpointDeps, everyMs: number, stop: () => boolean): Promise<void> {
   for (let n = 1; ; n++) {
-    const due = n * CHECKPOINT_EVERY_MS;
+    const due = n * everyMs;
     for (;;) {
       if (stop()) return;
       const wait = due - deps.clock.now();

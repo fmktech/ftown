@@ -1,11 +1,11 @@
 // In-guest supervisor: runs one seed end to end and writes the canonical log.
-//   node /opt/chaos/src/supervisor/main.ts --seed N --level off|low|high
+//   node /opt/chaos/src/supervisor/main.ts --seed N --level off|low|high [--profile short|soak]
 import { existsSync } from 'node:fs';
 import { appendFile, chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { CONTRACT_VERSION, EXIT, FAULT_WINDOW_END_MS, GUEST, PARENT_OF, ROLES, RUN_QUIESCE_MS } from '../contract.ts';
-import type { AgentLogLine, ChaosLevel, Clock, MailType, Rec, Role } from '../contract.ts';
+import { CONTRACT_VERSION, DEFAULT_PROFILE, EXIT, GUEST, PARENT_OF, PROFILE, ROLES, RUN_PROFILES } from '../contract.ts';
+import type { AgentLogLine, ChaosLevel, Clock, MailType, Rec, Role, RunProfile } from '../contract.ts';
 import { encodeLog, hashLog } from '../core/canon.ts';
 import { realClock, writeT0 } from '../core/clock.ts';
 import { deriveRng } from '../core/rng.ts';
@@ -234,11 +234,12 @@ export function idsDeadline(rootCreateStartMs: number, rootFirstSleepMs: number)
   return rootCreateStartMs + rootFirstSleepMs;
 }
 
-async function drive(seed: number, level: ChaosLevel, clock: Clock, rec: Recorder, schedule: ReturnType<typeof buildSchedule>): Promise<Omit<Outcome, 'dropFaults'>> {
+async function drive(seed: number, level: ChaosLevel, profile: RunProfile, clock: Clock, rec: Recorder, schedule: ReturnType<typeof buildSchedule>): Promise<Omit<Outcome, 'dropFaults'>> {
+  const timing = PROFILE[profile];
   const actions = makeActions(clock);
   if (!(await actions.bridgeUp())) throw new Infra('infra:bridge_up');
 
-  const scripts = buildScripts(seed, deriveRng);
+  const scripts = buildScripts(seed, profile, deriveRng);
   await mkdir(GUEST.agentScriptDir, { recursive: true });
   for (const role of ROLES) await writeFile(join(GUEST.agentScriptDir, `${role}.json`), `${JSON.stringify(scripts[role])}\n`);
 
@@ -289,13 +290,13 @@ async function drive(seed: number, level: ChaosLevel, clock: Clock, rec: Recorde
       stop = true;
       throw e;
     });
-  const checkpoints = guard(runCheckpoints(cpDeps, stopped));
+  const checkpoints = guard(runCheckpoints(cpDeps, timing.checkpointEveryMs, stopped));
   checkpoints.catch(() => undefined);
   const work = guard(
     runWorkload({
       clock,
       // Starts once every session exists; under icount that instant is itself deterministic.
-      plan: planWorkload(seed, deriveRng, Math.max(WORKLOAD_START_MS, clock.now()), FAULT_WINDOW_END_MS),
+      plan: planWorkload(seed, deriveRng, Math.max(WORKLOAD_START_MS, clock.now()), Math.min(timing.faultWindowEndMs, timing.workloadEndMs)),
       idOf: (r) => ids[r],
       send: (id: string, type: MailType, body: string) => ftown(['harness', 'mail', 'send', id, '--type', type, body], { timeoutMs: CONTROL_TIMEOUT_MS }),
       log: rec.log,
@@ -305,7 +306,8 @@ async function drive(seed: number, level: ChaosLevel, clock: Clock, rec: Recorde
   const faults = guard(runFaults({ clock, schedule, actions, roles: ROLES, log: rec.log, stopped }));
   // Rejects as soon as any loop (checkpoints included) rejects.
   await Promise.race([Promise.all([work, faults]), checkpoints.then(() => new Promise<never>(() => undefined))]);
-  await clock.sleep(RUN_QUIESCE_MS);
+  const quiesceWait = timing.faultWindowEndMs + timing.quiesceMs - clock.now();
+  if (quiesceWait > 0) await clock.sleep(quiesceWait);
   stop = true;
   await checkpoints;
   await checkpoint(cpDeps, 'final', true);
@@ -326,15 +328,15 @@ async function drive(seed: number, level: ChaosLevel, clock: Clock, rec: Recorde
   return { verdicts, exitCode, error: null, invalidAgentFields: invalid };
 }
 
-export async function runSeed({ seed, level }: { seed: number; level: ChaosLevel }): Promise<number> {
+export async function runSeed({ seed, level, profile }: { seed: number; level: ChaosLevel; profile: RunProfile }): Promise<number> {
   const clock: Clock = realClock({ t0Ns: writeT0(GUEST.t0File) });
   await chmod(GUEST.t0File, 0o644);
   const rec = new Recorder();
   // The seed's schedule is generated in full (same rng draws), then experiment drops are applied.
   const dropFaults = parseDropFaults(process.env.CHAOS_DROP_FAULTS);
-  const dropped = applyDrop(buildSchedule(seed, level, deriveRng(seed, 'faults')), dropFaults ?? []);
+  const dropped = applyDrop(buildSchedule(seed, level, profile, deriveRng(seed, 'faults')), dropFaults ?? []);
   const schedule = dropped.faults;
-  rec.log({ k: 'run', seed, level, contract: CONTRACT_VERSION });
+  rec.log({ k: 'run', seed, level, profile, contract: CONTRACT_VERSION });
   rec.log({ k: 'schedule', faults: schedule });
   if (dropped.unknown.length > 0) {
     process.stderr.write(`supervisor: CHAOS_DROP_FAULTS has unknown ids/kinds: ${dropped.unknown.join(',')}\n`);
@@ -342,7 +344,7 @@ export async function runSeed({ seed, level }: { seed: number; level: ChaosLevel
   }
   let outcome: Outcome;
   try {
-    outcome = { ...(await drive(seed, level, clock, rec, schedule)), dropFaults };
+    outcome = { ...(await drive(seed, level, profile, clock, rec, schedule)), dropFaults };
   } catch (e) {
     process.stderr.write(`supervisor: ${e instanceof Error ? e.stack : String(e)}\n`);
     outcome = { verdicts: [], exitCode: EXIT.infra, error: e instanceof Infra ? e.message : 'infra:drive', invalidAgentFields: 0, dropFaults };
@@ -350,21 +352,25 @@ export async function runSeed({ seed, level }: { seed: number; level: ChaosLevel
   return finish(rec, outcome);
 }
 
-export function parseCli(argv: readonly string[]): { seed: number; level: ChaosLevel } | null {
+export function parseCli(argv: readonly string[]): { seed: number; level: ChaosLevel; profile: RunProfile } | null {
   let seed: number | null = null;
   let level: ChaosLevel | null = null;
+  let profile: RunProfile = DEFAULT_PROFILE;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--seed' && /^\d+$/.test(argv[i + 1] ?? '')) seed = Number(argv[++i]);
     else if (argv[i] === '--level' && ['off', 'low', 'high'].includes(argv[i + 1] ?? '')) level = argv[++i] as ChaosLevel;
+    else if (argv[i] === '--profile' && RUN_PROFILES.includes(argv[i + 1] as RunProfile)) profile = argv[++i] as RunProfile;
     else return null;
   }
-  return seed === null || level === null ? null : { seed, level };
+  if (seed === null || level === null) return null;
+  if (profile === 'short' && level === 'high') return null;
+  return { seed, level, profile };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const args = parseCli(process.argv.slice(2));
   if (args === null) {
-    process.stderr.write('usage: main.ts --seed <int> --level off|low|high\n');
+    process.stderr.write('usage: main.ts --seed <int> --level off|low|high [--profile short|soak]\n');
     process.exit(EXIT.usage);
   }
   runSeed(args).then(

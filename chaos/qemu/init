@@ -41,20 +41,21 @@ step "hostname" $BB hostname chaos
 # Raw output on the frame port: no \n -> \r\n translation.
 step "stty ttyS1" $BB stty -F /dev/ttyS1 raw -echo 115200
 
-CHAOS_CMD=selftest; CHAOS_SEED=0; CHAOS_LEVEL=off; CHAOS_DROP_FAULTS=
+CHAOS_CMD=selftest; CHAOS_SEED=0; CHAOS_LEVEL=off; CHAOS_PROFILE=; CHAOS_DROP_FAULTS=
 for a in $(cat /proc/cmdline); do
   case "$a" in
     chaos.cmd=*) CHAOS_CMD=${a#chaos.cmd=} ;;
     chaos.seed=*) CHAOS_SEED=${a#chaos.seed=} ;;
     chaos.level=*) CHAOS_LEVEL=${a#chaos.level=} ;;
+    chaos.profile=*) CHAOS_PROFILE=${a#chaos.profile=} ;;
     chaos.drop=*) CHAOS_DROP_FAULTS=${a#chaos.drop=} ;;
   esac
 done
-export CHAOS_CMD CHAOS_SEED CHAOS_LEVEL CHAOS_DROP_FAULTS
+export CHAOS_CMD CHAOS_SEED CHAOS_LEVEL CHAOS_PROFILE CHAOS_DROP_FAULTS
 # Inside the VM the clock is the guest's own (instruction-counted), so the supervisor may jump it.
 # Never set this anywhere else (e.g. Docker bring-up shares the host clock).
 export CHAOS_ALLOW_CLOCK=1
-echo "chaos-init: cmd=$CHAOS_CMD seed=$CHAOS_SEED level=$CHAOS_LEVEL"
+echo "chaos-init: cmd=$CHAOS_CMD seed=$CHAOS_SEED level=$CHAOS_LEVEL profile=$CHAOS_PROFILE"
 
 rm -f /run/chaos-exit-sent
 cd /

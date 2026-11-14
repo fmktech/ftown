@@ -1,6 +1,6 @@
 // External mail workload: every 5–15 s until the fault window ends, one tagged mail from
 // 'external' to a random role, sent through the real CLI on the unfaulted control path.
-import { FAULT_WINDOW_END_MS, ROLES } from '../contract.ts';
+import { ROLES } from '../contract.ts';
 import type { Clock, DeriveRng, MailType, Rec, Role } from '../contract.ts';
 import { normaliseCliError } from '../fake-agent/parse.ts';
 
@@ -14,7 +14,7 @@ export interface PlannedMail {
 const TYPES: readonly MailType[] = ['message', 'task', 'result', 'fyi'];
 
 /** Pure plan from stream 'workload.mail'. First send at startMs + 5–15 s, last before endMs. */
-export function planWorkload(seed: number, deriveRng: DeriveRng, startMs: number, endMs: number = FAULT_WINDOW_END_MS): PlannedMail[] {
+export function planWorkload(seed: number, deriveRng: DeriveRng, startMs: number, endMs: number): PlannedMail[] {
   const rng = deriveRng(seed, 'workload.mail');
   const out: PlannedMail[] = [];
   let at = startMs;

@@ -1,7 +1,7 @@
 import {
   FAULTS,
-  FAULT_WINDOW_END_MS,
-  FAULT_WINDOW_START_MS,
+  PROFILE,
+  RUN_PROFILES,
   type BuildSchedule,
   type FaultSpec,
   type Role,
@@ -41,8 +41,8 @@ function endOf(f: ScheduledFault): number {
 }
 
 /** True when `cand` can be added to `placed` without breaking a schedule rule. */
-function fits(cand: ScheduledFault, placed: readonly ScheduledFault[]): boolean {
-  if (cand.atMs < FAULT_WINDOW_START_MS || endOf(cand) > FAULT_WINDOW_END_MS) return false;
+function fits(cand: ScheduledFault, placed: readonly ScheduledFault[], startMs: number, endMs: number): boolean {
+  if (cand.atMs < startMs || endOf(cand) > endMs) return false;
   const candKill = KILLS.has(cand.kind);
   for (const p of placed) {
     const overlapsInTime = cand.atMs <= endOf(p) && p.atMs <= endOf(cand);
@@ -61,9 +61,11 @@ function fits(cand: ScheduledFault, placed: readonly ScheduledFault[]): boolean 
 }
 
 function drawFault(
-  rng: Parameters<BuildSchedule>[2],
+  rng: Parameters<BuildSchedule>[3],
   candidates: readonly FaultSpec[],
   long: boolean,
+  startMs: number,
+  endMs: number,
 ): ScheduledFault {
   const spec = rng.pick(candidates);
   let target: ScheduledFault['target'];
@@ -81,15 +83,20 @@ function drawFault(
     if (range === null) throw new Error(`schedule: ${spec.kind} has no long form`);
     durationMs = rng.int(...range);
   }
-  const atMs = rng.int(FAULT_WINDOW_START_MS, Math.max(FAULT_WINDOW_START_MS, FAULT_WINDOW_END_MS - durationMs));
+  const atMs = rng.int(startMs, Math.max(startMs, endMs - durationMs));
   return { id: '', kind: spec.kind, target, atMs, durationMs, jumpMs, long };
 }
 
-export const buildSchedule: BuildSchedule = (_seed, level, rng) => {
+export const buildSchedule: BuildSchedule = (_seed, level, profile, rng) => {
   validateFaults(FAULTS);
+  if (!RUN_PROFILES.includes(profile)) throw new Error(`schedule: unknown profile ${String(profile)}`);
   if (level !== 'off' && level !== 'low' && level !== 'high') throw new Error(`schedule: unknown level ${String(level)}`);
+  if (profile === 'short' && level === 'high') {
+    throw new Error('schedule: level high is not valid with profile short (use profile soak)');
+  }
   if (level === 'off') return [];
 
+  const { faultWindowStartMs, faultWindowEndMs } = PROFILE[profile];
   const shortCount = level === 'low' ? rng.int(2, 4) : rng.int(3, 5);
   const placed: ScheduledFault[] = [];
 
@@ -98,8 +105,8 @@ export const buildSchedule: BuildSchedule = (_seed, level, rng) => {
     const longCandidates = FAULTS.filter((f) => f.long !== null || f.jump !== null);
     let ok = false;
     for (let a = 0; a < MAX_ATTEMPTS && !ok; a++) {
-      const cand = drawFault(rng, longCandidates, true);
-      if (fits(cand, placed)) {
+      const cand = drawFault(rng, longCandidates, true, faultWindowStartMs, faultWindowEndMs);
+      if (fits(cand, placed, faultWindowStartMs, faultWindowEndMs)) {
         placed.push(cand);
         ok = true;
       }
@@ -110,8 +117,8 @@ export const buildSchedule: BuildSchedule = (_seed, level, rng) => {
   for (let i = 0; i < shortCount; i++) {
     let ok = false;
     for (let a = 0; a < MAX_ATTEMPTS && !ok; a++) {
-      const cand = drawFault(rng, FAULTS, false);
-      if (fits(cand, placed)) {
+      const cand = drawFault(rng, FAULTS, false, faultWindowStartMs, faultWindowEndMs);
+      if (fits(cand, placed, faultWindowStartMs, faultWindowEndMs)) {
         placed.push(cand);
         ok = true;
       }

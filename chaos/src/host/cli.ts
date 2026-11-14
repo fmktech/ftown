@@ -1,11 +1,11 @@
 // Host runner: `npm run test:chaos -- <command>`. See USAGE in args.ts.
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { EXIT } from '../contract.ts';
+import { DEFAULT_PROFILE, EXIT } from '../contract.ts';
 import { parseArgs, USAGE, UsageError, type Command, type VmOptions } from './args.ts';
 import { build, readBuildInfo } from './build.ts';
 import { boot, cleanupContainers, qemuArgs, RTC_BASE, type GuestParams } from './qemu.ts';
-import { OUT_DIR } from './paths.ts';
+import { OUT_DIR, seedOutDir } from './paths.ts';
 import { selftestAssertions, differingKeys, formatSeedLine, normalizeConsole, sha256, summarizeSeed, worstExit, type BootResult, type SeedSummary } from './summary.ts';
 
 /** Runs tasks with at most `jobs` in flight; results keep input order. */
@@ -28,17 +28,24 @@ function requireBuild(): void {
   console.log(`image ${info.image}  kernel ${info.kernelVersion}  initramfs sha256 ${info.initramfsSha256} (${info.initramfsBytes} bytes)`);
 }
 
-function params(cmd: GuestParams['cmd'], seed: number, level: GuestParams['level'], vm: VmOptions, dropFaults: string | null = null): GuestParams {
-  return { cmd, seed, level, memMb: vm.memMb, icountShift: vm.icountShift, dropFaults };
+function params(
+  cmd: GuestParams['cmd'],
+  seed: number,
+  level: GuestParams['level'],
+  profile: GuestParams['profile'],
+  vm: VmOptions,
+  dropFaults: string | null = null,
+): GuestParams {
+  return { cmd, seed, level, profile, memMb: vm.memMb, icountShift: vm.icountShift, dropFaults };
 }
 
 async function selftest(times: number, vm: VmOptions): Promise<number> {
   requireBuild();
-  console.log(`qemu: ${qemuArgs(params('selftest', 0, 'off', vm)).join(' ')}`);
+  console.log(`qemu: ${qemuArgs(params('selftest', 0, 'off', DEFAULT_PROFILE, vm)).join(' ')}`);
   const root = join(OUT_DIR, 'selftest');
   const boots = await pool(vm.jobs, Array.from({ length: times }, (_, k) => async () => {
     const dir = join(root, `run${k + 1}`);
-    const o = await boot(params('selftest', 0, 'off', vm), dir, vm.timeoutSec);
+    const o = await boot(params('selftest', 0, 'off', DEFAULT_PROFILE, vm), dir, vm.timeoutSec);
     console.log(`boot ${k + 1}: ${(o.wallMs / 1000).toFixed(1)}s exit=${o.exitCode}${o.infraError ? ` INFRA: ${o.infraError}` : ''}`);
     return { o, dir };
   }));
@@ -72,7 +79,7 @@ async function selftest(times: number, vm: VmOptions): Promise<number> {
 
 async function selftestLong(times: number, seconds: number, vm: VmOptions): Promise<number> {
   requireBuild();
-  const p: GuestParams = { cmd: 'selftest-long', seed: seconds, level: 'off', memMb: vm.memMb, icountShift: vm.icountShift };
+  const p: GuestParams = { cmd: 'selftest-long', seed: seconds, level: 'off', profile: DEFAULT_PROFILE, memMb: vm.memMb, icountShift: vm.icountShift };
   console.log(`qemu: ${qemuArgs(p).join(' ')}`);
   const results = await pool(vm.jobs, Array.from({ length: times }, (_, k) => async (): Promise<BootResult> => {
     const o = await boot(p, join(OUT_DIR, 'selftest-long', `run${k + 1}`), vm.timeoutSec);
@@ -92,8 +99,7 @@ async function runSeeds(c: Extract<Command, { cmd: 'run' | 'campaign' }>): Promi
   mkdirSync(OUT_DIR, { recursive: true });
   const tasks = c.seeds.flatMap((seed) => Array.from({ length: c.times }, (_, k) => ({ seed, k })));
   const results = await pool(c.vm.jobs, tasks.map(({ seed, k }) => async (): Promise<BootResult> => {
-    const seedDir = c.dropFaults === null ? String(seed) : `${seed}-drop-${c.dropFaults}`;
-    const o = await boot(params('run', seed, c.level, c.vm, c.dropFaults), join(OUT_DIR, seedDir, `run${k + 1}`), c.vm.timeoutSec);
+    const o = await boot(params('run', seed, c.level, c.profile, c.vm, c.dropFaults), join(seedOutDir(seed, c.profile, c.dropFaults), `run${k + 1}`), c.vm.timeoutSec);
     const canon = o.files.get('canon.jsonl');
     if (o.infraError === null && canon === undefined) {
       return { exitCode: EXIT.infra, infraError: 'guest sent no canon.jsonl', hash: null, content: null, wallMs: o.wallMs };
@@ -107,7 +113,7 @@ async function runSeeds(c: Extract<Command, { cmd: 'run' | 'campaign' }>): Promi
   }
   const exit = worstExit(summaries.map((s) => s.exitCode));
   if (c.cmd === 'campaign') {
-    writeFileSync(join(OUT_DIR, 'campaign.json'), JSON.stringify({ level: c.level, times: c.times, exit, seeds: summaries }, null, 2) + '\n');
+    writeFileSync(join(OUT_DIR, 'campaign.json'), JSON.stringify({ level: c.level, profile: c.profile, times: c.times, exit, seeds: summaries }, null, 2) + '\n');
     console.log(`wrote ${join(OUT_DIR, 'campaign.json')}`);
   }
   return exit;

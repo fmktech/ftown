@@ -37,7 +37,7 @@ test('run and schedule sort before everything', () => {
   const head: Seq[] = [
     { rec: { k: 'op', t: 0, op: { op: 'session_create', role: 'root' }, ok: true, error: null }, seq: 0 },
     { rec: { k: 'schedule', faults: [] }, seq: 1 },
-    { rec: { k: 'run', seed: 1, level: 'off', contract: 3 }, seq: 2 },
+    { rec: { k: 'run', seed: 1, level: 'off', profile: 'short', contract: 7 }, seq: 2 },
   ];
   assert.deepEqual(canonicalOrder(head).map((r) => r.k), ['run', 'schedule', 'op']);
 });
