@@ -132,9 +132,16 @@ test('M4 exercised by untagged mail alone; unexercised when W+U=0', () => {
 });
 
 // M5
+const hookEv = (t: number, role: 'root' | 'child1' | 'child2' | 'child3', event: 'UserPromptSubmit' | 'Stop', ok = true): Rec => ({
+  k: 'agent',
+  t,
+  role,
+  e: { ev: 'hook_sent', event, ok },
+});
+
 test('M5 pass: pending fyi and nudged mail are fine, dead sessions ignored', () => {
   const log = [
-    checkpoint(9, [
+    checkpoint(200_000, [
       session('child1', [
         mail('CHAOS-M-1', { delivered: false, type: 'fyi' }),
         mail('CHAOS-M-2', { delivered: false, nudged: true, type: 'task' }),
@@ -144,12 +151,103 @@ test('M5 pass: pending fyi and nudged mail are fine, dead sessions ignored', () 
   ];
   assert.deepEqual(run('M5', log), { status: 'pass', evidence: [] });
 });
-test('M5 violated', () => {
+
+test('M5 violated: recipient idle >= 75 s and mail accepted >= 75 s before final checkpoint', () => {
   const log = [
-    checkpoint(9, [session('child1', [mail('CHAOS-M-7', { delivered: false, type: 'task' })])], true),
+    opSend(10_000, 'CHAOS-M-7', 'child1', 'task'),
+    hookEv(15_000, 'child1', 'UserPromptSubmit'),
+    hookEv(20_000, 'child1', 'Stop'),
+    checkpoint(95_000, [session('child1', [mail('CHAOS-M-7', { delivered: false, type: 'task' })])], true),
   ];
   assert.deepEqual(run('M5', log), { status: 'violated', evidence: ['pending CHAOS-M-7 to=child1'] });
 });
+
+test('M5 pass (not settled): recipient mid-turn, Stop only 30 s before final, or mail accepted 20 s before final', () => {
+  // Recipient mid-turn (last hook is UserPromptSubmit, not Stop)
+  const midTurn = [
+    opSend(10_000, 'CHAOS-M-1', 'child1', 'task'),
+    hookEv(12_000, 'child1', 'UserPromptSubmit'),
+    checkpoint(120_000, [session('child1', [mail('CHAOS-M-1', { delivered: false, type: 'task' })])], true),
+  ];
+  assert.deepEqual(run('M5', midTurn), { status: 'pass', evidence: ['pending, recipient not settled: CHAOS-M-1 to=child1'] });
+
+  // Stop only 30 s before final (< 75 s)
+  const recentStop = [
+    opSend(10_000, 'CHAOS-M-2', 'child1', 'task'),
+    hookEv(80_000, 'child1', 'UserPromptSubmit'),
+    hookEv(90_000, 'child1', 'Stop'),
+    checkpoint(120_000, [session('child1', [mail('CHAOS-M-2', { delivered: false, type: 'task' })])], true),
+  ];
+  assert.deepEqual(run('M5', recentStop), { status: 'pass', evidence: ['pending, recipient not settled: CHAOS-M-2 to=child1'] });
+
+  // Mail accepted only 20 s before final (< 75 s), even though recipient has been idle >= 75 s
+  const recentMail = [
+    hookEv(10_000, 'child1', 'UserPromptSubmit'),
+    hookEv(15_000, 'child1', 'Stop'),
+    opSend(100_000, 'CHAOS-M-3', 'child1', 'task'),
+    checkpoint(120_000, [session('child1', [mail('CHAOS-M-3', { delivered: false, type: 'task' })])], true),
+  ];
+  assert.deepEqual(run('M5', recentMail), { status: 'pass', evidence: ['pending, recipient not settled: CHAOS-M-3 to=child1'] });
+
+  // Synthetic regression matching seed-1 short run1 shape: Stop 23-31 s before final (205194)
+  const run1Shape = [
+    opSend(43_697, 'CHAOS-M-1', 'child2', 'task'),
+    opSend(83_999, 'CHAOS-M-5', 'child1', 'task'),
+    agentSent(104_919, 'child1', 'CHAOS-M-2002', 'root', 'result'),
+    hookEv(173_647, 'child1', 'Stop'),
+    hookEv(178_007, 'root', 'Stop'),
+    hookEv(182_019, 'child2', 'Stop'),
+    checkpoint(205_194, [
+      session('root', [mail('CHAOS-M-2002', { delivered: false, type: 'result' })]),
+      session('child1', [mail('CHAOS-M-5', { delivered: false, type: 'task' })]),
+      session('child2', [mail('CHAOS-M-1', { delivered: false, type: 'task' })]),
+    ], true),
+  ];
+  assert.deepEqual(run('M5', run1Shape), {
+    status: 'pass',
+    evidence: [
+      'pending, recipient not settled: CHAOS-M-1 to=child2',
+      'pending, recipient not settled: CHAOS-M-2002 to=root',
+      'pending, recipient not settled: CHAOS-M-5 to=child1',
+    ],
+  });
+});
+
+test('M5 edge cases: failed Stop, start-only session, exact 75_000 tie, and respawned recipient', () => {
+  // Failed Stop (ok=false) counts as not settled -> pass
+  const failedStop = [
+    opSend(10_000, 'CHAOS-M-10', 'child1', 'task'),
+    hookEv(15_000, 'child1', 'Stop', false),
+    checkpoint(120_000, [session('child1', [mail('CHAOS-M-10', { delivered: false, type: 'task' })])], true),
+  ];
+  assert.deepEqual(run('M5', failedStop), { status: 'pass', evidence: ['pending, recipient not settled: CHAOS-M-10 to=child1'] });
+
+  // Session with only start (>= 75_000 before final) and old pending mail -> violated
+  const startOnly: Rec[] = [
+    { k: 'agent', t: 5_000, role: 'child1', e: { ev: 'start', pid: 100 } },
+    opSend(10_000, 'CHAOS-M-11', 'child1', 'task'),
+    checkpoint(85_000, [session('child1', [mail('CHAOS-M-11', { delivered: false, type: 'task' })])], true),
+  ];
+  assert.deepEqual(run('M5', startOnly), { status: 'violated', evidence: ['pending CHAOS-M-11 to=child1'] });
+
+  // Exact 75_000 tie (>= 75_000 is settled) -> violated
+  const exactTie = [
+    opSend(25_000, 'CHAOS-M-12', 'child1', 'task'),
+    hookEv(25_000, 'child1', 'Stop', true),
+    checkpoint(100_000, [session('child1', [mail('CHAOS-M-12', { delivered: false, type: 'task' })])], true),
+  ];
+  assert.deepEqual(run('M5', exactTie), { status: 'violated', evidence: ['pending CHAOS-M-12 to=child1'] });
+
+  // Respawned recipient (Stop at 20_000, then new start 30 s before final at 120_000) -> not settled -> pass
+  const respawned: Rec[] = [
+    opSend(10_000, 'CHAOS-M-13', 'child1', 'task'),
+    hookEv(20_000, 'child1', 'Stop', true),
+    { k: 'agent', t: 90_000, role: 'child1', e: { ev: 'start', pid: 101 } },
+    checkpoint(120_000, [session('child1', [mail('CHAOS-M-13', { delivered: false, type: 'task' })])], true),
+  ];
+  assert.deepEqual(run('M5', respawned), { status: 'pass', evidence: ['pending, recipient not settled: CHAOS-M-13 to=child1'] });
+});
+
 test('M5 unexercised: no live session or no final checkpoint', () => {
   assert.equal(run('M5', [checkpoint(9, [session('child1', [], { tmuxAlive: false })], true)]).status, 'unexercised');
   assert.equal(run('M5', [checkpoint(9, [session('child1')])]).status, 'unexercised');

@@ -2,7 +2,70 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { deriveRng } from '../core/rng.ts';
 import { PROFILE, ROLES, RUN_PROFILES } from '../contract.ts';
-import { buildScripts, CHILD_ACTION_SLEEP_MS, IDLE_MARGIN_MS, MAX_START_OFFSET_MS, sleepTotal } from './scripts.ts';
+import type { AgentScript, Role, RunProfile } from '../contract.ts';
+import {
+  buildScripts,
+  BUSY_TURN_LIMIT_MS,
+  estimatedDuration,
+  IDLE_MARGIN_MS,
+  IDLE_SLEEP_MIN_MS,
+  MAX_START_OFFSET_MS,
+  stepCostMs,
+} from './scripts.ts';
+
+function validateTurns(script: AgentScript): number {
+  assert.deepEqual(script.steps.at(-1), { do: 'hook', event: 'Stop' }, `${script.role}: last step must be Stop`);
+  let inTurn = false;
+  let actionsInTurn = 0;
+  let busy = 0;
+  let maxBusy = 0;
+  for (const st of script.steps) {
+    const cost = stepCostMs(st);
+    if (st.do === 'hook' && st.event === 'UserPromptSubmit') {
+      assert.ok(!inTurn, `${script.role}: UserPromptSubmit while already in a turn`);
+      inTurn = true;
+      actionsInTurn = 0;
+      busy = cost;
+    } else if (st.do === 'hook' && st.event === 'Stop') {
+      assert.ok(inTurn, `${script.role}: Stop without UserPromptSubmit`);
+      assert.ok(actionsInTurn >= 1, `${script.role}: empty turn (no actions between UserPromptSubmit and Stop)`);
+      busy += cost;
+      if (busy > maxBusy) maxBusy = busy;
+      inTurn = false;
+      busy = 0;
+    } else if (inTurn) {
+      actionsInTurn++;
+      busy += cost;
+    } else {
+      assert.equal(st.do, 'sleep', `${script.role}: non-sleep step '${st.do}' outside a turn`);
+    }
+  }
+  assert.ok(!inTurn, `${script.role}: unclosed turn`);
+  return maxBusy;
+}
+
+function hasFaultWindowIdleSleep(
+  script: AgentScript,
+  role: Role,
+  profile: RunProfile,
+  startOffsetMs: number,
+  zeroCliCost = false,
+): boolean {
+  const { faultWindowStartMs, faultWindowEndMs } = PROFILE[profile];
+  const minIdle = IDLE_SLEEP_MIN_MS[profile];
+  let inTurn = false;
+  let t = startOffsetMs;
+  for (const st of script.steps) {
+    if (st.do === 'hook' && st.event === 'UserPromptSubmit') inTurn = true;
+    else if (st.do === 'hook' && st.event === 'Stop') inTurn = false;
+    else if (!inTurn && st.do === 'sleep') {
+      const overlap = Math.min(t + st.ms, faultWindowEndMs) - Math.max(t, faultWindowStartMs);
+      if (overlap >= minIdle) return true;
+    }
+    t += st.do === 'sleep' ? st.ms : (zeroCliCost ? 0 : stepCostMs(st));
+  }
+  return false;
+}
 
 test('scripts are a pure function of the seed and profile', () => {
   for (const profile of RUN_PROFILES) {
@@ -12,10 +75,9 @@ test('scripts are a pure function of the seed and profile', () => {
   assert.notDeepEqual(buildScripts(7, 'short', deriveRng), buildScripts(7, 'soak', deriveRng));
 });
 
-test('every seed and profile: early ask, 1–2 later asks, root answers, both mail directions, within workloadEndMs and overlapping fault window', () => {
+test('every seed and profile: turns, busy cap, idle sleep, asks, overlap, and workloadEndMs', () => {
   for (const profile of RUN_PROFILES) {
-    const { faultWindowStartMs, workloadEndMs } = PROFILE[profile];
-    const [minChildSleep, maxChildSleep] = CHILD_ACTION_SLEEP_MS[profile];
+    const { faultWindowStartMs, faultWindowEndMs, workloadEndMs } = PROFILE[profile];
     for (let seed = 1; seed <= 200; seed++) {
       const s = buildScripts(seed, profile, deriveRng);
       assert.equal(s.root.readMailOnNudge, true);
@@ -26,7 +88,32 @@ test('every seed and profile: early ask, 1–2 later asks, root answers, both ma
       for (const role of ROLES) {
         assert.equal(s[role].role, role);
         assert.ok(!s[role].steps.some((x) => x.do === 'exit'));
-        const endAt = MAX_START_OFFSET_MS[role] + sleepTotal(s[role]);
+
+        if (profile === 'short') {
+          assert.ok(!s[role].steps.some((x) => x.do === 'status'), `short ${role} must not have status steps`);
+        }
+
+        const maxBusy = validateTurns(s[role]);
+        assert.ok(maxBusy <= BUSY_TURN_LIMIT_MS, `${profile} seed ${seed} ${role} busy=${maxBusy} > ${BUSY_TURN_LIMIT_MS}`);
+
+        if (profile === 'soak') {
+          assert.ok(
+            hasFaultWindowIdleSleep(s[role], role, profile, 0, true),
+            `soak seed ${seed} ${role} missing >=${IDLE_SLEEP_MIN_MS[profile]} ms idle sleep at (0, 0)`,
+          );
+          assert.ok(
+            hasFaultWindowIdleSleep(s[role], role, profile, MAX_START_OFFSET_MS[role], false),
+            `soak seed ${seed} ${role} missing >=${IDLE_SLEEP_MIN_MS[profile]} ms idle sleep at (MAX, STEP_COST_MS)`,
+          );
+        } else {
+          // Short keeps the 170_000 end bound, so idle sleep is checked at MAX/2 with STEP_COST_MS.
+          assert.ok(
+            hasFaultWindowIdleSleep(s[role], role, profile, MAX_START_OFFSET_MS[role] / 2, false),
+            `short seed ${seed} ${role} missing >=${IDLE_SLEEP_MIN_MS[profile]} ms idle sleep at MAX/2`,
+          );
+        }
+
+        const endAt = MAX_START_OFFSET_MS[role] + estimatedDuration(s[role]);
         assert.ok(endAt <= workloadEndMs, `${profile} seed ${seed} ${role} endAt=${endAt} > ${workloadEndMs}`);
 
         const midOffset = MAX_START_OFFSET_MS[role] / 2;
@@ -34,34 +121,132 @@ test('every seed and profile: early ask, 1–2 later asks, root answers, both ma
         const beginTimes: Array<{ do: string; t: number }> = [];
         for (const st of s[role].steps) {
           beginTimes.push({ do: st.do, t: midOffset + cum });
-          if (st.do === 'sleep') cum += st.ms;
+          cum += stepCostMs(st);
         }
-        const inWindow = (t: number) => t >= faultWindowStartMs && t <= workloadEndMs;
+        const inFaultWin = (t: number) => t >= faultWindowStartMs && t <= faultWindowEndMs;
+        const inWorkloadWin = (t: number) => t >= faultWindowStartMs && t <= workloadEndMs;
         if (role === 'root') {
           const rootMails = beginTimes.filter((x) => x.do === 'mail_send');
-          const inWin = rootMails.filter((x) => inWindow(x.t)).length;
-          assert.ok(inWin >= 2, `${profile} seed ${seed} root mails in window: ${inWin}`);
+          const inFW = rootMails.filter((x) => inFaultWin(x.t)).length;
+          const req = profile === 'short' ? 1 : 2;
+          assert.ok(inFW >= req, `${profile} seed ${seed} root mails in fault window: ${inFW} < ${req}`);
         } else {
-          const statusIdx = s[role].steps.findIndex((x) => x.do === 'status' && x.headline === `${role} working`);
-          const afterStatus = s[role].steps.slice(statusIdx + 1);
-          const actionSleeps = afterStatus[0]?.do === 'sleep' ? afterStatus.slice(1) : afterStatus;
-          for (const st of actionSleeps) {
-            if (st.do === 'sleep') assert.ok(st.ms >= minChildSleep && st.ms <= maxChildSleep, `${profile} ${role} sleep ${st.ms}`);
-          }
           const ma = beginTimes.filter((x) => x.do === 'mail_send' || x.do === 'ask');
-          const inWin = ma.filter((x) => inWindow(x.t)).length;
-          assert.ok(inWin >= 2 && inWin * 2 >= ma.length, `${profile} seed ${seed} ${role}: ${inWin}/${ma.length} in window`);
+          const inFW = ma.filter((x) => inFaultWin(x.t)).length;
+          const inWW = ma.filter((x) => inWorkloadWin(x.t)).length;
+          if (profile === 'short') {
+            assert.ok(inWW >= 2 && inFW >= 1, `${profile} seed ${seed} ${role}: inWW=${inWW} inFW=${inFW}`);
+          } else {
+            assert.ok(inFW >= 2 && inFW * 2 >= ma.length, `${profile} seed ${seed} ${role}: ${inFW}/${ma.length} in fault window`);
+          }
           assert.equal(s[role].answerRoutedQuestions, false);
           assert.ok(s[role].steps.some((x) => x.do === 'mail_send' && x.to === 'parent'));
-          assert.deepEqual(s[role].steps.at(-1), { do: 'hook', event: 'Stop' });
           asks += s[role].steps.filter((x) => x.do === 'ask').length;
-          if (s[role].steps[1]?.do === 'ask') early += 1;
+          const laterAsksForRole = beginTimes.filter((x) => x.do === 'ask' && x.t >= faultWindowStartMs).length;
+          assert.ok(laterAsksForRole <= 1, `${profile} seed ${seed} ${role}: laterAsks=${laterAsksForRole} > 1`);
+          if (beginTimes.some((x) => x.do === 'ask' && x.t < faultWindowStartMs)) early += 1;
         }
       }
       assert.equal(early, 1, `${profile} seed ${seed}: early asks`);
       assert.ok(asks >= 2 && asks <= 3, `${profile} seed ${seed}: ${asks} asks`);
+      // Verify the number of later asks emitted matches the rootRng draw (none silently dropped).
+      const rootRng = deriveRng(seed, 'agent.root');
+      rootRng.int(45_000, 50_000);
+      if (profile === 'short') rootRng.int(IDLE_SLEEP_MIN_MS.short, IDLE_SLEEP_MIN_MS.short + 500);
+      const rootMails = rootRng.int(profile === 'short' ? 1 : 2, profile === 'short' ? 1 : 3);
+      for (let m = 0; m < rootMails; m++) {
+        rootRng.pick(['child1', 'child2', 'child3']);
+        rootRng.pick(['task', 'message', 'fyi']);
+        if (m < rootMails - 1) rootRng.int(500, profile === 'short' ? 1_000 : 1_500);
+      }
+      rootRng.pick(['child1', 'child2', 'child3']); // early
+      const expectedLater = rootRng.int(1, 2);
+      assert.equal(asks - early, expectedLater, `${profile} seed ${seed}: emitted later asks ${asks - early} != chosen ${expectedLater}`);
     }
   }
+});
+
+test('turn and bound helpers reject violating scripts and accept valid ones', () => {
+  const valid = buildScripts(1, 'soak', deriveRng).child1;
+  assert.ok(validateTurns(valid) <= BUSY_TURN_LIMIT_MS);
+  assert.ok(hasFaultWindowIdleSleep(valid, 'child1', 'soak', 0, true));
+  assert.ok(hasFaultWindowIdleSleep(valid, 'child1', 'soak', MAX_START_OFFSET_MS.child1, false));
+  assert.ok(MAX_START_OFFSET_MS.child1 + estimatedDuration(valid) <= PROFILE.soak.workloadEndMs);
+
+  // Out-of-turn action
+  assert.throws(() => validateTurns({
+    role: 'child1',
+    readMailOnNudge: true,
+    answerRoutedQuestions: false,
+    steps: [
+      { do: 'mail_send', to: 'parent', type: 'message', body: 'CHAOS-M-2000 from=child1 to=root' },
+      { do: 'hook', event: 'UserPromptSubmit' },
+      { do: 'hook', event: 'Stop' },
+    ],
+  }), /outside a turn/);
+
+  // Double UserPromptSubmit
+  assert.throws(() => validateTurns({
+    role: 'child1',
+    readMailOnNudge: true,
+    answerRoutedQuestions: false,
+    steps: [
+      { do: 'hook', event: 'UserPromptSubmit' },
+      { do: 'hook', event: 'UserPromptSubmit' },
+      { do: 'hook', event: 'Stop' },
+    ],
+  }), /already in a turn/);
+
+  // Empty turn
+  assert.throws(() => validateTurns({
+    role: 'child1',
+    readMailOnNudge: true,
+    answerRoutedQuestions: false,
+    steps: [
+      { do: 'hook', event: 'UserPromptSubmit' },
+      { do: 'hook', event: 'Stop' },
+    ],
+  }), /empty turn/);
+
+  const overBusy: AgentScript = {
+    role: 'child1',
+    readMailOnNudge: true,
+    answerRoutedQuestions: false,
+    steps: [
+      { do: 'hook', event: 'UserPromptSubmit' },
+      { do: 'mail_send', to: 'parent', type: 'message', body: 'CHAOS-M-2000 from=child1 to=root' },
+      { do: 'mail_send', to: 'parent', type: 'result', body: 'CHAOS-M-2001 from=child1 to=root' },
+      { do: 'hook', event: 'Stop' },
+    ],
+  };
+  assert.ok(validateTurns(overBusy) > BUSY_TURN_LIMIT_MS);
+
+  const noIdle: AgentScript = {
+    role: 'child1',
+    readMailOnNudge: true,
+    answerRoutedQuestions: false,
+    steps: [
+      { do: 'hook', event: 'UserPromptSubmit' },
+      { do: 'mail_send', to: 'parent', type: 'result', body: 'CHAOS-M-2000 from=child1 to=root' },
+      { do: 'hook', event: 'Stop' },
+      { do: 'sleep', ms: 1_000 },
+    ],
+  };
+  assert.equal(hasFaultWindowIdleSleep(noIdle, 'child1', 'short', 0, true), false);
+  assert.equal(hasFaultWindowIdleSleep(noIdle, 'child1', 'short', MAX_START_OFFSET_MS.child1, false), false);
+
+  const overEnd: AgentScript = {
+    role: 'root',
+    readMailOnNudge: true,
+    answerRoutedQuestions: true,
+    steps: [
+      { do: 'sleep', ms: PROFILE.short.workloadEndMs },
+      { do: 'hook', event: 'UserPromptSubmit' },
+      { do: 'mail_send', to: 'child1', type: 'task', body: 'CHAOS-M-1999 from=root to=child1' },
+      { do: 'hook', event: 'Stop' },
+    ],
+  };
+  assert.ok(MAX_START_OFFSET_MS.root + estimatedDuration(overEnd) > PROFILE.short.workloadEndMs);
 });
 
 test('every profile satisfies the contract quiesce sizing rule', () => {
@@ -74,7 +259,7 @@ test('every profile satisfies the contract quiesce sizing rule', () => {
   }
 });
 
-test('every seed: root sends a waking mail to a child after all children have gone idle', () => {
+test('every seed: root sends a waking mail (after >=8s idle in short, after all children idle in soak)', () => {
   for (const profile of RUN_PROFILES) {
     for (let seed = 1; seed <= 200; seed++) {
       const s = buildScripts(seed, profile, deriveRng);
@@ -83,9 +268,17 @@ test('every seed: root sends a waking mail to a child after all children have go
       const last = steps[i];
       assert.ok(last.do === 'mail_send' && last.type === 'task' && last.to !== 'root' && last.to !== 'parent');
       assert.deepEqual(steps.at(-1), { do: 'hook', event: 'Stop' });
-      const sentAt = steps.slice(0, i).reduce((n, x) => n + (x.do === 'sleep' ? x.ms : 0), 0);
-      const childEnd = Math.max(sleepTotal(s.child1), sleepTotal(s.child2), sleepTotal(s.child3));
-      assert.ok(sentAt >= childEnd + IDLE_MARGIN_MS, `${profile} seed ${seed}`);
+      const sentAt = steps.slice(0, i).reduce((n, x) => n + stepCostMs(x), 0);
+      if (profile === 'short') {
+        // Short decouples tag-1999 from childEnd: turn-structured children are idle between turns
+        // and the contract's 80 s tail + 60 s nudge re-check cover a busy recipient.
+        const idleBefore = steps[i - 2];
+        assert.ok(idleBefore?.do === 'sleep' && idleBefore.ms >= IDLE_SLEEP_MIN_MS.short);
+      } else {
+        // Soak keeps the strict childEnd + IDLE_MARGIN_MS coupling.
+        const childEnd = Math.max(estimatedDuration(s.child1), estimatedDuration(s.child2), estimatedDuration(s.child3));
+        assert.ok(sentAt >= childEnd + IDLE_MARGIN_MS, `${profile} seed ${seed}: sentAt=${sentAt} < ${childEnd + IDLE_MARGIN_MS}`);
+      }
     }
   }
 });

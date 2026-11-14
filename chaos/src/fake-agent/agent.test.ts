@@ -185,6 +185,36 @@ test('ask answered by the waiter: ask_sent on the stderr event id, later steps a
   assert.ok(t.calls[0].args.includes('--wait'));
 });
 
+test('ask step waits for ask_sent before next step, leaving --wait in background', async () => {
+  let emitStderr: (chunk: string) => void = () => undefined;
+  let release: (r: CliResult) => void = () => undefined;
+  const t = setup(
+    { steps: [{ do: 'ask', title: 'ignored', message: 'ignored', options: ['a'] }, { do: 'hook', event: 'Stop' }] },
+    (c) => new Promise<CliResult>((r) => {
+      emitStderr = (chunk) => c.opts?.onStderr?.(chunk);
+      release = r;
+    }),
+  );
+  t.stdin.end();
+  const done = t.run();
+  await tick();
+  await tick();
+  // Before event id arrives, Stop has not fired yet.
+  assert.deepEqual(t.events, [{ ev: 'start', pid: 42 }]);
+  emitStderr('Waiting for an answer (attention evt-2)...\n');
+  await tick();
+  await tick();
+  // Once ask_sent is known, Stop runs without waiting for --wait to finish.
+  assert.deepEqual(t.events, [
+    { ev: 'start', pid: 42 },
+    { ev: 'ask_sent', askTag: 'CHAOS-Q-2000', accepted: true, error: null },
+    { ev: 'hook_sent', event: 'Stop', ok: true },
+  ]);
+  release(ok('Q: CHAOS-Q-2000 from=child1\nA: yes\n', 'Waiting for an answer (attention evt-2)...\n'));
+  await done;
+  assert.deepEqual(t.events.at(-1), { ev: 'answer_received', askTag: 'CHAOS-Q-2000', answer: 'yes', via: 'waiter' });
+});
+
 test('ask answered by mail: the answer mail is logged with via mail', async () => {
   const t = setup(
     { steps: [{ do: 'ask', title: 't', message: 'm', options: [] }] },

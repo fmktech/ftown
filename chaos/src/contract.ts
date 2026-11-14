@@ -171,20 +171,26 @@ export interface ProfileTiming {
   /** Interval between periodic checkpoints. "After heal" properties are judged at the final one. */
   checkpointEveryMs: number;
   /**
-   * Every agent script's last step, and every workload op, must begin by this instant (guest ms
-   * since t0, so the agent's own start offset counts), so the workload overlaps the fault window
-   * and has finished well before the final checkpoint.
+   * By this instant (guest ms since t0) every workload op has begun and every agent has COMPLETED
+   * its final 'Stop' hook. The bound counts the agent's start offset, its sleeps and the guest time
+   * its CLI calls take (seconds each under the instruction-counted guest), not sleeps alone.
    *
-   * Sizing rule: the bridge nudges a hooked session about unread mail 60 s after the mail (or
-   * after a restart re-arms it). The final checkpoint must therefore come more than 60 s after
-   * both the last waking mail and the last heal, with margin for a bridge restart (a few seconds):
+   * Agent scripts are organised in turns, like a real agent: a 'UserPromptSubmit' hook, a few
+   * actions, a 'Stop' hook, then an idle sleep. The bridge treats a session as busy between those
+   * hooks and defers mail nudges while it is busy, re-checking every 60 s; it nudges an idle hooked
+   * session 60 s after a mail. A script that stays busy from its first prompt to its last step is
+   * never nudged during the run, so nudge delivery would go untested and mail would still be
+   * pending at the final checkpoint.
+   *
+   * Sizing rule: the final checkpoint must come more than 60 s after the last Stop and after the
+   * last waking mail, with margin for timer slip and a bridge restart:
    * faultWindowEndMs + quiesceMs >= max(workloadEndMs, faultWindowEndMs) + 80_000.
    */
   workloadEndMs: number;
 }
 
 export const PROFILE: Record<RunProfile, ProfileTiming> = {
-  short: { faultWindowStartMs: 75_000, faultWindowEndMs: 115_000, quiesceMs: 90_000, checkpointEveryMs: 15_000, workloadEndMs: 110_000 },
+  short: { faultWindowStartMs: 75_000, faultWindowEndMs: 115_000, quiesceMs: 135_000, checkpointEveryMs: 15_000, workloadEndMs: 170_000 },
   soak: { faultWindowStartMs: 90_000, faultWindowEndMs: 330_000, quiesceMs: 150_000, checkpointEveryMs: 30_000, workloadEndMs: 330_000 },
 };
 
@@ -331,7 +337,7 @@ export type Rec =
   | { k: 'checkpoint'; t: number; name: string; final: boolean; snap: Snapshot }
   | { k: 'verdict'; prop: string; kind: PropKind; status: PropStatus; evidence: string[] };
 
-export const CONTRACT_VERSION = 7;
+export const CONTRACT_VERSION = 8;
 
 /** Operations the supervisor's workload driver performs through the real ftown CLI. */
 export type WorkloadOp =
