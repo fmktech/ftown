@@ -270,7 +270,8 @@ async function drive(seed: number, level: ChaosLevel, clock: Clock, rec: Recorde
   const work = guard(
     runWorkload({
       clock,
-      plan: planWorkload(seed, deriveRng, WORKLOAD_START_MS, FAULT_WINDOW_END_MS),
+      // Starts once every session exists; under icount that instant is itself deterministic.
+      plan: planWorkload(seed, deriveRng, Math.max(WORKLOAD_START_MS, clock.now()), FAULT_WINDOW_END_MS),
       idOf: (r) => ids[r],
       send: (id: string, type: MailType, body: string) => ftown(['harness', 'mail', 'send', id, '--type', type, body], { timeoutMs: CONTROL_TIMEOUT_MS }),
       log: rec.log,

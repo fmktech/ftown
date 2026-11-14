@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fakeClock } from '../core/clock.ts';
 import { deriveRng } from '../core/rng.ts';
+import { FAULT_WINDOW_END_MS } from '../contract.ts';
 import type { Rec } from '../contract.ts';
 import { normaliseError, planWorkload, runWorkload } from './workload.ts';
 
@@ -13,7 +14,7 @@ test('plan: deterministic, 5–15 s apart, tags from 1, ends by the fault window
   p.forEach((m, i) => {
     assert.equal(m.tag, `CHAOS-M-${i + 1}`);
     assert.ok(m.atMs - prev >= 5_000 && m.atMs - prev <= 15_000);
-    assert.ok(m.atMs <= 240_000);
+    assert.ok(m.atMs <= FAULT_WINDOW_END_MS);
     assert.notEqual(m.type, 'escalation');
     prev = m.atMs;
   });

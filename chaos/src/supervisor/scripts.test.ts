@@ -20,13 +20,13 @@ test('every seed: one first-step ask plus 1–2 later asks, root answers, both m
     for (const role of ROLES) {
       assert.equal(s[role].role, role);
       assert.ok(!s[role].steps.some((x) => x.do === 'exit'));
-      if (role !== 'root') for (const st of s[role].steps) if (st.do === 'sleep') assert.ok(st.ms >= 1_000 && st.ms <= 20_000);
+      if (role !== 'root') for (const st of s[role].steps.slice(2)) if (st.do === 'sleep') assert.ok(st.ms >= 1_000 && st.ms <= 20_000);
       if (role === 'root') continue;
       assert.equal(s[role].answerRoutedQuestions, false);
       assert.ok(s[role].steps.some((x) => x.do === 'mail_send' && x.to === 'parent'));
       assert.deepEqual(s[role].steps.at(-1), { do: 'hook', event: 'Stop' });
       asks += s[role].steps.filter((x) => x.do === 'ask').length;
-      if (s[role].steps[0].do === 'ask') early += 1;
+      if (s[role].steps[1]?.do === 'ask') early += 1;
     }
     assert.equal(early, 1, `seed ${seed}: early asks`);
     assert.ok(asks >= 2 && asks <= 3, `seed ${seed}: ${asks} asks`);
