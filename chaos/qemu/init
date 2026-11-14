@@ -1,0 +1,52 @@
+#!/bin/sh
+# PID 1 of the chaos guest. Root is the initramfs (RAM). No disks, no network but lo.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export HOME=/root LANG=C.UTF-8 TZ=UTC NODE_OPTIONS= 
+BB=/bin/busybox
+[ -x "$BB" ] || BB=/usr/bin/busybox
+
+mkdir -p /proc /sys /dev /run /tmp
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev 2>/dev/null
+[ -e /dev/console ] || mknod -m 600 /dev/console c 5 1
+[ -e /dev/ttyS1 ] || mknod -m 660 /dev/ttyS1 c 4 65
+mkdir -p /dev/pts /dev/shm
+mount -t devpts devpts /dev/pts
+mount -t tmpfs -o mode=1777 tmpfs /dev/shm
+mount -t tmpfs -o mode=755 tmpfs /run
+mount -t tmpfs -o mode=1777 tmpfs /tmp
+mount -t cgroup2 cgroup2 /sys/fs/cgroup 2>/dev/null
+exec 0</dev/console 1>/dev/console 2>&1
+
+$BB ip link set lo up
+$BB hostname chaos
+# Raw output on the frame port: no \n -> \r\n translation.
+$BB stty -F /dev/ttyS1 raw -echo 115200
+
+CHAOS_CMD=selftest; CHAOS_SEED=0; CHAOS_LEVEL=off
+for a in $(cat /proc/cmdline); do
+  case "$a" in
+    chaos.cmd=*) CHAOS_CMD=${a#chaos.cmd=} ;;
+    chaos.seed=*) CHAOS_SEED=${a#chaos.seed=} ;;
+    chaos.level=*) CHAOS_LEVEL=${a#chaos.level=} ;;
+  esac
+done
+export CHAOS_CMD CHAOS_SEED CHAOS_LEVEL
+echo "chaos-init: cmd=$CHAOS_CMD seed=$CHAOS_SEED level=$CHAOS_LEVEL"
+
+rm -f /run/chaos-exit-sent
+cd /
+node /opt/chaos/src/guest/main.ts
+code=$?
+echo "chaos-init: main exited $code"
+if [ ! -e /run/chaos-exit-sent ]; then
+  # main did not report; that is an infrastructure failure unless it exited cleanly with a code.
+  [ "$code" -eq 0 ] && code=3
+  printf 'CHAOS-EXIT %s\n' "$code" > /dev/ttyS1
+fi
+sync
+# Let the UART drain (virtual time under icount, so this costs no wall time).
+$BB sleep 1
+$BB poweroff -f
+echo o > /proc/sysrq-trigger
