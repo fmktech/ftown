@@ -8,34 +8,59 @@ const VALID: Readonly<Record<Property['kind'], readonly PropStatus[]>> = {
   sometimes: ['hit', 'not_hit'],
 };
 
-function run(p: Property, log: readonly Rec[]): PropResult {
-  let r: PropResult;
-  try {
-    r = p.check(log);
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    return { status: 'violated', evidence: [`property threw: ${msg}`] };
+function deepFreeze<T>(v: T): T {
+  if (v !== null && typeof v === 'object' && !Object.isFrozen(v)) {
+    Object.freeze(v);
+    for (const k of Object.keys(v)) deepFreeze((v as Record<string, unknown>)[k]);
   }
-  if (!VALID[p.kind].includes(r.status)) {
-    return { status: 'violated', evidence: [`property returned status ${String(r.status)} invalid for kind ${p.kind}`] };
-  }
-  return r;
+  return v;
 }
 
+type Outcome = { result: PropResult; crashed: boolean };
+
+function crash(msg: string): Outcome {
+  return { result: { status: 'violated', evidence: [msg] }, crashed: true };
+}
+
+function run(p: Property, log: readonly Rec[]): Outcome {
+  try {
+    const r = p.check(log) as PropResult | null | undefined;
+    if (r === null || typeof r !== 'object') return crash(`property returned ${r === null ? 'null' : typeof r}`);
+    if (!VALID[p.kind].includes(r.status)) {
+      return crash(`property returned status ${String(r.status)} invalid for kind ${p.kind}`);
+    }
+    if (!Array.isArray(r.evidence) || r.evidence.some((e) => typeof e !== 'string')) {
+      return crash('property returned evidence that is not a string array');
+    }
+    return { result: { status: r.status, evidence: [...r.evidence] }, crashed: false };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return crash(`property threw: ${msg}`);
+  }
+}
+
+/**
+ * A property that throws or returns something malformed is 'violated' and fails the run for every
+ * kind, 'sometimes' included: a crashed check must never go green. Each property gets the same
+ * deep-frozen copy of the log (verdict records removed), so none can affect another.
+ */
 export function evaluate(
   props: readonly Property[],
   log: readonly Rec[],
 ): { verdicts: Verdict[]; exitCode: number } {
-  const input = log.filter((r) => r.k !== 'verdict');
+  const input = deepFreeze(structuredClone(log.filter((r) => r.k !== 'verdict')));
+  let bad = false;
   const verdicts: Verdict[] = props.map((p) => {
-    const r = run(p, input);
-    return { k: 'verdict', prop: p.id, kind: p.kind, status: r.status, evidence: [...r.evidence] };
+    const { result: r, crashed } = run(p, input);
+    if (
+      crashed ||
+      (p.kind === 'always' && (r.status === 'violated' || r.status === 'unexercised')) ||
+      (p.kind === 'unreachable' && r.status === 'violated')
+    ) {
+      bad = true;
+    }
+    return { k: 'verdict', prop: p.id, kind: p.kind, status: r.status, evidence: r.evidence };
   });
-  const bad = verdicts.some(
-    (v) =>
-      (v.kind === 'always' && (v.status === 'violated' || v.status === 'unexercised')) ||
-      (v.kind === 'unreachable' && v.status === 'violated'),
-  );
   return { verdicts, exitCode: bad ? EXIT.violation : EXIT.ok };
 }
 
