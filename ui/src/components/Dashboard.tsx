@@ -25,6 +25,8 @@ import { PullRequestStatusProvider } from "./PullRequestStatusProvider";
 import { SessionWorkspace } from "./SessionWorkspace";
 import { childSessionsOf } from "./SessionOverview";
 import { parsePullRequestUrl } from "@/lib/pull-request-url";
+import { usePreviewDismissal } from "@/hooks/usePreviewDismissal";
+import { previewRevisionKey } from "@/lib/preview-dismissal";
 import { Terminal, TerminalHandle } from "./Terminal";
 import { MobileControlBar, MobileControlBarHandle } from "./MobileControlBar";
 import { TerminalCopySheet } from "./TerminalCopySheet";
@@ -432,11 +434,11 @@ PY`;
     return counts;
   }, [inbox]);
   const selectedWaitingEntry = selectedSession ? inbox.find(e => e.session.id === selectedSession.id && !isWithParent(e.notice)) ?? null : null;
-  const [previewChoices, setPreviewChoices] = useState<Record<string, { id: string; open: boolean }>>({});
+  // A preview is shown unless the owner closed this exact revision; a new or changed preview shows again.
+  const { isDismissed, setPreviewDismissed } = usePreviewDismissal();
   const selectedPreviewKey = selectedSession ? `${selectedSession.bridgeId}:${selectedSession.id}` : "";
   const selectedPreviewDescriptor = selectedSession?.preview && isPreviewDescriptor(selectedSession.preview) ? selectedSession.preview : null;
-  const choice = previewChoices[selectedPreviewKey];
-  const previewOpen = !!selectedPreviewDescriptor && (choice?.id !== selectedPreviewDescriptor.id || choice.open);
+  const previewOpen = !!selectedPreviewDescriptor && !isDismissed(selectedPreviewKey, selectedPreviewDescriptor);
   const reviewIdentity = reviewIdentityFor(selectedSession);
   const [reviewChoice, setReviewChoice] = useState<{ identity: string; activation: number }>({ identity: "", activation: 0 });
   const reviewOpen = !!reviewIdentity && reviewChoice.identity === reviewIdentity;
@@ -481,9 +483,10 @@ PY`;
     for (const session of sessions) {
       if (!session.preview || !isPreviewDescriptor(session.preview)) continue;
       const key = `${session.bridgeId}:${session.id}`;
-      const hadPreviewBefore = observedPreviews.current[key] !== undefined;
-      observed[key] = session.preview.id;
-      if (!hadPreviewBefore && session.id === selectedSessionId) {
+      const revision = previewRevisionKey(session.preview);
+      observed[key] = revision;
+      // A preview that is new or changed since the last look brings the selected session's side pane forward unless it was closed.
+      if (observedPreviews.current[key] !== revision && session.id === selectedSessionId && !isDismissed(key, session.preview)) {
         autoOpenSelected = true;
       }
     }
@@ -491,28 +494,12 @@ PY`;
       setMobileTab(current => current === "sessions" || current === "review" ? current : "preview");
     }
     observedPreviews.current = observed;
-    setPreviewChoices(previous => {
-      const next: typeof previous = {};
-      for (const [key, id] of Object.entries(observed)) {
-        const prev = previous[key];
-        if (!prev) {
-          next[key] = { id, open: true };
-        } else if (prev.id === id) {
-          next[key] = prev;
-        } else {
-          // Set id changed but preview existed before: preserve open/closed state instead of re-opening.
-          next[key] = { id, open: prev.open };
-        }
-      }
-      if (Object.keys(next).length === Object.keys(previous).length && Object.keys(next).every(key => next[key] === previous[key])) return previous;
-      return next;
-    });
-  }, [sessions, selectedSessionId]);
+  }, [sessions, selectedSessionId, isDismissed]);
   const setPreviewOpen = useCallback((open: boolean) => {
     if (!selectedPreviewDescriptor) return;
-    setPreviewChoices(previous => ({ ...previous, [selectedPreviewKey]: { id: selectedPreviewDescriptor.id, open } }));
+    setPreviewDismissed(selectedPreviewKey, selectedPreviewDescriptor, !open);
     if (open) setMobileTab(current => current === "sessions" ? current : "preview");
-  }, [selectedPreviewDescriptor, selectedPreviewKey]);
+  }, [selectedPreviewDescriptor, selectedPreviewKey, setPreviewDismissed]);
   const refitPreviewTerminal = useCallback(() => { terminalRef.current?.refit({ forceResize: true }); }, []);
   const sessionRelaunchLabel = selectedSession && !selectedSession.loopId
     ? getSessionRelaunchLabel(selectedSession.status)
@@ -619,12 +606,12 @@ PY`;
     if (id) {
       const session = sessions.find(item => item.id === id);
       const key = session ? `${session.bridgeId}:${session.id}` : "";
-      const choice = previewChoices[key];
       // Entering a session lands on its side pane when there is something in it: the waiting item first, else an open preview.
       const waiting = inboxRef.current.some(entry => entry.session.id === id && !isWithParent(entry.notice));
-      setMobileTab(waiting || (session?.preview && (choice?.id !== session.preview.id || choice.open)) ? "preview" : "terminal");
+      const previewShown = !!session?.preview && isPreviewDescriptor(session.preview) && !isDismissed(key, session.preview);
+      setMobileTab(waiting || previewShown ? "preview" : "terminal");
     }
-  }, [sessions, previewChoices]);
+  }, [sessions, isDismissed]);
 
   const handleReviewPullRequest = useCallback((id: string) => {
     const target = sessions.find(session => session.id === id);
