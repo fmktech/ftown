@@ -19,7 +19,7 @@ import {
   type TreeEventLogApi,
   type TreeEventPage,
 } from './contract.js';
-import { createCoordination, rootOf, type CoordinationPrStatusResult } from './wiring.js';
+import { createCoordination, rootOf, type CoordinationDeps, type CoordinationPrStatusResult } from './wiring.js';
 
 function makeSession(id: string, overrides: Partial<Session> = {}): Session {
   return {
@@ -175,8 +175,12 @@ class FakeBoardService implements BoardServiceApi {
   }
 }
 
-function createHarness() {
+function createHarness(options?: {
+  createPlan?: CoordinationDeps['createPlan'];
+  listArchived?: boolean;
+}) {
   const sessions = new Map<string, Session>();
+  const archived: Session[] = [];
   const published: Session[] = [];
   const attentionMap = new Map<string, { activity: Activity; openCount: number }>();
   const routedMap = new Map<string, AttentionItem[]>();
@@ -207,6 +211,11 @@ function createHarness() {
         if (listSessionsShouldThrow) throw new Error('listSessions failed');
         return [...sessions.values()].map((s) => structuredClone(s));
       },
+      ...(options?.listArchived === false
+        ? {}
+        : {
+            listArchived: async () => archived.map((s) => structuredClone(s)),
+          }),
       sessionDir: (id) => `/tmp/fake-sessions/${id}`,
     },
     attention: {
@@ -248,11 +257,13 @@ function createHarness() {
       fakeBoard = new FakeBoardService(deps);
       return fakeBoard;
     },
+    ...(options?.createPlan ? { createPlan: options.createPlan } : {}),
   });
 
   return {
     coord,
     sessions,
+    archived,
     published,
     attentionMap,
     routedMap,
@@ -692,5 +703,172 @@ describe('coordination wiring', () => {
     assert.equal(h.escalatedCallbacks.length, 1);
     await h.coord.onSessionExit('parent-1');
     assert.equal(h.escalatedCallbacks.length, 1);
+  });
+
+  it('passes sanitized archive records to the board and omits the dep when the store has none', async () => {
+    const h = createHarness();
+    const tombstone = makeSession('gone', {
+      name: 'Retired',
+      parentSessionId: 'root-1',
+      status: 'completed',
+      env: { TOKEN: 'secret' },
+      previewSource: { version: 2, id: 'prev', root: '/tmp/secret', files: [{ id: 'f', filePath: '/tmp/secret/a.html' }] },
+    });
+    (tombstone as Session & { removedAt: string }).removedAt = '2026-11-13T11:00:00.000Z';
+    h.archived.push(tombstone);
+
+    assert.equal(typeof h.fakeBoard.deps.listArchived, 'function');
+    const listed = await h.fakeBoard.deps.listArchived!();
+    assert.equal(listed.length, 1);
+    assert.equal(listed[0].id, 'gone');
+    assert.equal(listed[0].name, 'Retired');
+    assert.equal(listed[0].parentSessionId, 'root-1');
+    assert.equal(listed[0].status, 'completed');
+    assert.equal((listed[0] as Session & { removedAt?: string }).removedAt, '2026-11-13T11:00:00.000Z');
+    assert.equal(listed[0].env, undefined);
+    assert.equal(listed[0].previewSource, undefined);
+    assert.equal(h.archived[0].env?.TOKEN, 'secret');
+
+    const bare = createHarness({ listArchived: false });
+    assert.equal(bare.fakeBoard.deps.listArchived, undefined);
+  });
+
+  it('completes the parent plan item when a child card becomes done, and emits plan events through the store', async () => {
+    const calls: Array<{ parentId: string; childId: string }> = [];
+    let planDeps: { emit: (parent: Session, summary: string) => Promise<void> } | undefined;
+    const h = createHarness({
+      createPlan: (deps) => {
+        planDeps = deps;
+        return {
+          get: async () => null,
+          add: async () => { throw new Error('not used'); },
+          patch: async () => { throw new Error('not used'); },
+          remove: async () => {},
+          startForChild: async () => {},
+          completeForChild: async (parentId: string, childId: string) => {
+            calls.push({ parentId, childId });
+          },
+        } as unknown as ReturnType<NonNullable<CoordinationDeps['createPlan']>>;
+      },
+    });
+    const child = makeSession('child-1', { name: 'Builder', parentSessionId: 'root-1' });
+    const root = makeSession('root-1', { name: 'Root' });
+    h.sessions.set(child.id, child);
+    h.sessions.set(root.id, root);
+
+    await h.coord.cards.set('child-1', { state: 'working', headline: 'In progress' });
+    assert.deepEqual(calls, []);
+
+    await h.coord.cards.set('child-1', { state: 'done', headline: 'Shipped' });
+    assert.deepEqual(calls, [{ parentId: 'root-1', childId: 'child-1' }]);
+
+    await h.coord.cards.set('child-1', { headline: 'Shipped again' });
+    assert.equal(calls.length, 1);
+
+    await h.coord.cards.set('root-1', { state: 'done', headline: 'Manager done' });
+    assert.equal(calls.length, 1);
+
+    const failing = createHarness({
+      createPlan: () => ({
+        get: async () => null,
+        add: async () => { throw new Error('not used'); },
+        patch: async () => { throw new Error('not used'); },
+        remove: async () => {},
+        startForChild: async () => {},
+        completeForChild: async () => { throw new Error('plan down'); },
+      }) as unknown as ReturnType<NonNullable<CoordinationDeps['createPlan']>>,
+    });
+    failing.sessions.set('child-1', makeSession('child-1', { parentSessionId: 'root-1' }));
+    await assert.doesNotReject(() => failing.coord.cards.set('child-1', { state: 'done', headline: 'Still saved' }));
+    assert.equal(failing.sessions.get('child-1')?.card?.state, 'done');
+    assert.equal((failing.fakeEvents.byRoot.get('root-1') ?? []).some((event) => event.kind === 'status'), true);
+
+    assert.ok(planDeps);
+    await planDeps.emit(root, 'p1 done: Ship');
+    const planEvents = h.fakeEvents.byRoot.get('root-1') ?? [];
+    assert.equal(planEvents.at(-1)?.kind, 'plan');
+    assert.equal(planEvents.at(-1)?.summary, 'p1 done: Ship');
+  });
+
+  it('emits removed once when a live child is archived, and not for an exit or a root', async () => {
+    const h = createHarness();
+    const root = makeSession('root-1', { name: 'Root', status: 'running' });
+    const child = makeSession('child-1', { name: 'Worker', parentSessionId: 'root-1', status: 'running' });
+    h.sessions.set(root.id, root);
+    h.sessions.set(child.id, child);
+
+    await h.coord.onSessionExit('child-1', child);
+    await h.coord.onSessionExit('child-1', child);
+    let events = h.fakeEvents.byRoot.get('root-1') ?? [];
+    assert.equal(events.length, 1);
+    assert.equal(events[0].kind, 'removed');
+    assert.equal(events[0].summary, 'removed');
+    assert.equal(events[0].sessionId, 'child-1');
+
+    h.coord.onSessionStart('child-1');
+    await Promise.all([
+      h.coord.onSessionExit('child-1', child),
+      h.coord.onSessionExit('child-1', child),
+    ]);
+    events = h.fakeEvents.byRoot.get('root-1') ?? [];
+    assert.equal(events.filter((event) => event.kind === 'removed').length, 2);
+
+    const stopped = makeSession('child-2', { name: 'Stopped', parentSessionId: 'root-1', status: 'completed' });
+    h.sessions.set(stopped.id, stopped);
+    await h.coord.onSessionExit('child-2', stopped);
+    events = h.fakeEvents.byRoot.get('root-1') ?? [];
+    assert.equal(events.filter((event) => event.sessionId === 'child-2' && event.kind === 'exit').length, 1);
+    assert.equal(events.filter((event) => event.sessionId === 'child-2' && event.kind === 'removed').length, 0);
+
+    await h.coord.onSessionExit('root-1', root);
+    assert.equal((h.fakeEvents.byRoot.get('root-1') ?? []).some((event) => event.sessionId === 'root-1' && event.kind === 'removed'), false);
+  });
+
+  it('returns a removed child\'s started plan items to todo and still emits removed when release fails', async () => {
+    const h = createHarness();
+    const stamp = '2026-11-13T10:00:00.000Z';
+    const root = makeSession('root-1', {
+      name: 'Root',
+      status: 'running',
+      plan: {
+        seq: 3,
+        items: [
+          { id: 'p1', title: 'Build parser', after: ['p2'], priority: 2, state: 'started', sessionId: 'child-1', createdAt: stamp, updatedAt: stamp },
+          { id: 'p2', title: 'Leave me', after: [], priority: 2, state: 'todo', createdAt: stamp, updatedAt: stamp },
+          { id: 'p3', title: 'Other child', after: [], priority: 2, state: 'started', sessionId: 'child-9', createdAt: stamp, updatedAt: stamp },
+        ],
+      },
+    });
+    const child = makeSession('child-1', { name: 'Worker', parentSessionId: 'root-1', status: 'running' });
+    h.sessions.set(root.id, root);
+    h.sessions.set(child.id, child);
+
+    await h.coord.onSessionExit('child-1', child);
+    const items = h.sessions.get('root-1')?.plan?.items ?? [];
+    assert.equal(items.find((item) => item.id === 'p1')?.state, 'todo');
+    assert.equal(items.find((item) => item.id === 'p1')?.sessionId, undefined);
+    assert.equal(items.find((item) => item.id === 'p2')?.state, 'todo');
+    assert.equal(items.find((item) => item.id === 'p3')?.state, 'started');
+    assert.equal(items.find((item) => item.id === 'p3')?.sessionId, 'child-9');
+    const events = h.fakeEvents.byRoot.get('root-1') ?? [];
+    assert.equal(events.filter((event) => event.kind === 'removed').length, 1);
+    assert.equal(events.find((event) => event.kind === 'plan')?.summary, 'p1 todo: Build parser (session removed)');
+
+    const failing = createHarness({
+      createPlan: () => ({
+        get: async () => null,
+        add: async () => { throw new Error('not used'); },
+        patch: async () => { throw new Error('not used'); },
+        remove: async () => {},
+        startForChild: async () => {},
+        completeForChild: async () => {},
+        releaseForChild: async () => { throw new Error('plan down'); },
+      }) as unknown as ReturnType<NonNullable<CoordinationDeps['createPlan']>>,
+    });
+    failing.sessions.set('child-1', makeSession('child-1', { name: 'Worker', parentSessionId: 'root-1', status: 'running' }));
+    failing.sessions.set('root-1', makeSession('root-1', { name: 'Root', status: 'running' }));
+    await assert.doesNotReject(() => failing.coord.onSessionExit('child-1', failing.sessions.get('child-1')));
+    const failedEvents = failing.fakeEvents.byRoot.get('root-1') ?? [];
+    assert.equal(failedEvents.filter((event) => event.kind === 'removed').length, 1);
   });
 });

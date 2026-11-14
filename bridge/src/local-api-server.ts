@@ -37,6 +37,7 @@ import {
   createFtownSession,
   deriveRelaunchCommand,
   parseCreateSessionBody,
+  PlanItemError,
   ProviderAuthMissingError,
   WorkingDirMissingError,
   type CreateFtownSessionDeps,
@@ -60,6 +61,7 @@ import {
   markArchivedWorktreeRetained,
 } from './coordination/attention-routing.js';
 import { handleBriefRoutes } from './coordination/routes-brief.js';
+import { createPlanRoutes } from './coordination/routes-plan.js';
 import { createWorktreeRoutes } from './coordination/routes-worktrees.js';
 import { createCoordination, rootOf, type Coordination } from './coordination/wiring.js';
 import { GitWorktrees } from './worktrees.js';
@@ -92,6 +94,11 @@ function jsonResponse(res: ServerResponse, status: number, data: unknown): void 
 }
 
 class BadRequestError extends Error {}
+
+/** PLAN_ROUTES paths: /api/sessions/:id/plan and /api/sessions/:id/plan/:itemId. */
+function isPlanRoutePath(path: string): boolean {
+  return /^\/api\/sessions\/[^/]+\/plan(?:\/[^/]+)?$/.test(path);
+}
 
 /**
  * A blocked provider create/revive (mapped flavor with no machine token anywhere)
@@ -307,7 +314,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     await this.security.revalidate(message.principal);
     void this.handleApiRoute(request, response as unknown as ServerResponse, new URL(route.path, 'http://localhost').pathname,
       new URL(route.path, 'http://localhost')).catch(error => {
-        if (error instanceof BadRequestError || error instanceof WorktreeError) jsonResponse(response as unknown as ServerResponse, 400, { error: error.message });
+        if (error instanceof BadRequestError || error instanceof WorktreeError || error instanceof PlanItemError) jsonResponse(response as unknown as ServerResponse, 400, { error: error.message });
         else if (error instanceof RouteError) jsonResponse(response as unknown as ServerResponse, error.status, { error: error.message });
         else if (error instanceof AttentionError) jsonResponse(response as unknown as ServerResponse, error.status, { error: error.message, code: error.code });
         else jsonResponse(response as unknown as ServerResponse, 500, { error: 'bridge_error', code: 'bridge_error' });
@@ -609,6 +616,10 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     };
     try {
       if (await handleBriefRoutes(ctx)) return true;
+      if (isPlanRoutePath(path)) {
+        const plan = this.getCoordination()?.plan;
+        if (plan && await createPlanRoutes(plan)(ctx)) return true;
+      }
       if (await this.worktreeRoutes(ctx)) return true;
       return false;
     } catch (error) {
@@ -1026,7 +1037,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
           useCallerAsParent ? callerSessionId : undefined,
         );
       } catch (err) {
-        if (err instanceof WorktreeError) {
+        if (err instanceof WorktreeError || err instanceof PlanItemError) {
           jsonResponse(res, 400, { error: err.message });
           return;
         }
@@ -1050,7 +1061,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         const session = await controller.create(input);
         jsonResponse(res, 201, { session: toWireSession(session) });
       } catch (err) {
-        if (err instanceof WorktreeError) {
+        if (err instanceof WorktreeError || err instanceof PlanItemError) {
           jsonResponse(res, 400, { error: err.message });
           return;
         }

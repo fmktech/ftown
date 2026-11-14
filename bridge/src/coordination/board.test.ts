@@ -14,7 +14,9 @@ import {
 } from './contract.js';
 import type { Activity } from '../attention-events.js';
 import type { PullRequestState } from '../pull-request-status-protocol.js';
-import type { Session } from '../types.js';
+import type { ArchivedSession, Session } from '../types.js';
+import type { PlanItem } from './contract-c.js';
+import { orderPlan } from './plan.js';
 
 function makeSession(overrides: Partial<Session> & { id: string; name: string }): Session {
   return {
@@ -616,5 +618,333 @@ describe('BoardService', () => {
       resShort.line,
       '[ftown] since 08:09: w1 done "ok" | w2 done "ok" | w3 done "ok" | w4 done "ok" | w5 done "ok" | w6 done "ok" | +2 more',
     );
+  });
+
+  it('attaches orderPlan(root.plan.items) for root and child queries, including filtered boards', async () => {
+    const items: PlanItem[] = [
+      {
+        id: 'p2',
+        title: 'Second',
+        after: ['p1'],
+        priority: 1,
+        state: 'todo',
+        createdAt: '2026-11-13T10:02:00.000Z',
+        updatedAt: '2026-11-13T10:02:00.000Z',
+      },
+      {
+        id: 'p1',
+        title: 'First',
+        after: [],
+        priority: 2,
+        state: 'todo',
+        createdAt: '2026-11-13T10:01:00.000Z',
+        updatedAt: '2026-11-13T10:01:00.000Z',
+      },
+    ];
+    const root = makeSession({
+      id: 'root',
+      name: 'root',
+      plan: { items, seq: 2 },
+    });
+    const child = makeSession({
+      id: 'c1',
+      name: 'w1',
+      parentSessionId: 'root',
+      status: 'running',
+      createdAt: '2026-11-13T10:05:00.000Z',
+    });
+    const env = createFakeEnv([root, child]);
+    const service = new BoardService(env.deps);
+    const expected = orderPlan(structuredClone(items));
+
+    const fromRoot = await service.board({ sessionId: 'root' });
+    assert.deepEqual(fromRoot.plan, expected);
+    const fromChild = await service.board({ sessionId: 'c1' });
+    assert.deepEqual(fromChild.plan, expected);
+
+    const filtered = await service.board({ sessionId: 'root', ready: true, since: 999 });
+    assert.deepEqual(filtered.cards, []);
+    assert.deepEqual(filtered.plan, expected);
+
+    const bare = makeSession({ id: 'bare', name: 'bare' });
+    const noPlan = await new BoardService(createFakeEnv([bare]).deps).board({ sessionId: 'bare' });
+    assert.equal(noPlan.plan, undefined);
+  });
+
+  it('board({ all: true }) appends archived children of the root, newest first, capped at 50', async () => {
+    const root = makeSession({ id: 'root', name: 'root' });
+    const live = makeSession({
+      id: 'live',
+      name: 'live-worker',
+      parentSessionId: 'root',
+      status: 'running',
+      createdAt: '2026-11-13T10:00:00.000Z',
+      card: { state: 'working', headline: 'still going', updatedAt: '2026-11-13T10:05:00.000Z' },
+    });
+    const liveTwin = makeSession({
+      id: 'live-twin',
+      name: 'live-twin',
+      parentSessionId: 'root',
+      status: 'running',
+      createdAt: '2026-11-13T10:06:00.000Z',
+    });
+    const archived: Session[] = [];
+    for (let i = 0; i < 51; i++) {
+      archived.push({
+        ...makeSession({
+          id: `a${String(i).padStart(2, '0')}`,
+          name: `arch-${i}`,
+          parentSessionId: 'root',
+          status: 'completed',
+          createdAt: '2026-11-13T09:00:00.000Z',
+          shellType: 'claude',
+          model: 'claude-opus',
+          pullRequestUrl: 'https://github.com/org/repo/pull/77',
+          card: {
+            state: 'done',
+            headline: `finished ${i}`,
+            updatedAt: '2026-11-13T09:30:00.000Z',
+          },
+          preview: { id: 'prev', files: [{ id: 'f1', fileName: 'notes.md', kind: 'markdown' }] },
+        }),
+        removedAt: new Date(Date.parse('2026-11-13T11:00:00.000Z') + i * 1000).toISOString(),
+      });
+    }
+    archived.push({
+      ...makeSession({
+        id: 'other-tree',
+        name: 'stranger',
+        parentSessionId: 'other-root',
+        status: 'completed',
+      }),
+      removedAt: '2026-11-13T12:00:00.000Z',
+    });
+    archived.push({
+      ...makeSession({
+        id: 'live-twin',
+        name: 'tombstone-twin',
+        parentSessionId: 'root',
+        status: 'completed',
+      }),
+      removedAt: '2026-11-13T12:30:00.000Z',
+    });
+    const olderDup = {
+      ...makeSession({
+        id: 'dup',
+        name: 'old-name',
+        parentSessionId: 'root',
+        status: 'completed',
+        card: { state: 'done', headline: 'old', updatedAt: '2026-11-13T08:00:00.000Z' },
+      }),
+      removedAt: '2026-11-13T08:00:00.000Z',
+    } satisfies ArchivedSession;
+    const newerDup = {
+      ...makeSession({
+        id: 'dup',
+        name: 'new-name',
+        parentSessionId: 'root',
+        status: 'error',
+        card: { state: 'failed', headline: 'new', updatedAt: '2026-11-13T08:30:00.000Z' },
+      }),
+      removedAt: '2026-11-13T10:30:00.000Z',
+    } satisfies ArchivedSession;
+    const undated = makeSession({
+      id: 'undated',
+      name: 'undated',
+      parentSessionId: 'root',
+      status: 'error',
+    });
+    archived.push(olderDup, newerDup, undated);
+
+    const env = createFakeEnv([root, live, liveTwin]);
+    env.attention.set('a50', { activity: { state: 'thinking' }, openCount: 4 });
+    env.unreadMail.set('a50', 9);
+    env.prStatuses.set('https://github.com/org/repo/pull/77', {
+      state: 'passed',
+      stale: false,
+      checkedAt: null,
+    });
+    const attentionCalls: string[] = [];
+    const prCalls: string[] = [];
+    const origAttention = env.deps.attention;
+    const origPr = env.deps.prStatus;
+    env.deps.attention = (id: string) => {
+      attentionCalls.push(id);
+      return origAttention(id);
+    };
+    env.deps.prStatus = (url: string) => {
+      prCalls.push(url);
+      return origPr(url);
+    };
+    let listed = 0;
+    env.deps.listArchived = async () => {
+      listed += 1;
+      return archived;
+    };
+
+    const service = new BoardService(env.deps);
+    const hidden = await service.board({ sessionId: 'root' });
+    assert.equal(listed, 0);
+    assert.deepEqual(hidden.cards.map((c) => c.sessionId), ['live', 'live-twin']);
+    assert.ok(hidden.cards.every((c) => c.archived !== true));
+
+    attentionCalls.length = 0;
+    prCalls.length = 0;
+    const board = await service.board({ sessionId: 'root', all: true });
+    assert.equal(listed, 1);
+    assert.equal(board.cards[0]?.sessionId, 'live');
+    assert.equal(board.cards[1]?.sessionId, 'live-twin');
+    const retired = board.cards.slice(2);
+    assert.equal(retired.length, 50);
+    assert.equal(retired[0]?.sessionId, 'a50');
+    assert.equal(retired[49]?.sessionId, 'a01');
+    assert.ok(retired.every((c) => c.archived === true));
+    assert.ok(!retired.some((c) => c.sessionId === 'a00' || c.sessionId === 'other-tree' || c.sessionId === 'live-twin' || c.sessionId === 'undated' || c.sessionId === 'dup'));
+    const newest = retired[0]!;
+    assert.equal(newest.derived.activity, 'unknown');
+    assert.equal(newest.derived.status, 'completed');
+    assert.equal(newest.derived.openAttention, 0);
+    assert.equal(newest.derived.unreadMail, 0);
+    assert.equal(newest.derived.pr, undefined);
+    assert.equal(newest.derived.idleSince, undefined);
+    assert.equal(newest.derived.shellType, 'claude');
+    assert.equal(newest.derived.model, 'claude-opus');
+    assert.deepEqual(newest.derived.previews, ['notes.md']);
+    assert.equal(newest.declared?.headline, 'finished 50');
+    assert.equal(newest.stale, false);
+    assert.equal(newest.parentSessionId, 'root');
+    assert.ok(!attentionCalls.includes('a50'));
+    assert.deepEqual(prCalls, []);
+    assert.equal(board.rollup.done, 0);
+    assert.equal(board.rollup.working, 1);
+    assert.equal(board.rollup.unset, 1);
+  });
+
+  it('excludes an archived working child from the rollup and keeps its last card', async () => {
+    const root = makeSession({ id: 'root', name: 'root' });
+    const live = makeSession({
+      id: 'live',
+      name: 'live',
+      parentSessionId: 'root',
+      status: 'running',
+      createdAt: '2026-11-13T10:00:00.000Z',
+      card: { state: 'working', headline: 'still going', updatedAt: '2026-11-13T10:05:00.000Z' },
+    });
+    const retiredWorking = {
+      ...makeSession({
+        id: 'old',
+        name: 'old-worker',
+        parentSessionId: 'root',
+        status: 'completed',
+        card: { state: 'working', headline: 'was working', updatedAt: '2026-11-13T09:00:00.000Z' },
+      }),
+      removedAt: '2026-11-13T11:00:00.000Z',
+    } satisfies ArchivedSession;
+    const env = createFakeEnv([root, live]);
+    env.deps.listArchived = async () => [retiredWorking];
+    const board = await new BoardService(env.deps).board({ sessionId: 'root', all: true });
+    const archived = board.cards.find((card) => card.sessionId === 'old');
+    assert.equal(archived?.archived, true);
+    assert.equal(archived?.declared?.state, 'working');
+    assert.equal(board.rollup.working, 1);
+    assert.equal(board.rollup.done, 0);
+    assert.equal(board.rollup.unset, 0);
+  });
+
+  it('keeps the newest archive tombstone and drops archived rows that have no events when since is set', async () => {
+    const root = makeSession({ id: 'root', name: 'root' });
+    const live = makeSession({
+      id: 'live',
+      name: 'live',
+      parentSessionId: 'root',
+      status: 'running',
+      createdAt: '2026-11-13T10:01:00.000Z',
+    });
+    const quiet = makeSession({
+      id: 'quiet',
+      name: 'quiet',
+      parentSessionId: 'root',
+      status: 'completed',
+      createdAt: '2026-11-13T10:02:00.000Z',
+    });
+    const older = {
+      ...makeSession({
+        id: 'dup',
+        name: 'old-name',
+        parentSessionId: 'root',
+        status: 'completed',
+      }),
+      removedAt: '2026-11-13T09:00:00.000Z',
+    } satisfies ArchivedSession;
+    const newer = {
+      ...makeSession({
+        id: 'dup',
+        name: 'new-name',
+        parentSessionId: 'root',
+        status: 'error',
+        card: { state: 'failed', headline: 'gave up', updatedAt: '2026-11-13T11:00:00.000Z' },
+      }),
+      removedAt: '2026-11-13T11:00:00.000Z',
+    } satisfies ArchivedSession;
+    const withEvent = {
+      ...makeSession({
+        id: 'archived-hit',
+        name: 'hit',
+        parentSessionId: 'root',
+        status: 'completed',
+        card: { state: 'done', headline: 'done', updatedAt: '2026-11-13T11:05:00.000Z' },
+      }),
+      removedAt: '2026-11-13T11:05:00.000Z',
+    } satisfies ArchivedSession;
+    const withoutEvent = {
+      ...makeSession({
+        id: 'archived-miss',
+        name: 'miss',
+        parentSessionId: 'root',
+        status: 'completed',
+      }),
+      removedAt: '2026-11-13T11:10:00.000Z',
+    } satisfies ArchivedSession;
+
+    const env = createFakeEnv([root, live, quiet]);
+    env.deps.listArchived = async () => [older, newer, withEvent, withoutEvent];
+    env.events.seed('root', [
+      {
+        seq: 1,
+        ts: '2026-11-13T11:06:00.000Z',
+        sessionId: 'live',
+        sessionName: 'live',
+        kind: 'status',
+        summary: 'working',
+      },
+      {
+        seq: 2,
+        ts: '2026-11-13T11:07:00.000Z',
+        sessionId: 'archived-hit',
+        sessionName: 'hit',
+        kind: 'exit',
+        summary: 'exited',
+      },
+    ]);
+
+    const service = new BoardService(env.deps);
+    const board = await service.board({ sessionId: 'root', all: true, since: 0 });
+    assert.deepEqual(
+      board.cards.map((c) => c.sessionId),
+      ['live', 'archived-hit'],
+    );
+    assert.equal(board.cards[1]?.archived, true);
+    assert.equal(board.cards[1]?.name, 'hit');
+
+    const all = await service.board({ sessionId: 'root', all: true });
+    const dup = all.cards.find((c) => c.sessionId === 'dup');
+    assert.ok(dup);
+    assert.equal(dup.name, 'new-name');
+    assert.equal(dup.derived.status, 'error');
+    assert.equal(dup.declared?.state, 'failed');
+    assert.equal(dup.archived, true);
+    assert.equal(all.cards.filter((c) => c.sessionId === 'dup').length, 1);
+    assert.ok(all.cards.some((c) => c.sessionId === 'quiet'));
+    assert.equal(all.cards.find((c) => c.sessionId === 'quiet')?.archived, undefined);
   });
 });

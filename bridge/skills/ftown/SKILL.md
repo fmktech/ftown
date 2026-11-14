@@ -53,6 +53,9 @@ ftown sessions preview --clear
 ftown sessions preview-reply --message "The preview is ready."
 ftown status set --state working --headline "Reviewing the API client" --progress 0/1
 ftown board
+ftown plan
+ftown plan add "Review the API client" --after p1 --priority 1
+ftown sessions create --parent --plan-item p2 --prompt "Review the API client"
 ftown brief set --file brief.md
 ftown attention list
 ftown worktrees list
@@ -127,6 +130,45 @@ ftown board
 ftown board --wait --until any-done --timeout 300
 ftown events --wait
 ```
+
+Plain `ftown board` appends a `planned` section with up to 5 ready plan
+items (`→ <id> <title>`, then `+N more`). `ftown board --all` also shows
+retired (archived) children after the live ones, suffixed `(retired)`.
+Tree events include the `plan` kind for plan changes and `removed` when a
+child is removed or archived while not already exited.
+
+## Plan list
+
+Keep the plan on the manager: `ftown plan` defaults to your own session
+(`$FTOWN_SESSION_ID`, the manager), and `--session-id <id>` targets another
+session's plan. This is the manager's plan, not a ticket system — it is a
+short ordered todo list the manager keeps for its own coordination. Add
+items, order them with precedence, and link each child to one item:
+
+```bash
+ftown plan [--json] [--session-id <id>]
+ftown plan add <title...> [--note <t>] [--after <id,id>] [--priority 1|2|3]
+ftown plan start <id> --session <child-id>
+ftown plan done <id>
+ftown plan drop <id>
+ftown plan todo <id>
+ftown plan edit <id> [--title <t>] [--note <t>|--no-note] [--after <ids>|--no-after] [--priority n]
+ftown plan rm <id>
+ftown sessions create --parent --plan-item <id> --prompt "<task>"
+```
+
+Precedence comes from `--after <id,id>` and `--priority 1|2|3` (1 is
+highest). An item is ready when it is `todo` and every item in its `after`
+list is `done` or `dropped`; the list shows `→` ready, `·` waiting, `▸`
+started, `✓` done and `✗` dropped. Creating a child with `--plan-item <id>`
+requires a parent, fails before creating anything when the item is unknown
+or not `todo`, and otherwise marks the item `started` with that child
+linked. When the linked child's card becomes `done`, its item becomes
+`done` too; a `failed` card leaves the item `started` for the manager to
+decide. `ftown plan start <id> --session <child-id>` links an existing
+child by hand, and `done`/`drop`/`todo` set the state directly. Every plan
+change emits one `plan` tree event (`<id> <state>: <title>`, plus
+` → ready: …` when items become ready). Exit codes: 0 ok, 1 error, 2 usage.
 
 **Delegating work.** Delegate implementation to ftown child sessions (`ftown sessions create --parent ...`) rather than in-process subagents — only sessions appear on the board and dashboard (cards, events, digests, parent-first questions).
 A child session may use its own subagents for reviews and lookups. Pick the CLI and model with `ftown quota --json` (see `references/quota.md`).

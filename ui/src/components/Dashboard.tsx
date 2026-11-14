@@ -13,7 +13,7 @@ import { useBridgeUpdates } from "@/hooks/useBridgeUpdates";
 import { BridgeUpdatesDialog } from "./BridgeUpdatesDialog";
 import { ModelRoutingDialog } from "./ModelRoutingDialog";
 import { AppUpdateNotice } from "./AppUpdateNotice";
-import { useAllSessionEvents } from "@/hooks/useAllSessionEvents";
+import { useAllSessionEvents, type SessionActivity } from "@/hooks/useAllSessionEvents";
 import type { SecurityCommand, SecurityCommandResults } from "@security/protocol";
 import { SecurityPanel, type SecurityBridge } from "./SecurityPanel";
 import { SecurityLockIcon } from "./SecurityLockIcon";
@@ -105,6 +105,23 @@ async function writeToClipboard(text: string): Promise<void> {
 
 function reviewIdentityFor(session: Session | null | undefined): string {
   return session && parsePullRequestUrl(session.pullRequestUrl) ? JSON.stringify([session.bridgeId, session.id, session.pullRequestUrl, session.pullRequestReviewGeneration]) : "";
+}
+
+/** ISO timestamp at which each session's activity became idle; cleared when it is not idle or leaves the activity map. */
+export function trackIdleSince(previous: Record<string, string>, activity: ReadonlyMap<string, Pick<SessionActivity, "activity">>): Record<string, string> {
+  const next: Record<string, string> = {};
+  let changed = false;
+  for (const id of Object.keys(previous)) {
+    const current = activity.get(id);
+    if (current?.activity === "idle") next[id] = previous[id];
+    else changed = true;
+  }
+  for (const [id, current] of activity) {
+    if (current.activity !== "idle") continue;
+    if (next[id] === undefined) { next[id] = new Date().toISOString(); changed = true; }
+    else if (next[id] !== previous[id]) changed = true;
+  }
+  return changed ? next : previous;
 }
 
 export function Dashboard({ client, connectionStatus, connectionError, userId, token, centrifugoUrl, transport, onDisconnect, localMode = false, accountId = null }: DashboardProps) {
@@ -298,6 +315,10 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
     });
   }, [bridges, rawSessions, setBridgeOrder]);
   const { sessionActivity, markSessionIdle, clearSessionAttention, answerSessionAttention, refreshSessionAttention } = useAllSessionEvents(client, rawSessions, userId, rpc);
+  // When each session's activity became idle: stamped from the live activity map
+  // (hook events and optimistic interrupts) and kept for the Overview's `idle <n>m`.
+  const [idleSince, setIdleSince] = useState<Record<string, string>>({});
+  useEffect(() => { setIdleSince(previous => trackIdleSince(previous, sessionActivity)); }, [sessionActivity]);
   const installedHookBridges = useRef(new Set<string>());
 
   useEffect(() => {
@@ -1297,7 +1318,7 @@ PY`;
           <SessionInboxPage entries={inbox} open={inboxOpen} onClose={() => { restoreInboxFocusRef.current = true; setInboxOpen(false); scheduleTerminalRenderAdjustment(); }}
             onOpenSession={id => { focusOpenedSessionRef.current = true; handleSelectSession(id); scheduleTerminalRenderAdjustment(); }} onDismiss={entry => clearSessionAttention(entry.session.id, entry.notice)} onReply={replyToInbox} onAnswer={answerInbox} />
           <div ref={workspaceFocusRef} role="region" aria-label={`Session workspace: ${selectedSession?.name || selectedSession?.prompt?.slice(0, 48) || "Session"}`} tabIndex={-1} className="relative min-h-0 min-w-0 flex-1 flex-col focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--accent)]" style={{ display: inboxOpen ? "none" : "flex" }} aria-hidden={inboxOpen}>
-          <SessionWorkspace session={selectedSession} sessions={sessions} activity={selectedSessionId ? sessionActivity.get(selectedSessionId) : undefined} activityBySession={sessionActivity} openAttentionBySession={openAttentionBySession} client={client} userId={userId} readable={connectionStatus === "connected" && !!selectedSession && activeBridgeIds.has(selectedSession.bridgeId) && bridgeSecurityStates.get(selectedSession.bridgeId) === "ready"} securityGeneration={securityGeneration} sendCommand={rpc.sendCommand} open={previewOpen} onClose={() => setPreviewOpen(false)} isDesktop={isDesktop} mobileTab={mobileTab} onMobileTab={handleMobileTabFallback} sessionActivation={sessionActivation} onRefit={refitPreviewTerminal} reviewOpen={reviewOpen} reviewActivation={reviewChoice.activation} onCloseReview={closeReview} attention={selectedWaitingEntry ? { entry: selectedWaitingEntry, shown: attentionShown, onShow: showAttention, onHide: hideAttention, onDismiss: entry => clearSessionAttention(entry.session.id, entry.notice), onReply: replyToInbox, onAnswer: answerInbox } : undefined}>
+          <SessionWorkspace session={selectedSession} sessions={sessions} activity={selectedSessionId ? sessionActivity.get(selectedSessionId) : undefined} activityBySession={sessionActivity} openAttentionBySession={openAttentionBySession} idleSince={idleSince} client={client} userId={userId} readable={connectionStatus === "connected" && !!selectedSession && activeBridgeIds.has(selectedSession.bridgeId) && bridgeSecurityStates.get(selectedSession.bridgeId) === "ready"} securityGeneration={securityGeneration} sendCommand={rpc.sendCommand} open={previewOpen} onClose={() => setPreviewOpen(false)} isDesktop={isDesktop} mobileTab={mobileTab} onMobileTab={handleMobileTabFallback} sessionActivation={sessionActivation} onRefit={refitPreviewTerminal} reviewOpen={reviewOpen} reviewActivation={reviewChoice.activation} onCloseReview={closeReview} attention={selectedWaitingEntry ? { entry: selectedWaitingEntry, shown: attentionShown, onShow: showAttention, onHide: hideAttention, onDismiss: entry => clearSessionAttention(entry.session.id, entry.notice), onReply: replyToInbox, onAnswer: answerInbox } : undefined}>
           <Terminal
             ref={terminalRef}
             transport={transport}

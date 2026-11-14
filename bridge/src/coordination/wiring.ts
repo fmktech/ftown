@@ -18,12 +18,15 @@ import type {
   TreeEventLogApi,
   TreeEventLogDeps,
 } from './contract.js';
+import { PlanStore } from './plan.js';
 import { TreeEventLog } from './tree-events.js';
 
 export interface CoordinationSessionStore {
   loadSession(id: string): Promise<Session | null>;
   saveSession(session: Session): Promise<void>;
   listSessions(): Promise<Session[]>;
+  /** Archive tombstones, same source the worktree routes read. */
+  listArchived?(): Promise<Session[]>;
   sessionDir(id: string): string;
 }
 
@@ -60,12 +63,15 @@ export interface CoordinationDeps {
   createCards?: (deps: CardStoreDeps) => CardStoreApi;
   createEvents?: (deps: TreeEventLogDeps) => TreeEventLogApi;
   createBoard?: (deps: BoardDeps) => BoardServiceApi;
+  createPlan?: (deps: ConstructorParameters<typeof PlanStore>[0]) => PlanStore;
 }
 
 export interface Coordination {
   cards: CardStoreApi;
   events: TreeEventLogApi;
   board: BoardServiceApi;
+  /** Same instance handed to session create (`--plan-item`) and the plan routes. */
+  plan: PlanStore;
   digest: DigestProvider;
   mailSink: MailEventSink;
   emit(session: Session, kind: TreeEventKind, summary: string, ref?: string): Promise<void>;
@@ -103,6 +109,14 @@ function formatStatusSummary(card: SessionCardDeclared): string {
   return base;
 }
 
+/** Archive records keep env for revive. The board must not hold those secrets. */
+function boardArchivedSession(record: Session): Session {
+  const sanitized: Session = { ...record };
+  delete sanitized.env;
+  delete sanitized.previewSource;
+  return sanitized;
+}
+
 export function createCoordination(deps: CoordinationDeps): Coordination {
   const events: TreeEventLogApi = (deps.createEvents ?? ((d) => new TreeEventLog(d)))({
     sessionDir: (id) => deps.store.sessionDir(id),
@@ -116,7 +130,8 @@ export function createCoordination(deps: CoordinationDeps): Coordination {
   }
 
   async function emit(session: Session, kind: TreeEventKind, summary: string, ref?: string): Promise<void> {
-    if (kind === 'exit') {
+    // exit and removed each fire once per incarnation. onSessionStart clears the slot.
+    if (kind === 'exit' || kind === 'removed') {
       if (exitedSessions.has(session.id)) return;
       exitedSessions.add(session.id);
     }
@@ -136,6 +151,14 @@ export function createCoordination(deps: CoordinationDeps): Coordination {
       );
     }
   }
+
+  const plan: PlanStore = (deps.createPlan ?? ((d) => new PlanStore(d)))({
+    loadSession: (id) => deps.store.loadSession(id),
+    saveSession: (session) => deps.store.saveSession(session),
+    publishSession: (session) => deps.publishSession(session),
+    emit: (parent, summary) => emit(parent, 'plan', summary),
+    now: deps.now,
+  });
 
   async function escalateExitingParent(sessionId: string): Promise<void> {
     if (!deps.attention.listRouted || !deps.attention.setRoute) return;
@@ -166,6 +189,21 @@ export function createCoordination(deps: CoordinationDeps): Coordination {
       if (terminal || snapshot !== undefined || !session) {
         await escalateExitingParent(sessionId);
       }
+      // Remove/archive passes the pre-delete snapshot. A child that has not
+      // already exited (terminal status, or an exit already emitted) gets one
+      // `removed` event. Stop passes a completed snapshot and stays an exit.
+      if (session && snapshot !== undefined && !terminal && session.parentSessionId) {
+        await emit(session, 'removed', 'removed');
+        // A started plan item was bound to this child. Put it back on the list.
+        try {
+          await plan.releaseForChild(session.parentSessionId, session.id);
+        } catch (error) {
+          console.warn(
+            '[Coordination] Failed to release plan item for removed child:',
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+      }
     } catch (error) {
       console.warn(
         '[Coordination] Failed to load session on exit:',
@@ -190,10 +228,31 @@ export function createCoordination(deps: CoordinationDeps): Coordination {
       if (saved.card && statusChanged(saved.card, previous)) {
         await emit(saved, 'status', formatStatusSummary(saved.card));
       }
+      // A child card that becomes done completes the parent's started plan item.
+      // 'failed' stays 'started' — the manager decides. A plan failure must not
+      // undo the card write.
+      if (saved.card?.state === 'done' && previous?.state !== 'done' && saved.parentSessionId) {
+        try {
+          await plan.completeForChild(saved.parentSessionId, saved.id);
+        } catch (error) {
+          console.warn(
+            '[Coordination] Failed to complete plan item for child:',
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+      }
     },
   });
 
   const board: BoardServiceApi = (deps.createBoard ?? ((d) => new BoardService(d)))({
+    ...(deps.store.listArchived
+      ? {
+          listArchived: async () => {
+            const records = await deps.store.listArchived!();
+            return records.map(boardArchivedSession);
+          },
+        }
+      : {}),
     loadSession: (id) => deps.store.loadSession(id),
     listSessions: () => deps.store.listSessions(),
     attention: async (id) => {
@@ -250,5 +309,5 @@ export function createCoordination(deps: CoordinationDeps): Coordination {
     },
   };
 
-  return { cards, events, board, digest, mailSink, emit, onSessionExit, onSessionStart };
+  return { cards, events, board, plan, digest, mailSink, emit, onSessionExit, onSessionStart };
 }

@@ -11,6 +11,7 @@ import { PROVIDER_AUTH_ENV, PROVIDER_RUNTIME_ENV, loadProviderEnv } from './prov
 import { registerSessionWorkspace } from './session-registry.js';
 import { GitWorktrees } from './worktrees.js';
 import { WorktreeError, type SessionWorktree, type WorktreeApi } from './coordination/contract-b.js';
+import type { SessionPlan } from './coordination/contract-c.js';
 
 import type { CentrifugoClient } from './centrifugo-client.js';
 import type { ProcessRunner } from './claude-runner.js';
@@ -21,6 +22,24 @@ import type { CreateSessionPayload, Session, ShellType } from './types.js';
 export { WorktreeError };
 
 export type CreateSessionWorktreeInput = true | { branch?: string; base?: string };
+
+/**
+ * Raised when `--plan-item` cannot be honoured BEFORE a session record is
+ * created: unknown or already-started plan item, missing plan tracking, or a
+ * missing parent. The local API server maps this to 400.
+ */
+export class PlanItemError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PlanItemError';
+  }
+}
+
+/** The slice of the plan store the create path needs (see contract-c.ts). */
+export interface CreatePlanStoreDep {
+  startForChild(parentId: string, itemId: string, childId: string): Promise<void>;
+  get(parentId: string): Promise<SessionPlan | null>;
+}
 
 export interface CreateFtownSessionDeps {
   store: SessionStore;
@@ -35,6 +54,8 @@ export interface CreateFtownSessionDeps {
   wireTerminalInput: (sessionId: string) => void;
   getTerminalSize?: (sessionId: string) => { cols: number; rows: number } | undefined;
   worktrees?: Pick<WorktreeApi, 'create' | 'remove'>;
+  /** Optional plan store (contract-c): enables `--plan-item` child creation. */
+  planStore?: CreatePlanStoreDep;
 }
 
 export interface CreateFtownSessionInput {
@@ -62,6 +83,8 @@ export interface CreateFtownSessionInput {
   suppressBriefing?: boolean;
   createMissingWorkingDir?: boolean;
   worktree?: CreateSessionWorktreeInput;
+  /** Parent-plan item id (`p<n>`) this child starts; requires a parent. */
+  planItem?: string;
 }
 
 export async function resolveParentSessionId(
@@ -428,6 +451,26 @@ async function createFtownSessionImpl(
     }
   }
 
+  // `--plan-item` binds the new child to a todo item on the parent's plan.
+  // Validation happens BEFORE any session record is created; failures are 400s.
+  const planItem = input.planItem;
+  if (planItem !== undefined) {
+    if (!parentSessionId) {
+      throw new PlanItemError('--plan-item requires a parent session');
+    }
+    if (!deps.planStore) {
+      throw new PlanItemError('Plan tracking is not available');
+    }
+    const plan = await deps.planStore.get(parentSessionId);
+    const item = plan?.items.find((candidate) => candidate.id === planItem);
+    if (!item) {
+      throw new PlanItemError(`Plan item ${planItem} does not exist on parent ${parentSessionId}`);
+    }
+    if (item.state !== 'todo') {
+      throw new PlanItemError(`Plan item ${planItem} is ${item.state}, not todo`);
+    }
+  }
+
   const isAgent = input.shellType !== 'shell';
   // Provider API tokens are read from the bridge's environment, the
   // ~/.ftown/env.json store, and the per-create input (last-wins) and mapped
@@ -608,6 +651,20 @@ async function createFtownSessionImpl(
 
     deps.wireTerminalInput(sessionId);
 
+    // Bind the plan item after the child exists and is launched. A failure here
+    // must not roll back the session — the manager still sees it and can start
+    // the item manually.
+    if (planItem !== undefined && parentSessionId && deps.planStore) {
+      try {
+        await deps.planStore.startForChild(parentSessionId, planItem, sessionId);
+      } catch (err) {
+        console.warn(
+          `[Bridge] Failed to start plan item ${planItem} for child ${sessionId}:`,
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    }
+
     return session;
   } catch (err) {
     if (worktree && worktrees) {
@@ -692,6 +749,10 @@ export function parseCreateSessionBody(
     suppressBriefing: body.suppressBriefing === true,
     createMissingWorkingDir: body.createMissingWorkingDir === true,
     worktree: parseWorktreeInput(body.worktree),
+    planItem:
+      typeof body.planItem === 'string' && /^p\d{1,6}$/.test(body.planItem)
+        ? body.planItem
+        : undefined,
   };
 }
 

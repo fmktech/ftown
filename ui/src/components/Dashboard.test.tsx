@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Session } from "@/types";
 import type { SessionActivity } from "@/hooks/useAllSessionEvents";
-import { Dashboard } from "./Dashboard";
+import { Dashboard, trackIdleSince } from "./Dashboard";
 import { buildBridgeCommand, buildBridgeStartCommand } from "@/lib/bridge-command";
 import type { MessageClient } from "@/lib/message-client";
 import type { ReactNode } from "react";
@@ -1176,5 +1176,37 @@ describe("preview auto-open rule", () => {
     await act(async () => {});
     await waitFor(() => expect(screen.queryByRole("button", { name: "Open preview" })).toBeNull());
     expect(screen.getByRole("tablist", { name: "Session view" })).toBeTruthy();
+  });
+});
+
+describe("trackIdleSince", () => {
+  const activity = (entries: Array<[string, Pick<SessionActivity, "activity">]>): Map<string, Pick<SessionActivity, "activity">> => new Map(entries);
+
+  it("stamps the moment a session becomes idle and keeps it while it stays idle", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.parse("2026-11-13T10:00:00.000Z"));
+    try {
+      const first = trackIdleSince({}, activity([["a", { activity: "thinking" }]]));
+      expect(first).toEqual({});
+      const stamped = trackIdleSince(first, activity([["a", { activity: "idle" }]]));
+      expect(stamped.a).toBe("2026-11-13T10:00:00.000Z");
+      // Still idle, possibly via a new activity map: the stamp survives.
+      expect(trackIdleSince(stamped, activity([["a", { activity: "idle" }]]))).toBe(stamped);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears the stamp when the session stops being idle or leaves the map", () => {
+    const stamped = { a: "2026-11-13T10:00:00.000Z", b: "2026-11-13T09:00:00.000Z" };
+    expect(trackIdleSince(stamped, activity([["a", { activity: "tool_use" }], ["b", { activity: "idle" }]]))).toEqual({ b: "2026-11-13T09:00:00.000Z" });
+    expect(trackIdleSince(stamped, activity([["b", { activity: "idle" }]]))).toEqual({ b: "2026-11-13T09:00:00.000Z" });
+    expect(trackIdleSince(stamped, activity([]))).toEqual({});
+  });
+
+  it("returns the previous object untouched when nothing changed", () => {
+    const stamped = { a: "2026-11-13T10:00:00.000Z" };
+    expect(trackIdleSince(stamped, activity([["a", { activity: "idle" }]]))).toBe(stamped);
+    expect(trackIdleSince({}, activity([["a", { activity: "thinking" }]]))).toEqual({});
   });
 });

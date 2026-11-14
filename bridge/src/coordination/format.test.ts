@@ -8,6 +8,27 @@ import {
   formatEvent,
 } from './format.js';
 import type { Board, SessionCard, TreeEvent } from './contract.js';
+import type { PlanItem, PlanView } from './contract-c.js';
+
+function planItem(id: string, title: string): PlanItem {
+  return {
+    id,
+    title,
+    after: [],
+    priority: 2,
+    state: 'todo',
+    createdAt: '2026-11-13T10:00:00.000Z',
+    updatedAt: '2026-11-13T10:00:00.000Z',
+  };
+}
+
+function planView(ready: PlanItem[], extra: PlanItem[] = []): PlanView {
+  return { items: [...extra, ...ready], ready: ready.map((item) => item.id) };
+}
+
+function emptyRollup(): Board['rollup'] {
+  return { working: 0, blocked: 0, waiting_review: 0, done: 0, failed: 0, unset: 0 };
+}
 
 function makeCard(overrides: Partial<SessionCard> = {}): SessionCard {
   return {
@@ -265,6 +286,74 @@ describe('format.ts', () => {
       '1 working, 1 blocked, 1 unset',
     ].join('\n');
     assert.equal(formatBoard(board, now), expected);
+  });
+
+  it('suffixes archived rows with (retired) after the other markers', () => {
+    const card = makeCard({
+      archived: true,
+      derived: {
+        status: 'completed',
+        activity: 'unknown',
+        openAttention: 1,
+        unreadMail: 0,
+        previews: [],
+      },
+      stale: true,
+    });
+    assert.equal(
+      formatBoardRow(card, Date.parse('2026-11-13T12:05:00.000Z')),
+      'worker-a working unknown  implementing parser  !1  (stale)  (retired)',
+    );
+  });
+
+  it('appends a planned section of up to 5 ready items, then +N more', () => {
+    const ready = [1, 2, 3, 4, 5, 6].map((n) => planItem(`p${n}`, `Title ${n}`));
+    const waiting = planItem('p9', 'Not ready');
+    const card = makeCard();
+    const board: Board = {
+      rootId: 'root-1',
+      cursor: 3,
+      cards: [card],
+      rollup: { ...emptyRollup(), working: 1 },
+      plan: planView(ready, [waiting]),
+    };
+    const now = Date.parse('2026-11-13T12:05:00.000Z');
+    const expected = [
+      'worker-a working thinking  implementing parser',
+      '1 working',
+      'planned',
+      '→ p1 Title 1',
+      '→ p2 Title 2',
+      '→ p3 Title 3',
+      '→ p4 Title 4',
+      '→ p5 Title 5',
+      '+1 more',
+    ].join('\n');
+    assert.equal(formatBoard(board, now), expected);
+
+    const five = formatBoard({ ...board, plan: planView(ready.slice(0, 5)) }, now);
+    assert.ok(five.endsWith('→ p5 Title 5'));
+    assert.equal(five.includes('+'), false);
+
+    const noReady = formatBoard({ ...board, plan: planView([], [waiting]) }, now);
+    assert.equal(noReady.includes('planned'), false);
+    assert.equal(noReady.includes('Not ready'), false);
+  });
+
+  it('prints the planned section under an empty child list and follows ready order', () => {
+    const first = planItem('p1', 'Alpha');
+    const second = planItem('p2', 'Beta');
+    const board: Board = {
+      rootId: 'root-1',
+      cursor: 0,
+      cards: [],
+      rollup: emptyRollup(),
+      plan: { items: [second, first], ready: ['p1', 'p2'] },
+    };
+    assert.equal(
+      formatBoard(board, Date.parse('2026-11-13T12:00:00.000Z')),
+      ['no child sessions', 'planned', '→ p1 Alpha', '→ p2 Beta'].join('\n'),
+    );
   });
 
   it('formats a tree event as #<seq> HH:MM <sessionName> <kind>: <summary>', () => {

@@ -1,5 +1,6 @@
 import type { SessionCardDeclared } from './coordination/contract.js';
 import type { SessionBrief, SessionWorktree } from './coordination/contract-b.js';
+import type { SessionPlan } from './coordination/contract-c.js';
 // Derived from the harness registry (single source of truth for supported
 // harnesses); re-exported here so existing `from './types.js'` imports keep working.
 // Type-only, so this adds no runtime dependency on harness-registry.js.
@@ -72,6 +73,8 @@ export interface Session {
   card?: SessionCardDeclared;
   /** Manager brief (coordination phase B). */
   brief?: SessionBrief;
+  /** Plan list on a parent session (coordination phase C). */
+  plan?: SessionPlan;
   /** Bridge-owned git worktree (coordination phase B). */
   worktree?: SessionWorktree;
 }
@@ -115,7 +118,7 @@ export interface Command {
   requestId: string;
 }
 
-export type CommandType = 'get_pull_request_review' | 'get_pull_request_review_chunk' | 'preview_chat_list' | 'preview_chat_send' | 'preview_chat_reply' | 'get_pull_request_statuses' | 'session_preview_status' | 'session_preview_chunk' | 'get_bridge_update' | 'update_bridge' | 'security_devices' | 'security_invite' | 'security_revoke' | 'ledger_head' | 'ledger_chain' | 'create_session' | 'stop_session' | 'list_sessions' | 'get_history' | 'retry_session' | 'send_message' | 'rename_session' | 'remove_session' | 'bridge_exec' | 'clear_terminal' | 'update_session_parent' | 'get_session_usage' | 'get_sessions_usage' | 'get_session_attention' | 'resolve_session_attention' | 'answer_session_attention'
+export type CommandType = 'get_pull_request_review' | 'get_pull_request_review_chunk' | 'preview_chat_list' | 'preview_chat_send' | 'preview_chat_reply' | 'get_pull_request_statuses' | 'session_preview_status' | 'session_preview_chunk' | 'get_bridge_update' | 'update_bridge' | 'security_devices' | 'security_invite' | 'security_revoke' | 'ledger_head' | 'ledger_chain' | 'create_session' | 'stop_session' | 'list_sessions' | 'get_history' | 'retry_session' | 'send_message' | 'rename_session' | 'remove_session' | 'bridge_exec' | 'clear_terminal' | 'update_session_parent' | 'get_session_usage' | 'get_sessions_usage' | 'get_session_attention' | 'resolve_session_attention' | 'answer_session_attention' | 'get_session_board'
   | 'get_model_routing' | 'set_model_routing';
 
 export interface GetSessionAttentionPayload { bridgeId: string; sessionId: string }

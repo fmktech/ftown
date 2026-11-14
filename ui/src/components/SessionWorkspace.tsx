@@ -14,6 +14,7 @@ import type { AttentionAnswerEntry } from '../../../bridge/src/attention-prompt-
 import type { AttentionAnswerSubmitResult } from './AttentionAnswerForm';
 import { InboxItemBody, inboxItemKey, type InboxEntry } from './SessionInbox';
 import { SessionOverview, childSessionsOf, type OpenAttentionCount } from './SessionOverview';
+import { useSessionBoard } from "@/hooks/useSessionBoard";
 import { clampPreviewRatio, isPreviewDescriptor, markdownPreviewDocument, previewDocument, previewRatioBounds } from '@/lib/session-preview';
 import { previewScrollOwnerKey } from '@/lib/preview-scroll-protocol';
 
@@ -42,6 +43,8 @@ interface Props {
   activityBySession?: ReadonlyMap<string, SessionActivity>;
   /** Open attention items per session id; withParent counts items still waiting with the parent. */
   openAttentionBySession?: ReadonlyMap<string, OpenAttentionCount>;
+  /** ISO timestamp at which each session's activity became idle, tracked by the dashboard. */
+  idleSince?: Readonly<Record<string, string>>;
 }
 type PreviewErrorReason = 'missing' | 'too_large' | 'invalid_utf8' | 'invalid_file' | 'unavailable';
 function previewErrorMessage(reason: PreviewErrorReason, fileName: string): string {
@@ -53,7 +56,7 @@ function previewErrorMessage(reason: PreviewErrorReason, fileName: string): stri
     case 'unavailable': return `${fileName} is unavailable`;
   }
 }
-export function SessionWorkspace({ session, client, userId, readable, sendCommand, subscribeAuthority, securityGeneration, open, onClose, isDesktop, mobileTab, onMobileTab, onRefit, children, sessions = [], activity, activityBySession, openAttentionBySession, reviewOpen = false, reviewActivation = 0, onCloseReview = () => {}, sessionActivation = 0, attention }: Props) {
+export function SessionWorkspace({ session, client, userId, readable, sendCommand, subscribeAuthority, securityGeneration, open, onClose, isDesktop, mobileTab, onMobileTab, onRefit, children, sessions = [], activity, activityBySession, openAttentionBySession, idleSince, reviewOpen = false, reviewActivation = 0, onCloseReview = () => {}, sessionActivation = 0, attention }: Props) {
   const mainRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
   const [ratio, setRatio] = useState(50);
@@ -134,6 +137,10 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
   const previewDisappeared = previousView.current.showPreview && !showPreview && previousView.current.view === 'preview';
   const activeExpanded = expanded && rawView === view && view !== 'terminal' && view !== 'overview' && !attentionVisible && !previewDisappeared;
   const previewVisible = showPreview && !attentionShown && view === 'preview';
+  // Dashboard data for the board v3 Overview: one get_session_board snapshot of
+  // this manager's tree, fetched only while the Overview tab is on screen.
+  const treeSessions = useMemo(() => (session ? [session, ...childSessions] : []), [session, childSessions]);
+  const { snapshot: boardSnapshot } = useSessionBoard(sendCommand, session?.bridgeId ?? null, session?.id ?? null, view === 'overview', treeSessions);
   const { state, refresh, getHardEpoch } = useSessionPreview({ client, userId, target, visible: previewVisible, readable, securityGeneration, sendCommand, subscribeAuthority });
   const owner = target ? previewScrollOwnerKey({ userId, bridgeId: target.bridgeId, sessionId: target.sessionId, previewId: target.preview.id, fileId: target.file.id }) : '';
 
@@ -316,7 +323,7 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
         {children}
         {/* Compact layouts cover the still-mounted terminal with the Overview; on a desktop the Overview has its own column beside it. */}
         {compact && view === 'overview' && session && <div id="session-overview-panel" role="tabpanel" aria-label="Overview" style={{ position: 'absolute', inset: 0, zIndex: 5, display: 'flex', background: 'var(--bg-base)' }}>
-          <SessionOverview session={session} sessions={sessions} activityBySession={activityBySession} openAttentionBySession={openAttentionBySession} />
+          <SessionOverview session={session} sessions={sessions} activityBySession={activityBySession} openAttentionBySession={openAttentionBySession} snapshot={boardSnapshot ?? undefined} idleSince={idleSince} />
         </div>}
       </div>
       {(hasAux || switcherColumn) && !compact && !activeExpanded && <div role="separator" aria-label="Resize terminal and preview" aria-orientation="vertical" aria-valuemin={Number(min.toFixed(1))} aria-valuemax={Number(max.toFixed(1))} aria-valuenow={Number(actualRatio.toFixed(1))} tabIndex={0} className="session-preview-separator" onPointerDown={start} onPointerMove={move} onPointerUp={finish} onPointerCancel={finish} onLostPointerCapture={finish} onKeyDown={keyDown} onDoubleClick={() => setSplit(50)} />}
@@ -363,7 +370,7 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
         </div>}
       </section>}
       {switcherColumn && view === 'overview' && session && <div id="session-overview-panel" role="tabpanel" aria-label="Overview" style={{ flex: 1, minHeight: 0, display: 'flex' }}>
-        <SessionOverview session={session} sessions={sessions} activityBySession={activityBySession} openAttentionBySession={openAttentionBySession} />
+        <SessionOverview session={session} sessions={sessions} activityBySession={activityBySession} openAttentionBySession={openAttentionBySession} snapshot={boardSnapshot ?? undefined} idleSince={idleSince} />
       </div>}
       {reviewOpen && <PullRequestReview session={session} client={client} userId={userId} visible={reviewVisible} readable={readable} securityGeneration={securityGeneration} sendCommand={sendCommand} subscribeAuthority={subscribeAuthority} onClose={onCloseReview} expanded={activeExpanded} onExpand={() => setExpanded(value => !value)} />}
       </div>}

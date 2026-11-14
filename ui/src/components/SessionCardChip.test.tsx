@@ -5,6 +5,7 @@ import type { Session, SessionCard } from "@/types";
 import {
   SessionCardChip,
   cardStateLabel,
+  cardStateStyle,
   formatCardRollup,
   rollupChildCards,
 } from "./SessionCardChip";
@@ -168,4 +169,10 @@ it("hides progress on a done card", () => {
   expect(screen.getByText("done · Finished")).toBeTruthy();
   expect(screen.queryByText("done 3/7 · Finished")).toBeNull();
   expect(screen.getByRole("img", { name: "done: Finished" })).toBeTruthy();
+});
+
+it("exposes the glyph and colour token per card state", () => {
+  expect(cardStateStyle("working")).toEqual({ icon: "▸", color: "var(--accent)" });
+  expect(cardStateStyle("failed")).toEqual({ icon: "✗", color: "var(--status-error)" });
+  expect(cardStateStyle("waiting_review").icon).toBe("◷");
 });

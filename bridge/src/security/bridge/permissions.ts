@@ -5,7 +5,7 @@ export interface OperationPermission { permission: EndpointPermission; mutating:
 const session = /^[A-Za-z0-9_-]+$/;
 const readCommands = new Set(['get_pull_request_statuses', 'session_preview_status', 'session_preview_chunk', 'get_bridge_update', 'list_sessions', 'get_history', 'get_session_usage', 'get_sessions_usage', 'get_session_attention',
   'ledger_head', 'ledger_chain',
-  'get_model_routing']);
+  'get_model_routing', 'get_session_board']);
 const controlCommands = new Set(['update_bridge', 'create_session', 'stop_session', 'retry_session', 'send_message', 'rename_session', 'remove_session',
   'bridge_exec', 'clear_terminal', 'update_session_parent', 'resolve_session_attention', 'answer_session_attention',
   'set_model_routing']);
@@ -53,6 +53,20 @@ export function classifyHttp(method: string, path: string): OperationPermission 
   if (board) return method === 'GET' && queryAllows(url, ['since', 'ready', 'all']) ? result('read', 'board_get', board[1]) : deny();
   const events = /^\/api\/sessions\/([A-Za-z0-9_-]{1,200})\/events$/.exec(url.pathname);
   if (events) return method === 'GET' && queryAllows(url, ['since', 'limit', 'waitSeconds']) ? result('read', 'events_get', events[1]) : deny();
+  const planItem = /^\/api\/sessions\/([A-Za-z0-9_-]{1,200})\/plan\/(p\d{1,6})$/.exec(url.pathname);
+  if (planItem) {
+    if (url.search) return deny();
+    if (method === 'PATCH') return result('control', 'plan_patch', planItem[1]);
+    if (method === 'DELETE') return result('control', 'plan_remove', planItem[1]);
+    return deny();
+  }
+  const plan = /^\/api\/sessions\/([A-Za-z0-9_-]{1,200})\/plan$/.exec(url.pathname);
+  if (plan) {
+    if (url.search) return deny();
+    if (method === 'GET') return result('read', 'plan_get', plan[1]);
+    if (method === 'POST') return result('control', 'plan_add', plan[1]);
+    return deny();
+  }
   if (url.pathname === '/api/loops' || /^\/api\/loops\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)?$/.test(url.pathname)) {
     if (!['GET', 'POST', 'PATCH', 'DELETE'].includes(method)) return deny();
     return { permission: method === 'GET' ? 'read' : 'control', mutating: false, operation: 'automation_removed', sessionId: null };

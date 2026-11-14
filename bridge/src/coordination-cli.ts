@@ -187,23 +187,30 @@ export function buildCardPatch(flags: StatusSetFlags): CardPatch {
   return patch;
 }
 
-/** Pure wait-condition evaluation over a fetched board and the events that arrived. */
+/**
+ * Pure wait-condition evaluation.
+ * any-done, any-blocked, and any-ready hold only for a child that appears in
+ * `events` (tree events after the starting cursor). all-done is the whole board.
+ * any-change is any event in `events`.
+ */
 export function evaluateWaitCondition(
   condition: BoardWaitCondition,
   board: Board,
   events: readonly TreeEvent[],
 ): boolean {
+  const changedIds = new Set(events.map((event) => event.sessionId));
+  const changed = board.cards.filter((card) => changedIds.has(card.sessionId));
   switch (condition) {
     case 'any-change':
       return events.length > 0;
     case 'any-done':
-      return board.cards.some((card) => card.declared?.state === 'done');
+      return changed.some((card) => card.declared?.state === 'done');
     case 'any-blocked':
-      return board.cards.some((card) => card.declared?.state === 'blocked');
+      return changed.some((card) => card.declared?.state === 'blocked');
     case 'all-done':
       return board.cards.length > 0 && board.cards.every((card) => card.declared?.state === 'done');
     case 'any-ready':
-      return board.cards.some(
+      return changed.some(
         (card) => card.derived.pr?.state === 'passed' && card.declared?.state !== 'done',
       );
   }
@@ -397,20 +404,23 @@ async function waitForBoard(
   timeoutSeconds: number,
   json: boolean,
 ): Promise<void> {
-  // Conditions are evaluated only on events past the starting cursor, and
-  // always on an unfiltered board; the user-filtered board is what prints.
+  // any-done / any-blocked / any-ready apply to children with events after the
+  // starting cursor (accumulated across polls). all-done is global. Evaluation
+  // uses an unfiltered board; the user-filtered board is what prints.
   const start = await fetchBoard(deps, sessionId, {});
   let cursor = start.cursor;
   const timeoutMs = timeoutSeconds * 1000;
   const deadline = deps.now() + timeoutMs;
   let remainingMs = timeoutMs;
+  const eventsSinceStart: TreeEvent[] = [];
   while (remainingMs > 0) {
     const waitSeconds = Math.min(Math.ceil(remainingMs / 1000), EVENTS_WAIT_CHUNK_SECONDS);
     const page = await fetchEventsPage(deps, sessionId, { since: cursor, waitSeconds });
     cursor = page.cursor;
     if (page.events.length > 0) {
+      eventsSinceStart.push(...page.events);
       const board = await fetchBoard(deps, sessionId, {});
-      if (evaluateWaitCondition(condition, board, page.events)) {
+      if (evaluateWaitCondition(condition, board, eventsSinceStart)) {
         printBoard(deps, await fetchBoard(deps, sessionId, query), json);
         return;
       }

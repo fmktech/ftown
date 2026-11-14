@@ -400,3 +400,17 @@ test('attention --to human sends to:"human" in request body and rejects invalid 
   assert.equal(requests.at(-1)?.method, 'POST');
   assert.deepEqual(requests.at(-1)?.body, { message: 'Need token', to: 'human' });
 }, (request) => request.method === 'GET' ? newCapabilities : { event: { id: 'evt-human' } }));
+
+test('create --plan-item maps to body.planItem and requires --parent/--parent-id', async () => fixture(async (requests, output) => {
+  assert.equal(await runSessions(['create', '--prompt', 'work', '--plan-item', 'p3']), 1);
+  assert.equal(requests.length, 0, 'no POST without a parent');
+  assert.ok(output.some((line) => line.includes('--plan-item requires --parent or --parent-id')));
+
+  assert.equal(await runSessions(['create', '--prompt', 'work', '--plan-item', 'item3', '--parent-id', 'p-uuid']), 1);
+  assert.equal(requests.length, 0, 'no POST for a malformed item id');
+  assert.ok(output.some((line) => line.includes('--plan-item must be a plan item id')));
+
+  assert.equal(await runSessions(['create', '--prompt', 'work', '--parent-id', 'p-uuid', '--plan-item', 'p3']), 0);
+  assert.equal(requests.at(-1)?.method, 'POST');
+  assert.deepEqual(requests.at(-1)?.body, { parentSessionId: 'p-uuid', prompt: 'work', planItem: 'p3' });
+}, (request) => ({ session: { id: 'child', name: 'child', status: 'running' } })));

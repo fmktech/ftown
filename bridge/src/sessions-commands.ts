@@ -138,6 +138,7 @@ interface SessionsOptions {
   createWorkdir?: boolean; worktree?: boolean; branch?: string; base?: string;
   keepWorktree?: boolean; forceWorktree?: boolean; to?: string;
   offset?: string; limit?: string; pattern?: string;
+  planItem?: string;
   children?: boolean; siblings?: boolean; keys?: boolean; type?: string; thread?: string;
   peek?: boolean; all?: boolean; sessionId?: string; message?: string; messageFile?: string; id?: string; title?: string; clear?: boolean;
   option?: string[]; multi?: boolean; text?: boolean; questionsJson?: string; wait?: boolean; timeout?: string;
@@ -165,6 +166,7 @@ function sessionProgram(): Command {
     .option('--base <ref>', 'Base ref for the worktree branch (requires --worktree)')
     .option('--name <label>', 'Dashboard name').option('--command <cmd>', 'Full command override')
     .option('--parent', 'Link to the current session').option('--parent-id <uuid>', 'Explicit parent session')
+    .option('--plan-item <id>', 'Start this todo item (p<n>) on the parent plan; requires --parent or --parent-id')
     .option('--model <name>', 'Model override')
     .option('--orchestrator', 'Compatibility flag (no additional prompt or environment changes)')
     .action((_opts, cmd: Command) => run('create', [], cmd));
@@ -493,6 +495,14 @@ async function executeSessionCommand(cmd: SessionCommand, rest: string[], option
         const model = options.model;
         const parentId = options.parentId;
         const useParent = !!options.parent;
+        const planItem = options.planItem;
+
+        if (planItem !== undefined && !/^p\d{1,6}$/.test(planItem)) {
+          throw new Error('--plan-item must be a plan item id like p1, p12');
+        }
+        if (planItem !== undefined && !parentId && !useParent) {
+          throw new Error('--plan-item requires --parent or --parent-id');
+        }
         const createWorkdir = !!options.createWorkdir;
         const useWorktree = !!options.worktree;
         const branch = options.branch;
@@ -511,6 +521,7 @@ async function executeSessionCommand(cmd: SessionCommand, rest: string[], option
         if (model) body.model = model;
         if (parentId) body.parentSessionId = parentId;
         else if (useParent) body.parentSessionId = true;
+        if (planItem) body.planItem = planItem;
         if (createWorkdir) body.createMissingWorkingDir = true;
         if (useWorktree) {
           if (branch !== undefined || base !== undefined) {

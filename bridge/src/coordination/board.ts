@@ -11,9 +11,13 @@ import {
   type SessionCard,
   type TreeEvent,
 } from './contract.js';
+import { orderPlan } from './plan.js';
 import { formatLocalHHMM } from './format.js';
 import type { Activity } from '../attention-events.js';
 import type { Session } from '../types.js';
+
+/** Archived children included by board({ all: true }), newest first. */
+const ARCHIVED_CHILD_CAP = 50;
 
 function emptyRollup(): Record<BoardRollupKey, number> {
   const rollup: Record<BoardRollupKey, number> = {
@@ -57,6 +61,65 @@ async function readAllEventsSince(
     }
   }
   return { events: all, cursor };
+}
+
+function archivedTime(session: Session): string {
+  const removedAt = (session as { removedAt?: unknown }).removedAt;
+  return typeof removedAt === 'string' ? removedAt : '';
+}
+
+/** Newest archived time first. Valid timestamps beat missing ones; id breaks ties. */
+function compareArchivedNewestFirst(a: Session, b: Session): number {
+  const aTime = archivedTime(a);
+  const bTime = archivedTime(b);
+  const ta = Date.parse(aTime);
+  const tb = Date.parse(bTime);
+  const aOk = aTime !== '' && !Number.isNaN(ta);
+  const bOk = bTime !== '' && !Number.isNaN(tb);
+  if (aOk && bOk && ta !== tb) return tb - ta;
+  if (aOk !== bOk) return aOk ? -1 : 1;
+  return a.id.localeCompare(b.id);
+}
+
+function selectArchivedChildren(
+  archived: readonly Session[],
+  rootId: string,
+  liveIds: ReadonlySet<string>,
+): Session[] {
+  const newestById = new Map<string, Session>();
+  for (const session of archived) {
+    if (session.id === rootId || session.parentSessionId !== rootId) continue;
+    if (liveIds.has(session.id)) continue;
+    const prev = newestById.get(session.id);
+    if (!prev || compareArchivedNewestFirst(session, prev) <= 0) {
+      newestById.set(session.id, session);
+    }
+  }
+  return Array.from(newestById.values())
+    .sort(compareArchivedNewestFirst)
+    .slice(0, ARCHIVED_CHILD_CAP);
+}
+
+function buildArchivedCard(session: Session): SessionCard {
+  const previews = session.preview ? session.preview.files.map((f) => f.fileName) : [];
+  const derived: CardDerived = {
+    status: session.status,
+    activity: 'unknown',
+    openAttention: 0,
+    unreadMail: 0,
+    previews,
+    ...(session.shellType !== undefined ? { shellType: session.shellType } : {}),
+    ...(session.model !== undefined ? { model: session.model } : {}),
+  };
+  return {
+    archived: true,
+    sessionId: session.id,
+    name: session.name,
+    ...(session.parentSessionId !== undefined ? { parentSessionId: session.parentSessionId } : {}),
+    declared: session.card ?? null,
+    derived,
+    stale: false,
+  };
 }
 
 export class BoardService implements BoardServiceApi {
@@ -147,22 +210,27 @@ export class BoardService implements BoardServiceApi {
       throw new Error('Session not found');
     }
     const rootId = session.parentSessionId ?? session.id;
+    const listArchived = this.deps.listArchived;
 
-    const [allSessions, cursor, eventsPage] = await Promise.all([
+    const [allSessions, cursor, eventsPage, archivedSessions, rootSession] = await Promise.all([
       this.deps.listSessions(),
       this.deps.events.head(rootId),
       query.since !== undefined
         ? readAllEventsSince(this.deps, rootId, query.since)
         : Promise.resolve(null),
+      query.all && listArchived ? listArchived() : Promise.resolve([] as Session[]),
+      session.id === rootId ? Promise.resolve(session) : this.deps.loadSession(rootId),
     ]);
 
     const sinceSessionIds = eventsPage
       ? new Set(eventsPage.events.map((e) => e.sessionId))
       : null;
 
-    let children = allSessions.filter(
+    const liveChildren = allSessions.filter(
       (s) => s.parentSessionId === rootId && s.id !== rootId,
     );
+    const liveIds = new Set(liveChildren.map((s) => s.id));
+    let children = liveChildren;
 
     if (!query.all) {
       children = children.filter(
@@ -186,7 +254,18 @@ export class BoardService implements BoardServiceApi {
       return a.createdAt.localeCompare(b.createdAt);
     });
 
-    let cards = await Promise.all(children.map((c) => this.buildCardForSession(c)));
+    let archivedChildren: Session[] = [];
+    if (query.all) {
+      archivedChildren = selectArchivedChildren(archivedSessions, rootId, liveIds);
+      if (sinceSessionIds !== null) {
+        archivedChildren = archivedChildren.filter((s) => sinceSessionIds.has(s.id));
+      }
+    }
+
+    let cards = [
+      ...(await Promise.all(children.map((c) => this.buildCardForSession(c)))),
+      ...archivedChildren.map((c) => buildArchivedCard(c)),
+    ];
 
     if (query.ready) {
       cards = cards.filter(
@@ -194,17 +273,23 @@ export class BoardService implements BoardServiceApi {
       );
     }
 
+    // Rollup counts live work. Archived children stay on the board under --all
+    // (suffixed "(retired)") and do not add to a state bucket.
     const rollup = emptyRollup();
     for (const c of cards) {
+      if (c.archived) continue;
       const key: BoardRollupKey = c.declared?.state ?? 'unset';
       rollup[key] += 1;
     }
+
+    const plan = rootSession?.plan ? orderPlan(rootSession.plan.items) : undefined;
 
     return {
       rootId,
       cursor,
       cards,
       rollup,
+      ...(plan !== undefined ? { plan } : {}),
     };
   }
 

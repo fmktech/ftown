@@ -76,17 +76,72 @@ ftown board [--json] [--since <n>] [--ready] [--all] [--session-id <id>]
 # Wait until a board condition holds
 ftown board [--wait --until any-change|any-done|any-blocked|all-done|any-ready [--timeout <s≤300>]] [--session-id <id>]
 
-# Tree events for my tree (status, attention, pr, preview, exit, idle, result, mail)
+# Tree events for my tree (status, attention, pr, preview, exit, idle, result, mail, plan, removed)
 ftown events [--json] [--since <n>] [--limit <n>] [--wait [--timeout <s≤300>]] [--session-id <id>]
 ```
 
 `--ready` lists only children whose PR checks passed and who are not done;
-`--all` includes archived/completed children; `--since <n>` limits the board
-to children with events after that cursor (the board prints its cursor).
-Pass the cursor back as `--since` to see only what changed.
+`--all` includes retired (archived) children after the live ones, newest
+first, capped at 50 and suffixed `(retired)` in plain output; `--since <n>`
+limits the board to children with events after that cursor (the board
+prints its cursor). Pass the cursor back as `--since` to see only what
+changed. Plain board output appends a `planned` section after the child
+rows: up to 5 ready plan items as `→ <id> <title>`, then `+N more` when
+more are ready.
+
+Tree events also include `plan` (one per plan change, summary
+`<id> <state>: <title>`, plus ` → ready: <id>, …` when items become ready)
+and `removed` (summary `removed`, when a child is removed or archived
+while not already exited).
 
 Exit codes for `status`, `board` and `events`: 0 ok, 1 error, 2 usage,
 3 wait timed out with the condition unmet.
+
+## Plan list
+
+The plan is the manager's plan, not a ticket system: a todo list with
+precedence stored on the manager (parent) session. It defaults to
+`FTOWN_SESSION_ID`; `--session-id <id>` targets another session's plan.
+
+```bash
+# List in plan order (--json passes the PlanView through)
+ftown plan [--json] [--session-id <id>]
+
+# Add (title is the remaining words; precedence via --after/--priority)
+ftown plan add <title...> [--note <t>] [--after <id,id>] [--priority 1|2|3] [--session-id <id>]
+
+# Link an existing child, or set state directly
+ftown plan start <id> --session <child-id> [--session-id <id>]
+ftown plan done <id> [--session-id <id>]
+ftown plan drop <id> [--session-id <id>]
+ftown plan todo <id> [--session-id <id>]
+
+# Edit or remove (removing strips the id from other items' after lists)
+ftown plan edit <id> [--title <t>] [--note <t>|--no-note] [--after <ids>|--no-after] [--priority n] [--session-id <id>]
+ftown plan rm <id> [--session-id <id>]
+
+# Create a child for a plan item (marks it started, linked to the child)
+ftown sessions create --parent --plan-item <id> --prompt "<task>"
+```
+
+List marks: `→` ready, `·` waiting, `▸` started, `✓` done, `✗` dropped,
+printed as `<mark> <id> [P<priority>] <title>` plus `(after p1,p2)` or
+`→ <child name>` when linked. Ordering is ready first, then waiting (both
+by priority ascending, then creation time), then started, done and
+dropped. An item is ready when it is `todo` and every item in its `after`
+list is `done` or `dropped`; precedence is set only with `--after` and
+`--priority` (1 is highest). Item ids are `p<n>` and are never reused.
+Limits: 200 items, title 140 characters, note 500, at most 20 `after`
+ids; `after` ids must exist, with no self-reference or cycles.
+
+`--plan-item <id>` (on `ftown sessions create`, requires `--parent` or
+`--parent-id`) fails with an error before any session is created when the
+item is unknown or not `todo`; after creation the item becomes `started`
+with the child linked, and a linking failure only warns (the session
+stays). When a linked child's card becomes `done`, the item becomes
+`done`; a `failed` card leaves it `started` for the manager to decide.
+Setting an item back to `todo` clears its linked session. Exit codes for
+`ftown plan`: 0 ok, 1 error, 2 usage.
 
 ## Manager brief
 
@@ -362,6 +417,7 @@ Fan-out targets are messaged sequentially, one JSON result line per target.
 | `--command` | Full command override (skips `--shell` builder) |
 | `--parent` | Set parent to `$FTOWN_SESSION_ID` |
 | `--parent-id` | Explicit parent session UUID |
+| `--plan-item <id>` | Do plan item `p<n>` of the parent (requires `--parent` or `--parent-id`; see Plan list) |
 | `--worktree` | Create a bridge-owned git worktree for the session (see Worktrees) |
 | `--branch <b>` | Worktree branch (requires `--worktree`; default `ftown/<slug(name)>`) |
 | `--base <ref>` | Ref the worktree branch starts from (requires `--worktree`) |
@@ -443,6 +499,10 @@ The CLI wraps the loopback API. Raw access if needed:
 | GET | `/api/sessions/:id/attention/routed` | Open parent-routed items of my children → `{ items }` |
 | GET/PUT/DELETE | `/api/sessions/:id/brief` | Read, set/clear (`{ text: string \| null }`) or delete the manager brief |
 | POST | `/api/sessions/:id/brief/notes` | Append a brief note (`{ text }`) |
+| GET | `/api/sessions/:id/plan` | Read the plan (`PlanView`: ordered items plus ready ids) |
+| POST | `/api/sessions/:id/plan` | Add a plan item (`{ title, note?, after?, priority? }`) → `{ item }` |
+| PATCH | `/api/sessions/:id/plan/:itemId` | Edit a plan item (`{ title?, note?: string\|null, after?, priority?, state?, sessionId?: string\|null }`) → `{ item }`; item id is `p<n>` |
+| DELETE | `/api/sessions/:id/plan/:itemId` | Remove a plan item (strips it from other items' `after`) → `{ ok: true }` |
 | GET | `/api/worktrees` | List bridge-owned worktrees with git status |
 | POST | `/api/worktrees/prune` | Retire eligible archived worktrees → `{ removed, retained }` |
 | GET | `/api/sessions/:id/attention/:eventId` | Read one item (`?waitSeconds=0..25` long-polls until resolved) → `{ event }`; 404 `attention_not_found` |

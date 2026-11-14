@@ -109,6 +109,10 @@ function makeEvent(seq: number): TreeEvent {
   };
 }
 
+function eventFor(card: SessionCard, seq = 1): TreeEvent {
+  return { ...makeEvent(seq), sessionId: card.sessionId, sessionName: card.name };
+}
+
 function page(events: TreeEvent[], cursor: number, timedOut?: boolean): TreeEventPage {
   return timedOut ? { events, cursor, timedOut: true } : { events, cursor };
 }
@@ -170,20 +174,26 @@ test('evaluateWaitCondition covers all five conditions', () => {
   assert.equal(evaluateWaitCondition('any-change', makeBoard([]), oneEvent), true);
   assert.equal(evaluateWaitCondition('any-change', makeBoard([doneKid]), []), false);
 
-  assert.equal(evaluateWaitCondition('any-done', makeBoard([doneKid]), []), true);
-  assert.equal(evaluateWaitCondition('any-done', makeBoard([workingKid]), oneEvent), false);
+  assert.equal(evaluateWaitCondition('any-done', makeBoard([doneKid]), []), false);
+  assert.equal(evaluateWaitCondition('any-done', makeBoard([doneKid]), [eventFor(doneKid)]), true);
+  assert.equal(evaluateWaitCondition('any-done', makeBoard([doneKid, workingKid]), [eventFor(workingKid)]), false);
+  assert.equal(evaluateWaitCondition('any-done', makeBoard([workingKid]), [eventFor(workingKid)]), false);
 
-  assert.equal(evaluateWaitCondition('any-blocked', makeBoard([blockedKid]), []), true);
-  assert.equal(evaluateWaitCondition('any-blocked', makeBoard([workingKid]), []), false);
+  assert.equal(evaluateWaitCondition('any-blocked', makeBoard([blockedKid]), []), false);
+  assert.equal(evaluateWaitCondition('any-blocked', makeBoard([blockedKid]), [eventFor(blockedKid)]), true);
+  assert.equal(evaluateWaitCondition('any-blocked', makeBoard([blockedKid, workingKid]), [eventFor(workingKid)]), false);
 
   assert.equal(evaluateWaitCondition('all-done', makeBoard([doneKid, doneKid]), []), true);
   assert.equal(evaluateWaitCondition('all-done', makeBoard([doneKid, workingKid]), []), false);
   assert.equal(evaluateWaitCondition('all-done', makeBoard([doneKid, unsetKid]), []), false);
   assert.equal(evaluateWaitCondition('all-done', makeBoard([]), []), false);
+  assert.equal(evaluateWaitCondition('all-done', makeBoard([doneKid]), [eventFor(workingKid)]), true);
 
-  assert.equal(evaluateWaitCondition('any-ready', makeBoard([readyKid]), []), true);
-  assert.equal(evaluateWaitCondition('any-ready', makeBoard([childCard('f', 'done', 'passed')]), []), false);
-  assert.equal(evaluateWaitCondition('any-ready', makeBoard([workingKid]), []), false);
+  const doneWithPr = childCard('f', 'done', 'passed');
+  assert.equal(evaluateWaitCondition('any-ready', makeBoard([readyKid]), []), false);
+  assert.equal(evaluateWaitCondition('any-ready', makeBoard([readyKid]), [eventFor(readyKid)]), true);
+  assert.equal(evaluateWaitCondition('any-ready', makeBoard([doneWithPr]), [eventFor(doneWithPr)]), false);
+  assert.equal(evaluateWaitCondition('any-ready', makeBoard([readyKid, workingKid]), [eventFor(workingKid)]), false);
 });
 
 // ───────────────────────── status ─────────────────────────
@@ -369,6 +379,42 @@ test('board --wait exits 0 when an arriving event makes a child done', async () 
   });
   assert.equal(await runBoard(['--wait', '--until', 'any-done', '--timeout', '30'], deps), 0);
   assert.equal(out[out.length - 1], 'cursor 6');
+});
+
+test('board --wait any-done ignores an already-done child when a different child changes', async () => {
+  let polls = 0;
+  const done = childCard('done-kid', 'done');
+  const other = childCard('other', 'working');
+  const { deps, out } = harness((call) => {
+    if (call.path.includes('/board')) return makeBoard([done, other], 5);
+    polls += 1;
+    if (polls === 1) return page([eventFor(other, 6)], 6);
+    return page([], 6, true);
+  });
+  assert.equal(await runBoard(['--wait', '--until', 'any-done', '--timeout', '1'], deps), 3);
+  assert.equal(polls, 2);
+  assert.match(out.join('\n'), /done-kid done/);
+});
+
+test('board --wait any-done accepts a child whose event arrived after the cursor even if a later event is unrelated', async () => {
+  let boardCalls = 0;
+  let polls = 0;
+  const done = childCard('done-kid', 'done');
+  const workingSame = childCard('done-kid', 'working');
+  const other = childCard('other', 'working');
+  const { deps } = harness((call) => {
+    if (call.path.includes('/board')) {
+      boardCalls += 1;
+      if (boardCalls < 3) return makeBoard([workingSame, other], boardCalls === 1 ? 5 : 6);
+      return makeBoard([done, other], 7);
+    }
+    polls += 1;
+    if (polls === 1) return page([eventFor(workingSame, 6)], 6);
+    if (polls === 2) return page([eventFor(other, 7)], 7);
+    return page([], 7, true);
+  });
+  assert.equal(await runBoard(['--wait', '--until', 'any-done', '--timeout', '30'], deps), 0);
+  assert.equal(polls, 2);
 });
 
 test('board --wait does not pre-check: an already-done child still waits for new events', async () => {

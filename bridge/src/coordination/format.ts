@@ -63,26 +63,51 @@ export function formatBoardRow(card: SessionCard, nowMs: number): string {
   if (card.stale) {
     suffix += '  (stale)';
   }
+  if (card.archived) {
+    suffix += '  (retired)';
+  }
 
   return `${card.name} ${state} ${activity}${idlePart}  ${headline}${suffix}`;
 }
 
-export function formatBoard(board: Board, nowMs: number): string {
-  if (board.cards.length === 0) {
-    return 'no child sessions';
+const PLANNED_READY_LIMIT = 5;
+
+function formatPlannedLines(board: Board): string[] {
+  const ready = board.plan?.ready ?? [];
+  if (ready.length === 0) return [];
+  const titleById = new Map((board.plan?.items ?? []).map((item) => [item.id, item.title]));
+  const shown = ready.slice(0, PLANNED_READY_LIMIT);
+  const lines = ['planned'];
+  for (const id of shown) {
+    const title = titleById.get(id) ?? '';
+    lines.push(title === '' ? `→ ${id}` : `→ ${id} ${title}`);
   }
-  const rows = board.cards.map((card) => formatBoardRow(card, nowMs));
-  const rollupParts: string[] = [];
-  for (const key of ROLLUP_ORDER) {
-    const count = board.rollup[key] ?? 0;
-    if (count > 0) {
-      rollupParts.push(`${count} ${key}`);
+  const more = ready.length - shown.length;
+  if (more > 0) lines.push(`+${more} more`);
+  return lines;
+}
+
+export function formatBoard(board: Board, nowMs: number): string {
+  const lines: string[] = [];
+  if (board.cards.length === 0) {
+    lines.push('no child sessions');
+  } else {
+    for (const card of board.cards) {
+      lines.push(formatBoardRow(card, nowMs));
+    }
+    const rollupParts: string[] = [];
+    for (const key of ROLLUP_ORDER) {
+      const count = board.rollup[key] ?? 0;
+      if (count > 0) {
+        rollupParts.push(`${count} ${key}`);
+      }
+    }
+    if (rollupParts.length > 0) {
+      lines.push(rollupParts.join(', '));
     }
   }
-  if (rollupParts.length > 0) {
-    rows.push(rollupParts.join(', '));
-  }
-  return rows.join('\n');
+  lines.push(...formatPlannedLines(board));
+  return lines.join('\n');
 }
 
 export function formatEvent(e: TreeEvent): string {

@@ -35,6 +35,7 @@ export interface Session {
   preview?: SessionPreviewDescriptor;
   card?: SessionCard;
   brief?: { text?: string; notes: { ts: string; text: string }[]; updatedAt: string };
+  plan?: { seq: number; items: Array<{ id: string; title: string; note?: string; after: string[]; priority: 1 | 2 | 3; state: 'todo' | 'started' | 'done' | 'dropped'; sessionId?: string; createdAt: string; updatedAt: string }> };
   worktree?: { repoRoot: string; path: string; branch: string; base: string; createdByBridge: true; retained?: { reason: string; at: string } };
 }
 
@@ -126,7 +127,7 @@ export type CommandType =
   | 'session_preview_status' | 'session_preview_chunk'
   | 'get_bridge_update' | 'update_bridge' | 'get_pull_request_statuses' | 'get_pull_request_review' | 'get_pull_request_review_chunk'
   | 'get_model_routing' | 'set_model_routing'
-  | 'get_session_attention' | 'resolve_session_attention' | 'answer_session_attention' | 'send_message'
+  | 'get_session_attention' | 'resolve_session_attention' | 'answer_session_attention' | 'get_session_board' | 'send_message'
   | 'create_session' | 'stop_session' | 'list_sessions' | 'get_history'
   | 'retry_session' | 'rename_session' | 'remove_session' | 'bridge_exec'
   | 'update_session_parent'

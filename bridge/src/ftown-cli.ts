@@ -10,12 +10,13 @@ import { runBoard, runEvents, runStatus } from './coordination-cli.js';
 import { runAttention } from './attention-cli.js';
 import { runBrief } from './brief-cli.js';
 import { runWorktrees } from './worktrees-cli.js';
+import { runPlan } from './plan-cli.js';
 import { executeCli, isCliEntry } from './cli-entry.js';
 export { isCliEntry } from './cli-entry.js';
 
 export function usage(): string {
   return `Usage: ftown [bridge options]
-       ftown <setup|start|sessions|harness|env|security|quota|status|board|events|attention|brief|worktrees> [args...]
+       ftown <setup|start|sessions|harness|env|security|quota|status|board|events|attention|brief|worktrees|plan> [args...]
 
 With no subcommand, start the bridge. Run setup explicitly before the first start.
 
@@ -32,7 +33,8 @@ Subcommands:
   events     Tree event log for this session's tree
   attention  Answer or escalate questions routed from child sessions
   brief      Manager brief for a session (show, set, note)
-  worktrees  List or prune bridge-owned git worktrees`;
+  worktrees  List or prune bridge-owned git worktrees
+  plan       Manager plan list (add, start, done, drop, todo, edit, rm)`;
 }
 
 export async function runFtown(argv: string[], start: (argv: string[]) => Promise<number> = runStart): Promise<number> {
@@ -51,6 +53,7 @@ export async function runFtown(argv: string[], start: (argv: string[]) => Promis
     case 'attention': return runAttention(args);
     case 'brief': return runBrief(args);
     case 'worktrees': return runWorktrees(args);
+    case 'plan': return runPlan(args);
     case 'setup': return runSetup(args);
     case 'start': return start(args);
     default: console.error(`ftown: Unknown subcommand "${group}"`); console.error(usage()); return 1;
