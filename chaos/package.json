@@ -1,0 +1,19 @@
+{
+  "name": "ftown-chaos",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Deterministic chaos tests for ftown: seed-driven faults inside a QEMU guest.",
+  "engines": {
+    "node": ">=24.12.0"
+  },
+  "scripts": {
+    "test": "node --test \"src/**/*.test.ts\"",
+    "typecheck": "tsc -p tsconfig.json",
+    "test:chaos": "node src/host/cli.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.7.0"
+  }
+}
