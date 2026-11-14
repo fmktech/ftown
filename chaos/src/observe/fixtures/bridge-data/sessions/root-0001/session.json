@@ -1,0 +1,1 @@
+{"id":"root-0001","name":"root","status":"running","createdAt":"2026-01-01T00:00:00.000Z","workdir":"/work/repo","command":"node /opt/chaos/src/fake-agent/main.ts --role root --script /run/chaos/scripts/root.json"}
