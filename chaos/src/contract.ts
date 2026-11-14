@@ -35,7 +35,14 @@ export interface Rng {
 
 export type DeriveRng = (seed: number, label: StreamLabel) => Rng;
 
-/** Guest time source. now() is milliseconds since the supervisor started (monotonic). */
+/**
+ * Guest time source. now() is whole milliseconds since the supervisor started (monotonic).
+ * All processes share one epoch: the supervisor writes its start instant, taken from
+ * process.hrtime.bigint() (CLOCK_MONOTONIC, comparable across processes), as a decimal
+ * nanosecond string to GUEST.t0File before anything else starts. Every other process (the
+ * fake agents) computes now() = floor((process.hrtime.bigint() - t0) / 1e6). A process that
+ * cannot read the file must fail loudly, not fall back to its own epoch.
+ */
 export interface Clock {
   now(): number;
   sleep(ms: number): Promise<void>;
@@ -205,6 +212,10 @@ export interface AgentLogLine {
  *   question message = the title again; options are always ['yes', 'no'].
  * The workload allocates n from 1; agent `role` allocates from 1000 * (index of role in ROLES + 1).
  */
+/**
+ * In every record and observation, `tag` is the full text `CHAOS-M-<n>` and `askTag` is the full
+ * text `CHAOS-Q-<n>` (not the bare number).
+ */
 /** Every mail body sent by the workload or an agent starts with this tag: `CHAOS-M-<n> `. */
 export const MAIL_TAG_RE = /^CHAOS-M-(\d+)\b/;
 /** Every question title starts with this tag: `CHAOS-Q-<n> `. */
@@ -277,7 +288,7 @@ export type Rec =
   | { k: 'checkpoint'; t: number; name: string; final: boolean; snap: Snapshot }
   | { k: 'verdict'; prop: string; kind: PropKind; status: PropStatus; evidence: string[] };
 
-export const CONTRACT_VERSION = 2;
+export const CONTRACT_VERSION = 3;
 
 /** Operations the supervisor's workload driver performs through the real ftown CLI. */
 export type WorkloadOp =
@@ -340,6 +351,10 @@ export const GUEST = {
   /** Git repo the sessions use as workdir. */
   repoDir: '/work/repo',
   agentLogDir: '/run/chaos/agents',
+  /** Shared clock epoch, see Clock. */
+  t0File: '/run/chaos/t0',
+  /** JSON {role: sessionId} written by the supervisor; read by agents to address other roles. */
+  idsFile: '/run/chaos/ids.json',
   agentScriptDir: '/run/chaos/scripts',
   /** Where the supervisor writes its outputs before they are sent to the host. */
   outDir: '/run/chaos/out',
