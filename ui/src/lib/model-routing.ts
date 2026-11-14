@@ -9,8 +9,13 @@ import type {
   ModelPricing,
   ModelRoutingConfig,
   ModelRoutingSnapshot,
+  ProviderQuota,
+  ProviderRouting,
+  QuotaAvailability,
   QuotaProviderId,
   QuotaReport,
+  QuotaWindow,
+  QuotaWindowKind,
   RoutingPick,
   RoutingTier,
   SetModelRoutingResult,
@@ -604,4 +609,238 @@ export function parseSetModelRoutingResult(data: unknown): SetModelRoutingResult
 /** `<provider> / <model>` plus ` @ <effort>` when an effort is set. */
 export function pickLabel(pick: RoutingPick): string {
   return `${pick.provider} / ${pick.model}${pick.effort ? ` @ ${pick.effort}` : ''}`;
+}
+
+export const AGY_QUOTA_POOLS = [
+  'Gemini Models',
+  'Gemini 4 Argon',
+  'Claude and GPT models',
+] as const;
+
+export type AgyQuotaPool = (typeof AGY_QUOTA_POOLS)[number];
+
+/**
+ * Pure mapping from an `agy` model ID to its rate-limit pool:
+ * - `gemini-4-argon*` -> `'Gemini 4 Argon'`
+ * - IDs containing `claude` or `gpt` -> `'Claude and GPT models'`
+ * - Other `gemini*` -> `'Gemini Models'`
+ * - Unknown / unrecognized IDs -> `null` (falls back to tightest pool).
+ */
+export function agyQuotaPool(modelId: string): AgyQuotaPool | null {
+  const id = modelId.trim().toLowerCase();
+  if (id.length === 0) return null;
+  if (id.startsWith('gemini-4-argon')) return 'Gemini 4 Argon';
+  if (id.includes('claude') || id.includes('gpt')) return 'Claude and GPT models';
+  if (id.startsWith('gemini')) return 'Gemini Models';
+  return null;
+}
+
+const MINUTE_MS = 60_000;
+const IMMINENT_RESET_MINUTES = 10;
+const RUNWAY_LOW = 0.5;
+const RUNWAY_CAP = 99;
+const WINDOW_MINUTES_BY_KIND: Record<QuotaWindowKind, number> = {
+  five_hour: 300,
+  weekly: 10080,
+};
+const SEVERITY: Record<QuotaAvailability, number> = {
+  available: 0,
+  low: 1,
+  exhausted: 2,
+  unknown: -1,
+};
+const KIND_ORDER: Record<QuotaWindowKind, number> = {
+  five_hour: 0,
+  weekly: 1,
+};
+
+function assessPoolWindow(
+  window: QuotaWindow,
+  nowMs: number,
+): { availability: QuotaAvailability; leftPercent: number | null } {
+  const used = window.usedPercent;
+  const measuredLeft =
+    used !== null && Number.isFinite(used)
+      ? Math.round(Math.min(100, Math.max(0, 100 - used)))
+      : null;
+  if (measuredLeft === null) return { availability: 'unknown', leftPercent: null };
+
+  const resetMs = window.resetsAt !== null ? Date.parse(window.resetsAt) : Number.NaN;
+  const resetsInMinutes = Number.isNaN(resetMs)
+    ? null
+    : Math.max(0, Math.floor((resetMs - nowMs) / MINUTE_MS));
+
+  if (resetsInMinutes !== null && resetsInMinutes <= IMMINENT_RESET_MINUTES) {
+    return { availability: 'available', leftPercent: 100 };
+  }
+
+  const windowMinutes = window.windowMinutes;
+  let runway: number | null = null;
+  if (
+    windowMinutes !== null &&
+    Number.isFinite(windowMinutes) &&
+    windowMinutes > 0 &&
+    resetsInMinutes !== null &&
+    resetsInMinutes > 0
+  ) {
+    const raw = (measuredLeft / 100) / (resetsInMinutes / windowMinutes);
+    runway = Math.min(RUNWAY_CAP, Math.round(raw * 100) / 100);
+  }
+
+  let availability: QuotaAvailability;
+  if (measuredLeft <= 1) availability = 'exhausted';
+  else if (measuredLeft < 15) availability = 'low';
+  else if (runway !== null && runway < RUNWAY_LOW) availability = 'low';
+  else availability = 'available';
+
+  return { availability, leftPercent: measuredLeft };
+}
+
+function agyPoolWindows(row: ProviderQuota, modelId: string): QuotaWindow[] {
+  const pool = agyQuotaPool(modelId);
+  const scoped = row.scopedLimits;
+  if (pool !== null && Array.isArray(scoped) && scoped.length > 0) {
+    const matches = scoped.filter((entry) => isRecord(entry) && entry.scope === pool);
+    if (matches.length > 0) {
+      const windows: QuotaWindow[] = [];
+      for (const kind of ['five_hour', 'weekly'] as const) {
+        const ofKind = matches.filter((entry) => entry.kind === kind);
+        if (ofKind.length === 0) continue;
+        let best = ofKind[0];
+        for (const entry of ofKind.slice(1)) {
+          const entryUsed = finiteOrNull(entry.usedPercent) ?? -1;
+          const bestUsed = finiteOrNull(best.usedPercent) ?? -1;
+          if (entryUsed > bestUsed) best = entry;
+        }
+        windows.push({
+          kind,
+          usedPercent: finiteOrNull(best.usedPercent),
+          resetsAt: stringOrNull(best.resetsAt),
+          windowMinutes: WINDOW_MINUTES_BY_KIND[kind],
+          note: pool,
+        });
+      }
+      if (windows.length > 0) return windows;
+    }
+  }
+  return Array.isArray(row.windows) ? row.windows : [];
+}
+
+function adviseAgyModelFromRow(
+  row: ProviderQuota,
+  modelId: string,
+  generatedAt: string,
+): { availability: QuotaAvailability; leftPercent: number | null; reason: string | undefined } | null {
+  if (row.status !== 'ok') return null;
+  const windows = agyPoolWindows(row, modelId);
+  if (windows.length === 0) return null;
+
+  const parsedNow = Date.parse(row.observedAt || generatedAt);
+  const nowMs = Number.isFinite(parsedNow) ? parsedNow : Date.now();
+  const usable: { window: QuotaWindow; availability: QuotaAvailability; leftPercent: number }[] = [];
+  for (const window of windows) {
+    const assessed = assessPoolWindow(window, nowMs);
+    if (assessed.availability !== 'unknown' && assessed.leftPercent !== null) {
+      usable.push({ window, availability: assessed.availability, leftPercent: assessed.leftPercent });
+    }
+  }
+  if (usable.length === 0) return null;
+
+  const binding = usable.reduce((best, candidate) => {
+    const sevDiff = SEVERITY[candidate.availability] - SEVERITY[best.availability];
+    if (sevDiff !== 0) return sevDiff > 0 ? candidate : best;
+    if (candidate.leftPercent !== best.leftPercent) {
+      return candidate.leftPercent < best.leftPercent ? candidate : best;
+    }
+    return KIND_ORDER[candidate.window.kind] < KIND_ORDER[best.window.kind] ? candidate : best;
+  });
+
+  const pool = agyQuotaPool(modelId);
+  const label = binding.window.kind === 'five_hour' ? '5-hour' : 'weekly';
+  const scopeNote = pool ?? binding.window.note ?? null;
+  const reason =
+    binding.availability === 'exhausted'
+      ? `${label} window used up${scopeNote ? ` (${scopeNote})` : ''}`
+      : `${binding.leftPercent}% of the ${label} window left${scopeNote ? ` (${scopeNote})` : ''}`;
+
+  return {
+    availability: binding.availability,
+    leftPercent: binding.leftPercent,
+    reason,
+  };
+}
+
+/**
+ * Resolves the per-pick availability, remaining percentage, and badge tooltip
+ * for a pick in the Model Routing dialog. Uses the annotated pick when present,
+ * or computes pool availability from `report.providers` for `agy` picks edited
+ * in the draft before saving, falling back to the provider-level routing entry.
+ */
+export function resolvePickAvailability(
+  report: QuotaReport,
+  originName: string | null,
+  pick: Pick<RoutingPick, 'provider' | 'model' | 'effort'>,
+): { availability: QuotaAvailability; leftPercent: number | null; reason: string | undefined } {
+  const routing = report.routing.find((entry) => entry.provider === pick.provider);
+  const exactAnnotation = findAnnotatedPick(report.tiers, originName, pick);
+  const modelAnnotation =
+    exactAnnotation ??
+    report.tiers
+      .flatMap((tier) => (Array.isArray(tier.picks) ? tier.picks : []))
+      .find((candidate) => candidate.provider === pick.provider && candidate.model === pick.model) ??
+    null;
+
+  const quotaRow = report.providers.find((entry) => entry.provider === pick.provider);
+  const agyLive =
+    pick.provider === 'agy' && quotaRow !== undefined
+      ? adviseAgyModelFromRow(quotaRow, pick.model, report.generatedAt)
+      : null;
+
+  if (
+    modelAnnotation !== null &&
+    (AVAILABILITIES as readonly string[]).includes(modelAnnotation.availability as string) &&
+    (modelAnnotation.availability !== 'unknown' || agyLive === null)
+  ) {
+    return {
+      availability: modelAnnotation.availability as QuotaAvailability,
+      leftPercent: finiteOrNull(modelAnnotation.leftPercent),
+      reason: agyLive?.reason ?? routing?.reason,
+    };
+  }
+
+  if (agyLive !== null) {
+    return agyLive;
+  }
+
+  return {
+    availability:
+      routing && (AVAILABILITIES as readonly string[]).includes(routing.availability)
+        ? routing.availability
+        : 'unknown',
+    leftPercent: finiteOrNull(routing?.leftPercent),
+    reason: routing?.reason || undefined,
+  };
+}
+
+const TIGHTEST_NOTE_PATTERN = /\((tightest:\s*[^()]+)\)$/;
+
+/**
+ * Plan or tightest-pool summary label for a subscription row in the dialog:
+ * returns `row.plan` when present, otherwise a `tightest: <pool>` note from
+ * the binding window or routing reason when multiple pools exist, else `"–"`.
+ */
+export function providerSummaryLabel(row: ProviderQuota, routing?: ProviderRouting): string {
+  if (typeof row.plan === 'string' && row.plan.trim().length > 0) return row.plan;
+  const bindingKind = routing?.bindingWindow ?? null;
+  const bindingWindow = bindingKind ? row.windows.find((w) => w.kind === bindingKind) : undefined;
+  const candidateNote =
+    bindingWindow?.note ?? row.windows.find((w) => typeof w.note === 'string' && w.note.startsWith('tightest:'))?.note ?? null;
+  if (typeof candidateNote === 'string' && candidateNote.trim().startsWith('tightest:')) {
+    return candidateNote.trim();
+  }
+  if (typeof routing?.reason === 'string') {
+    const match = routing.reason.match(TIGHTEST_NOTE_PATTERN);
+    if (match) return match[1].trim();
+  }
+  return '–';
 }

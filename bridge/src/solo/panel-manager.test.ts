@@ -619,6 +619,40 @@ describe('startPanel spawn contract (S15)', () => {
     assert.equal(await exists(path.join(dataDir, 'solo', 'panel.pid')), false);
   });
 
+  it('ignores a +90s wall-clock jump during the health wait (F1: monotonic deadline)', async () => {
+    const dataDir = await freshDataDir('walljump');
+    const bundleDir = path.join(tmpRoot, 'bundle-walljump');
+    await fs.mkdir(bundleDir, { recursive: true });
+    await fs.writeFile(path.join(bundleDir, 'server.js'), '');
+
+    const records: SpawnRecord[] = [];
+    const children: FakeChild[] = [];
+    const realDateNow = Date.now;
+    let wall = realDateNow();
+    Date.now = () => wall;
+    let probes = 0;
+    try {
+      const running = await startPanel({
+        bundleDir,
+        port: 54326,
+        dataDir,
+        probeIntervalMs: 10,
+        probeMaxWaitMs: 5_000,
+        spawnImpl: fakeSpawn(records, children),
+        healthFetchImpl: (async (): Promise<Response> => {
+          probes += 1;
+          if (probes === 1) wall += 90_000;
+          return { status: probes < 3 ? 503 : 200 } as unknown as Response;
+        }) as unknown as typeof fetch,
+      });
+      assert.equal(running.pid, children[0].pid);
+      assert.ok(probes >= 3, `health probes must continue past the wall jump, got ${probes}`);
+    } finally {
+      Date.now = realDateNow;
+    }
+    await stopPanel(dataDir);
+  });
+
   it('gives up after the health budget, SIGTERMs the child, removes the pidfile', async () => {
     const dataDir = await freshDataDir('unhealthy');
     const bundleDir = path.join(tmpRoot, 'bundle-unhealthy');

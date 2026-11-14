@@ -36,6 +36,7 @@ import {
   canResumeStoredSession,
   createFtownSession,
   deriveRelaunchCommand,
+  InvalidShellTypeError,
   parseCreateSessionBody,
   PlanItemError,
   ProviderAuthMissingError,
@@ -314,7 +315,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     await this.security.revalidate(message.principal);
     void this.handleApiRoute(request, response as unknown as ServerResponse, new URL(route.path, 'http://localhost').pathname,
       new URL(route.path, 'http://localhost')).catch(error => {
-        if (error instanceof BadRequestError || error instanceof WorktreeError || error instanceof PlanItemError) jsonResponse(response as unknown as ServerResponse, 400, { error: error.message });
+        if (error instanceof BadRequestError || error instanceof WorktreeError || error instanceof PlanItemError || error instanceof InvalidShellTypeError) jsonResponse(response as unknown as ServerResponse, 400, { error: error.message });
         else if (error instanceof RouteError) jsonResponse(response as unknown as ServerResponse, error.status, { error: error.message });
         else if (error instanceof AttentionError) jsonResponse(response as unknown as ServerResponse, error.status, { error: error.message, code: error.code });
         else jsonResponse(response as unknown as ServerResponse, 500, { error: 'bridge_error', code: 'bridge_error' });
@@ -1037,7 +1038,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
           useCallerAsParent ? callerSessionId : undefined,
         );
       } catch (err) {
-        if (err instanceof WorktreeError || err instanceof PlanItemError) {
+        if (err instanceof WorktreeError || err instanceof PlanItemError || err instanceof InvalidShellTypeError) {
           jsonResponse(res, 400, { error: err.message });
           return;
         }
@@ -1061,7 +1062,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         const session = await controller.create(input);
         jsonResponse(res, 201, { session: toWireSession(session) });
       } catch (err) {
-        if (err instanceof WorktreeError || err instanceof PlanItemError) {
+        if (err instanceof WorktreeError || err instanceof PlanItemError || err instanceof InvalidShellTypeError) {
           jsonResponse(res, 400, { error: err.message });
           return;
         }
@@ -1330,15 +1331,55 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         if (!body || typeof body !== 'object' || Array.isArray(body)) {
           throw new BadRequestError('Card update must be an object');
         }
-        const keys = Object.keys(body);
+        const rawBody = body as Record<string, unknown>;
+        const keys = Object.keys(rawBody);
         if (keys.length === 0) throw new BadRequestError('Empty card update');
         for (const key of keys) {
-          if (!['state', 'headline', 'progress', 'blockedOn', 'next'].includes(key)) {
+          if (!['state', 'headline', 'progress', 'blockedOn', 'next', 'force'].includes(key)) {
             throw new BadRequestError(`Unknown card field: ${key}`);
           }
         }
+        if ('force' in rawBody && typeof rawBody.force !== 'boolean') {
+          throw new BadRequestError('force must be a boolean');
+        }
+        const force = rawBody.force === true;
+        const patch = { ...rawBody };
+        delete patch.force;
+        if (Object.keys(patch).length === 0) {
+          throw new BadRequestError('Empty card update');
+        }
+        const targetSession = await this.store?.loadSession(id);
+        if (!targetSession) {
+          jsonResponse(res, 404, { error: 'Session not found' });
+          return;
+        }
+        const callerId = this.readCallerSessionId(req);
+        const forcedByParent =
+          force &&
+          Boolean(callerId && targetSession.parentSessionId && callerId === targetSession.parentSessionId);
+        if (targetSession.requireGreenPr && patch.state === 'done' && !forcedByParent) {
+          if (!targetSession.pullRequestUrl) {
+            jsonResponse(res, 409, { error: 'Cannot mark card done: linked PR required' });
+            return;
+          }
+          let pr: { status: { state: string }; fresh: boolean } | null = null;
+          try {
+            pr = await coordination.prStatusFresh(targetSession.pullRequestUrl);
+          } catch {
+            pr = null;
+          }
+          if (pr && !pr.fresh) {
+            jsonResponse(res, 409, { error: 'Checking PR status, retry in ~1 min' });
+            return;
+          }
+          const prState = pr?.status.state ?? 'unknown';
+          if (prState !== 'passed' && prState !== 'merged') {
+            jsonResponse(res, 409, { error: `PR checks are ${prState}; wait for green` });
+            return;
+          }
+        }
         try {
-          await coordination.cards.set(id, body as CardPatch);
+          await coordination.cards.set(id, patch as CardPatch);
         } catch (err) {
           if (err instanceof CardValidationError) {
             jsonResponse(res, 400, { error: err.message });
@@ -1349,6 +1390,9 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
             return;
           }
           throw err;
+        }
+        if (targetSession.requireGreenPr && patch.state === 'done' && forcedByParent) {
+          await coordination.emit(targetSession, 'status', `done forced by parent (${callerId})`);
         }
         const card = await coordination.board.card(id);
         if (!card) { jsonResponse(res, 404, { error: 'Session not found' }); return; }

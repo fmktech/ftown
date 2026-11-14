@@ -6,8 +6,14 @@ import { dirname, join } from 'node:path';
 import { CLAUDE_MOD_FILES } from './claude-mod-installer.js';
 
 import {
+  ACCEPTED_SHELL_TYPES,
   HARNESSES,
   HOOKED_SHELL_TYPES,
+  InvalidShellTypeError,
+  isShellType,
+  isShellTypeOrAlias,
+  normalizeShellType,
+  SHELL_ALIASES,
   SHELL_TYPES,
   buildAntigravityCommand,
   buildGrokCommand,
@@ -15,8 +21,8 @@ import {
   buildMuseCommand,
   buildOpencodeCommand,
   harnessAcceptsPromptAsCliArg,
-  isShellType,
 } from './harness-registry.js';
+import { QUOTA_PROVIDER_IDS } from './quota/types.js';
 import { buildSessionCommand } from './agent-commands.js';
 import { PROVIDER_AUTH_ENV, PROVIDER_FLAVORS, PROVIDER_RUNTIME_ENV } from './provider-env-store.js';
 
@@ -454,5 +460,104 @@ describe('buildGrokCommand', () => {
     assert.equal(HARNESSES.grok.hooked, false);
     assert.equal(HARNESSES.grok.promptAsCliArg, true);
     assert.equal(HARNESSES.grok.resumeField, 'grokSessionId');
+  });
+});
+
+describe('shellType aliases and validation', () => {
+  it('maps routing/quota provider ids to canonical harness keys', () => {
+    assert.deepEqual(SHELL_ALIASES, { agy: 'antigravity' });
+    // Verify all QUOTA_PROVIDER_IDS against harness-registry
+    for (const providerId of QUOTA_PROVIDER_IDS) {
+      const canonical = normalizeShellType(providerId);
+      assert.ok(canonical && isShellType(canonical), `provider ${providerId} must resolve to a valid harness key`);
+      if (providerId === 'agy') {
+        assert.equal(canonical, 'antigravity');
+      } else {
+        assert.equal(canonical, providerId);
+      }
+    }
+  });
+
+  it('normalizes valid harness keys and aliases', () => {
+    assert.equal(normalizeShellType(undefined), undefined);
+    assert.equal(normalizeShellType(null), undefined);
+    assert.equal(normalizeShellType('agy'), 'antigravity');
+    assert.equal(normalizeShellType('  agy  '), 'antigravity');
+    assert.equal(normalizeShellType('antigravity'), 'antigravity');
+    assert.equal(normalizeShellType('claude'), 'claude');
+    assert.equal(normalizeShellType('codex'), 'codex');
+    assert.equal(normalizeShellType('cursor'), 'cursor');
+    assert.equal(normalizeShellType('shell'), 'shell');
+    assert.equal(normalizeShellType('grok'), 'grok');
+    assert.equal(normalizeShellType('muse'), 'muse');
+    assert.equal(normalizeShellType('pi'), 'pi');
+    assert.equal(normalizeShellType('opencode'), 'opencode');
+    assert.equal(normalizeShellType('kimi-code'), 'kimi-code');
+    assert.equal(normalizeShellType('zai'), 'zai');
+    assert.equal(normalizeShellType('kimi'), 'kimi');
+    assert.equal(normalizeShellType('deepseek'), 'deepseek');
+    assert.equal(normalizeShellType('fireworks'), 'fireworks');
+  });
+
+  it('identifies valid shell types and aliases with isShellTypeOrAlias', () => {
+    assert.equal(isShellTypeOrAlias('agy'), true);
+    assert.equal(isShellTypeOrAlias('antigravity'), true);
+    assert.equal(isShellTypeOrAlias('claude'), true);
+    assert.equal(isShellTypeOrAlias('unknown'), false);
+    assert.equal(isShellTypeOrAlias(''), false);
+    assert.equal(isShellTypeOrAlias(null), false);
+  });
+
+  it('rejects unknown shellType with 400 InvalidShellTypeError listing valid values', () => {
+    for (const bad of ['unknown', 'gemini', 'agy2', '', '  ', 123, {}]) {
+      assert.throws(
+        () => normalizeShellType(bad),
+        (err: unknown) => {
+          assert.ok(err instanceof InvalidShellTypeError);
+          assert.equal(err.status, 400);
+          assert.equal(err.code, 'invalid_shell_type');
+          assert.match(err.message, /Invalid shellType/);
+          assert.match(err.message, /Valid values:/);
+          assert.ok(ACCEPTED_SHELL_TYPES.every((t) => err.message.includes(t)));
+          return true;
+        },
+      );
+    }
+  });
+
+  it('rejects Object.prototype properties such as constructor, toString, and __proto__', () => {
+    for (const prop of ['constructor', 'toString', '__proto__', 'valueOf', 'hasOwnProperty']) {
+      assert.equal(isShellTypeOrAlias(prop), false);
+      assert.throws(
+        () => normalizeShellType(prop),
+        (err: unknown) => {
+          assert.ok(err instanceof InvalidShellTypeError);
+          assert.equal(err.status, 400);
+          assert.equal(err.code, 'invalid_shell_type');
+          assert.match(err.message, /Invalid shellType/);
+          return true;
+        },
+      );
+    }
+  });
+
+  it('buildSessionCommand resolves alias agy to antigravity instead of falling back to claude', () => {
+    const cmd = buildSessionCommand({
+      shellType: 'agy' as ShellType,
+      model: 'gemini-4-hydrogen-medium',
+    });
+    assert.equal(cmd, "agy --dangerously-skip-permissions --model 'gemini-4-hydrogen-medium'");
+    assert.doesNotMatch(cmd, /claude/);
+  });
+
+  it('buildSessionCommand rejects unknown shellType and never silently falls back to claude', () => {
+    assert.throws(
+      () => buildSessionCommand({ shellType: 'unknown' as ShellType }),
+      (err: unknown) => {
+        assert.ok(err instanceof InvalidShellTypeError);
+        assert.match(err.message, /Valid values:/);
+        return true;
+      },
+    );
   });
 });

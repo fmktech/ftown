@@ -65,7 +65,6 @@ jobs:
       - uses: ./.github/actions/run-ci
         with:
           job: centrifugo
-          boat-api-key: ${{ secrets.BOAT_API_KEY }}
 
   deploy:
     if: github.event_name == 'workflow_dispatch' && inputs.deploy

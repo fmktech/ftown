@@ -306,6 +306,94 @@ describe('model routing service: get', () => {
     assert.notEqual(served.report, original);
     assert.deepEqual(original, snapshot);
   });
+
+  it('annotates agy picks with per-pool availability when the three agy pools are at different levels', async t => {
+    const h = await harness(t);
+    const fiveHourReset = '2026-11-13T03:00:00.000Z';
+    const weeklyReset = '2026-11-19T12:00:00.000Z';
+    h.setCollect(async () => ({
+      generatedAt: OBSERVED,
+      providers: [
+        {
+          provider: 'agy',
+          status: 'ok',
+          plan: null,
+          source: 'live',
+          observedAt: OBSERVED,
+          message: null,
+          windows: [
+            { kind: 'five_hour', usedPercent: 100, resetsAt: fiveHourReset, windowMinutes: 300, note: 'tightest: Gemini Models' },
+            { kind: 'weekly', usedPercent: 60, resetsAt: weeklyReset, windowMinutes: 10080, note: 'tightest: Gemini Models' },
+          ],
+          scopedLimits: [
+            { scope: 'Gemini Models', kind: 'five_hour', usedPercent: 100, resetsAt: fiveHourReset },
+            { scope: 'Gemini Models', kind: 'weekly', usedPercent: 60, resetsAt: weeklyReset },
+            { scope: 'Claude and GPT models', kind: 'five_hour', usedPercent: 90, resetsAt: fiveHourReset },
+            { scope: 'Claude and GPT models', kind: 'weekly', usedPercent: 20, resetsAt: weeklyReset },
+            { scope: 'Gemini 4 Argon', kind: 'weekly', usedPercent: 1, resetsAt: weeklyReset },
+          ],
+        },
+      ],
+      routing: [
+        {
+          provider: 'agy',
+          availability: 'exhausted',
+          leftPercent: 0,
+          bindingWindow: 'five_hour',
+          resetsAt: fiveHourReset,
+          resetsInMinutes: 180,
+          runway: 0,
+          reason: '5-hour window used up, resets in 3h 0m (tightest: Gemini Models)',
+        },
+      ],
+      models: [
+        {
+          provider: 'agy',
+          status: 'ok',
+          source: 'live',
+          observedAt: OBSERVED,
+          message: null,
+          modelFlag: '--model <id>',
+          effortFlag: null,
+          models: [
+            { id: 'gemini-4-argon-medium', name: 'Gemini 4 Argon (Medium)', isDefault: false, description: null, contextTokens: null, efforts: ['medium'], defaultEffort: 'medium' },
+            { id: 'claude-sonnet-5-5-high', name: 'Claude Sonnet 5.5 (Thinking)', isDefault: false, description: null, contextTokens: null, efforts: ['high'], defaultEffort: 'high' },
+            { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', isDefault: false, description: null, contextTokens: null, efforts: [], defaultEffort: null },
+          ],
+        },
+      ],
+      routingConfig: { status: 'missing', path: '/elsewhere', errors: [] },
+      tiers: [],
+      steering: '',
+    }));
+
+    await saveRoutingConfig(h.homeDir, {
+      version: 1,
+      steering: '',
+      tiers: [
+        {
+          name: 'complex',
+          description: '',
+          guidance: '',
+          picks: [
+            { provider: 'agy', model: 'gemini-4-argon-medium', effort: 'medium' },
+            { provider: 'agy', model: 'claude-sonnet-5-5-high', effort: 'high' },
+            { provider: 'agy', model: 'gemini-3.8-flash', effort: null },
+          ],
+        },
+      ],
+    });
+
+    const snap = await h.service.get({});
+    assert.deepEqual(
+      snap.report.tiers[0].picks.map((p) => [p.model, p.availability, p.leftPercent]),
+      [
+        ['gemini-4-argon-medium', 'available', 99],
+        ['claude-sonnet-5-5-high', 'low', 10],
+        ['gemini-3.8-flash', 'exhausted', 0],
+      ],
+    );
+  });
 });
 
 describe('model routing service: set', () => {

@@ -58,6 +58,7 @@ export interface Session {
   antigravitySessionId?: string;
   env?: Record<string, string>;
   parentSessionId?: string;
+  requireGreenPr?: boolean;
   pullRequestUrl?: string;
   /** Private incarnation fencing for linked PR notifications. */
   pullRequestLinkId?: string;
@@ -147,6 +148,7 @@ export interface CreateSessionPayload {
   grokSessionId?: string;
   antigravitySessionId?: string;
   parentSessionId?: string;
+  requireGreenPr?: boolean;
   /** @deprecated Ignored compatibility input. Ordinary sessions use task + parent. */
   orchestrator?: boolean;
   suppressBriefing?: boolean;

@@ -1,12 +1,9 @@
 name: Run isolated CI validation
-description: Run a fixed validation job in Boat or on the untrusted PR runner
+description: Run a fixed validation job on the GitHub runner
 inputs:
   job:
     required: true
     description: Fixed validation job
-  boat-api-key:
-    required: false
-    description: Boat CI key for trusted events
   shard:
     required: false
     description: E2E shard as index/total
@@ -22,36 +19,12 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Run trusted validation on Boat
-      if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.sender.login != 'dependabot[bot]' && github.actor != 'dependabot[bot]') }}
+    - name: Run validation on the GitHub runner
       shell: bash
       env:
         INPUT_JOB: ${{ inputs.job }}
-        INPUT_NPM_VERSION: ${{ inputs.npm-version }}
-        INPUT_SHARD: ${{ inputs.shard }}
-        INPUT_BASE_SHA: ${{ inputs.base-sha }}
-        INPUT_HEAD_SHA: ${{ inputs.head-sha }}
-        CI_EVENT: ${{ github.event_name }}
-        CI_REPOSITORY: ${{ github.repository }}
-        CI_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
-        CI_PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-        CI_SENDER: ${{ github.event.sender.login }}
-        CI_ACTOR: ${{ github.actor }}
-        BOAT_API_KEY: ${{ inputs.boat-api-key }}
-      run: node scripts/ci/boat-runner.mjs
-    - name: Run untrusted PR validation locally
-      if: ${{ !(github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.sender.login != 'dependabot[bot]' && github.actor != 'dependabot[bot]')) }}
-      shell: bash
-      env:
-        INPUT_JOB: ${{ inputs.job }}
-        INPUT_NPM_VERSION: ${{ inputs.npm-version }}
-        INPUT_SHARD: ${{ inputs.shard }}
-        INPUT_BASE_SHA: ${{ inputs.base-sha }}
-        INPUT_HEAD_SHA: ${{ inputs.head-sha }}
-        CI_EVENT: ${{ github.event_name }}
-        CI_REPOSITORY: ${{ github.repository }}
-        CI_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
-        CI_PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-        CI_SENDER: ${{ github.event.sender.login }}
-        CI_ACTOR: ${{ github.actor }}
-      run: node scripts/ci/boat-runner.mjs
+        NPM_VERSION: ${{ inputs.npm-version }}
+        E2E_SHARD: ${{ inputs.shard }}
+        BASE: ${{ inputs.base-sha }}
+        HEAD: ${{ inputs.head-sha }}
+      run: bash scripts/ci/run-job.sh "$INPUT_JOB"

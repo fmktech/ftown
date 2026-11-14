@@ -1,3 +1,4 @@
+import { agyWindowsForModel } from './agy.js';
 import { formatDuration } from './format.js';
 import { QUOTA_PROVIDER_IDS } from './types.js';
 import type {
@@ -7,7 +8,18 @@ import type {
   QuotaRoutingAdvisor,
   QuotaWindow,
   QuotaWindowKind,
+  RoutingPick,
 } from './types.js';
+
+export interface WindowAdvice {
+  availability: QuotaAvailability;
+  leftPercent: number | null;
+  bindingWindow: QuotaWindowKind | null;
+  resetsAt: string | null;
+  resetsInMinutes: number | null;
+  runway: number | null;
+  reason: string;
+}
 
 const MINUTE_MS = 60_000;
 const IMMINENT_RESET_MINUTES = 10;
@@ -131,10 +143,9 @@ function isMoreBinding(a: UsableWindow, b: UsableWindow): boolean {
   return KIND_ORDER[a.window.kind] < KIND_ORDER[b.window.kind];
 }
 
-function unknownRouting(row: ProviderQuota): ProviderRouting {
-  const message = row.message?.trim() ?? '';
+function unknownAdvice(rawMessage?: string | null): WindowAdvice {
+  const message = rawMessage?.trim() ?? '';
   return {
-    provider: row.provider,
     availability: 'unknown',
     leftPercent: null,
     bindingWindow: null,
@@ -143,6 +154,19 @@ function unknownRouting(row: ProviderQuota): ProviderRouting {
     runway: null,
     reason: message.length > 0 ? message : 'no usage numbers available',
   };
+}
+
+function unknownRouting(row: ProviderQuota): ProviderRouting {
+  return {
+    provider: row.provider,
+    ...unknownAdvice(row.message),
+  };
+}
+
+function noteSuffixFor(window: QuotaWindow): string {
+  const note = window.note?.trim() ?? '';
+  if (note.startsWith('tightest:')) return ` (${note})`;
+  return '';
 }
 
 function reasonFor(binding: UsableWindow): string {
@@ -155,28 +179,36 @@ function reasonFor(binding: UsableWindow): string {
   const resetClause = duration !== null ? `, resets in ${duration}` : '';
   const runwayClause =
     binding.runway !== null && binding.runway > 0 ? ` (runway ${binding.runway}x)` : '';
+  const suffix = noteSuffixFor(binding.window);
 
   if (binding.resetting) {
-    return duration !== null
-      ? `${label} window resets in ${duration}`
-      : `${label} window resets soon`;
+    const base =
+      duration !== null
+        ? `${label} window resets in ${duration}`
+        : `${label} window resets soon`;
+    return `${base}${suffix}`;
   }
   if (binding.availability === 'exhausted') {
-    return `${label} window used up${resetClause}`;
+    return `${label} window used up${resetClause}${suffix}`;
   }
   if (binding.availability === 'low' && left < 15) {
-    return `only ${left}% of the ${label} window left${resetClause}${runwayClause}`;
+    return `only ${left}% of the ${label} window left${resetClause}${runwayClause}${suffix}`;
   }
   if (binding.availability === 'low') {
     const untilReset = duration !== null ? ` but ${duration} until reset` : '';
-    return `${left}% of the ${label} window left${untilReset}${runwayClause}`;
+    return `${left}% of the ${label} window left${untilReset}${runwayClause}${suffix}`;
   }
-  return `${left}% of the ${label} window left${resetClause}${runwayClause}`;
+  return `${left}% of the ${label} window left${resetClause}${runwayClause}${suffix}`;
 }
 
-function adviseRow(row: ProviderQuota, now: Date): ProviderRouting {
+/** Assesses a list of quota windows against `now` and returns the most binding advice. Pure. */
+export function adviseWindows(
+  windows: readonly QuotaWindow[],
+  now: Date,
+  fallbackMessage?: string | null,
+): WindowAdvice {
   const usable: UsableWindow[] = [];
-  for (const window of row.windows) {
+  for (const window of windows) {
     const assessed = assessWindow(window, now);
     if (assessed.availability !== 'unknown' && assessed.leftPercent !== null) {
       usable.push({
@@ -190,8 +222,8 @@ function adviseRow(row: ProviderQuota, now: Date): ProviderRouting {
     }
   }
 
-  if (row.status !== 'ok' || usable.length === 0) {
-    return unknownRouting(row);
+  if (usable.length === 0) {
+    return unknownAdvice(fallbackMessage);
   }
 
   const binding = usable.reduce((best, candidate) =>
@@ -199,7 +231,6 @@ function adviseRow(row: ProviderQuota, now: Date): ProviderRouting {
   );
 
   return {
-    provider: row.provider,
     availability: binding.availability,
     leftPercent: binding.leftPercent,
     bindingWindow: binding.window.kind,
@@ -208,6 +239,87 @@ function adviseRow(row: ProviderQuota, now: Date): ProviderRouting {
     runway: binding.resetting ? null : binding.runway,
     reason: reasonFor(binding),
   };
+}
+
+function providerSummaryWindows(row: ProviderQuota): readonly QuotaWindow[] {
+  if (row.provider !== 'agy' || !Array.isArray(row.scopedLimits) || row.scopedLimits.length === 0) {
+    return row.windows;
+  }
+  const scopes = new Set(row.scopedLimits.map((entry) => entry.scope));
+  if (scopes.size < 2) return row.windows;
+  return row.windows.map((window) => {
+    if (window.note && window.note.trim().length > 0) return window;
+    const candidates = row.scopedLimits!.filter(
+      (entry) => entry.kind === window.kind && entry.usedPercent !== null,
+    );
+    if (candidates.length === 0) return window;
+    let best = candidates[0];
+    for (const entry of candidates.slice(1)) {
+      if ((entry.usedPercent ?? -1) > (best.usedPercent ?? -1)) best = entry;
+    }
+    return { ...window, note: `tightest: ${best.scope}` };
+  });
+}
+
+function adviseRow(row: ProviderQuota, now: Date): ProviderRouting {
+  if (row.status !== 'ok') {
+    return unknownRouting(row);
+  }
+  const advice = adviseWindows(providerSummaryWindows(row), now, row.message);
+  return {
+    provider: row.provider,
+    ...advice,
+  };
+}
+
+function resolvePickNow(now: Date | undefined, observedAt: string | undefined): Date {
+  if (now instanceof Date && !Number.isNaN(now.getTime())) return now;
+  if (typeof observedAt === 'string') {
+    const parsed = Date.parse(observedAt);
+    if (!Number.isNaN(parsed)) return new Date(parsed);
+  }
+  return new Date();
+}
+
+/**
+ * Computes routing availability for a single routing pick (`provider` + `model`).
+ * For `agy`, evaluates the quota windows of the rate-limit pool that governs `pick.model`
+ * (or the tightest pool when the model ID is unknown or has no matching `scopedLimits`).
+ * For all other providers, uses the provider-level routing entry.
+ */
+export function advisePickRouting(
+  pick: Pick<RoutingPick, 'provider' | 'model'>,
+  quota: readonly ProviderQuota[],
+  routing: readonly ProviderRouting[],
+  now?: Date,
+): WindowAdvice {
+  const quotaRow = quota.find((entry) => entry.provider === pick.provider);
+  const route = routing.find((entry) => entry.provider === pick.provider);
+
+  if (pick.provider === 'agy' && quotaRow !== undefined && quotaRow.status === 'ok') {
+    const poolWindows = agyWindowsForModel(quotaRow, pick.model);
+    if (poolWindows.length > 0) {
+      const refNow = resolvePickNow(now, quotaRow.observedAt);
+      const advice = adviseWindows(poolWindows, refNow, quotaRow.message);
+      if (advice.availability !== 'unknown' || route === undefined) {
+        return advice;
+      }
+    }
+  }
+
+  if (route !== undefined) {
+    return {
+      availability: route.availability,
+      leftPercent: route.leftPercent,
+      bindingWindow: route.bindingWindow,
+      resetsAt: route.resetsAt,
+      resetsInMinutes: route.resetsInMinutes,
+      runway: route.runway,
+      reason: route.reason,
+    };
+  }
+
+  return unknownAdvice(quotaRow?.message);
 }
 
 /** Quota left scaled by pace: 0% left always scores 0; null left scores -1. */

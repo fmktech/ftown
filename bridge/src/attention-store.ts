@@ -586,7 +586,7 @@ export class AttentionStore implements AttentionRoutingStoreApi {
         poller.active--;
         // The TTL bridges the gap between polls, so it runs from the end of the latest one.
         if (!signal?.aborted) poller.lastPollAt = this.notificationOptions.now();
-        if (signal?.aborted && poller.active === 0 && this.pollers.get(eventId) === poller) this.pollers.delete(eventId);
+        if (signal?.aborted && poller.active === 0 && waiters.size === 0 && this.pollers.get(eventId) === poller) this.pollers.delete(eventId);
       }
     }
   }

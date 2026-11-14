@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, symlink, utimes, writeFile } from 'node:fs/promises
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { claudeCatalogExpiry, fetchClaudeModels, parseClaudeModelCatalog } from './models-claude.js';
+import { claudeCatalogExpiry, fetchClaudeModels, parseClaudeCcCatalog, parseClaudeModelCatalog } from './models-claude.js';
 import type { QuotaFetchOptions } from './types.js';
 
 const OBSERVED = '2026-11-13T09:00:00.000Z';
@@ -19,6 +19,28 @@ function entry(id: string, overrides: Record<string, unknown> = {}): Record<stri
     runtime: {
       max_input_tokens: 1000000,
       effort_levels: ['low', 'medium', 'high'],
+      default_effort: 'medium',
+    },
+    ...overrides,
+  };
+}
+
+function ccEntry(id: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id,
+    name: `Name ${id}`,
+    description: `About ${id}`,
+    section: 'main',
+    thinking: {
+      type: 'effort',
+      effort_options: [
+        { id: 'low', name: 'Low' },
+        { id: 'medium', name: 'Medium' },
+        { id: 'high', name: 'High' },
+      ],
+    },
+    runtime: {
+      max_input_tokens: 1000000,
       default_effort: 'medium',
     },
     ...overrides,
@@ -51,6 +73,38 @@ function catalogue(
   };
 }
 
+function ccCatalogue(
+  models: unknown[],
+  options: {
+    defaultModel?: string;
+    aliases?: Record<string, { default: string }>;
+    fetchedAt?: number;
+    staleAt?: number;
+  } = {},
+): Record<string, unknown> {
+  return {
+    version: 2,
+    fetchedAt: options.fetchedAt ?? NOW.getTime(),
+    staleAt: options.staleAt ?? NOW.getTime() + 3600_000,
+    catalog: {
+      surface: 'cc',
+      config: {
+        id: 'cc',
+        models,
+        provider_alias_targets: options.aliases ?? {
+          fable: { default: 'claude-fable-5-2' },
+          opus: { default: 'claude-opus-5-5' },
+          sonnet: { default: 'claude-sonnet-5-5' },
+        },
+      },
+      state: {
+        id: 'cc',
+        model: options.defaultModel ?? 'claude-opus-5-5',
+      },
+    },
+  };
+}
+
 function fileFor(doc: unknown): Record<string, unknown> {
   return { version: 2, documentBytes: Buffer.from(JSON.stringify(doc)).toString('base64') };
 }
@@ -60,6 +114,18 @@ const SAMPLE_MODELS = [
   entry('claude-sonnet-5-5', { name: 'Sonnet 5.5' }),
   entry('claude-fable-5-2', { name: 'Fable 5.2' }),
   entry('claude-haiku-5-5', { name: 'Haiku 5.5', runtime: { max_input_tokens: 200000 } }),
+];
+
+const SAMPLE_CC_MODELS = [
+  ccEntry('claude-opus-5-5', { name: 'Opus 5.5' }),
+  ccEntry('claude-fable-5-2', { name: 'Fable 5.2' }),
+  ccEntry('claude-sonnet-5-5', { name: 'Sonnet 5.5' }),
+  ccEntry('claude-haiku-4-5-20251001', {
+    name: 'Haiku 4.5',
+    description: null,
+    thinking: { type: 'none' },
+    runtime: { max_input_tokens: 200000 },
+  }),
 ];
 
 describe('parseClaudeModelCatalog', () => {
@@ -207,6 +273,95 @@ function assertUnrecognised(result: { status: string; models: unknown[]; message
   assert.equal(result.message, 'unrecognised Claude model catalogue format');
 }
 
+describe('parseClaudeCcCatalog', () => {
+  it('maps entries in catalogue order with provider metadata', () => {
+    const result = parseClaudeCcCatalog(ccCatalogue(SAMPLE_CC_MODELS), null, OBSERVED);
+    assert.equal(result.provider, 'claude');
+    assert.equal(result.status, 'ok');
+    assert.equal(result.source, 'cached');
+    assert.equal(result.observedAt, OBSERVED);
+    assert.equal(result.message, null);
+    assert.equal(result.modelFlag, '--model <id>');
+    assert.equal(result.effortFlag, '--effort <level>');
+    assert.deepEqual(
+      result.models.map((model) => model.id),
+      ['claude-opus-5-5', 'claude-fable-5-2', 'claude-sonnet-5-5', 'claude-haiku-4-5-20251001'],
+    );
+    assert.deepEqual(result.models[0], {
+      id: 'claude-opus-5-5',
+      name: 'Opus 5.5',
+      isDefault: true,
+      description: 'About claude-opus-5-5',
+      contextTokens: 1000000,
+      efforts: ['low', 'medium', 'high'],
+      defaultEffort: 'medium',
+    });
+  });
+
+  it('maps thinking: none to empty efforts and null defaultEffort', () => {
+    const result = parseClaudeCcCatalog(ccCatalogue(SAMPLE_CC_MODELS), null, OBSERVED);
+    const haiku = result.models.find((m) => m.id === 'claude-haiku-4-5-20251001');
+    assert.ok(haiku);
+    assert.deepEqual(haiku.efforts, []);
+    assert.equal(haiku.defaultEffort, null);
+    assert.equal(haiku.description, null);
+    assert.equal(haiku.contextTokens, 200000);
+  });
+
+  it('resolves a settings alias to default model', () => {
+    const result = parseClaudeCcCatalog(ccCatalogue(SAMPLE_CC_MODELS), 'fable', OBSERVED);
+    assert.deepEqual(
+      result.models.map((model) => model.isDefault),
+      [false, true, false, false],
+    );
+  });
+
+  it('strips a trailing bracket suffix before resolving settings model', () => {
+    const result = parseClaudeCcCatalog(ccCatalogue(SAMPLE_CC_MODELS), 'sonnet[1m]', OBSERVED);
+    assert.deepEqual(
+      result.models.map((model) => model.isDefault),
+      [false, false, true, false],
+    );
+  });
+
+  it('falls back to state default when settings model matches nothing', () => {
+    const result = parseClaudeCcCatalog(ccCatalogue(SAMPLE_CC_MODELS), 'no-such-model', OBSERVED);
+    assert.deepEqual(
+      result.models.map((model) => model.isDefault),
+      [true, false, false, false],
+    );
+  });
+
+  it('nulls defaultEffort when declared default is not among effort_options', () => {
+    const doc = ccCatalogue([
+      ccEntry('claude-invalid-default', {
+        thinking: {
+          type: 'effort',
+          effort_options: [{ id: 'low', name: 'Low' }, { id: 'medium', name: 'Medium' }],
+        },
+        runtime: { default_effort: 'max' },
+      }),
+    ]);
+    const result = parseClaudeCcCatalog(doc, null, OBSERVED);
+    assert.equal(result.models[0].defaultEffort, null);
+  });
+
+  it('returns error for wrong shape or wrong surface', () => {
+    assertUnrecognised(parseClaudeCcCatalog({ catalog: { surface: 'other', config: { models: [] } } }, null, OBSERVED));
+    assertUnrecognised(parseClaudeCcCatalog({ catalog: { surface: 'cc', config: { models: [] } } }, null, OBSERVED));
+    assertUnrecognised(parseClaudeCcCatalog({ catalog: { surface: 'cc', config: { models: [{ name: 'no id' }] } } }, null, OBSERVED));
+    assertUnrecognised(parseClaudeCcCatalog(null, null, OBSERVED));
+    assertUnrecognised(parseClaudeCcCatalog('invalid', null, OBSERVED));
+  });
+
+  it('is also parsed via parseClaudeModelCatalog when given cc format', () => {
+    const result = parseClaudeModelCatalog(ccCatalogue(SAMPLE_CC_MODELS), null, OBSERVED);
+    assert.equal(result.status, 'ok');
+    assert.equal(result.models.length, 4);
+    assert.equal(result.models[0].id, 'claude-opus-5-5');
+  });
+});
+
 describe('fetchClaudeModels', () => {
   async function withHome(run: (home: string) => Promise<void>): Promise<void> {
     const home = await mkdtemp(join(tmpdir(), 'models-claude-'));
@@ -226,6 +381,14 @@ describe('fetchClaudeModels', () => {
     await mkdir(dir, { recursive: true });
     const path = join(dir, name);
     await writeFile(path, JSON.stringify(fileFor(doc)));
+    await utimes(path, mtime, mtime);
+  }
+
+  async function writeCcCatalogue(home: string, name: string, mtime: Date, doc: unknown): Promise<void> {
+    const dir = join(home, '.claude', 'cache', 'model-catalog');
+    await mkdir(dir, { recursive: true });
+    const path = join(dir, name);
+    await writeFile(path, typeof doc === 'string' ? doc : JSON.stringify(doc));
     await utimes(path, mtime, mtime);
   }
 
@@ -374,6 +537,160 @@ describe('fetchClaudeModels', () => {
       assert.equal(result.message, null);
     });
   });
+
+  it('prefers a cc catalogue over a published catalogue with fewer models', async () => {
+    await withHome(async (home) => {
+      await writeCatalogue(
+        home,
+        'published-few.json',
+        new Date('2026-11-12T00:00:00.000Z'),
+        catalogue([entry('claude-fable-5-1')]),
+      );
+      await writeCcCatalogue(
+        home,
+        'account-hash-cc.json',
+        new Date('2026-11-10T00:00:00.000Z'),
+        ccCatalogue([
+          ccEntry('claude-opus-5-5'),
+          ccEntry('claude-fable-5-2'),
+          ccEntry('claude-sonnet-5-5'),
+        ]),
+      );
+
+      const result = await fetchClaudeModels(optionsFor(home));
+      assert.equal(result.status, 'ok');
+      assert.equal(result.models.length, 3);
+      assert.deepEqual(
+        result.models.map((m) => m.id),
+        ['claude-opus-5-5', 'claude-fable-5-2', 'claude-sonnet-5-5'],
+      );
+    });
+  });
+
+  it('falls back to published catalogue when cc catalogue is unparseable', async () => {
+    await withHome(async (home) => {
+      await writeCatalogue(
+        home,
+        'published-ok.json',
+        new Date('2026-11-10T00:00:00.000Z'),
+        catalogue([entry('claude-opus-5-5'), entry('claude-sonnet-5-5')]),
+      );
+      await writeCcCatalogue(
+        home,
+        'bad-cc.json',
+        new Date('2026-11-12T00:00:00.000Z'),
+        '{ corrupted json',
+      );
+
+      const result = await fetchClaudeModels(optionsFor(home));
+      assert.equal(result.status, 'ok');
+      assert.deepEqual(
+        result.models.map((m) => m.id),
+        ['claude-opus-5-5', 'claude-sonnet-5-5'],
+      );
+    });
+  });
+
+  it('preserves unchanged behaviour when only published catalogues exist', async () => {
+    await withHome(async (home) => {
+      await writeCatalogue(
+        home,
+        'published-only.json',
+        new Date('2026-11-10T00:00:00.000Z'),
+        catalogue(SAMPLE_MODELS),
+      );
+
+      const result = await fetchClaudeModels(optionsFor(home));
+      assert.equal(result.status, 'ok');
+      assert.equal(result.models.length, SAMPLE_MODELS.length);
+      assert.deepEqual(
+        result.models.map((m) => m.id),
+        ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-fable-5-2', 'claude-haiku-5-5'],
+      );
+    });
+  });
+
+  it('prefers newest cc catalogue by fetchedAt over mtime', async () => {
+    await withHome(async (home) => {
+      await writeCcCatalogue(
+        home,
+        'older-fetched-cc.json',
+        new Date('2026-11-12T00:00:00.000Z'),
+        ccCatalogue([ccEntry('claude-from-older-fetch')], { fetchedAt: 1000 }),
+      );
+      await writeCcCatalogue(
+        home,
+        'newer-fetched-cc.json',
+        new Date('2026-11-10T00:00:00.000Z'),
+        ccCatalogue([ccEntry('claude-from-newer-fetch')], { fetchedAt: 2000 }),
+      );
+
+      const result = await fetchClaudeModels(optionsFor(home));
+      assert.equal(result.status, 'ok');
+      assert.deepEqual(
+        result.models.map((m) => m.id),
+        ['claude-from-newer-fetch'],
+      );
+    });
+  });
+
+  it('breaks ties on fetchedAt by mtime', async () => {
+    await withHome(async (home) => {
+      await writeCcCatalogue(
+        home,
+        'older-mtime-cc.json',
+        new Date('2026-11-05T00:00:00.000Z'),
+        ccCatalogue([ccEntry('claude-older-mtime')], { fetchedAt: 5000 }),
+      );
+      await writeCcCatalogue(
+        home,
+        'newer-mtime-cc.json',
+        new Date('2026-11-10T00:00:00.000Z'),
+        ccCatalogue([ccEntry('claude-newer-mtime')], { fetchedAt: 5000 }),
+      );
+
+      const result = await fetchClaudeModels(optionsFor(home));
+      assert.equal(result.status, 'ok');
+      assert.deepEqual(
+        result.models.map((m) => m.id),
+        ['claude-newer-mtime'],
+      );
+    });
+  });
+
+  it('reports expiry when cc catalogue staleAt is in the past', async () => {
+    await withHome(async (home) => {
+      const pastStaleAt = Date.parse('2026-11-01T08:00:00.000Z');
+      await writeCcCatalogue(
+        home,
+        'stale-cc.json',
+        new Date('2026-11-01T08:00:00.000Z'),
+        ccCatalogue(SAMPLE_CC_MODELS, { staleAt: pastStaleAt }),
+      );
+
+      const result = await fetchClaudeModels(optionsFor(home));
+      assert.equal(result.status, 'ok');
+      assert.equal(result.models.length, SAMPLE_CC_MODELS.length);
+      assert.equal(result.message, 'Claude model catalogue expired on 2026-11-01; open claude to refresh it');
+    });
+  });
+
+  it('reports no message when cc catalogue staleAt is in the future', async () => {
+    await withHome(async (home) => {
+      const futureStaleAt = Date.parse('2026-11-20T08:00:00.000Z');
+      await writeCcCatalogue(
+        home,
+        'fresh-cc.json',
+        new Date('2026-11-12T00:00:00.000Z'),
+        ccCatalogue(SAMPLE_CC_MODELS, { staleAt: futureStaleAt }),
+      );
+
+      const result = await fetchClaudeModels(optionsFor(home));
+      assert.equal(result.status, 'ok');
+      assert.equal(result.models.length, SAMPLE_CC_MODELS.length);
+      assert.equal(result.message, null);
+    });
+  });
 });
 
 describe('claudeCatalogExpiry', () => {
@@ -382,6 +699,25 @@ describe('claudeCatalogExpiry', () => {
       claudeCatalogExpiry(fileFor(catalogue(SAMPLE_MODELS, { expiresAt: '2026-11-20T09:37:50Z' }))),
       '2026-11-20T09:37:50.000Z',
     );
+  });
+
+  it('returns numeric staleAt as an ISO instant', () => {
+    assert.equal(
+      claudeCatalogExpiry({ staleAt: 1794644369607 }),
+      '2026-11-14T08:19:29.607Z',
+    );
+  });
+
+  it('returns string staleAt as an ISO instant', () => {
+    assert.equal(
+      claudeCatalogExpiry({ staleAt: '2026-11-14T08:19:29.607Z' }),
+      '2026-11-14T08:19:29.607Z',
+    );
+  });
+
+  it('returns null when staleAt is invalid', () => {
+    assert.equal(claudeCatalogExpiry({ staleAt: 'invalid-date' }), null);
+    assert.equal(claudeCatalogExpiry({ staleAt: NaN }), null);
   });
 
   it('returns null when expires_at is absent', () => {

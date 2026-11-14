@@ -1,3 +1,4 @@
+import { advisePickRouting } from './routing.js';
 import type {
   AnnotatedPick,
   AnnotatedTier,
@@ -18,20 +19,21 @@ function firstFor<T extends { provider: QuotaProviderId }>(
   return list.find((entry) => entry.provider === provider);
 }
 
-/** Annotate one pick with the provider's live availability, scoped limits and model check. */
+/** Annotate one pick with the pick's live pool/provider availability, scoped limits and model check. */
 export function annotatePick(
   pick: RoutingPick,
   quota: readonly ProviderQuota[],
   routing: readonly ProviderRouting[],
   models: readonly ProviderModels[],
+  now?: Date,
 ): AnnotatedPick {
-  const route = firstFor(routing, pick.provider);
   const quotaRow = firstFor(quota, pick.provider);
   const modelList = firstFor(models, pick.provider);
+  const advice = advisePickRouting(pick, quota, routing, now);
 
-  const availability = route ? route.availability : 'unknown';
-  const leftPercent = route ? route.leftPercent : null;
-  const resetsAt = route ? route.resetsAt : null;
+  const availability = advice.availability;
+  const leftPercent = advice.leftPercent;
+  const resetsAt = advice.resetsAt;
   const scopedLimits = (quotaRow?.scopedLimits ?? []).map((limit) => ({ ...limit }));
 
   let modelName: string | null = null;
@@ -74,11 +76,12 @@ export function annotateTiers(
   quota: readonly ProviderQuota[],
   routing: readonly ProviderRouting[],
   models: readonly ProviderModels[],
+  now?: Date,
 ): AnnotatedTier[] {
   return config.tiers.map((tier) => ({
     name: tier.name,
     description: tier.description,
-    picks: tier.picks.map((pick) => annotatePick(pick, quota, routing, models)),
+    picks: tier.picks.map((pick) => annotatePick(pick, quota, routing, models, now)),
     guidance: typeof tier.guidance === 'string' ? tier.guidance : '',
   }));
 }

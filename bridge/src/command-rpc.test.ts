@@ -327,6 +327,31 @@ test('create_session forwards the grok and antigravity native session ids to the
   assert.equal(inputs[1].antigravitySessionId, 'conv-abc'); assert.equal(inputs[1].grokSessionId, undefined);
 });
 
+test('create_session resolves shellType alias agy to canonical antigravity', async () => {
+  const responses: CommandResponse[] = []; const inputs: Record<string, unknown>[] = [];
+  const handler = createCommandHandler({ bridgeId: 'owner', sessionController: {
+    create: async (input: Record<string, unknown>) => { inputs.push(input); return { id: 'created', bridgeId: 'owner', status: 'running', ...input }; },
+  } as unknown as SessionController, publishCommandResponse: async (response) => { responses.push(response); } });
+
+  await handler({ type: 'create_session', requestId: 'req-agy', payload: { shellType: 'agy', model: 'gemini-4-hydrogen-medium' } } as unknown as Command);
+  assert.equal(responses.at(-1)?.success, true);
+  assert.equal(inputs[0].shellType, 'antigravity');
+});
+
+test('create_session rejects unknown shellType with client error listing valid values', async () => {
+  const responses: CommandResponse[] = []; const inputs: Record<string, unknown>[] = [];
+  const handler = createCommandHandler({ bridgeId: 'owner', sessionController: {
+    create: async (input: Record<string, unknown>) => { inputs.push(input); return { id: 'created', bridgeId: 'owner', status: 'running', ...input }; },
+  } as unknown as SessionController, publishCommandResponse: async (response) => { responses.push(response); } });
+
+  await handler({ type: 'create_session', requestId: 'req-bad', payload: { shellType: 'bogus' } } as unknown as Command);
+  assert.equal(responses.at(-1)?.success, false);
+  assert.match(responses.at(-1)?.error ?? '', /Invalid shellType "bogus"/);
+  assert.match(responses.at(-1)?.error ?? '', /Valid values:/);
+  assert.deepEqual(responses.at(-1)?.data, { code: 'invalid_shell_type' });
+  assert.equal(inputs.length, 0);
+});
+
 test('retired RPC commands reject without dependencies, preserving routing and correlation', async () => {
   const responses: CommandResponse[] = [];
   const handler = createCommandHandler({ bridgeId: 'owner', sessionController: new Proxy({}, {
@@ -685,4 +710,25 @@ test('create_session forwards planItem and maps PlanItemError to a client error'
 
   await send('drop', { command: 'claude', bridgeId: 'bridge', planItem: 'not-an-id' });
   assert.equal(inputs.at(-1)?.planItem, undefined);
+});
+
+test('create_session forwards requireGreenPr only when strictly true', async () => {
+  const responses: CommandResponse[] = [];
+  const inputs: Array<{ requireGreenPr?: boolean }> = [];
+  const handler = createCommandHandler({
+    bridgeId: 'bridge',
+    sessionController: {
+      create: async (input: { requireGreenPr?: boolean }) => {
+        inputs.push(input);
+        return { id: 'child', name: 'child', command: 'claude', status: 'running', bridgeId: 'bridge', createdAt: '', updatedAt: '' };
+      },
+    } as unknown as SessionController,
+    publishCommandResponse: async (response) => { responses.push(response); },
+  });
+  await handler({ type: 'create_session', requestId: 'rgp-1', payload: { command: 'claude', bridgeId: 'bridge', requireGreenPr: true } });
+  assert.equal(responses.at(-1)?.success, true);
+  assert.equal(inputs[0]?.requireGreenPr, true);
+
+  await handler({ type: 'create_session', requestId: 'rgp-2', payload: { command: 'claude', bridgeId: 'bridge', requireGreenPr: false } });
+  assert.equal(inputs[1]?.requireGreenPr, undefined);
 });

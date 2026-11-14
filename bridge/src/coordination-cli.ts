@@ -3,7 +3,7 @@
  * Thin client over the local coordination API (see coordination/contract.ts).
  */
 import { Command, CommanderError } from 'commander';
-import { api as request, loadPointer } from './cli-client.js';
+import { apiResponse, loadPointer } from './cli-client.js';
 import {
   BOARD_WAIT_CONDITIONS,
   CARD_LIMITS,
@@ -37,7 +37,7 @@ const EVENTS_WAIT_CHUNK_SECONDS = 300;
 
 const STATUS_SET_USAGE =
   'Usage: ftown status set [--state <s>] [--headline <t>] [--progress <d>/<t>|--no-progress] ' +
-  '[--on human|parent|external|session:<id>] [--text <t>] [--next <t>|--no-next] [--session-id <id>]';
+  '[--on human|parent|external|session:<id>] [--text <t>] [--next <t>|--no-next] [--force] [--session-id <id>]';
 
 /** Usage problem: message printed, exit code 2. */
 export class UsageError extends Error {
@@ -55,8 +55,29 @@ class ExitError extends Error {
   }
 }
 
+/** HTTP error returned by the local coordination API. */
+class ApiHttpError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+    this.name = 'ApiHttpError';
+  }
+}
+
 async function defaultApi(method: string, path: string, body?: unknown): Promise<unknown> {
-  return request(loadPointer(), method, path, body);
+  const caller = process.env.FTOWN_SESSION_ID?.trim();
+  const headers = caller ? { 'X-Ftown-Session-Id': caller } : undefined;
+  const result = await apiResponse(loadPointer(), method, path, body, headers);
+  if (result.status < 200 || result.status >= 300) {
+    const error =
+      result.body && typeof result.body === 'object' && !Array.isArray(result.body)
+        ? result.body.error
+        : undefined;
+    throw new ApiHttpError(
+      result.status,
+      typeof error === 'string' ? error : `HTTP ${result.status}`,
+    );
+  }
+  return result.body;
 }
 
 function resolveDeps(partial?: Partial<CoordinationCliDeps>): CoordinationCliDeps {
@@ -144,6 +165,7 @@ export interface StatusSetFlags {
   text?: string;
   /** string value, false for --no-next, undefined when absent */
   next?: string | boolean;
+  force?: boolean;
 }
 
 export function buildCardPatch(flags: StatusSetFlags): CardPatch {
@@ -309,6 +331,7 @@ interface StatusSetOptions extends StatusOptions {
   on?: string;
   text?: string;
   next?: string | boolean;
+  force?: boolean;
 }
 
 async function getStatus(deps: CoordinationCliDeps, opts: StatusOptions): Promise<void> {
@@ -326,7 +349,8 @@ async function setStatus(deps: CoordinationCliDeps, opts: StatusSetOptions): Pro
       throw new UsageError('--state blocked needs --on <human|parent|external|session:id> and --text');
     }
   }
-  const card = (await deps.api('PUT', cardPath(sessionId), patch)) as SessionCard;
+  const body: CardPatch & { force?: boolean } = opts.force ? { ...patch, force: true } : patch;
+  const card = (await deps.api('PUT', cardPath(sessionId), body)) as SessionCard;
   printCard(deps, card, opts.json === true);
 }
 
@@ -364,6 +388,7 @@ function statusProgram(deps: CoordinationCliDeps): Command {
     .option('--text <t>', 'Blocked-on detail (required with --on)')
     .option('--next <t>', 'Next step')
     .option('--no-next', 'Clear next step')
+    .option('--force', 'Bypass --require-green-pr check (parent session only)')
     .option('--json', 'Machine-readable JSON output')
     .option('--plain', 'Human-readable output (default)')
     .option('--session-id <id>', 'Target session; defaults to FTOWN_SESSION_ID')
@@ -575,6 +600,10 @@ async function runProgram(
       deps.errorLog(`ftown ${group}: ${error.message}`);
       if (error.usage) deps.errorLog(error.usage);
       return 2;
+    }
+    if (error instanceof Error && (error as { status?: unknown }).status === 409) {
+      deps.errorLog(`ftown ${group}: ${error.message}`);
+      return 5;
     }
     deps.errorLog(`ftown ${group}: ${error instanceof Error ? error.message : String(error)}`);
     return 1;

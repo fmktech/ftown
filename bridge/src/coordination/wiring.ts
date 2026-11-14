@@ -55,6 +55,8 @@ export interface CoordinationDeps {
   store: CoordinationSessionStore;
   attention: CoordinationAttentionStore;
   prStatus: (url: string) => Promise<CoordinationPrStatusResult | null>;
+  /** Gate-time status that must be fresh (see PullRequestStatusService.getFresh). */
+  prStatusFresh?: (url: string) => Promise<{ status: CoordinationPrStatusResult; fresh: boolean } | null>;
   mail: CoordinationMailStore;
   publishSession: (s: Session) => void;
   now: () => number;
@@ -74,6 +76,8 @@ export interface Coordination {
   plan: PlanStore;
   digest: DigestProvider;
   mailSink: MailEventSink;
+  prStatus(url: string): Promise<CoordinationPrStatusResult | null>;
+  prStatusFresh(url: string): Promise<{ status: CoordinationPrStatusResult; fresh: boolean } | null>;
   emit(session: Session, kind: TreeEventKind, summary: string, ref?: string): Promise<void>;
   /**
    * `snapshot`, when passed, is the session as it existed before the record was
@@ -309,5 +313,21 @@ export function createCoordination(deps: CoordinationDeps): Coordination {
     },
   };
 
-  return { cards, events, board, plan, digest, mailSink, emit, onSessionExit, onSessionStart };
+  return {
+    cards,
+    events,
+    board,
+    plan,
+    digest,
+    mailSink,
+    prStatus: (url) => deps.prStatus(url),
+    prStatusFresh: async (url) => {
+      if (deps.prStatusFresh) return deps.prStatusFresh(url);
+      const status = await deps.prStatus(url);
+      return status ? { status, fresh: true } : null;
+    },
+    emit,
+    onSessionExit,
+    onSessionStart,
+  };
 }

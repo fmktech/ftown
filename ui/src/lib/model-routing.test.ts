@@ -10,6 +10,7 @@ import type {
   RoutingTier,
 } from '../../../bridge/src/quota/types';
 import {
+  agyQuotaPool,
   configBaselineAfterSave,
   defaultPickFor,
   effortOptions,
@@ -22,6 +23,8 @@ import {
   parseSetModelRoutingResult,
   pickLabel,
   providerOptions,
+  providerSummaryLabel,
+  resolvePickAvailability,
   routingEditorReducer,
   uniqueTierName,
   validateRoutingDraft,
@@ -870,5 +873,116 @@ describe('pickLabel', () => {
   it('formats provider and model, adding the effort only when set', () => {
     expect(pickLabel(pick('claude', 'claude-opus-4', 'high'))).toBe('claude / claude-opus-4 @ high');
     expect(pickLabel(pick('codex', 'gpt-5', null))).toBe('codex / gpt-5');
+  });
+});
+
+describe('agyQuotaPool, resolvePickAvailability and providerSummaryLabel', () => {
+  const fiveHourReset = '2026-11-13T15:00:00.000Z';
+  const weeklyReset = '2026-11-19T22:00:00.000Z';
+
+  const multiPoolReport = (): QuotaReport => ({
+    ...fixtureReport(),
+    generatedAt: '2026-11-13T12:00:00.000Z',
+    providers: [
+      {
+        provider: 'agy',
+        status: 'ok',
+        plan: null,
+        source: 'live',
+        observedAt: '2026-11-13T12:00:00.000Z',
+        message: null,
+        windows: [
+          { kind: 'five_hour', usedPercent: 100, resetsAt: fiveHourReset, windowMinutes: 300, note: 'tightest: Gemini Models' },
+          { kind: 'weekly', usedPercent: 60, resetsAt: weeklyReset, windowMinutes: 10080, note: 'tightest: Gemini Models' },
+        ],
+        scopedLimits: [
+          { scope: 'Gemini Models', kind: 'five_hour', usedPercent: 100, resetsAt: fiveHourReset },
+          { scope: 'Gemini Models', kind: 'weekly', usedPercent: 60, resetsAt: weeklyReset },
+          { scope: 'Claude and GPT models', kind: 'five_hour', usedPercent: 90, resetsAt: fiveHourReset },
+          { scope: 'Claude and GPT models', kind: 'weekly', usedPercent: 20, resetsAt: weeklyReset },
+          { scope: 'Gemini 4 Argon', kind: 'weekly', usedPercent: 1, resetsAt: weeklyReset },
+        ],
+      },
+    ],
+    routing: [
+      {
+        provider: 'agy',
+        availability: 'exhausted',
+        leftPercent: 0,
+        bindingWindow: 'five_hour',
+        resetsAt: fiveHourReset,
+        resetsInMinutes: 180,
+        runway: 0,
+        reason: '5-hour window used up, resets in 3h 0m (tightest: Gemini Models)',
+      },
+    ],
+    tiers: [
+      {
+        name: 'complex',
+        description: '',
+        guidance: '',
+        picks: [
+          {
+            provider: 'agy',
+            model: 'gemini-4-argon-medium',
+            effort: 'medium',
+            modelName: null,
+            availability: 'available',
+            leftPercent: 99,
+            resetsAt: weeklyReset,
+            scopedLimits: [],
+            problem: null,
+            checked: true,
+          },
+          {
+            provider: 'agy',
+            model: 'gemini-3.8-flash',
+            effort: null,
+            modelName: null,
+            availability: 'exhausted',
+            leftPercent: 0,
+            resetsAt: fiveHourReset,
+            scopedLimits: [],
+            problem: null,
+            checked: true,
+          },
+        ],
+      },
+    ],
+  });
+
+  it('maps agy model ids to their rate-limit pools and null for unknown', () => {
+    expect(agyQuotaPool('gemini-4-argon-medium')).toBe('Gemini 4 Argon');
+    expect(agyQuotaPool('claude-opus-5-5-high')).toBe('Claude and GPT models');
+    expect(agyQuotaPool('gpt-oss-120b-medium')).toBe('Claude and GPT models');
+    expect(agyQuotaPool('gemini-3.8-flash')).toBe('Gemini Models');
+    expect(agyQuotaPool('unknown-model')).toBeNull();
+  });
+
+  it('resolves per-pick availability for annotated picks and draft-edited agy picks across all three pools', () => {
+    const report = multiPoolReport();
+
+    expect(resolvePickAvailability(report, 'complex', pick('agy', 'gemini-4-argon-medium', 'medium'))).toMatchObject({
+      availability: 'available',
+      leftPercent: 99,
+    });
+    expect(resolvePickAvailability(report, 'complex', pick('agy', 'gemini-3.8-flash', null))).toMatchObject({
+      availability: 'exhausted',
+      leftPercent: 0,
+    });
+    // Draft-edited pick not yet in report.tiers resolves from scopedLimits on report.providers:
+    expect(resolvePickAvailability(report, 'complex', pick('agy', 'claude-sonnet-5-5-high', 'high'))).toMatchObject({
+      availability: 'low',
+      leftPercent: 10,
+    });
+    expect(resolvePickAvailability(report, null, pick('agy', 'unknown-agy-model', null))).toMatchObject({
+      availability: 'exhausted',
+      leftPercent: 0,
+    });
+  });
+
+  it('labels the provider summary row with the tightest pool when plan is null', () => {
+    const report = multiPoolReport();
+    expect(providerSummaryLabel(report.providers[0], report.routing[0])).toBe('tightest: Gemini Models');
   });
 });

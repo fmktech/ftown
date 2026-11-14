@@ -667,6 +667,11 @@ export async function startPanel(opts: StartPanelOptions): Promise<RunningPanel>
   return { pid, proc, serverDir };
 }
 
+/** Monotonic ms for durations and deadlines; the wall clock stays for displayed timestamps only. */
+function monotonicNowMs(): number {
+  return performance.now();
+}
+
 /** Pinned probe: HEAD http://127.0.0.1:<port>/ — up iff status < 500. */
 async function waitHealthy(
   port: number,
@@ -678,14 +683,14 @@ async function waitHealthy(
   const intervalMs = opts.probeIntervalMs ?? HEALTH_POLL_INTERVAL_MS;
   const maxWaitMs = opts.probeMaxWaitMs ?? PANEL_HEALTH_MAX_WAIT_MS;
   const doFetch = opts.healthFetchImpl ?? fetch;
-  const deadline = Date.now() + maxWaitMs;
+  const deadline = monotonicNowMs() + maxWaitMs;
 
   const tailSuffix = (): string => {
     const text = sanitizeStderr(tail.text());
     return text.length > 0 ? `\npanel stderr (sanitized tail): ${text}` : '';
   };
 
-  while (Date.now() < deadline) {
+  while (monotonicNowMs() < deadline) {
     if (exitInfo.exited) {
       throw new PanelStartError(
         `panel exited prematurely (code ${exitInfo.code}, signal ${exitInfo.signal})${tailSuffix()}`,
@@ -760,8 +765,8 @@ function isPidAlive(pid: number): boolean {
 }
 
 async function waitForPidDeath(pid: number, budgetMs: number): Promise<boolean> {
-  const deadline = Date.now() + budgetMs;
-  while (Date.now() < deadline) {
+  const deadline = monotonicNowMs() + budgetMs;
+  while (monotonicNowMs() < deadline) {
     if (!isPidAlive(pid)) return true;
     await delay(PID_DEATH_POLL_MS);
   }

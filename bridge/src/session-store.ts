@@ -5,6 +5,7 @@ import { existsSync } from 'node:fs';
 
 import type { ArchivedSession, Session } from './types.js';
 import { isSettledStamp, sameStamp, toFileStamp, type FileStamp } from './file-stamp.js';
+import { normalizeShellType } from './harness-registry.js';
 
 /**
  * Drop the legacy preview shape on load: version !== 2 or a preview without a
@@ -31,6 +32,13 @@ function dropLegacyPreviewShape(session: Session): void {
 function parseSessionRecord(json: string): Session {
   const session = JSON.parse(json) as Session;
   dropLegacyPreviewShape(session);
+  if (session.shellType !== undefined) {
+    try {
+      session.shellType = normalizeShellType(session.shellType);
+    } catch {
+      // Tolerate corrupt / unrecognized legacy shellType
+    }
+  }
   return session;
 }
 
@@ -393,6 +401,13 @@ export class SessionStore {
       try {
         const record = JSON.parse(line) as ArchivedSession;
         if (record && typeof record.id === 'string' && typeof record.removedAt === 'string') {
+          if (record.shellType !== undefined) {
+            try {
+              record.shellType = normalizeShellType(record.shellType);
+            } catch {
+              // Tolerate corrupt / unrecognized legacy shellType
+            }
+          }
           archived.push(record);
         }
       } catch {

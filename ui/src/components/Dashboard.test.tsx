@@ -1132,7 +1132,7 @@ describe("mobile copy and paste wiring", () => {
 
 describe("preview auto-open rule", () => {
   const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
-  it("auto-opens only on no-preview-before, preserves closed state when a file is added to a seen set", async () => {
+  it("auto-opens only on no-preview-before; a closed preview stays closed until its revision changes", async () => {
     window.matchMedia = vi.fn().mockReturnValue({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() });
     const initialPreview = { id: uuid(1), files: [{ id: uuid(11), fileName: "a.html", kind: "html" as const }] };
     state.sessions = [session("ordinary", "Regular shell", { preview: initialPreview })];
@@ -1150,9 +1150,9 @@ describe("preview auto-open rule", () => {
     state.sessions = [session("ordinary", "Regular shell", { preview: extended })];
     rerender(<Dashboard client={ { securityRuntime: { ownerId: "00000000-0000-4000-8000-000000000001", state: (bridgeId: string) => ({ bridgeId, status: "ready", endpoint: null }), snapshot: () => [], onChange: () => () => {}, bridge: () => ({ permissions: ["read", "control"] }), identity: { endpoint: { id: "approved-browser" } } } } as unknown as MessageClient } connectionStatus="connected" connectionError={null} userId="user" token="test" centrifugoUrl="ws://localhost" transport={null} onDisconnect={vi.fn()} localMode={false} />);
     await act(async () => {});
-    // should remain closed, not re-opened on set id change
-    expect(screen.getByRole("button", { name: "Open preview" })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Close preview" })).toBeNull();
+    // a changed revision is new content: it shows again instead of staying hidden
+    expect(screen.queryByRole("button", { name: "Open preview" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Close preview" })).toBeTruthy();
   });
 
   it("re-opens after clear then re-add", async () => {

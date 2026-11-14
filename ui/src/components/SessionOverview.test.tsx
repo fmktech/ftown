@@ -477,20 +477,16 @@ describe("SessionWorkspace overview toggle", () => {
         <div data-testid="terminal-node">Terminal content</div>
       </SessionWorkspace>,
     );
-    expect(screen.getByRole("tab", { name: "Overview" }).getAttribute("aria-selected")).toBe("true");
     const panel = screen.getByRole("tabpanel", { name: "Overview" });
     expect(panel.closest(".session-aux-pane")).toBeTruthy();
-    expect(screen.getByRole("tablist", { name: "Auxiliary view" }).textContent).toBe("OverviewTerminal");
+    // The terminal is already the centre pane: the aux column has no tab strip and no Terminal tab.
+    expect(screen.queryByRole("tablist", { name: "Auxiliary view" })).toBeNull();
+    expect(screen.queryByRole("tab", { name: "Terminal" })).toBeNull();
+    expect(panel.closest(".session-aux-pane")?.textContent).toContain("Overview");
     const terminal = screen.getByTestId("terminal-node");
     expect((terminal.closest("[aria-label='Terminal']") as HTMLElement).hidden).toBe(false);
     expect(onRefit).toHaveBeenCalled();
-    onRefit.mockClear();
-    fireEvent.click(screen.getByRole("tab", { name: "Terminal" }));
-    expect(screen.queryByRole("tabpanel", { name: "Overview" })).toBeNull();
-    expect(screen.getByTestId("terminal-node")).toBe(terminal);
-    expect(screen.getByRole("tab", { name: "Terminal" }).getAttribute("aria-selected")).toBe("true");
-    fireEvent.click(screen.getByRole("tab", { name: "Overview" }));
-    expect(screen.getByRole("tabpanel", { name: "Overview" })).toBeTruthy();
+    // The Overview stays up beside the terminal; the terminal node is the same one.
     expect(screen.getByTestId("terminal-node")).toBe(terminal);
   });
 
@@ -505,5 +501,32 @@ describe("SessionWorkspace overview toggle", () => {
     );
     expect(screen.queryByRole("tab", { name: "Overview" })).toBeNull();
     expect(screen.queryByRole("tabpanel", { name: "Overview" })).toBeNull();
+  });
+
+  it("shows PR ◷ / PR ✓ / PR ✗ suffix on the one-line row only when requireGreenPr is true", () => {
+    const manager = managerSession();
+    const pending = session("c-pend", { name: "PendingPR", parentSessionId: "manager", requireGreenPr: true, card: card("working", { headline: "waiting" }) });
+    const passed = session("c-pass", { name: "PassedPR", parentSessionId: "manager", requireGreenPr: true, card: card("working", { headline: "ready" }) });
+    const failed = session("c-fail", { name: "FailedPR", parentSessionId: "manager", requireGreenPr: true, card: card("working", { headline: "broken" }) });
+    const plain = session("c-plain", { name: "PlainPR", parentSessionId: "manager", card: card("working", { headline: "normal" }) });
+    const baseDerived = { status: "running" as const, activity: "unknown" as const, openAttention: 0, unreadMail: 0, previews: [] };
+    const snapshot: OverviewSnapshot = {
+      board: {
+        rootId: "manager",
+        cards: [
+          snapCard("c-pend", "PendingPR", pending.card, { derived: { ...baseDerived, pr: { url: "https://github.com/o/r/pull/1", state: "in_progress", stale: false, checkedAt: null } } }),
+          snapCard("c-pass", "PassedPR", passed.card, { derived: { ...baseDerived, pr: { url: "https://github.com/o/r/pull/2", state: "passed", stale: false, checkedAt: null } } }),
+          snapCard("c-fail", "FailedPR", failed.card, { derived: { ...baseDerived, pr: { url: "https://github.com/o/r/pull/3", state: "failed", stale: false, checkedAt: null } } }),
+          snapCard("c-plain", "PlainPR", plain.card, { derived: { ...baseDerived, pr: { url: "https://github.com/o/r/pull/4", state: "in_progress", stale: false, checkedAt: null } } }),
+        ],
+      },
+      events: [],
+      attention: [],
+    };
+    renderOverview(manager, [manager, pending, passed, failed, plain], { snapshot });
+    expect(screen.getByRole("button", { name: /PendingPR/ }).textContent).toContain("PR ◷");
+    expect(screen.getByRole("button", { name: /PassedPR/ }).textContent).toContain("PR ✓");
+    expect(screen.getByRole("button", { name: /FailedPR/ }).textContent).toContain("PR ✗");
+    expect(screen.getByRole("button", { name: /PlainPR/ }).textContent).not.toContain("PR ");
   });
 });

@@ -4,7 +4,7 @@ import { useEffect, useId, useReducer, useRef, useState } from "react";
 import type { Command, CommandResponse } from "@/types";
 import { useModelRouting } from "@/hooks/useModelRouting";
 import type { RoutingEditorAction } from "@/lib/model-routing";
-import { configBaselineAfterSave, defaultPickFor, effortOptions, findAnnotatedPick, initialRoutingEditorState, modelOptionLabel, modelOptions, normalizePick, pickLabel, providerOptions, routingEditorReducer, validateRoutingDraft } from "@/lib/model-routing";
+import { configBaselineAfterSave, defaultPickFor, effortOptions, findAnnotatedPick, initialRoutingEditorState, modelOptionLabel, modelOptions, normalizePick, pickLabel, providerOptions, providerSummaryLabel, resolvePickAvailability, routingEditorReducer, validateRoutingDraft } from "@/lib/model-routing";
 import { MODEL_ROUTING_LIMITS } from "../../../bridge/src/quota/types";
 import type { ModelRoutingConfig, ModelRoutingSnapshot, RoutingConfigState, ProviderQuota, QuotaAvailability, QuotaProviderId, QuotaReport, QuotaWindowKind, RoutingPick } from "../../../bridge/src/quota/types";
 
@@ -44,9 +44,10 @@ function Subscriptions({ report }: { report: QuotaReport }) {
     {report.providers.map(row => {
       const routing = report.routing.find(entry => entry.provider === row.provider);
       const problem = statusLabel[row.status];
+      const summaryLabel = providerSummaryLabel(row, routing);
       return <li key={row.provider} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-1.5">
         <span className="w-16 shrink-0 font-[family-name:var(--font-mono)] text-[var(--text-primary)]">{row.provider}</span>
-        <span className="min-w-0 max-w-32 truncate text-[var(--text-secondary)]" title={row.plan ?? undefined}>{row.plan ?? "–"}</span>
+        <span className="min-w-0 max-w-44 truncate text-[var(--text-secondary)]" title={summaryLabel !== "–" ? summaryLabel : undefined}>{summaryLabel}</span>
         {problem ? <span className="text-[var(--status-pending)]" title={row.message ?? undefined}>{problem}</span> : <>
           <span className="text-[var(--text-secondary)]"><span className="text-[var(--text-muted)]">5h </span>{windowLeft(row, "five_hour")}</span>
           <span className="text-[var(--text-secondary)]"><span className="text-[var(--text-muted)]">week </span>{windowLeft(row, "weekly")}</span>
@@ -66,7 +67,7 @@ function PickRow({ report, tierIndex, pick, index, count, disabled, originName, 
   const providers = providerOptions(report);
   const models = modelOptions(report, pick.provider);
   const { efforts, defaultEffort } = effortOptions(report, pick.provider, pick.model);
-  const routing = report.routing.find(entry => entry.provider === pick.provider);
+  const pickStatus = resolvePickAvailability(report, originName, pick);
   const annotation = findAnnotatedPick(report.tiers, originName, pick);
   const problem = annotation?.problem ?? null;
   const notChecked = !problem && annotation?.checked === false;
@@ -91,8 +92,8 @@ function PickRow({ report, tierIndex, pick, index, count, disabled, originName, 
         {efforts.map(effort => <option key={effort} value={effort}>{effort}</option>)}
       </select>}
       <span className="flex items-center gap-1.5 text-[11px] text-[var(--text-secondary)]">
-        <AvailabilityBadge availability={routing?.availability ?? "unknown"} title={routing?.reason} />
-        {routing?.leftPercent != null && <span>{Math.round(routing.leftPercent)}% left</span>}
+        <AvailabilityBadge availability={pickStatus.availability} title={pickStatus.reason} />
+        {pickStatus.leftPercent != null && <span>{Math.round(pickStatus.leftPercent)}% left</span>}
       </span>
       <span className="ml-auto flex gap-1">
         <button type="button" className={iconButton} aria-label={`Move ${label} up`} disabled={disabled || index === 0} onClick={() => onMove(-1)}>↑</button>

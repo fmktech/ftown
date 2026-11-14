@@ -507,6 +507,43 @@ describe('startHub', () => {
     }
   });
 
+  it('ignores a +90s wall-clock jump during the health wait (F1: monotonic deadline)', async () => {
+    const dir = tmpDir('start-walljump');
+    const configPath = path.join(dir, 'solo', 'hub.json');
+    await writeHubConfig(configPath, { port: 59998, secret: 'test-hub-secret-0123456789' });
+    const child = new StubHubChild();
+    const spawnImpl: SpawnLike = () => asChild(child);
+    const realDateNow = Date.now;
+    let wall = realDateNow();
+    Date.now = () => wall;
+    let probes = 0;
+    try {
+      const running = await startHub({
+        configPath,
+        binPath: '/bin/hub',
+        dataDir: dir,
+        spawnImpl,
+        fetchImpl: async () => {
+          probes += 1;
+          if (probes === 1) {
+            // Wall clock jumps forward; monotonic time (performance.now) is untouched.
+            wall += 90_000;
+            return new Response('no', { status: 503 });
+          }
+          return probes < 3 ? new Response('no', { status: 503 }) : new Response('{}');
+        },
+        healthIntervalMs: 10,
+        healthTryTimeoutMs: 250,
+        healthDeadlineMs: 5_000,
+      });
+      assert.equal(running.port, 59998);
+      assert.ok(probes >= 3, `health probes must continue past the wall jump, got ${probes}`);
+      assert.deepEqual(child.killSignals, [], 'healthy hub must not be killed after a wall jump');
+    } finally {
+      Date.now = realDateNow;
+    }
+  });
+
   it('reaps a stale pidfile pointing at a dead process before spawning (L2)', async () => {
     const dir = tmpDir('start-reap-dead');
     const victim = realSpawn(process.execPath, ['-e', 'process.exit(0)']);

@@ -69,6 +69,13 @@ test("mail nudge survives agent mail, highlights the trigger and shows the item 
     await expect(row(nameA).getByRole("img", { name: "Input needed" })).toBeVisible({ timeout: 30_000 });
     await expect(row(nameB).getByRole("img", { name: "Input needed" })).toHaveCount(0);
     await expect.poll(() => page.title()).toMatch(/^\(\d+\) /);
+    // Wait for A's shell prompt on the screen API before sending mail so the PTY is ready to receive and echo the nudge.
+    await expect.poll(async () => {
+      const screen = await bridgeApiFetch("GET", `/api/sessions/${idA}/screen?limit=200`);
+      if (screen.status !== 200) return false;
+      const lines = (screen.body as { lines?: string[] }).lines ?? [];
+      return /[$%#>]/.test(lines.join("\n"));
+    }, { timeout: 30_000 }).toBe(true);
     // B sends ftown mail to A via the real CLI; the bridge nudges A's terminal.
     await execute(process.execPath, [HARNESS_CLI, "mail", "send", idA, "--type", "message", `Agent mail for A ${stamp}`], { env: { ...process.env, HOME: BRIDGE_HOME, FTOWN_SESSION_ID: idB }, timeout: 30_000 });
     await expect.poll(async () => {

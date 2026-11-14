@@ -102,10 +102,12 @@ export function createModelRoutingService(options: ModelRoutingServiceOptions): 
     const base = hit ? hit.report : await collect(refresh);
     const loaded = await loadRoutingConfig(options.homeDir);
     const config = loaded.state.status === 'ok' ? loaded.config : null;
+    const generatedMs = Date.parse(base.generatedAt);
+    const reportNow = Number.isFinite(generatedMs) ? new Date(generatedMs) : new Date(options.now());
     const report: QuotaReport = {
       ...base,
       routingConfig: loaded.state,
-      tiers: config ? annotateTiers(config, base.providers, base.routing, base.models) : [],
+      tiers: config ? annotateTiers(config, base.providers, base.routing, base.models, reportNow) : [],
       steering: config ? config.steering : '',
     };
     return { schema: MODEL_ROUTING_SCHEMA, config: config ?? starterRoutingConfig(), report, cached: hit !== null };

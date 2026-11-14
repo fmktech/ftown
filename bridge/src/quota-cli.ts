@@ -61,6 +61,7 @@ export type TierAnnotator = (
   quota: readonly ProviderQuota[],
   routing: readonly ProviderRouting[],
   models: readonly ProviderModels[],
+  now?: Date,
 ) => AnnotatedTier[];
 
 export interface QuotaDeps {
@@ -313,12 +314,13 @@ function annotateRouting(
   rows: readonly ProviderQuota[],
   routing: readonly ProviderRouting[],
   models: readonly ProviderModels[],
+  now: Date,
   deps: QuotaDeps,
   warnings: string[],
 ): Pick<QuotaReport, 'routingConfig' | 'tiers' | 'steering'> {
   if (state.status !== 'ok' || config === null) return { routingConfig: state, tiers: [], steering: '' };
   try {
-    return { routingConfig: state, tiers: deps.annotate(config, rows, routing, models), steering: typeof config.steering === 'string' ? config.steering : '' };
+    return { routingConfig: state, tiers: deps.annotate(config, rows, routing, models, now), steering: typeof config.steering === 'string' ? config.steering : '' };
   } catch (error) {
     warnings.push(`ftown-quota: model routing could not be annotated: ${shortReason(error)}`);
     return { routingConfig: unreadableRouting(), tiers: [], steering: '' };
@@ -352,7 +354,7 @@ export async function collectQuotaReport(input: CollectQuotaInput, deps: QuotaDe
   const now = deps.now();
   const advice = adviseOrFallback(rows, now, deps);
   if (advice.failure !== null) warnings.push(advice.failure);
-  const routingSection = annotateRouting(loaded.state, config, rows, advice.routing, models, deps, warnings);
+  const routingSection = annotateRouting(loaded.state, config, rows, advice.routing, models, now, deps, warnings);
 
   const report: QuotaReport = {
     generatedAt: now.toISOString(),
@@ -364,9 +366,23 @@ export async function collectQuotaReport(input: CollectQuotaInput, deps: QuotaDe
   return { report, hung, warnings };
 }
 
-/** `claude (low)`, `grok (exhausted)`, or just the provider name when available. */
+const TIGHTEST_REASON_PATTERN = /\((tightest:\s*[^()]+)\)$/;
+
+function tightestNoteOf(entry: ProviderRouting): string | null {
+  if (typeof entry.reason !== 'string') return null;
+  const match = entry.reason.match(TIGHTEST_REASON_PATTERN);
+  return match ? match[1].trim() : null;
+}
+
+/** `claude (low)`, `grok (exhausted)`, or just the provider name when available (with tightest pool when multi-pool). */
 function routeLabel(entry: ProviderRouting): string {
-  return entry.availability === 'available' ? entry.provider : `${entry.provider} (${entry.availability})`;
+  const tightest = tightestNoteOf(entry);
+  if (entry.availability === 'available') {
+    return tightest ? `${entry.provider} (${tightest})` : entry.provider;
+  }
+  return tightest
+    ? `${entry.provider} (${entry.availability}, ${tightest})`
+    : `${entry.provider} (${entry.availability})`;
 }
 
 function pickLine(index: number, pick: AnnotatedPick): string {

@@ -33,5 +33,4 @@ jobs:
       - uses: ./.github/actions/run-ci
         with:
           job: release-artifacts
-          boat-api-key: ${{ secrets.BOAT_API_KEY }}
           npm-version: ${{ matrix.npm }}

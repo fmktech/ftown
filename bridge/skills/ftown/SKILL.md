@@ -1,11 +1,15 @@
 ---
 name: ftown
 description: >-
-  Control ftown sessions: create/list/read/drive sibling sessions, send ftown
-  mail, request human attention, register and update self-contained HTML
-  previews for the dashboard, link session PRs, and coordinate worker agents.
-  Use for ftown sessions, child/sibling agents, bridge mail/inbox, html preview,
-  or explicitly requested orchestration.
+  Control ftown sessions and multi-provider routing: sessions
+  (create/list/read/drive, archive/revive/remove), worktrees, and ftown mail.
+  Handle human attention and questions routed to the parent first. Support
+  HTML/Markdown previews, HTML preview replies, PR links, status cards and
+  ftown board/events, the manager's plan list (ftown plan), and manager brief.
+  Use quota/model routing for choosing CLI/model/effort across claude, codex,
+  grok, muse, agy and opencode (`ftown quota --json`). Use for ftown sessions,
+  child/sibling agents, bridge mail/inbox, HTML preview, previews, worktrees,
+  plan list, or orchestration.
 ---
 
 # ftown
@@ -55,7 +59,7 @@ ftown status set --state working --headline "Reviewing the API client" --progres
 ftown board
 ftown plan
 ftown plan add "Review the API client" --after p1 --priority 1
-ftown sessions create --parent --plan-item p2 --prompt "Review the API client"
+ftown sessions create --parent --plan-item p2 --require-green-pr --prompt "Review the API client"
 ftown brief set --file brief.md
 ftown attention list
 ftown worktrees list
@@ -170,7 +174,7 @@ child by hand, and `done`/`drop`/`todo` set the state directly. Every plan
 change emits one `plan` tree event (`<id> <state>: <title>`, plus
 ` → ready: …` when items become ready). Exit codes: 0 ok, 1 error, 2 usage.
 
-**Delegating work.** Delegate implementation to ftown child sessions (`ftown sessions create --parent ...`) rather than in-process subagents — only sessions appear on the board and dashboard (cards, events, digests, parent-first questions).
+**Delegating work.** Delegate implementation to ftown child sessions (`ftown sessions create --parent ...`) rather than in-process subagents — only sessions appear on the board and dashboard (cards, events, digests, parent-first questions). For children that open PRs, pass `--require-green-pr` so the child cannot set its card to `done` until its linked PR is green/merged (parent can bypass with `ftown status set --force`). The gate is advisory against a hostile child: any local process can present the parent's id (same trust model as the local CLI); it stops honest mistakes, not malicious agents.
 A child session may use its own subagents for reviews and lookups. Pick the CLI and model with `ftown quota --json` (see `references/quota.md`).
 
 ## Manager brief

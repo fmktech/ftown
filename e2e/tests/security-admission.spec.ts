@@ -40,18 +40,22 @@ function raw(method: string, path: string, body: string | Buffer, options: { chu
       method,
       // A fresh connection per probe: the keep-alive pool (Node's default agent) would hand the next probe a socket the
       // server answered early on (413) while this upload was still streaming, and that request stalls until reset.
+      // Advertise Connection: keep-alive on this one-off socket (and destroy it once the response ends) because agent:false
+      // otherwise sends Connection: close, which makes Node's HTTP server destroySoon() on an early 413 while the 2.5 MB
+      // body is still in flight — emitting a TCP RST that races the 413 status line (and turns into 502 at the TLS proxy).
       agent: false,
       signal: AbortSignal.timeout(30_000),
       headers: {
         "Content-Type": options.contentType ?? "application/json",
+        "Connection": "keep-alive",
         "x-real-ip": options.ip ?? source(),
         ...(!options.chunked ? { "Content-Length": String(bytes.length) } : {}),
       },
     }, (response) => {
       answered = response.statusCode ?? 0;
-      response.on("error", () => resolve(answered ?? 0));
+      response.on("error", () => { request.destroy(); resolve(answered ?? 0); });
       response.resume();
-      response.on("end", () => resolve(answered ?? 0));
+      response.on("end", () => { request.destroy(); resolve(answered ?? 0); });
     });
     // A server that answers early (e.g. 413 before reading the whole body) may close the connection while the
     // body is still being sent; through the TLS terminator that surfaces as EPIPE/ECONNRESET after the answer.
