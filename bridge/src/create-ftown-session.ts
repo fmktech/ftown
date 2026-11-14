@@ -10,7 +10,6 @@ import {
   harnessAcceptsPromptAsCliArg,
   InvalidShellTypeError,
   normalizeShellType,
-  resolveShellType,
   SHELL_ALIASES,
   type HarnessSpec,
 } from './harness-registry.js';
@@ -27,7 +26,7 @@ import type { UpdateAdmission } from './update-admission.js';
 import type { SessionStore } from './session-store.js';
 import type { CreateSessionPayload, Session, ShellType } from './types.js';
 
-export { WorktreeError, InvalidShellTypeError, normalizeShellType, resolveShellType, SHELL_ALIASES };
+export { WorktreeError, InvalidShellTypeError, normalizeShellType, SHELL_ALIASES };
 
 export type CreateSessionWorktreeInput = true | { branch?: string; base?: string };
 
@@ -314,8 +313,14 @@ export function deriveRelaunchCommand(session: RelaunchCommandSource): {
   command: string;
   isCustom: boolean;
 } {
+  let shellType = session.shellType;
+  try {
+    shellType = normalizeShellType(shellType);
+  } catch {
+    // Keep un-normalized if invalid
+  }
   const builderBase = {
-    shellType: session.shellType,
+    shellType,
     workingDir: session.workingDir,
     model: session.model,
   };
@@ -335,7 +340,7 @@ export function deriveRelaunchCommand(session: RelaunchCommandSource): {
     // fields.
     resume: true,
   });
-  const isLegacyPiBuilder = session.shellType === 'pi' && [
+  const isLegacyPiBuilder = shellType === 'pi' && [
     buildPiCommand({ model: session.model, includeFtownExtension: false }),
     buildPiCommand({ model: session.model, resume: true, includeFtownExtension: false }),
   ].includes(session.command);
@@ -361,7 +366,12 @@ export function canResumeStoredSession(
     | 'antigravitySessionId'
   >,
 ): boolean {
-  const shellType = session.shellType ?? 'claude';
+  let shellType = session.shellType ?? 'claude';
+  try {
+    shellType = normalizeShellType(shellType) ?? 'claude';
+  } catch {
+    // Keep un-normalized if invalid
+  }
   if (shellType === 'cursor') return Boolean(session.cursorSessionId?.trim());
   if (shellType === 'codex') return Boolean(session.codexSessionId?.trim());
   // opencode resumes by captured session id (`--session`), recorded from the
@@ -406,6 +416,13 @@ async function relaunchFtownSessionImpl(
   mode: RelaunchMode,
 ): Promise<string> {
   assertSessionCanLaunch(session);
+  if (session.shellType !== undefined) {
+    try {
+      session.shellType = normalizeShellType(session.shellType);
+    } catch {
+      // Keep un-normalized if invalid
+    }
+  }
   const command = mode === 'retry' ? session.command : deriveRelaunchCommand(session).command;
   if (!command) {
     throw new Error('Session has no command to relaunch');

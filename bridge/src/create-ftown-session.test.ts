@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 import { buildSessionCommand } from './agent-commands.js';
+import { HOOKED_SHELL_TYPES } from './harness-registry.js';
 import { TerminalManager } from './terminal-manager.js';
 import type { PlanItem, PlanState, SessionPlan } from './coordination/contract-c.js';
 import {
@@ -1000,6 +1001,33 @@ describe('relaunchFtownSession — entry-point parity with createFtownSession', 
       restoreHome(realHome);
       rmSync(home, { recursive: true, force: true });
     }
+  });
+
+  it('resumes a legacy stored agy session as antigravity using antigravitySessionId', async () => {
+    const harness = fakeDeps();
+    const legacySession: Session = {
+      ...fakeSession('legacy-agy'),
+      command: 'agy --dangerously-skip-permissions',
+      shellType: 'agy' as unknown as Session['shellType'],
+      antigravitySessionId: 'conv-legacy-123',
+      status: 'error',
+      errorReason: 'stale',
+      runtime: 'tmux',
+    };
+
+    assert.strictEqual(canResumeStoredSession(legacySession), true);
+    const { command: derivedCmd, isCustom } = deriveRelaunchCommand(legacySession);
+    assert.strictEqual(isCustom, false);
+    assert.strictEqual(derivedCmd, "agy --dangerously-skip-permissions --conversation 'conv-legacy-123'");
+
+    const command = await relaunchFtownSession(harness.deps, legacySession, 'resume');
+    assert.strictEqual(command, "agy --dangerously-skip-permissions --conversation 'conv-legacy-123'");
+    assert.strictEqual(legacySession.shellType, 'antigravity');
+    assert.strictEqual(HOOKED_SHELL_TYPES.has(legacySession.shellType), true);
+    assert.strictEqual(legacySession.status, 'running');
+    assert.strictEqual(legacySession.errorReason, undefined);
+    assert.strictEqual(harness.runs[0].command, command);
+    assert.strictEqual(harness.saved[0].shellType, 'antigravity');
   });
 
   it('refuses to retry a session with no stored command (pre-v0.2.0 records)', async () => {

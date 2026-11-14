@@ -13,7 +13,6 @@ import {
   isShellType,
   isShellTypeOrAlias,
   normalizeShellType,
-  resolveShellType,
   SHELL_ALIASES,
   SHELL_TYPES,
   buildAntigravityCommand,
@@ -520,6 +519,22 @@ describe('shellType aliases and validation', () => {
           assert.match(err.message, /Invalid shellType/);
           assert.match(err.message, /Valid values:/);
           assert.ok(ACCEPTED_SHELL_TYPES.every((t) => err.message.includes(t)));
+          return true;
+        },
+      );
+    }
+  });
+
+  it('rejects Object.prototype properties such as constructor, toString, and __proto__', () => {
+    for (const prop of ['constructor', 'toString', '__proto__', 'valueOf', 'hasOwnProperty']) {
+      assert.equal(isShellTypeOrAlias(prop), false);
+      assert.throws(
+        () => normalizeShellType(prop),
+        (err: unknown) => {
+          assert.ok(err instanceof InvalidShellTypeError);
+          assert.equal(err.status, 400);
+          assert.equal(err.code, 'invalid_shell_type');
+          assert.match(err.message, /Invalid shellType/);
           return true;
         },
       );

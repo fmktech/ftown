@@ -521,15 +521,12 @@ export function normalizeShellType(value: unknown): ShellType | undefined {
     if (isShellType(trimmed)) {
       return trimmed;
     }
-    const alias = SHELL_ALIASES[trimmed];
-    if (alias) {
-      return alias;
+    if (Object.prototype.hasOwnProperty.call(SHELL_ALIASES, trimmed)) {
+      return SHELL_ALIASES[trimmed];
     }
   }
   throw new InvalidShellTypeError(value);
 }
-
-export const resolveShellType = normalizeShellType;
 
 /**
  * Whether the initial prompt may be passed as a CLI argument for this harness,

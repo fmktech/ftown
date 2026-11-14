@@ -2,7 +2,6 @@ import {
   HARNESSES,
   InvalidShellTypeError,
   normalizeShellType,
-  resolveShellType,
   SHELL_ALIASES,
   shellQuote,
 } from './harness-registry.js';
@@ -24,7 +23,6 @@ export {
   buildPiCommand,
   buildKimiCodeCommand,
   normalizeShellType,
-  resolveShellType,
   SHELL_ALIASES,
   InvalidShellTypeError,
 } from './harness-registry.js';

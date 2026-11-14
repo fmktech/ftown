@@ -3,9 +3,10 @@
  * Local API client for ftown cross-session control.
  * Installed to ~/.ftown/ftown-sessions by ftown-bridge.
  */
+
+import { normalizeShellType } from './harness-registry.js';
 import { Command, CommanderError } from 'commander';
 import { normalizePullRequestUrl } from './pull-request-url.js';
-import { normalizeShellType } from './harness-registry.js';
 import { sanitizeAttentionText } from './attention-events.js';
 import { resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
