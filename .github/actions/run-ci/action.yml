@@ -1,19 +1,9 @@
 name: Run isolated CI validation
-description: Run a fixed validation job on the GitHub runner (default), or on Agent37/Boat when opted in
+description: Run a fixed validation job on the GitHub runner
 inputs:
   job:
     required: true
     description: Fixed validation job
-  ci-runner:
-    required: false
-    default: local
-    description: Backend (local, agent37 or boat); empty means local
-  agent37-api-key:
-    required: false
-    description: Agent37 CI key for trusted events
-  boat-api-key:
-    required: false
-    description: Boat CI key for trusted events (fallback backend)
   shard:
     required: false
     description: E2E shard as index/total
@@ -29,42 +19,7 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Run trusted validation on Agent37
-      if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.sender.login != 'dependabot[bot]' && github.actor != 'dependabot[bot]')) && inputs.ci-runner == 'agent37' }}
-      shell: bash
-      env:
-        INPUT_JOB: ${{ inputs.job }}
-        INPUT_NPM_VERSION: ${{ inputs.npm-version }}
-        INPUT_SHARD: ${{ inputs.shard }}
-        INPUT_BASE_SHA: ${{ inputs.base-sha }}
-        INPUT_HEAD_SHA: ${{ inputs.head-sha }}
-        CI_EVENT: ${{ github.event_name }}
-        CI_REPOSITORY: ${{ github.repository }}
-        CI_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
-        CI_PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-        CI_SENDER: ${{ github.event.sender.login }}
-        CI_ACTOR: ${{ github.actor }}
-        AGENT37_API_KEY: ${{ inputs.agent37-api-key }}
-      run: node scripts/ci/agent37-runner.mjs
-    - name: Run trusted validation on Boat (fallback)
-      if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.sender.login != 'dependabot[bot]' && github.actor != 'dependabot[bot]')) && inputs.ci-runner == 'boat' }}
-      shell: bash
-      env:
-        INPUT_JOB: ${{ inputs.job }}
-        INPUT_NPM_VERSION: ${{ inputs.npm-version }}
-        INPUT_SHARD: ${{ inputs.shard }}
-        INPUT_BASE_SHA: ${{ inputs.base-sha }}
-        INPUT_HEAD_SHA: ${{ inputs.head-sha }}
-        CI_EVENT: ${{ github.event_name }}
-        CI_REPOSITORY: ${{ github.repository }}
-        CI_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
-        CI_PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-        CI_SENDER: ${{ github.event.sender.login }}
-        CI_ACTOR: ${{ github.actor }}
-        BOAT_API_KEY: ${{ inputs.boat-api-key }}
-      run: node scripts/ci/boat-runner.mjs
     - name: Run validation on the GitHub runner
-      if: ${{ !(github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]' && github.event.sender.login != 'dependabot[bot]' && github.actor != 'dependabot[bot]')) || (inputs.ci-runner != 'agent37' && inputs.ci-runner != 'boat') }}
       shell: bash
       env:
         INPUT_JOB: ${{ inputs.job }}

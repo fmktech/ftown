@@ -41,7 +41,7 @@ case "$job" in
       [[ $shard =~ ^([1-9])/([1-9])$ ]] && (( BASH_REMATCH[1] <= BASH_REMATCH[2] )) || { echo "Invalid E2E shard" >&2; exit 2; }
     fi
     unit=1; [[ -z $shard || $shard == 1/* ]] || unit=0
-    (( ! unit )) || node --test scripts/ci/boat-runner.test.mjs scripts/ci/agent37-runner.test.mjs scripts/ci/bridge-version.test.mjs
+    (( ! unit )) || node --test scripts/ci/bridge-version.test.mjs
     # Reject all inherited endpoint, credential and test-selector overrides before sourcing fixtures.
     for name in DATABASE_URL MIGRATION_DATABASE_URL PGHOST PGPORT PGUSER PGDATABASE PGPASSWORD PGOPTIONS PGSERVICE PGSERVICEFILE FTOWN_PUBLIC_URL NEXT_PUBLIC_CENTRIFUGO_URL FTOWN_DATA_DIR REGISTRATION_ENABLED FTOWN_ACCOUNT_CREATE_PER_IP_HOUR FTOWN_ACCOUNT_CREATE_GLOBAL_DAY FTOWN_ACCOUNT_WRITES_PER_10MIN FTOWN_MAX_ACCOUNTS E2E_DIR E2E_BROWSER_HOME E2E_SECOND_BRIDGE_HOME E2E_PUBLIC_URL E2E_UI_PORT E2E_TLS_PORT NODE_EXTRA_CA_CERTS AUTH_SECRET CENTRIFUGO_API_KEY CENTRIFUGO_TOKEN_SECRET; do
       if printenv "$name" >/dev/null; then echo "Inherited override $name rejected" >&2; exit 1; fi

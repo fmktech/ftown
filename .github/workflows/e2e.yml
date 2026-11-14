@@ -31,9 +31,6 @@ jobs:
         with:
           job: e2e
           shard: ${{ matrix.shard }}
-          ci-runner: ${{ vars.CI_RUNNER }}
-          agent37-api-key: ${{ secrets.AGENT37_API_KEY }}
-          boat-api-key: ${{ secrets.BOAT_API_KEY }}
 
       - name: Upload Playwright report + traces
         if: always()
