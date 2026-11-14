@@ -21,4 +21,16 @@ write-ups — publishing them discloses unfixed issues.
   maintainer, and do **not** open a public issue or PR that contains the
   details. Remediation code (with no finding narrative) is fine.
 
+## CI flakiness is a failure
+
+- A flaky test or job in CI is a bug, not noise. Never re-run CI blindly to get
+  green.
+- On a failure that "passes locally" or "passes on retry": find the cause from
+  the failed logs (timing assumption, missing await, shared state, network),
+  fix it deterministically (explicit synchronisation, not longer sleeps), and
+  prove it with repeated and parallel runs under load.
+- A re-run is acceptable only for a failure proven to be outside the repo
+  (registry/network outage, runner crash), and the reason must be stated
+  where the re-run is reported.
+
 See `bridge/AGENTS.md` for bridge-specific notes.
