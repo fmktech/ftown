@@ -155,6 +155,7 @@ export interface MailDeliveryOptions {
   runner?: MailDeliveryRunner | null;
   /** Clock seam — defaults to the real Date.now/setTimeout/clearTimeout. */
   now?: () => number;
+  monotonicNow?: () => number;
   setTimeout?: (fn: () => void, ms: number) => MailTimerHandle;
   clearTimeout?: (handle: MailTimerHandle) => void;
   nativeWake?: NativeMailWaker;
@@ -180,6 +181,7 @@ export class MailDeliveryService {
   private mailStore: MailDeliveryMailStore | null;
   private runner: MailDeliveryRunner | null;
   private readonly now: () => number;
+  private readonly monotonicNow: () => number;
   private readonly setTimeoutFn: (fn: () => void, ms: number) => MailTimerHandle;
   private readonly clearTimeoutFn: (handle: MailTimerHandle) => void;
 
@@ -199,6 +201,7 @@ export class MailDeliveryService {
   private wakeControllers = new Map<string, AbortController>();
   private legacyReadyAt = new Map<string, number>();
   private lastInjection = new Map<string, { text: string; at: number }>();
+  private lastInjectionMonotonic = new Map<string, number>();
   private digestProvider: DigestProvider | null = null;
   private eventSink: MailEventSink | null = null;
   private stopped = false;
@@ -210,6 +213,7 @@ export class MailDeliveryService {
     this.mailStore = options.mailStore ?? null;
     this.runner = options.runner ?? null;
     this.now = options.now ?? (() => Date.now());
+    this.monotonicNow = options.monotonicNow ?? (() => performance.now());
     this.setTimeoutFn = options.setTimeout ?? ((fn, ms) => setTimeout(fn, ms));
     this.clearTimeoutFn = options.clearTimeout ?? ((handle) => clearTimeout(handle as NodeJS.Timeout));
     this.nativeWake = options.nativeWake ?? createNativeMailWaker();
@@ -263,7 +267,7 @@ export class MailDeliveryService {
     // them again immediately before dispatch, including native capability probes.
     const legacyDelay = HOOKED_SHELL_TYPES.has(session.shellType ?? 'claude')
       ? MAIL_NUDGE_DELAY_HOOKED_MS : MAIL_NUDGE_DELAY_MS;
-    if (!this.legacyReadyAt.has(sessionId)) this.legacyReadyAt.set(sessionId, this.now() + legacyDelay);
+    if (!this.legacyReadyAt.has(sessionId)) this.legacyReadyAt.set(sessionId, this.monotonicNow() + legacyDelay);
     const sender = this.pendingNudgeFrom.get(sessionId) ?? pending[0].fromName ?? pending[0].from;
     this.scheduleMailNudge(sessionId, sender,
       session.shellType === 'codex' || session.shellType === 'muse' ? MAIL_NUDGE_DELAY_MS : legacyDelay);
@@ -288,6 +292,7 @@ export class MailDeliveryService {
     this.batchAttempts.clear();
     this.museNativeTried.clear();
     this.lastInjection.clear();
+    this.lastInjectionMonotonic.clear();
     for (const controller of this.wakeControllers.values()) controller.abort();
     this.wakeControllers.clear();
   }
@@ -304,18 +309,18 @@ export class MailDeliveryService {
       this.nativeLeases.delete(session.id);
       throw new NativeWakeRegistrationError(409, 'Native wake session identity or running process does not match');
     }
-    this.nativeLeases.set(session.id, { ...registration, until: this.now() + NATIVE_WAKE_LEASE_MS });
+    this.nativeLeases.set(session.id, { ...registration, until: this.monotonicNow() + NATIVE_WAKE_LEASE_MS });
   }
 
   private pluginLeaseRemaining(session: Session): number {
     const lease = this.nativeLeases.get(session.id);
     if (!lease) return 0;
     if (session.status !== 'running' || !this.runner?.isRunning(session.id)
-      || this.pluginIdentity(session, lease.adapter) !== lease.nativeSessionId || lease.until <= this.now()) {
+      || this.pluginIdentity(session, lease.adapter) !== lease.nativeSessionId || lease.until <= this.monotonicNow()) {
       this.nativeLeases.delete(session.id);
       return 0;
     }
-    return lease.until - this.now();
+    return lease.until - this.monotonicNow();
   }
 
   private async withSelection<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
@@ -342,7 +347,7 @@ export class MailDeliveryService {
    *  can precede a single tool call far longer than HOOKED_BUSY_STALE_MS, while a
    *  fresh PostToolUse/UserPromptSubmit means a new turn boundary is imminent. */
   markAgentBusy(sessionId: string, event?: 'PreToolUse' | 'PostToolUse' | 'UserPromptSubmit'): void {
-    this.agentBusySince.set(sessionId, this.now());
+    this.agentBusySince.set(sessionId, this.monotonicNow());
     if (event !== undefined) this.agentBusyEvent.set(sessionId, event);
   }
 
@@ -355,6 +360,7 @@ export class MailDeliveryService {
   /** Hook SessionEnd / session removal: forget the injection record. */
   markSessionEnded(sessionId: string): void {
     this.lastInjection.delete(sessionId);
+    this.lastInjectionMonotonic.delete(sessionId);
   }
 
   /** Last bridge-submitted text for a session (PTY nudge or native wake), if any. */
@@ -364,6 +370,7 @@ export class MailDeliveryService {
 
   private recordInjection(sessionId: string, text: string): void {
     this.lastInjection.set(sessionId, { text, at: this.now() });
+    this.lastInjectionMonotonic.set(sessionId, this.monotonicNow());
   }
 
   /** Let the API server record an opencode/claude-mod plugin handoff (mail handed to the plugin). */
@@ -429,8 +436,9 @@ export class MailDeliveryService {
     if (!last) return false;
     // One-shot: the first no-prompt hook consumes the record; the timed rule
     // for hooks carrying text is not consumed.
-    if (this.now() - last.at < 15_000) {
+    if (this.monotonicNow() - (this.lastInjectionMonotonic.get(sessionId) ?? -Infinity) < 15_000) {
       this.lastInjection.delete(sessionId);
+      this.lastInjectionMonotonic.delete(sessionId);
       return true;
     }
     return false;
@@ -544,7 +552,7 @@ export class MailDeliveryService {
     if (pending && (!hadWaiter || session.shellType === 'codex') && session.shellType !== 'pi') {
       const legacyDelay = HOOKED_SHELL_TYPES.has(session.shellType ?? 'claude')
         ? MAIL_NUDGE_DELAY_HOOKED_MS : MAIL_NUDGE_DELAY_MS;
-      if (!this.pendingNudgeFrom.has(session.id)) this.legacyReadyAt.set(session.id, this.now() + legacyDelay);
+      if (!this.pendingNudgeFrom.has(session.id)) this.legacyReadyAt.set(session.id, this.monotonicNow() + legacyDelay);
       const nudgeDelay = session.shellType === 'codex' || session.shellType === 'muse' ? MAIL_NUDGE_DELAY_MS : legacyDelay;
       this.scheduleMailNudge(session.id, sender, nudgeDelay);
     }
@@ -673,7 +681,7 @@ export class MailDeliveryService {
   isAgentRecentlyBusy(sessionId: string, session?: Session): boolean {
     const busySince = this.agentBusySince.get(sessionId);
     if (busySince === undefined) return false;
-    return this.now() - busySince < this.busyStaleFor(sessionId, session);
+    return this.monotonicNow() - busySince < this.busyStaleFor(sessionId, session);
   }
 
   /** Staleness window for a session's current busy marker, computed once per check. */
@@ -711,7 +719,7 @@ export class MailDeliveryService {
     runner: MailDeliveryRunner | null, epoch: number, fromLabel: string): Promise<void> {
     const sessionId = session.id;
     const current = () => !this.stopped && this.dependencyEpoch === epoch && this.mailStore === mailStore;
-    const wait = (this.codexRetryAt.get(sessionId) ?? 0) - this.now();
+    const wait = (this.codexRetryAt.get(sessionId) ?? 0) - this.monotonicNow();
     if (wait > 0) { this.scheduleMailNudge(sessionId, fromLabel, wait); return; }
     if (!runner || !runner.isRunning(sessionId) || session.status !== 'running') {
       const pending = await this.withSelection(sessionId, async () =>
@@ -738,7 +746,7 @@ export class MailDeliveryService {
         this.pendingNudgeFrom.delete(sessionId);
       } else {
         this.batchAttempts.set(sessionId, { key: batchKey, count: attempts });
-        this.codexRetryAt.set(sessionId, this.now() + MAIL_NUDGE_BUSY_RECHECK_MS);
+        this.codexRetryAt.set(sessionId, this.monotonicNow() + MAIL_NUDGE_BUSY_RECHECK_MS);
         this.scheduleMailNudge(sessionId, fromLabel, MAIL_NUDGE_BUSY_RECHECK_MS);
       }
       return;
@@ -819,7 +827,7 @@ export class MailDeliveryService {
         this.codexRetryAt.delete(sessionId);
       } else {
         this.batchAttempts.set(sessionId, { key: batchKey, count: attempts });
-        this.codexRetryAt.set(sessionId, this.now() + MAIL_NUDGE_BUSY_RECHECK_MS);
+        this.codexRetryAt.set(sessionId, this.monotonicNow() + MAIL_NUDGE_BUSY_RECHECK_MS);
       }
     }
     const remaining = await mailStore.listUnnudgedWaking(sessionId);
@@ -937,7 +945,7 @@ export class MailDeliveryService {
       }
     };
 
-    const legacyWait = (this.legacyReadyAt.get(sessionId) ?? 0) - this.now();
+    const legacyWait = (this.legacyReadyAt.get(sessionId) ?? 0) - this.monotonicNow();
     if (legacyWait > 0) { await unstampMuse(); this.scheduleMailNudge(sessionId, fromLabel, legacyWait); return; }
 
     if (this.isAgentRecentlyBusy(sessionId, session)) {
@@ -952,7 +960,7 @@ export class MailDeliveryService {
     // `now() - 0` look like it's already inside the rate-limit window.
     const lastNudgeAt = this.lastNudgeAt.get(sessionId);
     if (lastNudgeAt !== undefined) {
-      const sinceLast = this.now() - lastNudgeAt;
+      const sinceLast = this.monotonicNow() - lastNudgeAt;
       if (sinceLast < MAIL_NUDGE_MIN_INTERVAL_MS) {
         // Rate-limited: retry once the window reopens (mail may still be unread).
         await unstampMuse();
@@ -1045,7 +1053,7 @@ export class MailDeliveryService {
     this.batchAttempts.delete(sessionId);
     this.pendingNudgeFrom.delete(sessionId);
     if (current()) {
-      this.lastNudgeAt.set(sessionId, this.now());
+      this.lastNudgeAt.set(sessionId, this.monotonicNow());
       this.logMail(sessionId, 'nudge', `pty wake with ${batchIds.length} message(s)`);
     }
   }

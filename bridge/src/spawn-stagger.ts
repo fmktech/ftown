@@ -25,7 +25,7 @@ export function staggerSpawn(
   minGapMs: number,
   opts?: { now?: () => number; sleep?: (ms: number) => Promise<void> },
 ): Promise<void> {
-  const now = opts?.now ?? Date.now;
+  const now = opts?.now ?? (() => performance.now());
   const sleep = opts?.sleep ?? defaultSleep;
 
   // Reserve the slot synchronously — no await may happen before this point.

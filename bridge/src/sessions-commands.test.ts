@@ -237,6 +237,7 @@ async function withFakeClock(run: (sleeps: number[], advance: (ms: number) => vo
   const original = { ...attentionClock };
   let now = 1_000_000; const sleeps: number[] = [];
   attentionClock.now = () => now;
+  attentionClock.monotonicNow = () => now;
   attentionClock.sleep = async (ms) => { sleeps.push(ms); now += ms; };
   try { await run(sleeps, (ms) => { now += ms; }); } finally { Object.assign(attentionClock, original); }
 }
@@ -433,3 +434,21 @@ test('create --require-green-pr maps to body.requireGreenPr', async () => fixtur
   assert.equal(requests.at(-1)?.method, 'POST');
   assert.deepEqual(requests.at(-1)?.body, { parentSessionId: 'p-uuid', prompt: 'work', requireGreenPr: true });
 }, () => ({ session: { id: 'child', name: 'child', status: 'running' } })));
+
+test('attention wait budget ignores wall-clock jumps', async () => {
+  for (const jump of [-600_000, 600_000]) {
+    await withFakeClock(async (_sleeps, advance) => {
+      let wall = 1_000_000; let polls = 0; attentionClock.now = () => wall;
+      await fixture(async (requests) => {
+        process.env.FTOWN_SESSION_ID = 'self-id';
+        assert.equal(await runSessions(['attention', '--message', 'Q', '--option', 'x', '--wait', '--timeout', '30']), 124);
+        assert.deepEqual(requests.filter(r => r.url.includes('waitSeconds')).map(r => new URL(r.url).searchParams.get('waitSeconds')), ['25', '5']);
+      }, request => {
+        if (request.method === 'POST') return { event: { id: 'evt-1' } };
+        if (!request.url.includes('/attention/evt-1')) return promptCapabilities;
+        if (++polls > 6) throw new Error('poll sentinel');
+        wall += jump; advance(25_000); return { event: { id: 'evt-1' } };
+      });
+    });
+  }
+});

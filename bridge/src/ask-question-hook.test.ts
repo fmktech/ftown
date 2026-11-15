@@ -72,6 +72,7 @@ function makeHarness(handler: Handler, opts: { env?: Record<string, string | und
       return result;
     },
     now: () => clock.t,
+    monotonicNow: () => clock.t,
     sleep: async (ms) => { clock.t += ms; },
     writeStdout: (text) => { stdout.push(text); },
     writeStderr: (text) => { stderr.push(text); },
@@ -325,4 +326,37 @@ describe('runAskHook', () => {
     assert.deepEqual(h.stdout, []);
     assert.ok(h.clock.t - 1_000_000 > 60_000 && h.clock.t - 1_000_000 <= 64_000);
   });
+});
+
+
+it('deadline and outage budgets ignore wall-clock jumps', async () => {
+  for (const jump of [-600_000, 600_000]) {
+    const deadlineAbort = new AbortController();
+    const deadline = makeHarness(standard(() => pending), { deadlineMs: 100_000, signal: deadlineAbort.signal });
+    let deadlinePolls = 0;
+    let wall = deadline.clock.t; deadline.deps.now = () => wall;
+    deadline.deps.request = ((original) => async (method, path, body, signal) => {
+      const result = await original(method, path, body, signal);
+      if (path.includes('waitSeconds')) {
+        if (++deadlinePolls > 6) deadlineAbort.abort();
+        wall += jump; deadline.clock.t += 25_000;
+      }
+      return result;
+    })(deadline.deps.request);
+    await runAskHook(deadline.deps);
+    assert.equal(deadline.clock.t - 1_000_000, 100_000);
+    assert.equal(deadline.calls.filter(c => c.path.includes('waitSeconds')).length, 4);
+
+    const outageAbort = new AbortController();
+    let outagePolls = 0;
+    const outage = makeHarness(standard(() => {
+      if (++outagePolls > 40) outageAbort.abort();
+      return new Error('offline');
+    }), { signal: outageAbort.signal });
+    wall = outage.clock.t; outage.deps.now = () => wall;
+    outage.deps.sleep = async ms => { wall += jump; outage.clock.t += ms; };
+    await runAskHook(outage.deps);
+    assert.equal(outage.clock.t - 1_000_000, 62_000);
+    assert.equal(outage.calls.filter(c => c.path.includes('waitSeconds')).length, 32);
+  }
 });

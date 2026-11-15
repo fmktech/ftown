@@ -50,7 +50,7 @@ test('Codex wake uses target home/XDG/cwd and excludes the bridge agent transpor
 });
 test('capability probes cache bounded support by runtime context and expire', async () => {
   let now=0,probes=0,sends=0;
-  const wake=createNativeMailWaker({now:()=>now,run:async(_file,args)=>{if(args.includes('--help')){probes++;return help();}sends++;return accepted();}});
+  const wake=createNativeMailWaker({monotonicNow:()=>now,run:async(_file,args)=>{if(args.includes('--help')){probes++;return help();}sends++;return accepted();}});
   await wake(session,pointer);await wake(session,pointer);assert.equal(probes,1);assert.equal(sends,2);
   await wake({...session,env:{CODEX_HOME:'/another-home'}},pointer);assert.equal(probes,2);
   now=60_001;await wake(session,pointer);assert.equal(probes,3);
@@ -113,3 +113,24 @@ test('grok and antigravity are unsupported for native wake, with or without thei
   }
   assert.equal(f.calls.length, 0);
 });
+
+for (const jump of [-600_000, 600_000]) {
+  for (const supported of [true, false]) {
+    test(`probe cache ${supported ? 'supported' : 'unsupported'} ignores wall jump ${jump}`, async () => {
+      let wall = 1_000_000, mono = 0, probes = 0;
+      const wake = createNativeMailWaker({ now: () => wall, monotonicNow: () => mono,
+        run: async (_file, args) => {
+          if (args.includes('--help')) { probes++; return supported ? help() : result({ stdout: 'Usage: codex' }); }
+          return accepted();
+        } });
+      const expected = supported ? 'accepted' : 'unsupported';
+      assert.equal((await wake(session, pointer)).status, expected);
+      wall += jump; mono = 59_999;
+      assert.equal((await wake(session, pointer)).status, expected);
+      assert.equal(probes, 1);
+      mono = 60_000;
+      assert.equal((await wake(session, pointer)).status, expected);
+      assert.equal(probes, 2);
+    });
+  }
+}

@@ -98,13 +98,14 @@ const LEGACY_IDLE_DELAY_MS = 600_000;
 export interface SubagentIdleSignal { sessionId: string; cycleId: string; startedAt: string }
 export interface AttentionNotificationOptions {
   now?: () => number;
+  monotonicNow?: () => number;
   schedule?: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
   cancel?: (timer: ReturnType<typeof setTimeout>) => void;
   isSessionActive?: (sessionId: string) => Promise<boolean>;
   onIdleCanceled?: (sessionId: string) => void;
   onSubagentIdle?: (signal: SubagentIdleSignal, isCurrent: () => boolean) => Promise<void>;
 }
-interface IdleTimer { cycleId: string; timer: ReturnType<typeof setTimeout> }
+interface IdleTimer { cycleId: string; deadline: number; timer: ReturnType<typeof setTimeout> }
 
 /** Single-process, serialized snapshots. Missing/corrupt files never masquerade as recovered history. */
 export class AttentionStore implements AttentionRoutingStoreApi {
@@ -113,14 +114,14 @@ export class AttentionStore implements AttentionRoutingStoreApi {
   /** Per session: wake callbacks of item waiters, fired whenever any item is resolved. */
   private itemWaiters = new Map<string, Set<() => void>>();
   /** Per attention event id: active item long-polls and when the latest one started. */
-  private pollers = new Map<string, { active: number; lastPollAt: number }>();
+  private pollers = new Map<string, { active: number; lastPollAt: number; lastPollWallAt: number }>();
   private idleTimers = new Map<string, IdleTimer>();
   private notificationsStopped = false;
   private notificationOptions: Required<Omit<AttentionNotificationOptions, 'onIdleCanceled' | 'onSubagentIdle'>> & Pick<AttentionNotificationOptions, 'onIdleCanceled' | 'onSubagentIdle'>;
   constructor(private resolveDir: (sessionId: string) => string, private resolvedRetention = 500,
     private onNotification?: (sessionId: string, notice: PushNotice) => void,
     options: AttentionNotificationOptions = {}) {
-    this.notificationOptions = { now: Date.now, schedule: setTimeout, cancel: clearTimeout,
+    this.notificationOptions = { now: Date.now, monotonicNow: () => performance.now(), schedule: setTimeout, cancel: clearTimeout,
       isSessionActive: async () => true, ...options };
   }
 
@@ -130,10 +131,12 @@ export class AttentionStore implements AttentionRoutingStoreApi {
   private isExplicit(event: StoredItem): boolean {
     return event.type === 'agent_needs_input' || (event.type === 'ask_user' && !!event.prompt);
   }
-  hasLiveWaiter(eventId: string, now: number = this.notificationOptions.now()): boolean {
+  hasLiveWaiter(eventId: string, now?: number): boolean {
     const poller = this.pollers.get(eventId);
     if (!poller) return false;
-    return poller.active > 0 || now - poller.lastPollAt <= ATTENTION_WAITER_TTL_MS;
+    return poller.active > 0 || (now === undefined
+      ? this.notificationOptions.monotonicNow() - poller.lastPollAt
+      : now - poller.lastPollWallAt) <= ATTENTION_WAITER_TTL_MS;
   }
 
   private activeWaits(eventId: string): number {
@@ -149,15 +152,18 @@ export class AttentionStore implements AttentionRoutingStoreApi {
     this.clearIdleTimer(id);
     try { this.notificationOptions.onIdleCanceled?.(id); } catch { /* Optional observer is isolated. */ }
   }
-  private scheduleIdle(id: string, cycle: NonNullable<Ledger['idleCycle']>): void {
+  private scheduleIdle(id: string, cycle: NonNullable<Ledger['idleCycle']>, newDeadline?: number): void {
     if (this.notificationsStopped || cycle.notifiedAt || !this.notificationOptions.onSubagentIdle) return;
+    const existing = this.idleTimers.get(id);
+    const deadline = newDeadline ?? (existing?.cycleId === cycle.id ? existing.deadline
+      : this.notificationOptions.monotonicNow() + Math.max(0, Date.parse(cycle.dueAt) - this.notificationOptions.now()));
     this.clearIdleTimer(id);
-    const remaining = Math.max(0, Date.parse(cycle.dueAt) - this.notificationOptions.now());
+    const remaining = Math.max(0, deadline - this.notificationOptions.monotonicNow());
     const timer = this.notificationOptions.schedule(() => { void this.emitIdle(id, cycle.id).catch(() => {
       if (this.idleTimers.get(id)?.cycleId === cycle.id) this.clearIdleTimer(id);
     }); }, Math.min(remaining, 2_147_483_647));
     timer.unref?.();
-    this.idleTimers.set(id, { cycleId: cycle.id, timer });
+    this.idleTimers.set(id, { cycleId: cycle.id, deadline, timer });
   }
   private async emitIdle(id: string, cycleId: string): Promise<void> {
     await this.withLock(id, async () => {
@@ -169,7 +175,7 @@ export class AttentionStore implements AttentionRoutingStoreApi {
       const active = await this.notificationOptions.isSessionActive(id);
       if (!current()) return;
       if (!active) { delete ledger.idleCycle; await this.save(id, ledger); this.idleCanceled(id); return; }
-      if (this.notificationOptions.now() < Date.parse(cycle.dueAt)) { this.scheduleIdle(id, cycle); return; }
+      if (this.notificationOptions.monotonicNow() < this.idleTimers.get(id)!.deadline) { this.scheduleIdle(id, cycle); return; }
       const timestamp = new Date(this.notificationOptions.now()).toISOString();
       cycle.notifiedAt = timestamp;
       await this.save(id, ledger);
@@ -288,8 +294,10 @@ export class AttentionStore implements AttentionRoutingStoreApi {
       const ledger = await this.load(id);
       const timestamp = new Date(this.notificationOptions.now()).toISOString();
       const notifications: PushNotice[] = [];
+      let idleDeadline: number | undefined;
       if (cancelIdle) { this.idleCanceled(id); delete ledger.idleCycle; }
       else if (observation.activity === 'idle' && ['thinking', 'tool_use'].includes(ledger.activity.state)) {
+        idleDeadline = this.notificationOptions.monotonicNow() + SUBAGENT_IDLE_DELAY_MS;
         ledger.idleCycle = { id: randomUUID(), startedAt: timestamp, dueAt: new Date(this.notificationOptions.now() + SUBAGENT_IDLE_DELAY_MS).toISOString() };
       }
       if (observation.activity) ledger.activity = { state: observation.activity, lastActivityAt: timestamp };
@@ -341,7 +349,7 @@ export class AttentionStore implements AttentionRoutingStoreApi {
       this.prune(ledger, resolvedIds);
       await this.save(id, ledger);
       if (ledger.activity.state === 'idle' && ledger.idleCycle && !ledger.idleCycle.notifiedAt
-        && !this.idleTimers.has(id)) this.scheduleIdle(id, ledger.idleCycle);
+        && !this.idleTimers.has(id)) this.scheduleIdle(id, ledger.idleCycle, idleDeadline);
       for (const notice of notifications) {
         try { if (!this.notificationsStopped) this.onNotification?.(id, notice); } catch { /* Optional delivery cannot fail a committed hook. */ }
       }
@@ -426,7 +434,7 @@ export class AttentionStore implements AttentionRoutingStoreApi {
       const at = now ?? new Date(this.notificationOptions.now());
       // Mail answers fall back to mail when nobody is polling right now (a duplicate beats a lost answer);
       // hook answers have no fallback, so a recent poll still counts.
-      const waiterLive = event.prompt.channel === 'mail' ? this.activeWaits(eventId) > 0 : this.hasLiveWaiter(eventId, at.getTime());
+      const waiterLive = event.prompt.channel === 'mail' ? this.activeWaits(eventId) > 0 : this.hasLiveWaiter(eventId);
       if (event.prompt.channel === 'hook' && !waiterLive) {
         throw new AttentionError('answer_waiter_gone', 'The agent is no longer waiting for this answer', 409);
       }
@@ -511,7 +519,7 @@ export class AttentionStore implements AttentionRoutingStoreApi {
     });
   }
   async wait(id: string, options: AttentionReadOptions, waitSeconds: number, signal?: AbortSignal): Promise<AttentionPage> {
-    const deadline = Date.now() + Math.min(25, Math.max(0, waitSeconds)) * 1000;
+    const deadline = this.notificationOptions.monotonicNow() + Math.min(25, Math.max(0, waitSeconds)) * 1000;
     // Install before the first read so a committed event cannot fall between read and listener setup.
     let notify: (() => void) | undefined;
     const listeners = this.listeners.get(id) ?? new Set<() => void>();
@@ -524,15 +532,15 @@ export class AttentionStore implements AttentionRoutingStoreApi {
         const change = new Promise<void>((resolve) => { wake = resolve; });
         notify = wake;
         const page = await this.list(id, { ...options, actionableOnly: true, includeResolved: false });
-        if (page.events.length || Date.now() >= deadline) return page;
+        if (page.events.length || this.notificationOptions.monotonicNow() >= deadline) return page;
         let timer: ReturnType<typeof setTimeout> | undefined;
         const cancel = () => wake();
         try {
-          const timeout = new Promise<void>((resolve) => { timer = setTimeout(resolve, Math.max(0, deadline - Date.now())); });
+          const timeout = new Promise<void>((resolve) => { timer = this.notificationOptions.schedule(resolve, Math.max(0, deadline - this.notificationOptions.monotonicNow())); });
           signal?.addEventListener('abort', cancel, { once: true });
           if (signal?.aborted) wake();
           await Promise.race([change, timeout]);
-        } finally { if (timer) clearTimeout(timer); signal?.removeEventListener('abort', cancel); }
+        } finally { if (timer !== undefined) this.notificationOptions.cancel(timer); signal?.removeEventListener('abort', cancel); }
       }
     } finally { listeners.delete(listener); if (!listeners.size) this.listeners.delete(id); }
   }
@@ -548,13 +556,13 @@ export class AttentionStore implements AttentionRoutingStoreApi {
     const ms = Number.isFinite(waitMs) ? Math.min(Math.max(waitMs, 0), ATTENTION_ITEM_WAIT_MAX_SECONDS * 1000) : 0;
     // A zero-wait read is a status check, not a waiter: it never counts toward liveness.
     if (ms <= 0) return this.readItem(id, eventId);
-    const deadline = Date.now() + ms;
+    const deadline = this.notificationOptions.monotonicNow() + ms;
     // Install before the first read so a resolution cannot fall between read and listener setup.
     let notify: (() => void) | undefined;
     const waiters = this.itemWaiters.get(id) ?? new Set<() => void>();
     const waiter = () => notify?.();
     waiters.add(waiter); this.itemWaiters.set(id, waiters);
-    let poller: { active: number; lastPollAt: number } | undefined;
+    let poller: { active: number; lastPollAt: number; lastPollWallAt: number } | undefined;
     try {
       while (true) {
         if (signal?.aborted) throw new AttentionError('cancelled', 'Attention wait cancelled', 499);
@@ -562,30 +570,34 @@ export class AttentionStore implements AttentionRoutingStoreApi {
         const change = new Promise<void>((resolve) => { wake = resolve; });
         notify = wake;
         const item = await this.readItem(id, eventId);
-        if (item.resolvedAt || Date.now() >= deadline) return item;
+        if (item.resolvedAt || this.notificationOptions.monotonicNow() >= deadline) return item;
         if (!poller) {
           // Only a confirmed, still-open item gets a liveness record.
-          const nowMs = this.notificationOptions.now();
+          const nowMs = this.notificationOptions.monotonicNow();
+          const wallNowMs = this.notificationOptions.now();
           for (const [key, entry] of this.pollers) if (!entry.active && nowMs - entry.lastPollAt > ATTENTION_WAITER_TTL_MS) this.pollers.delete(key);
-          poller = this.pollers.get(eventId) ?? { active: 0, lastPollAt: nowMs };
-          poller.active++; poller.lastPollAt = nowMs;
+          poller = this.pollers.get(eventId) ?? { active: 0, lastPollAt: nowMs, lastPollWallAt: wallNowMs };
+          poller.active++; poller.lastPollAt = nowMs; poller.lastPollWallAt = wallNowMs;
           this.pollers.set(eventId, poller);
         }
         let timer: ReturnType<typeof setTimeout> | undefined;
         const cancel = () => wake();
         try {
-          const timeout = new Promise<void>((resolve) => { timer = setTimeout(resolve, Math.max(0, deadline - Date.now())); });
+          const timeout = new Promise<void>((resolve) => { timer = this.notificationOptions.schedule(resolve, Math.max(0, deadline - this.notificationOptions.monotonicNow())); });
           signal?.addEventListener('abort', cancel, { once: true });
           if (signal?.aborted) wake();
           await Promise.race([change, timeout]);
-        } finally { if (timer) clearTimeout(timer); signal?.removeEventListener('abort', cancel); }
+        } finally { if (timer !== undefined) this.notificationOptions.cancel(timer); signal?.removeEventListener('abort', cancel); }
       }
     } finally {
       waiters.delete(waiter); if (!waiters.size) this.itemWaiters.delete(id);
       if (poller) {
         poller.active--;
         // The TTL bridges the gap between polls, so it runs from the end of the latest one.
-        if (!signal?.aborted) poller.lastPollAt = this.notificationOptions.now();
+        if (!signal?.aborted) {
+          poller.lastPollAt = this.notificationOptions.monotonicNow();
+          poller.lastPollWallAt = this.notificationOptions.now();
+        }
         if (signal?.aborted && poller.active === 0 && waiters.size === 0 && this.pollers.get(eventId) === poller) this.pollers.delete(eventId);
       }
     }

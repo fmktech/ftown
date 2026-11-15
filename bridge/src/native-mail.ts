@@ -16,6 +16,7 @@ interface CommandResult {
 interface Dependencies {
   run?: (file: string, args: string[], options: CommandOptions) => Promise<CommandResult>;
   now?: () => number;
+  monotonicNow?: () => number;
   env?: NodeJS.ProcessEnv;
 }
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
@@ -89,7 +90,7 @@ function backendUnsupported(result: CommandResult): boolean {
 /** Dispatch native messages with bounded subprocesses and validated receipts. */
 export function createNativeMailWaker(deps: Dependencies = {}): NativeMailWaker {
   const run = deps.run ?? runCommand;
-  const now = deps.now ?? Date.now;
+  const monotonicNow = deps.monotonicNow ?? (() => performance.now());
   const base = deps.env ?? process.env;
   const probes = new Map<string, { supported: boolean; expires: number }>();
   return async (session, text, signal, isCurrent) => {
@@ -109,12 +110,12 @@ export function createNativeMailWaker(deps: Dependencies = {}): NativeMailWaker 
     const cacheKey = JSON.stringify([harness, env.PATH, env.HOME, env.CODEX_HOME, env.XDG_CONFIG_HOME, cwd]);
     let probe = probes.get(cacheKey);
     try {
-      if (!probe || now() >= probe.expires) {
+      if (!probe || monotonicNow() >= probe.expires) {
         const result = await run('codex', ['queue', '--help'], options);
         if (signal?.aborted) return { status: 'rejected' };
-        if (result.errorCode === 'ENOENT' || parserUnsupported(result)) probe = { supported: false, expires: now() + PROBE_TTL_MS };
+        if (result.errorCode === 'ENOENT' || parserUnsupported(result)) probe = { supported: false, expires: monotonicNow() + PROBE_TTL_MS };
         else if (interrupted(result) || result.code !== 0) return { status: 'rejected' }; // Probe never submits input.
-        else probe = { supported: /Usage:\s*codex queue\b/.test(result.stdout) && result.stdout.includes('--thread') && result.stdout.includes('--message'), expires: now() + PROBE_TTL_MS };
+        else probe = { supported: /Usage:\s*codex queue\b/.test(result.stdout) && result.stdout.includes('--thread') && result.stdout.includes('--message'), expires: monotonicNow() + PROBE_TTL_MS };
         probes.delete(cacheKey);
         while (probes.size >= PROBE_CACHE_LIMIT) probes.delete(probes.keys().next().value!);
         probes.set(cacheKey, probe);
