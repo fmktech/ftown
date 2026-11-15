@@ -64,17 +64,43 @@ The recorded pair is contract 9. Both canonical logs are byte-identical. A2 is v
 
 ## Settling experiment
 
-**NOT YET RUN.**
+Run on 2026-11-15 against the pre-fix bridge. The result is in Fix confirmation. A2 passed.
 
 ```text
 cd chaos && npm run test:chaos -- repro --seed 9 --profile short --level low --times 1 --drop-faults bridge_kill9
 ```
 
-The harness writes that run under `chaos/out/9-short-drop-bridge_kill9` (`chaos/src/host/paths.ts:15`). Dropping `bridge_kill9` leaves `parent_kill9` at its scheduled time while the bridge stays up. The question is opened at t=62999, before the kill at t=101154. Expect the seed 6 shape: the bridge log shows the tmux client exit and `Process exited with code 137`, the question's route becomes `human` with `escalated` true, and A2 passes. If A2 still fails with the bridge up the whole time, this account of the trigger is wrong.
+The harness writes that run under `chaos/out/9-short-drop-bridge_kill9` (`chaos/src/host/paths.ts:15`). Dropping `bridge_kill9` leaves `parent_kill9` at its scheduled time while the bridge stays up. The question is opened at t=62999, before the kill at t=101154. The run had the seed 6 shape: the bridge log shows the tmux client exit and `Process exited with code 137`, the question's route becomes `human` with `escalated` true, and A2 passes.
+
+## Fix confirmation
+
+Fix commit `39f03f5`, PR #229, confirmed 2026-11-15. This branch merged `origin/main` as `16582d7`, which contains `39f03f5`. Chaos `npm test` was 274 pass and `npm run typecheck` was clean before the post-fix guest runs.
+
+Scenario. Contract v9, profile short, level low. Seed 9 schedules `f1` `bridge_kill9` at 83,509 ms, `f2` `agent_kill9` of child1 at 96,355 ms, and `f3` `parent_kill9` of root at 101,153 ms. The parent kill falls inside the bridge-down span. Seed 36 is a second reproduction of the same mechanism on a different outage: `f1` `bridge_sigterm` at 80,352 ms (heal `doneT` 112,644), `f2` `clock_jump_fwd` +90,000 ms at 95,593 ms, and `f3` `parent_kill9` at 106,896 ms. Checkpoints at 90 s and 105 s still show the bridge dead, and the parent kill at t=106,902 sits between them. On the pre-fix bridge both seeds leave the open items at route `parent` and log `Marked stale session ... as error`.
+
+Pre-fix campaign, the bridge before `39f03f5`. Seeds 1–40, two runs each, 40 of 40 pairs byte-identical. A2 violated only on seeds 9 and 36.
+
+| Run | H_run | violated | exit | wall | A2 line | Final attention |
+| --- | --- | --- | --- | --- | --- | --- |
+| Seed 9 pair | `51fbe1c3a3de` | A2 | 1 | 427.6 s | `{"k":"verdict","prop":"A2","kind":"always","status":"violated","evidence":["child3 CHAOS-Q-4000 route=parent unresolved, root not alive"]}` | `CHAOS-Q-4000` route `parent`, `escalated` false |
+| Seed 36 pair | `9a38a903144b` | A2 | 1 | 385.9 s | `{"k":"verdict","prop":"A2","kind":"always","status":"violated","evidence":["child1 CHAOS-Q-2000 route=parent unresolved, root not alive","child2 CHAOS-Q-3000 route=parent unresolved, root not alive"]}` | `CHAOS-Q-2000` and `CHAOS-Q-3000` route `parent`, `escalated` false |
+
+Seed 36 `side-bridge.log` line 73: `Marked stale session b6eba06e-372d-4a20-a82f-a15de46b89e4 as error`. That id is the root tmux session. The restarted bridge reattaches the three children and does not reattach root.
+
+Counterfactual, pre-fix bridge. Source fingerprint `0508bf92547a86507297f85c4751bfb63f1696d5f378cb301bea9b37e17431a4` (head `8d9e10ed3e79`, dirty false, 456 files). One boot. `H_run=14fba9da891c`, `violated=-`, wall 207.1 s, `exit=0`. A2 line: `{"k":"verdict","prop":"A2","kind":"always","status":"pass","evidence":[]}`. Schedule kept `f2` at 96,355 ms and `f3` `parent_kill9` at 101,153 ms; `f1` was dropped. `parent_kill9` applied at t=101,155 with the bridge up. Bridge log: `Session f444b135-5f0d-48c8-870f-eb201f7ef830 error: Process exited with code 137` (root). No `Marked stale session` line. Final checkpoint t=250,191, bridge alive, root status `error`: `CHAOS-Q-4000` and `CHAOS-Q-4001` route `human`, `escalated` true.
+
+Post-fix. Source fingerprint `b1014caec549b820018161ef07d6cf1ea501c28b15a30d7094a85c7fc89a31ca` (head `16582d749eac`, dirty false, 456 files). The auto-build printed `chaos build is stale (cached 0508bf92 != current b1014cae): rebuilding`. Each seed was `--times 2`. Schedules matched the campaign.
+
+| Run | H_run | violated | exit | wall | Pair | A2 line | Final attention |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Seed 9 | `3dfc8f602ab7` | `-` | 0 | 429.7 s (215.7+214.0) | byte-identical | `{"k":"verdict","prop":"A2","kind":"always","status":"pass","evidence":[]}` | `CHAOS-Q-4000` route `human`, `escalated` true |
+| Seed 36 | `e5eb2f6f5e39` | `-` | 0 | 389.1 s (194.5+194.6) | byte-identical | `{"k":"verdict","prop":"A2","kind":"always","status":"pass","evidence":[]}` | `CHAOS-Q-2000` and `CHAOS-Q-3000` route `human`, `escalated` true |
+
+On both post-fix seeds the bridge log still marks the dead root stale (`Marked stale session f1b7f6ee-18a8-48bf-9a69-69a30d871dfc as error` on seed 9; `Marked stale session d56c1983-33de-4dbd-99ba-dc775d768106 as error` on seed 36) and the open items are route `human` with `escalated` true at the final checkpoint. Seed 9's second ask, `CHAOS-Q-4001`, was `ask_sent` `accepted` false with `bridge_unreachable` during the outage, so it is not an open item at the final checkpoint. `parent_kill9` still lands inside the outage (seed 9 t=101,157; seed 36 t=106,901).
 
 ## Grade
 
-**B.** Reproduced twice, byte-identical. The code path is identified. Seed 6 is a natural control in the same profile and level: the parent dies while the bridge is up, and escalation happens. The dedicated counterfactual (`--drop-faults bridge_kill9` on seed 9) has not been run, so the grade is not A.
+**A.** Reproduced on the pre-fix bridge, byte-identical, on seed 9 and on seed 36. The code path is identified above. The counterfactual that drops `bridge_kill9` on seed 9 passes A2: the parent dies while the bridge is up and the items are escalated. The post-fix bridge passes A2 on seed 9 and on seed 36, each pair byte-identical, on a source fingerprint different from the pre-fix counterfactual.
 
 ## Suggested fix direction
 
