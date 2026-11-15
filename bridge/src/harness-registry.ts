@@ -151,30 +151,40 @@ export function buildGrokCommand(options: {
   return parts.join(' ');
 }
 
+/**
+ * Model selection for an opencode v2 launch. Root `opencode` no longer accepts
+ * `-m` (it exits 1). The model is a config document instead. Returns undefined
+ * when no model was requested so no-model launches stay `opencode --auto`.
+ */
+export function opencodeLaunchEnv(model: string | undefined): Record<string, string> | undefined {
+  const trimmed = model?.trim();
+  if (!trimmed) return undefined;
+  return { OPENCODE_CONFIG_CONTENT: JSON.stringify({ model: trimmed }) };
+}
+
 export function buildOpencodeCommand(options: {
   model?: string;
   opencodeSessionId?: string;
   initialPrompt?: string;
 }): string {
   // --auto approves permissions that are not explicitly denied — the opencode
-  // analog of claude's --allow-dangerously-skip-permissions / grok's
-  // --always-approve, required for unattended ftown runs.
-  const parts = ['opencode', '--auto'];
+  // analog of grok's --always-approve, required for unattended ftown runs.
+  // A model launch adds --standalone: the background server does not inherit
+  // the client environment, so OPENCODE_CONFIG_CONTENT (opencodeLaunchEnv)
+  // would otherwise be ignored. Resume keeps --standalone when a model is set
+  // and still suppresses the prompt — opencode restores the thread.
+  const model = options.model?.trim();
+  const parts = ['opencode'];
+  if (model) parts.push('--standalone');
+  parts.push('--auto');
 
   if (options.opencodeSessionId?.trim()) {
-    // Resume must not replay the original prompt — opencode restores the thread.
     parts.push('--session', shellQuote(options.opencodeSessionId.trim()));
     return parts.join(' ');
   }
 
-  if (options.model?.trim()) {
-    parts.push('-m', shellQuote(options.model.trim()));
-  }
-
   if (options.initialPrompt?.trim()) {
     // The TUI submits the --prompt message as the first turn on launch.
-    // Requires an opencode build with prompt auto-submit (restored upstream
-    // 2025-11); older builds merely prefill the composer.
     parts.push('--prompt', shellQuote(options.initialPrompt));
   }
 
