@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { constants, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import test from 'node:test';
-import { acquireBuildLock, collectSourceInputs, computeSourceFingerprint, defaultFingerprintDeps, hasDirtyInput, isChaosFingerprintInput, isFingerprintInput, listFingerprintInputs, releaseBuildLock, stageSourceTree, type FingerprintDeps, type LockOps } from './build.ts';
+import { BUILD_LOCK_STALE_MS, acquireBuildLock, collectSourceInputs, computeSourceFingerprint, defaultFingerprintDeps, hasDirtyInput, isChaosFingerprintInput, isFingerprintInput, listFingerprintInputs, readRegularFile, releaseBuildLock, stageSourceTree, type FingerprintDeps, type InputFs, type LockOps } from './build.ts';
 
 function fakeDeps(
   files: Record<string, string | null>,
@@ -44,6 +44,34 @@ function walkFiles(root: string): string[] {
   };
   walk(root);
   return out.sort();
+}
+
+function walkDirs(root: string): string[] {
+  const out: string[] = [];
+  const walk = (dir: string): void => {
+    for (const ent of readdirSync(dir, { withFileTypes: true })) {
+      if (!ent.isDirectory()) continue;
+      const abs = join(dir, ent.name);
+      out.push(relative(root, abs).split('\\').join('/'));
+      walk(abs);
+    }
+  };
+  walk(root);
+  return out.sort();
+}
+
+/** Directories implied by the fingerprint list. An extra directory fails a deepEqual against this. */
+function parentDirs(files: readonly string[]): string[] {
+  const dirs = new Set<string>();
+  for (const file of files) {
+    const parts = file.split('/');
+    for (let i = 1; i < parts.length; i++) dirs.add(parts.slice(0, i).join('/'));
+  }
+  return [...dirs].sort();
+}
+
+function heldPid(ops: LockOps, dir: string): string {
+  return ops.readFile(`${dir}/pid`).split('\n')[0] ?? '';
 }
 
 function memLock(): LockOps {
@@ -272,6 +300,21 @@ test('staging list equals the fingerprint list; an ignored path is in neither an
     assert.equal(statSync(join(dest, 'chaos/qemu/init')).mode & 0o777, 0o755);
     assert.equal(statSync(join(dest, 'chaos/box/Dockerfile')).mode & 0o777, 0o644);
     assert.deepEqual(walkFiles(dest), fingerprintPaths);
+    assert.deepEqual(walkDirs(dest), parentDirs(fingerprintPaths));
+    // BuildKit's context sync is metadata-based (size, mtime, mode, uid/gid) and
+    // skips the byte read when they match. A pinned mtime would keep old COPY bytes
+    // for a same-size edit. Write-time stamps are not the epoch, and two stagings
+    // of the same content a few milliseconds apart are allowed to differ.
+    const stagedFile = join(dest, 'chaos/box/Dockerfile');
+    const firstMtime = statSync(stagedFile).mtimeMs;
+    assert.notEqual(firstMtime, 0);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    stageSourceTree(dest, inputs);
+    const secondMtime = statSync(stagedFile).mtimeMs;
+    assert.notEqual(secondMtime, 0);
+    assert.deepEqual(walkDirs(dest), parentDirs(fingerprintPaths));
+    mkdirSync(join(dest, 'bridge/unexpected'));
+    assert.notDeepEqual(walkDirs(dest), parentDirs(walkFiles(dest)));
   } finally {
     rmSync(dest, { recursive: true, force: true });
   }
@@ -387,12 +430,18 @@ test('re-staging drops a path removed from the list and the on-disk set matches'
   const dest = mkdtempSync(join(tmpdir(), 'chaos-restage-'));
   const keep = { path: 'bridge/src/keep.ts', digest: null, executable: false, bytes: Buffer.from('keep\n') };
   const drop = { path: 'bridge/src/drop.ts', digest: null, executable: false, bytes: Buffer.from('drop\n') };
+  const gone = { path: 'bridge/only/gone.ts', digest: null, executable: false, bytes: Buffer.from('gone\n') };
   try {
-    stageSourceTree(dest, [keep, drop]);
-    assert.deepEqual(walkFiles(dest), ['bridge/src/drop.ts', 'bridge/src/keep.ts']);
+    stageSourceTree(dest, [keep, drop, gone]);
+    assert.deepEqual(walkFiles(dest), ['bridge/only/gone.ts', 'bridge/src/drop.ts', 'bridge/src/keep.ts']);
+    assert.deepEqual(walkDirs(dest), parentDirs(walkFiles(dest)));
     stageSourceTree(dest, [keep]);
     assert.deepEqual(walkFiles(dest), ['bridge/src/keep.ts']);
+    assert.deepEqual(walkDirs(dest), parentDirs(['bridge/src/keep.ts']));
     assert.equal(existsSync(join(dest, 'bridge/src/drop.ts')), false);
+    assert.equal(existsSync(join(dest, 'bridge/only')), false);
+    mkdirSync(join(dest, 'bridge/unexpected'));
+    assert.notDeepEqual(walkDirs(dest), parentDirs(walkFiles(dest)));
   } finally {
     rmSync(dest, { recursive: true, force: true });
   }
@@ -416,28 +465,101 @@ test('defaultFingerprintDeps rejects a symlink instead of following it', async (
   }
 });
 
-test('acquireBuildLock rejects a live holder, reclaims a dead pid, and release drops only our lock', () => {
+test('acquireBuildLock holds a fresh live pid, reclaims a dead or stale pid, and keeps an unreadable lock', () => {
   const dir = '/cache/build.lock';
+  const now = 1_700_000_000_000;
   const alive = memLock();
-  acquireBuildLock(dir, 10, alive, () => true);
-  assert.throws(() => acquireBuildLock(dir, 11, alive, (pid) => pid === 10), /exits 3/);
-  assert.equal(alive.readFile(`${dir}/pid`).trim(), '10');
+  acquireBuildLock(dir, 10, alive, () => true, () => now);
+  assert.throws(() => acquireBuildLock(dir, 11, alive, (pid) => pid === 10, () => now + 1), /exits 3/);
+  assert.equal(heldPid(alive, dir), '10');
+
+  const old = memLock();
+  old.mkdir(dir);
+  old.writeFile(`${dir}/pid`, `10\n${now - BUILD_LOCK_STALE_MS - 1}\n`);
+  const notices: string[] = [];
+  acquireBuildLock(dir, 12, old, () => true, () => now, (line) => notices.push(line));
+  assert.equal(notices.length, 1);
+  assert.match(notices[0], /reclaiming stale lock/);
+  assert.match(notices[0], /exceeds 60 minutes/);
+  assert.equal(heldPid(old, dir), '12');
 
   const dead = memLock();
   dead.mkdir(dir);
-  dead.writeFile(`${dir}/pid`, '99\n');
-  acquireBuildLock(dir, 12, dead, () => false);
-  assert.equal(dead.readFile(`${dir}/pid`).trim(), '12');
-  releaseBuildLock(dir, 12, dead);
+  dead.writeFile(`${dir}/pid`, `99\n${now}\n`);
+  const deadNotices: string[] = [];
+  acquireBuildLock(dir, 16, dead, () => false, () => now, (line) => deadNotices.push(line));
+  assert.deepEqual(deadNotices, []);
+  assert.equal(heldPid(dead, dir), '16');
+  releaseBuildLock(dir, 16, dead);
   assert.throws(() => dead.readFile(`${dir}/pid`));
 
   const other = memLock();
-  acquireBuildLock(dir, 13, other, () => true);
+  acquireBuildLock(dir, 13, other, () => true, () => now);
   releaseBuildLock(dir, 14, other);
-  assert.equal(other.readFile(`${dir}/pid`).trim(), '13');
+  assert.equal(heldPid(other, dir), '13');
 
   const unread = memLock();
   unread.mkdir(dir);
-  assert.throws(() => acquireBuildLock(dir, 15, unread, () => false), /no readable pid/);
+  assert.throws(() => acquireBuildLock(dir, 15, unread, () => false, () => now), /no readable pid/);
   assert.throws(() => unread.readFile(`${dir}/pid`));
+});
+
+test('defaultFingerprintDeps rejects a directory and a fifo instead of hanging', { timeout: 10_000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'chaos-fifo-'));
+  try {
+    const git = (...args: string[]) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' });
+    git('init', '-q');
+    git('config', 'user.email', 'test@example.com');
+    git('config', 'user.name', 'Test');
+    mkdirSync(join(dir, 'bridge/src'), { recursive: true });
+    writeFileSync(join(dir, 'bridge/src/x.ts'), 'export const x = 1;\n');
+    writeFileSync(join(dir, 'bridge/src/entry.ts'), 'export const entry = 1;\n');
+    writeFileSync(join(dir, 'bridge/src/pipe.ts'), 'export const pipe = 1;\n');
+    git('add', '.');
+    git('commit', '-q', '-m', 'init');
+    rmSync(join(dir, 'bridge/src/entry.ts'));
+    mkdirSync(join(dir, 'bridge/src/entry.ts'));
+    await assert.rejects(
+      collectSourceInputs(defaultFingerprintDeps(dir)),
+      /not a regular file: bridge\/src\/entry\.ts/,
+    );
+    rmSync(join(dir, 'bridge/src/entry.ts'), { recursive: true });
+    git('checkout', '-q', '--', 'bridge/src/entry.ts');
+
+    // git ls-files does not list an untracked fifo, so the listed path is a
+    // tracked file replaced on disk. Open must return instead of waiting.
+    const fifo = join(dir, 'bridge/src/pipe.ts');
+    rmSync(fifo);
+    let created = false;
+    try {
+      execFileSync('mkfifo', [fifo], { stdio: 'ignore' });
+      created = true;
+    } catch {
+      created = false;
+    }
+    if (created) {
+      await assert.rejects(
+        collectSourceInputs(defaultFingerprintDeps(dir)),
+        /not a regular file: bridge\/src\/pipe\.ts/,
+      );
+    } else {
+      const fs: InputFs = {
+        open(_path, flags) {
+          assert.equal(flags & constants.O_NONBLOCK, constants.O_NONBLOCK);
+          assert.equal(flags & constants.O_NOFOLLOW, constants.O_NOFOLLOW);
+          return 3;
+        },
+        fstat() {
+          return { isFile: () => false, size: 0, mode: 0o10644 };
+        },
+        read() {
+          throw new Error('fifo read should not run');
+        },
+        close() {},
+      };
+      assert.throws(() => readRegularFile(fifo, 'bridge/src/pipe.ts', fs), /not a regular file: bridge\/src\/pipe\.ts/);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

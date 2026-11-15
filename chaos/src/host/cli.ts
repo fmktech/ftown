@@ -4,9 +4,9 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { DEFAULT_PROFILE, EXIT } from '../contract.ts';
 import { parseArgs, USAGE, UsageError, type Command, type VmOptions } from './args.ts';
-import { build, computeSourceFingerprint, inspectImageId, readBuildInfo, type BuildInfo, type SourceFingerprint } from './build.ts';
+import { build, computeSourceFingerprint, defaultLockOps, inspectImageId, readBuildInfo, releaseBuildLock, type BuildInfo, type SourceFingerprint } from './build.ts';
 import { boot, cleanupContainers, qemuArgs, RTC_BASE, type GuestParams } from './qemu.ts';
-import { OUT_DIR, seedOutDir } from './paths.ts';
+import { CACHE_DIR, OUT_DIR, seedOutDir } from './paths.ts';
 import { selftestAssertions, differingKeys, formatSeedLine, normalizeConsole, sha256, summarizeSeed, worstExit, type BootResult, type SeedSummary } from './summary.ts';
 
 /** Runs tasks with at most `jobs` in flight; results keep input order. */
@@ -210,6 +210,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       if (stopping) return;
       stopping = true;
       console.error(`${sig}: removing chaos containers`);
+      releaseBuildLock(join(CACHE_DIR, 'build.lock'), process.pid, defaultLockOps);
       void cleanupContainers().finally(() => process.exit(EXIT.infra));
     });
   }

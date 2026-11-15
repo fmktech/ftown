@@ -147,11 +147,35 @@ export function defaultFingerprintDeps(repoRoot = REPO_ROOT): FingerprintDeps {
   };
 }
 
-function readRegularFile(abs: string, relPath: string): FileSnapshot | null {
+interface InputFileStat {
+  isFile(): boolean;
+  size: number;
+  mode: number;
+}
+
+/** Real filesystem, or a test double when mkfifo cannot be created. */
+export interface InputFs {
+  open(path: string, flags: number): number;
+  fstat(fd: number): InputFileStat;
+  read(fd: number, buffer: Buffer, offset: number, length: number, position: number | null): number;
+  close(fd: number): void;
+}
+
+const defaultInputFs: InputFs = {
+  open: openSync,
+  fstat: fstatSync,
+  read(fd, buffer, offset, length, position) {
+    return readSync(fd, buffer, offset, length, position);
+  },
+  close: closeSync,
+};
+
+export function readRegularFile(abs: string, relPath: string, fs: InputFs = defaultInputFs): FileSnapshot | null {
   let fd: number;
   try {
-    // O_NOFOLLOW: a symlink must not be opened as the target. macOS and Linux return ELOOP.
-    fd = openSync(abs, constants.O_RDONLY | constants.O_NOFOLLOW);
+    // O_NOFOLLOW: a symlink is not opened as its target (macOS and Linux return ELOOP).
+    // O_NONBLOCK: an untracked FIFO must not wait for a writer.
+    fd = fs.open(abs, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'ENOENT') return null;
@@ -161,12 +185,12 @@ function readRegularFile(abs: string, relPath: string): FileSnapshot | null {
     throw err;
   }
   try {
-    const st = fstatSync(fd);
+    const st = fs.fstat(fd);
     if (!st.isFile()) throw new BuildExit(`fingerprint input is not a regular file: ${relPath}`);
     const bytes = Buffer.alloc(st.size);
     let off = 0;
     while (off < bytes.length) {
-      const n = readSync(fd, bytes, off, bytes.length - off, null);
+      const n = fs.read(fd, bytes, off, bytes.length - off, null);
       if (n === 0) break;
       off += n;
     }
@@ -175,7 +199,7 @@ function readRegularFile(abs: string, relPath: string): FileSnapshot | null {
       executable: (st.mode & 0o111) !== 0,
     };
   } finally {
-    closeSync(fd);
+    fs.close(fd);
   }
 }
 
@@ -370,40 +394,64 @@ function pidAlive(pid: number): boolean {
   }
 }
 
-function lockOwner(ops: LockOps, pidPath: string): number | null {
+/** A live pid older than this is stale. A full build finishes well under an hour. */
+export const BUILD_LOCK_STALE_MS = 60 * 60 * 1000;
+
+function lockMeta(ops: LockOps, pidPath: string): { pid: number; createdAt: number | null } | null {
+  let text: string;
   try {
-    const n = Number(ops.readFile(pidPath).trim());
-    return Number.isInteger(n) && n > 0 ? n : null;
+    text = ops.readFile(pidPath);
   } catch {
     return null;
   }
+  const [pidLine, timeLine] = text.split('\n');
+  const pid = Number(pidLine);
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  if (timeLine === undefined || timeLine.length === 0) return { pid, createdAt: null };
+  const createdAt = Number(timeLine);
+  return { pid, createdAt: Number.isFinite(createdAt) ? createdAt : null };
 }
 
 /**
  * Exclusive lock around one build. A second build exits 3 instead of waiting:
  * the holder is using docker, and a waiter would stack another image build.
  * A lock whose recorded pid is dead is removed and the acquire is retried.
- * A lock with no readable pid is treated as held, so a mkdir that has not
- * written its pid yet is not stolen. Remove chaos/.cache/build.lock by hand
- * only when no build is running and the pid file is missing.
+ * A lock whose pid is alive but whose age exceeds 60 minutes is stale: it is
+ * removed with a one-line notice and the acquire is retried. A full build
+ * finishes well under that. A lock with no readable pid is treated as held,
+ * so a mkdir that has not written its pid yet is not stolen. Remove
+ * chaos/.cache/build.lock by hand only when no build is running and the pid
+ * file is missing.
  */
-export function acquireBuildLock(lockDir: string, pid: number, ops: LockOps, isAlive: (pid: number) => boolean): void {
+export function acquireBuildLock(
+  lockDir: string,
+  pid: number,
+  ops: LockOps,
+  isAlive: (pid: number) => boolean,
+  now: () => number = Date.now,
+  notice: (line: string) => void = log,
+): void {
   const pidPath = join(lockDir, 'pid');
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       ops.mkdir(lockDir);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-      const owner = lockOwner(ops, pidPath);
-      if (owner !== null && !isAlive(owner)) {
+      const meta = lockMeta(ops, pidPath);
+      const ageMs = meta?.createdAt === null || meta === null ? null : now() - meta.createdAt;
+      const stale = ageMs !== null && ageMs > BUILD_LOCK_STALE_MS;
+      if (meta !== null && (!isAlive(meta.pid) || stale)) {
+        if (stale && isAlive(meta.pid)) {
+          notice(`reclaiming stale lock at ${lockDir} (pid ${meta.pid} alive, age exceeds 60 minutes)`);
+        }
         ops.rm(lockDir);
         continue;
       }
-      const who = owner === null ? 'no readable pid' : `pid ${owner}`;
+      const who = meta === null ? 'no readable pid' : `pid ${meta.pid}`;
       throw new BuildExit(`chaos build already running (${who}) at ${lockDir}; a second build exits 3 instead of waiting`);
     }
     try {
-      ops.writeFile(pidPath, `${pid}\n`);
+      ops.writeFile(pidPath, `${pid}\n${now()}\n`);
       return;
     } catch (err) {
       ops.rm(lockDir);
@@ -415,7 +463,7 @@ export function acquireBuildLock(lockDir: string, pid: number, ops: LockOps, isA
 
 /** Removes the lock only when `pid` still owns it. */
 export function releaseBuildLock(lockDir: string, pid: number, ops: LockOps): void {
-  if (lockOwner(ops, join(lockDir, 'pid')) !== pid) return;
+  if (lockMeta(ops, join(lockDir, 'pid'))?.pid !== pid) return;
   ops.rm(lockDir);
 }
 
@@ -510,7 +558,9 @@ async function runBuild(imageArg: string | null, checkRepro: boolean): Promise<B
     sourceHead: fp.head,
     sourceDirty,
   };
-  writeFileSync(BUILD_INFO, JSON.stringify(info, null, 2) + '\n');
+  const tmpBuildInfo = `${BUILD_INFO}.tmp`;
+  writeFileSync(tmpBuildInfo, JSON.stringify(info, null, 2) + '\n');
+  renameSync(tmpBuildInfo, BUILD_INFO);
   return info;
 }
 
