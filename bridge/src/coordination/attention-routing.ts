@@ -148,6 +148,47 @@ export async function escalateParentChildren(
   return results;
 }
 
+export interface EscalateOrphanedParentItemsDeps extends EscalateParentChildrenDeps {
+  /** Extra liveness probe; when supplied, a stored 'running' parent must also pass it. */
+  isParentRunning?: (parent: Session) => boolean;
+}
+
+/** A parent can still answer routed items only under the same checks decideRoute applies. */
+function parentCanAnswer(parent: Session | undefined, deps: EscalateOrphanedParentItemsDeps): boolean {
+  if (!parent) return false;
+  if (parent.status !== 'running') return false;
+  if (parent.shellType === 'shell') return false;
+  if (deps.isParentRunning && !deps.isParentRunning(parent)) return false;
+  return true;
+}
+
+/**
+ * Start-up sweep: escalate every open parent-routed item whose parent cannot
+ * answer it (missing, no longer running, or a shell). Parents that died while
+ * the bridge was down never pass through the live exit path, so without this
+ * pass their children wait on the parent indefinitely. Idempotent: escalation
+ * is compare-and-set on route 'parent', so a second pass escalates nothing.
+ */
+export async function escalateOrphanedParentItems(
+  deps: EscalateOrphanedParentItemsDeps,
+): Promise<Array<{ sessionId: string; item: AttentionItem }>> {
+  const sessions = await deps.listSessions();
+  const byId = new Map(sessions.map((session) => [session.id, session]));
+  const deadParentIds: string[] = [];
+  const checked = new Set<string>();
+  for (const child of sessions) {
+    const parentId = child.parentSessionId;
+    if (!parentId || parentId === child.id || checked.has(parentId)) continue;
+    checked.add(parentId);
+    if (!parentCanAnswer(byId.get(parentId), deps)) deadParentIds.push(parentId);
+  }
+  const results: Array<{ sessionId: string; item: AttentionItem }> = [];
+  for (const parentId of deadParentIds) {
+    results.push(...await escalateParentChildren(parentId, deps));
+  }
+  return results;
+}
+
 export async function markArchivedWorktreeRetained(
   sessionDir: (sessionId: string) => string,
   sessionId: string,

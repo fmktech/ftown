@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 
 import { SessionResurrection, shouldResurrectStoredSession } from './session-resurrection.js';
 import type { Session } from './types.js';
+import { escalateParentChildren } from './coordination/attention-routing.js';
+import { PARENT_UNAVAILABLE_NOTE, type AttentionRoutingFields } from './coordination/contract-b.js';
+import type { AttentionItem } from './attention-events.js';
 
 function session(overrides: Partial<Session>): Session {
   return {
@@ -114,5 +117,121 @@ describe('retired automation startup reconciliation', () => {
       assert.deepEqual(archived, unchanged);
       assert.deepEqual(h.stored.get('ordinary'), ordinary);
     } finally { console.error = previousError; }
+  });
+});
+
+function routedItem(overrides: Partial<AttentionItem> = {}): AttentionItem {
+  return {
+    id: 'att-1',
+    sequence: 1,
+    type: 'agent_needs_input',
+    title: 'Question',
+    message: 'Need a decision please',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    lastSeenAt: '2026-01-01T00:00:00.000Z',
+    occurrences: 1,
+    route: 'parent',
+    routedTo: 'parent-1',
+    ...overrides,
+  };
+}
+
+/** Resurrection harness whose dead-hook runs the real parent-children escalation. */
+function deadParentHarness(records: Session[], options: {
+  runningIds?: string[];
+  deadHook?: (session: Session) => Promise<void>;
+} = {}) {
+  const stored = new Map(records.map((record) => [record.id, structuredClone(record)]));
+  const published: Session[] = [];
+  const deadCalls: Session[] = [];
+  const routed = new Map<string, AttentionItem[]>();
+  const escalatedNotices: Array<{ sessionId: string; item: AttentionItem }> = [];
+  const attention = {
+    listRouted: async (childId: string) => (routed.get(childId) ?? [])
+      .filter((item) => item.route === 'parent' && !item.resolvedAt)
+      .map((item) => ({ ...item })),
+    setRoute: async (sessionId: string, eventId: string, fields: AttentionRoutingFields, expectRoute?: 'parent' | 'human') => {
+      const item = (routed.get(sessionId) ?? []).find((candidate) => candidate.id === eventId);
+      if (!item || item.resolvedAt) return undefined;
+      if (expectRoute !== undefined && item.route !== expectRoute) return undefined;
+      Object.assign(item, fields);
+      return { ...item };
+    },
+  };
+  const escalate = async (dead: Session) => {
+    await escalateParentChildren(dead.id, {
+      listSessions: async () => [...stored.values()].map((record) => structuredClone(record)),
+      attention,
+      now: () => Date.parse('2026-01-01T01:00:00.000Z'),
+      onEscalated: (childId, item) => { escalatedNotices.push({ sessionId: childId, item }); },
+    });
+  };
+  const deps = {
+    store: {
+      listSessions: async () => [...stored.values()].map((record) => structuredClone(record)),
+      listArchived: async () => [],
+      loadSession: async (id: string) => stored.has(id) ? structuredClone(stored.get(id)!) : null,
+      saveSession: async (record: Session) => { stored.set(record.id, structuredClone(record)); },
+    },
+    runner: {
+      isRunning: (id: string) => (options.runningIds ?? []).includes(id),
+      reattach: () => false,
+    },
+    bridgeId: 'b1', sessionFactoryDeps: {},
+    publishSessionUpdate: async (record: Session) => { published.push(structuredClone(record)); },
+    wireTerminalInput: () => {},
+    tmux: { available: () => false, list: () => [] as string[], kill: async () => true },
+    onSessionDead: async (dead: Session) => {
+      deadCalls.push(structuredClone(dead));
+      await (options.deadHook ? options.deadHook(dead) : escalate(dead));
+    },
+  } as unknown as SessionResurrectionDeps;
+  return { stored, published, deadCalls, routed, escalatedNotices, deps };
+}
+
+describe('dead-parent escalation on resurrection (F2)', () => {
+  it('escalates open parent-routed child items when resurrection marks the parent dead', async () => {
+    const parent = session({ id: 'parent-1' });
+    const child = session({ id: 'child-1', parentSessionId: 'parent-1' });
+    const h = deadParentHarness([parent, child], { runningIds: ['child-1'] });
+    h.routed.set('child-1', [routedItem({ id: 'att-1', routedTo: 'parent-1' })]);
+    await new SessionResurrection(h.deps).resurrectSessions();
+    assert.equal(h.stored.get('parent-1')!.status, 'error');
+    assert.equal(h.deadCalls.length, 1);
+    assert.equal(h.deadCalls[0].id, 'parent-1');
+    assert.equal(h.deadCalls[0].status, 'error');
+    const item = h.routed.get('child-1')![0];
+    assert.equal(item.route, 'human');
+    assert.equal(item.escalationNote, PARENT_UNAVAILABLE_NOTE);
+    assert.equal(item.escalatedAt, '2026-01-01T01:00:00.000Z');
+    assert.deepEqual(h.escalatedNotices.map((notice) => `${notice.sessionId}:${notice.item.id}`), ['child-1:att-1']);
+  });
+
+  it('does not escalate when the parent is still running at resurrection', async () => {
+    const parent = session({ id: 'parent-1' });
+    const child = session({ id: 'child-1', parentSessionId: 'parent-1' });
+    const h = deadParentHarness([parent, child], { runningIds: ['parent-1', 'child-1'] });
+    h.routed.set('child-1', [routedItem({ id: 'att-1', routedTo: 'parent-1' })]);
+    await new SessionResurrection(h.deps).resurrectSessions();
+    assert.equal(h.stored.get('parent-1')!.status, 'running');
+    assert.equal(h.deadCalls.length, 0);
+    assert.equal(h.routed.get('child-1')![0].route, 'parent');
+    assert.equal(h.escalatedNotices.length, 0);
+  });
+
+  it('keeps the dead marking when the parent-children escalation hook fails', async () => {
+    const parent = session({ id: 'parent-1' });
+    const child = session({ id: 'child-1', parentSessionId: 'parent-1' });
+    const h = deadParentHarness([parent, child], {
+      runningIds: ['child-1'],
+      deadHook: async () => { throw new Error('escalation unavailable'); },
+    });
+    const previousError = console.error;
+    console.error = () => {};
+    try {
+      await new SessionResurrection(h.deps).resurrectSessions();
+    } finally { console.error = previousError; }
+    assert.equal(h.stored.get('parent-1')!.status, 'error');
+    assert.equal(h.deadCalls.length, 1);
   });
 });

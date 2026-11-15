@@ -102,6 +102,11 @@ async function startup(pointerFails = false, restart: 'none' | 'success' | 'fail
     const pullRequestReview = {};
     const publishRouter = { handleCommand() {} };
     const resurrection = { resurrectSessions: async () => { startupSteps.push('resurrect'); } };
+    const coordination = { escalateOrphanedParentItems: async () => {
+      if (!resurrectionComplete) throw new Error('Invalid orphan sweep ordering');
+      startupSteps.push('sweep');
+      return [];
+    } };
     const applicationJson = (value: unknown) => value;
     const randomUUID = () => 'isolated-command';
     const createCommandHandler = (deps: { publishCommandResponse: (response: unknown) => Promise<void>; pullRequestStatuses: unknown; pullRequestReview: unknown }) => async (data: { type: string }) => {
@@ -160,7 +165,7 @@ test('invite advice is emitted only when its actual encrypted CLI command can di
 test('startup keeps its command gate closed until the existing readiness timer', async () => {
   const result = await startup();
   assert.equal(result.timerMs, 2000);
-  assert.deepEqual(result.startupSteps, ['resurrect', 'list', 'restore']);
+  assert.deepEqual(result.startupSteps, ['resurrect', 'sweep', 'list', 'restore']);
   assert.equal(result.before.response.success, false);
   assert.equal(result.before.response.error, 'bridge_offline');
   assert.equal(result.after.response.success, true);

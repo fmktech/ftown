@@ -645,6 +645,57 @@ describe('coordination wiring', () => {
     assert.equal(h.escalatedCallbacks[0].item.escalationNote, PARENT_UNAVAILABLE_NOTE);
   });
 
+  it('escalateOrphanedParentItems escalates orphans once, skips running parents, and never re-notifies after onSessionExit (F2)', async () => {
+    const h = createHarness();
+    const deadParent = makeSession('parent-dead', { name: 'Dead parent', status: 'error' });
+    const liveParent = makeSession('parent-live', { name: 'Live parent', status: 'running' });
+    const childDead = makeSession('child-dead', { name: 'Worker dead', parentSessionId: 'parent-dead' });
+    const childGone = makeSession('child-gone', { name: 'Worker gone', parentSessionId: 'parent-gone' });
+    const childLive = makeSession('child-live', { name: 'Worker live', parentSessionId: 'parent-live' });
+    h.sessions.set(deadParent.id, deadParent);
+    h.sessions.set(liveParent.id, liveParent);
+    h.sessions.set(childDead.id, childDead);
+    h.sessions.set(childGone.id, childGone);
+    h.sessions.set(childLive.id, childLive);
+    const routedItem = (id: string, routedTo: string): AttentionItem => ({
+      id,
+      sequence: 1,
+      type: 'agent_needs_input',
+      title: 'Question',
+      message: 'Help',
+      createdAt: '2026-11-13T10:00:00.000Z',
+      lastSeenAt: '2026-11-13T10:00:00.000Z',
+      occurrences: 1,
+      route: 'parent',
+      routedTo,
+    });
+    h.routedMap.set('child-dead', [routedItem('att-dead', 'parent-dead')]);
+    h.routedMap.set('child-gone', [routedItem('att-gone', 'parent-gone')]);
+    h.routedMap.set('child-live', [routedItem('att-live', 'parent-live')]);
+
+    // The live exit path escalates the dead parent's child first.
+    await h.coord.onSessionExit('parent-dead');
+    assert.equal(h.setRouteCalls.length, 1);
+    assert.equal(h.escalatedCallbacks.length, 1);
+
+    // The startup sweep picks up only the child whose parent record is gone.
+    const swept = await h.coord.escalateOrphanedParentItems();
+    assert.deepEqual(swept.map((entry) => `${entry.sessionId}:${entry.item.id}`), ['child-gone:att-gone']);
+    assert.equal(h.setRouteCalls.length, 2);
+    assert.equal(h.setRouteCalls[1].expectRoute, 'parent');
+    assert.equal(h.setRouteCalls[1].fields.route, 'human');
+    assert.equal(h.setRouteCalls[1].fields.escalationNote, PARENT_UNAVAILABLE_NOTE);
+    assert.equal(h.escalatedCallbacks.length, 2);
+    assert.equal(h.escalatedCallbacks[1].sessionId, 'child-gone');
+
+    // A second sweep is a no-op: no double-escalation, no second notice.
+    assert.deepEqual(await h.coord.escalateOrphanedParentItems(), []);
+    assert.equal(h.setRouteCalls.length, 2);
+    assert.equal(h.escalatedCallbacks.length, 2);
+    assert.equal(h.routedMap.get('child-live')!.length, 1);
+    assert.equal(h.routedMap.get('child-live')![0].route, 'parent');
+  });
+
   it('escalates from a running snapshot and from a deleted parent without a second notice', async () => {
     const h = createHarness();
     const parent = makeSession('parent-1', { name: 'Parent', status: 'running' });

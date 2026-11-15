@@ -868,6 +868,9 @@ program
       publishSessionUpdate: (session) => centrifugo.publishSessionUpdate(userId, session),
       wireTerminalInput,
       withSessionWrite: (id, task) => pump.withSessionWrite(id, task),
+      // A parent that died while this bridge was down gets the same
+      // parent-children escalation the live exit path runs.
+      onSessionDead: (session) => coordination.onSessionExit(session.id, session),
     });
 
     // Persists Claude/Cursor/Codex-native session ids from hook events.
@@ -1069,6 +1072,11 @@ program
         try {
           await resurrection.resurrectSessions();
           resurrectionComplete = true;
+          // Start-up sweep: parents already dead (or removed) before this
+          // bridge started never hit resurrection's dead path, so escalate
+          // their children's still-parent-routed items now. Idempotent with
+          // the per-session escalation resurrection just ran.
+          await coordination.escalateOrphanedParentItems();
           const knownSessions = await store.listSessions();
           await attentionStore.restoreIdleNotifications(knownSessions
             .filter(session => session.status === 'running' && session.shellType !== 'shell')

@@ -24,6 +24,12 @@ export interface SessionResurrectionDeps {
   sessionFactoryDeps: CreateFtownSessionDeps;
   publishSessionUpdate: (session: Session) => Promise<void>;
   wireTerminalInput: (sessionId: string) => void;
+  /**
+   * Runs the live exit path's parent-children escalation for a session just
+   * marked dead (its children's parent-routed attention items go to the human).
+   * Best-effort: a failure is logged and never undoes the dead marking.
+   */
+  onSessionDead?: (session: Session) => Promise<void>;
   withSessionWrite?: (sessionId: string, task: () => Promise<void>) => Promise<void>;
   /** Exact dedicated-socket operations; injectable without touching a live tmux server. */
   tmux?: {
@@ -50,6 +56,16 @@ export class SessionResurrection {
     await this.deps.store.saveSession(session);
     await this.deps.publishSessionUpdate(session);
     console.log(`[Bridge] Marked stale session ${session.id} as error`);
+    // The parent is gone: its children's parent-routed questions must reach
+    // the human now, exactly as the live exit path escalates them. Saved first
+    // so the escalation reads the dead status.
+    if (this.deps.onSessionDead) {
+      try {
+        await this.deps.onSessionDead(session);
+      } catch (error) {
+        console.error(`[Bridge] Failed to escalate children of dead session ${session.id}:`, error);
+      }
+    }
   }
 
   private async resurrectSession(sessionId: string): Promise<void> {
