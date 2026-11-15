@@ -172,12 +172,13 @@ function parseBoard(value: unknown): OverviewSnapshot["board"] | null {
   return board;
 }
 
-/** AttentionPrompt mirror: only the questions/options the Overview renders. */
+/** Full AttentionPrompt as the bridge sends it; null when the shape cannot be answered from the dashboard. */
 function parsePrompt(value: unknown): SnapshotAttentionEvent["prompt"] | null {
-  if (!isRecord(value) || !Array.isArray(value.questions)) return null;
-  const questions: Array<{ header?: string; question: string; options: Array<{ label: string; description?: string }> }> = [];
+  if (!isRecord(value) || (value.channel !== "mail" && value.channel !== "hook") || !Array.isArray(value.questions)) return null;
+  const questions: NonNullable<SnapshotAttentionEvent["prompt"]>["questions"] = [];
   for (const entry of value.questions) {
-    if (!isRecord(entry) || typeof entry.question !== "string" || !Array.isArray(entry.options)) return null;
+    if (!isRecord(entry) || typeof entry.question !== "string" || !Array.isArray(entry.options)
+      || typeof entry.multiSelect !== "boolean" || typeof entry.allowText !== "boolean") return null;
     const options: Array<{ label: string; description?: string }> = [];
     for (const option of entry.options) {
       if (!isRecord(option) || typeof option.label !== "string") return null;
@@ -185,9 +186,9 @@ function parsePrompt(value: unknown): SnapshotAttentionEvent["prompt"] | null {
       options.push({ label: option.label, ...(description ? { description } : {}) });
     }
     const header = asString(entry.header);
-    questions.push({ question: entry.question, options, ...(header ? { header } : {}) });
+    questions.push({ question: entry.question, options, multiSelect: entry.multiSelect, allowText: entry.allowText, ...(header ? { header } : {}) });
   }
-  return { questions };
+  return { channel: value.channel, questions };
 }
 
 function parseAttentionItem(value: unknown): SnapshotAttentionEvent | null {
@@ -196,16 +197,29 @@ function parseAttentionItem(value: unknown): SnapshotAttentionEvent | null {
   const title = asString(value.title);
   if (!id || !title) return null;
   const item: SnapshotAttentionEvent = { id, title };
+  const type = asString(value.type);
+  if (type) item.type = type;
   const message = asString(value.message);
   if (message) item.message = message;
+  const createdAt = asString(value.createdAt);
+  if (createdAt) item.createdAt = createdAt;
+  const sequence = asNumber(value.sequence);
+  if (sequence !== undefined) item.sequence = sequence;
   const resolvedAt = asString(value.resolvedAt);
   if (resolvedAt) item.resolvedAt = resolvedAt;
   const route = asString(value.route);
   if (route) item.route = route;
+  const routedTo = asString(value.routedTo);
+  if (routedTo) item.routedTo = routedTo;
   const escalatedAt = asString(value.escalatedAt);
   if (escalatedAt) item.escalatedAt = escalatedAt;
   const escalationNote = asString(value.escalationNote);
   if (escalationNote) item.escalationNote = escalationNote;
+  if (isRecord(value.answeredBy) && (value.answeredBy.kind === "human" || value.answeredBy.kind === "session")) {
+    const sessionId = asString(value.answeredBy.sessionId);
+    const name = asString(value.answeredBy.name);
+    item.answeredBy = { kind: value.answeredBy.kind, ...(sessionId ? { sessionId } : {}), ...(name ? { name } : {}) };
+  }
   if (value.prompt !== undefined) {
     const prompt = parsePrompt(value.prompt);
     if (prompt) item.prompt = prompt;
@@ -252,7 +266,7 @@ export function useSessionBoard(
   sessionId: string | null,
   enabled: boolean,
   treeSessions?: ReadonlyArray<Session>,
-): { snapshot: SessionBoardSnapshot | null } {
+): { snapshot: SessionBoardSnapshot | null; refresh: () => Promise<void> } {
   const [snapshot, setSnapshot] = useState<SessionBoardSnapshot | null>(null);
   const sendRef = useRef(sendCommand);
   sendRef.current = sendCommand;
@@ -314,5 +328,5 @@ export function useSessionBoard(
     return () => clearInterval(timer);
   }, [enabled, bridgeId, sessionId, fetch]);
 
-  return { snapshot };
+  return { snapshot, refresh: fetch };
 }

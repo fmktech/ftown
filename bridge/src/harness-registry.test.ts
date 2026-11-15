@@ -21,6 +21,7 @@ import {
   buildMuseCommand,
   buildOpencodeCommand,
   harnessAcceptsPromptAsCliArg,
+  opencodeLaunchEnv,
 } from './harness-registry.js';
 import { QUOTA_PROVIDER_IDS } from './quota/types.js';
 import { buildSessionCommand } from './agent-commands.js';
@@ -210,13 +211,22 @@ describe('harness registry', () => {
 describe('buildOpencodeCommand', () => {
   it('base launch is --auto only (frozen)', () => {
     assert.equal(buildOpencodeCommand({}), 'opencode --auto');
+    assert.equal(opencodeLaunchEnv(undefined), undefined);
+    assert.equal(opencodeLaunchEnv('   '), undefined);
   });
 
-  it('model rides -m in provider/model form', () => {
+  it('a model selects via config and a private server, not -m', () => {
     assert.equal(
-      buildOpencodeCommand({ model: 'anthropic/claude-sonnet-4-5' }),
-      "opencode --auto -m 'anthropic/claude-sonnet-4-5'",
+      buildOpencodeCommand({ model: 'opencode-go/kimi-k3.1-pro' }),
+      'opencode --standalone --auto',
     );
+    assert.deepEqual(opencodeLaunchEnv('opencode-go/kimi-k3.1-pro'), {
+      OPENCODE_CONFIG_CONTENT: '{"model":"opencode-go/kimi-k3.1-pro"}',
+    });
+    assert.equal(buildOpencodeCommand({ model: '  provider/model  ' }).includes('-m'), false);
+    assert.deepEqual(opencodeLaunchEnv(' provider/model '), {
+      OPENCODE_CONFIG_CONTENT: '{"model":"provider/model"}',
+    });
   });
 
   it('initial prompt rides --prompt (the TUI submits it on launch)', () => {
@@ -226,18 +236,18 @@ describe('buildOpencodeCommand', () => {
     );
   });
 
-  it('model and prompt compose', () => {
+  it('model and prompt compose without -m', () => {
     assert.equal(
-      buildOpencodeCommand({ model: 'openai/gpt-5.2', initialPrompt: 'hello world' }),
-      "opencode --auto -m 'openai/gpt-5.2' --prompt 'hello world'",
+      buildOpencodeCommand({ model: 'provider/model', initialPrompt: 'hello world' }),
+      "opencode --standalone --auto --prompt 'hello world'",
     );
   });
 
-  it('resume suppresses model and prompt (thread is restored)', () => {
+  it('resume suppresses the prompt and keeps the private server when a model is set', () => {
     assert.equal(buildOpencodeCommand({ opencodeSessionId: 'ses_abc' }), "opencode --auto --session 'ses_abc'");
     assert.equal(
-      buildOpencodeCommand({ opencodeSessionId: 'ses_abc', model: 'm', initialPrompt: 'p' }),
-      "opencode --auto --session 'ses_abc'",
+      buildOpencodeCommand({ opencodeSessionId: 'ses_abc', model: 'provider/model', initialPrompt: 'p' }),
+      "opencode --standalone --auto --session 'ses_abc'",
     );
   });
 
