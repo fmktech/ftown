@@ -1,6 +1,6 @@
 // Builds chaos/.cache/: vmlinuz, initramfs.cpio.gz, build.json, and the qemu container image.
 // Guest image content is a function of the fingerprint file list: path, bytes, executable bit.
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, constants, copyFileSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { BUILD_INFO, CACHE_DIR, CHAOS_DIR, DEFAULT_BOX_IMAGE, QEMU_IMAGE } from './paths.ts';
 import { mustRun, run } from './proc.ts';
@@ -26,20 +26,35 @@ export interface SourceFingerprint {
   fileCount: number;
 }
 
+/** Bytes and the executable bit, both taken from one open of a regular file. */
+export interface FileSnapshot {
+  bytes: Buffer;
+  /** True when fstat shows any execute bit (git mode 100755); otherwise false (100644). */
+  executable: boolean;
+}
+
 export interface FingerprintDeps {
   /** Returns repo-relative POSIX paths of tracked and untracked non-ignored input files. */
   listFiles(): Promise<string[]>;
-  /** Returns file bytes, or null if the path is missing. */
-  readFile(relPath: string): Promise<Buffer | null>;
   /**
-   * Executable bit as git records it for a regular file: true when any execute bit is set
-   * (index mode 100755), otherwise false (100644). Missing paths and non-files are false.
+   * Opens `relPath` once and fstats that descriptor. Returns the bytes and the
+   * executable bit, or null if the path is missing. A symlink or other
+   * non-regular file is not followed; it throws BuildExit (the CLI exits 3).
    */
-  isExecutable(relPath: string): Promise<boolean>;
+  readFile(relPath: string): Promise<FileSnapshot | null>;
   /** Returns the git commit hash of HEAD. */
   getHead(): Promise<string>;
   /** Returns whether any uncommitted path matches `pred`. */
   isDirty(pred: (relPath: string) => boolean): Promise<boolean>;
+}
+
+/** Failure that the host CLI reports as exit 3 (EXIT.infra). */
+export class BuildExit extends Error {
+  readonly exitCode = 3;
+  constructor(message: string) {
+    super(message);
+    this.name = 'BuildExit';
+  }
 }
 
 /** One fingerprint input. `bytes` is null when the path was listed and then disappeared. */
@@ -119,24 +134,8 @@ export function defaultFingerprintDeps(repoRoot = REPO_ROOT): FingerprintDeps {
       ]);
       return out.split('\0').filter((p) => p.length > 0);
     },
-    async readFile(relPath: string): Promise<Buffer | null> {
-      try {
-        return readFileSync(join(repoRoot, relPath));
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
-        throw err;
-      }
-    },
-    async isExecutable(relPath: string): Promise<boolean> {
-      try {
-        const st = lstatSync(join(repoRoot, relPath));
-        // Symlinks are mode 0777 on macOS; git stores them as 120000, not as executable files.
-        if (!st.isFile()) return false;
-        return (st.mode & 0o111) !== 0;
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
-        throw err;
-      }
+    async readFile(relPath: string): Promise<FileSnapshot | null> {
+      return readRegularFile(join(repoRoot, relPath), relPath);
     },
     async getHead(): Promise<string> {
       return (await mustRun('git', ['-C', repoRoot, 'rev-parse', 'HEAD'])).trim();
@@ -146,6 +145,38 @@ export function defaultFingerprintDeps(repoRoot = REPO_ROOT): FingerprintDeps {
       return hasDirtyInput(out, pred);
     },
   };
+}
+
+function readRegularFile(abs: string, relPath: string): FileSnapshot | null {
+  let fd: number;
+  try {
+    // O_NOFOLLOW: a symlink must not be opened as the target. macOS and Linux return ELOOP.
+    fd = openSync(abs, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return null;
+    if (code === 'ELOOP' || code === 'EISDIR' || code === 'ENXIO') {
+      throw new BuildExit(`fingerprint input is not a regular file: ${relPath}`);
+    }
+    throw err;
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) throw new BuildExit(`fingerprint input is not a regular file: ${relPath}`);
+    const bytes = Buffer.alloc(st.size);
+    let off = 0;
+    while (off < bytes.length) {
+      const n = readSync(fd, bytes, off, bytes.length - off, null);
+      if (n === 0) break;
+      off += n;
+    }
+    return {
+      bytes: off === bytes.length ? bytes : bytes.subarray(0, off),
+      executable: (st.mode & 0o111) !== 0,
+    };
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** Sorted repo-relative paths the fingerprint hashes. Image inputs are this list and nothing else. */
@@ -162,9 +193,9 @@ function byPath(inputs: readonly SourceInput[]): SourceInput[] {
 export async function collectSourceInputs(deps: FingerprintDeps = defaultFingerprintDeps()): Promise<SourceInput[]> {
   const paths = await listFingerprintInputs(deps);
   return Promise.all(paths.map(async (path) => {
-    const bytes = await deps.readFile(path);
-    if (bytes === null) return { path, digest: null, executable: false, bytes: null };
-    return { path, digest: sha256(bytes), executable: await deps.isExecutable(path), bytes };
+    const snap = await deps.readFile(path);
+    if (snap === null) return { path, digest: null, executable: false, bytes: null };
+    return { path, digest: sha256(snap.bytes), executable: snap.executable, bytes: snap.bytes };
   }));
 }
 
@@ -204,8 +235,8 @@ function stagePath(dest: string, relPath: string): string {
   return abs;
 }
 
-/** Epoch mtimes on every directory after the files exist. Deepest first so a child utime cannot bump a parent we already stamped. */
-function normalizeDirMeta(root: string): void {
+/** Directory mode only. File mtimes stay at write time; pinning them hides same-size edits from BuildKit. */
+function chmodDirectories(root: string): void {
   const dirs: string[] = [];
   const walk = (dir: string): void => {
     for (const ent of readdirSync(dir, { withFileTypes: true })) {
@@ -216,12 +247,8 @@ function normalizeDirMeta(root: string): void {
     }
   };
   walk(root);
-  for (const d of dirs.sort((a, b) => b.length - a.length)) {
-    chmodSync(d, 0o755);
-    utimesSync(d, 0, 0);
-  }
+  for (const d of dirs) chmodSync(d, 0o755);
   chmodSync(root, 0o755);
-  utimesSync(root, 0, 0);
 }
 
 /**
@@ -234,10 +261,12 @@ function normalizeDirMeta(root: string): void {
  * stay as written). The prefix is exactly the listed files under chaos/qemu.
  *
  * Each file is mode 0755 or 0644, matching the executable bit in the fingerprint entry.
- * mtime is the epoch on files and directories. BuildKit's COPY cache is content and mode;
- * a fresh mtime must not be the only thing that differs between two unchanged builds.
- * Docker does not apply a host .dockerignore to this tree unless the staged list itself
- * contains one. chaos/box/Dockerfile.dockerignore is comment-only so it matches nothing.
+ * mtimes are left at write time. BuildKit's context sync does not read bytes when
+ * size, mtime, mode, and uid/gid match the previous upload, so an epoch mtime would
+ * keep the old COPY bytes for a same-size edit while the fingerprint hashed the new
+ * ones. After upload, the COPY layer cache is content-keyed, so unchanged content
+ * still hits. Docker does not apply a host .dockerignore to this tree unless the
+ * staged list itself contains one. chaos/box/Dockerfile.dockerignore matches nothing.
  */
 export function stageSourceTree(dest: string, inputs: readonly SourceInput[]): string[] {
   const files = byPath(inputs).filter((f) => isFingerprintInput(f.path));
@@ -253,9 +282,8 @@ export function stageSourceTree(dest: string, inputs: readonly SourceInput[]): s
       mkdirSync(dirname(abs), { recursive: true });
       writeFileSync(abs, f.bytes);
       chmodSync(abs, fingerprintFileMode(f.executable));
-      utimesSync(abs, 0, 0);
     }
-    normalizeDirMeta(tmp);
+    chmodDirectories(tmp);
     rmSync(dest, { recursive: true, force: true });
     renameSync(tmp, dest);
     return paths;
@@ -315,6 +343,82 @@ async function pack(image: string, dest: string, fingerprintFile: string, stageD
   }
 }
 
+/** mkdir-based lock. Tests inject these so they never touch chaos/.cache. */
+export interface LockOps {
+  /** Creates `path` as a directory. Throws EEXIST when it already exists. */
+  mkdir(path: string): void;
+  writeFile(path: string, data: string): void;
+  readFile(path: string): string;
+  rm(path: string): void;
+}
+
+export const defaultLockOps: LockOps = {
+  mkdir(path: string) { mkdirSync(path); },
+  writeFile(path: string, data: string) { writeFileSync(path, data); },
+  readFile(path: string) { return readFileSync(path, 'utf8'); },
+  rm(path: string) { rmSync(path, { recursive: true, force: true }); },
+};
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'EPERM') return true;
+    return false;
+  }
+}
+
+function lockOwner(ops: LockOps, pidPath: string): number | null {
+  try {
+    const n = Number(ops.readFile(pidPath).trim());
+    return Number.isInteger(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Exclusive lock around one build. A second build exits 3 instead of waiting:
+ * the holder is using docker, and a waiter would stack another image build.
+ * A lock whose recorded pid is dead is removed and the acquire is retried.
+ * A lock with no readable pid is treated as held, so a mkdir that has not
+ * written its pid yet is not stolen. Remove chaos/.cache/build.lock by hand
+ * only when no build is running and the pid file is missing.
+ */
+export function acquireBuildLock(lockDir: string, pid: number, ops: LockOps, isAlive: (pid: number) => boolean): void {
+  const pidPath = join(lockDir, 'pid');
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      ops.mkdir(lockDir);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      const owner = lockOwner(ops, pidPath);
+      if (owner !== null && !isAlive(owner)) {
+        ops.rm(lockDir);
+        continue;
+      }
+      const who = owner === null ? 'no readable pid' : `pid ${owner}`;
+      throw new BuildExit(`chaos build already running (${who}) at ${lockDir}; a second build exits 3 instead of waiting`);
+    }
+    try {
+      ops.writeFile(pidPath, `${pid}\n`);
+      return;
+    } catch (err) {
+      ops.rm(lockDir);
+      throw err;
+    }
+  }
+  throw new BuildExit(`could not acquire ${lockDir}; exit 3`);
+}
+
+/** Removes the lock only when `pid` still owns it. */
+export function releaseBuildLock(lockDir: string, pid: number, ops: LockOps): void {
+  if (lockOwner(ops, join(lockDir, 'pid')) !== pid) return;
+  ops.rm(lockDir);
+}
+
 async function dockerBuild(args: string[]): Promise<void> {
   // --progress=plain (not -q) so a second unchanged build shows CACHED layers.
   // stdout is not echoed by mustRun; keep it visible when BuildKit writes there.
@@ -324,7 +428,16 @@ async function dockerBuild(args: string[]): Promise<void> {
 
 export async function build(imageArg: string | null, checkRepro = false): Promise<BuildInfo> {
   mkdirSync(CACHE_DIR, { recursive: true });
+  const lockDir = join(CACHE_DIR, 'build.lock');
+  acquireBuildLock(lockDir, process.pid, defaultLockOps, pidAlive);
+  try {
+    return await runBuild(imageArg, checkRepro);
+  } finally {
+    releaseBuildLock(lockDir, process.pid, defaultLockOps);
+  }
+}
 
+async function runBuild(imageArg: string | null, checkRepro: boolean): Promise<BuildInfo> {
   const deps = defaultFingerprintDeps();
   const inputs = await collectSourceInputs(deps);
   const fp = await computeSourceFingerprint(deps, inputs);

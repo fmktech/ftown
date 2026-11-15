@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1
 # ftown chaos box: linux/amd64 root filesystem with a built ftown bridge that
-# starts in solo mode with no network. Build context = repo root:
-#   docker build --platform linux/amd64 -f chaos/box/Dockerfile -t ftown-chaos-box:dev .
+# starts in solo mode with no network. Build context is chaos/.cache/context,
+# the staged fingerprint file list, not the live repo:
+#   npm run test:chaos -- build
 # Base: node 24.22.1 (matches .nvmrc; satisfies bridge/package.json engines ^24.22.1).
 
 ARG NODE_IMAGE=node:24.22.1-bookworm-slim@sha256:be8204d4bd327363357f532187b752ff62759c31bedf98e9e18fc08c9cbd605c

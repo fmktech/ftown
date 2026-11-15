@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import test from 'node:test';
-import { collectSourceInputs, computeSourceFingerprint, defaultFingerprintDeps, hasDirtyInput, isChaosFingerprintInput, isFingerprintInput, listFingerprintInputs, stageSourceTree, type FingerprintDeps } from './build.ts';
+import { acquireBuildLock, collectSourceInputs, computeSourceFingerprint, defaultFingerprintDeps, hasDirtyInput, isChaosFingerprintInput, isFingerprintInput, listFingerprintInputs, releaseBuildLock, stageSourceTree, type FingerprintDeps, type LockOps } from './build.ts';
 
 function fakeDeps(
   files: Record<string, string | null>,
@@ -18,10 +18,8 @@ function fakeDeps(
     async readFile(relPath: string) {
       if (!(relPath in files)) throw new Error(`read error: ${relPath}`);
       const content = files[relPath];
-      return content === null ? null : Buffer.from(content);
-    },
-    async isExecutable(relPath: string) {
-      return opts.exec?.[relPath] ?? false;
+      if (content === null) return null;
+      return { bytes: Buffer.from(content), executable: opts.exec?.[relPath] ?? false };
     },
     async getHead() {
       return opts.head ?? '0123456789abcdef0123456789abcdef01234567';
@@ -31,6 +29,50 @@ function fakeDeps(
       if (pred('chaos/src/guest/main.ts')) return opts.chaosDirty ?? opts.dirty ?? false;
       if (pred('chaos/box/Dockerfile')) return opts.boxDirty ?? opts.dirty ?? false;
       return false;
+    },
+  };
+}
+
+function walkFiles(root: string): string[] {
+  const out: string[] = [];
+  const walk = (dir: string): void => {
+    for (const ent of readdirSync(dir, { withFileTypes: true })) {
+      const abs = join(dir, ent.name);
+      if (ent.isDirectory()) walk(abs);
+      else out.push(relative(root, abs).split('\\').join('/'));
+    }
+  };
+  walk(root);
+  return out.sort();
+}
+
+function memLock(): LockOps {
+  const dirs = new Set<string>();
+  const files = new Map<string, string>();
+  return {
+    mkdir(path: string) {
+      if (dirs.has(path)) {
+        const err = new Error('EEXIST') as NodeJS.ErrnoException;
+        err.code = 'EEXIST';
+        throw err;
+      }
+      dirs.add(path);
+    },
+    writeFile(path: string, data: string) { files.set(path, data); },
+    readFile(path: string) {
+      const data = files.get(path);
+      if (data === undefined) {
+        const err = new Error('ENOENT') as NodeJS.ErrnoException;
+        err.code = 'ENOENT';
+        throw err;
+      }
+      return data;
+    },
+    rm(path: string) {
+      dirs.delete(path);
+      for (const key of [...files.keys()]) {
+        if (key === path || key.startsWith(`${path}/`)) files.delete(key);
+      }
     },
   };
 }
@@ -229,8 +271,7 @@ test('staging list equals the fingerprint list; an ignored path is in neither an
     assert.equal(readFileSync(join(dest, untracked), 'utf8'), 'export const extra = 1;\n');
     assert.equal(statSync(join(dest, 'chaos/qemu/init')).mode & 0o777, 0o755);
     assert.equal(statSync(join(dest, 'chaos/box/Dockerfile')).mode & 0o777, 0o644);
-    assert.equal(statSync(join(dest, 'chaos/box/Dockerfile')).mtimeMs, 0);
-    assert.equal(statSync(join(dest, 'bridge')).mtimeMs, 0);
+    assert.deepEqual(walkFiles(dest), fingerprintPaths);
   } finally {
     rmSync(dest, { recursive: true, force: true });
   }
@@ -340,4 +381,63 @@ test('defaultFingerprintDeps omits gitignored files, includes untracked file byt
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('re-staging drops a path removed from the list and the on-disk set matches', () => {
+  const dest = mkdtempSync(join(tmpdir(), 'chaos-restage-'));
+  const keep = { path: 'bridge/src/keep.ts', digest: null, executable: false, bytes: Buffer.from('keep\n') };
+  const drop = { path: 'bridge/src/drop.ts', digest: null, executable: false, bytes: Buffer.from('drop\n') };
+  try {
+    stageSourceTree(dest, [keep, drop]);
+    assert.deepEqual(walkFiles(dest), ['bridge/src/drop.ts', 'bridge/src/keep.ts']);
+    stageSourceTree(dest, [keep]);
+    assert.deepEqual(walkFiles(dest), ['bridge/src/keep.ts']);
+    assert.equal(existsSync(join(dest, 'bridge/src/drop.ts')), false);
+  } finally {
+    rmSync(dest, { recursive: true, force: true });
+  }
+});
+
+test('defaultFingerprintDeps rejects a symlink instead of following it', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'chaos-link-'));
+  try {
+    const git = (...args: string[]) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' });
+    git('init', '-q');
+    git('config', 'user.email', 'test@example.com');
+    git('config', 'user.name', 'Test');
+    mkdirSync(join(dir, 'bridge/src'), { recursive: true });
+    writeFileSync(join(dir, 'bridge/src/x.ts'), 'export const x = 1;\n');
+    symlinkSync('x.ts', join(dir, 'bridge/src/link.ts'));
+    git('add', '.');
+    git('commit', '-q', '-m', 'init');
+    await assert.rejects(collectSourceInputs(defaultFingerprintDeps(dir)), /not a regular file: bridge\/src\/link\.ts/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('acquireBuildLock rejects a live holder, reclaims a dead pid, and release drops only our lock', () => {
+  const dir = '/cache/build.lock';
+  const alive = memLock();
+  acquireBuildLock(dir, 10, alive, () => true);
+  assert.throws(() => acquireBuildLock(dir, 11, alive, (pid) => pid === 10), /exits 3/);
+  assert.equal(alive.readFile(`${dir}/pid`).trim(), '10');
+
+  const dead = memLock();
+  dead.mkdir(dir);
+  dead.writeFile(`${dir}/pid`, '99\n');
+  acquireBuildLock(dir, 12, dead, () => false);
+  assert.equal(dead.readFile(`${dir}/pid`).trim(), '12');
+  releaseBuildLock(dir, 12, dead);
+  assert.throws(() => dead.readFile(`${dir}/pid`));
+
+  const other = memLock();
+  acquireBuildLock(dir, 13, other, () => true);
+  releaseBuildLock(dir, 14, other);
+  assert.equal(other.readFile(`${dir}/pid`).trim(), '13');
+
+  const unread = memLock();
+  unread.mkdir(dir);
+  assert.throws(() => acquireBuildLock(dir, 15, unread, () => false), /no readable pid/);
+  assert.throws(() => unread.readFile(`${dir}/pid`));
 });
