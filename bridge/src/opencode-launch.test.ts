@@ -79,21 +79,40 @@ async function pollUntil<T>(label: string, read: () => Promise<T | undefined>): 
   throw new Error(`${label} timed out: ${last}`);
 }
 
-/** The tmux wrapper is `/bin/zsh -l -c`. Skip when that shell cannot start. */
-function launchRuntimeSkip(): string | false {
-  if (!isTmuxAvailable()) return 'tmux is not installed';
-  if (!existsSync('/bin/zsh')) return '/bin/zsh is not installed';
-  return false;
+/** The tmux wrapper is `/bin/zsh -l -c`. Local runs skip when it cannot start. CI must have both. */
+function launchRuntimeAction(input: { tmux: boolean; zsh: boolean; ci: boolean }): 'run' | 'skip' | 'fail' {
+  if (input.tmux && input.zsh) return 'run';
+  return input.ci ? 'fail' : 'skip';
+}
+
+function currentLaunchRuntimeAction(): 'run' | 'skip' | 'fail' {
+  return launchRuntimeAction({
+    tmux: isTmuxAvailable(),
+    zsh: existsSync('/bin/zsh'),
+    ci: process.env.CI === 'true',
+  });
 }
 
 describe('opencode child launch', { concurrency: 1 }, () => {
-  // Unit CI (ubuntu-26.04) has tmux and does not have /bin/zsh. The pane then
-  // exits before the EXIT trap, so no receipt is written. Command tests still
-  // run there. e2e/tests/opencode-launch.spec.ts launches the child where CI
-  // installs both tmux and zsh.
-  it('stays up, receives the prompt, reaches idle, and records a failed launch', {
-    skip: launchRuntimeSkip(),
-  }, async () => {
+  it('fails in CI when tmux or zsh is missing and skips locally', () => {
+    assert.equal(launchRuntimeAction({ tmux: true, zsh: true, ci: true }), 'run');
+    assert.equal(launchRuntimeAction({ tmux: true, zsh: true, ci: false }), 'run');
+    assert.equal(launchRuntimeAction({ tmux: false, zsh: true, ci: false }), 'skip');
+    assert.equal(launchRuntimeAction({ tmux: true, zsh: false, ci: false }), 'skip');
+    assert.equal(launchRuntimeAction({ tmux: false, zsh: false, ci: true }), 'fail');
+    assert.equal(launchRuntimeAction({ tmux: false, zsh: true, ci: true }), 'fail');
+    assert.equal(launchRuntimeAction({ tmux: true, zsh: false, ci: true }), 'fail');
+  });
+
+  it('stays up, receives the prompt, reaches idle, and records a failed launch', async (t) => {
+    const action = currentLaunchRuntimeAction();
+    if (action === 'skip') {
+      t.skip('tmux or /bin/zsh is not installed');
+      return;
+    }
+    if (action === 'fail') {
+      assert.fail('tmux and /bin/zsh are required when CI=true');
+    }
     const root = mkdtempSync(join(tmpdir(), 'oc-launch-'));
     const fakeDir = join(root, 'bin');
     const workDir = join(root, 'work');
