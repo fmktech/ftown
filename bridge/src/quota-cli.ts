@@ -438,8 +438,9 @@ export async function collectQuotaReport(input: CollectQuotaInput, deps: QuotaDe
       }
       if (lock === null && !lockUnavailable) {
         contended = true;
-        const deadline = Date.now() + lockWaitMs;
-        while ((missingQuota().length > 0 || missingModels().length > 0) && Date.now() < deadline) {
+        // Monotonic deadline: a wall-clock jump cannot extend the wait.
+        const deadline = performance.now() + lockWaitMs;
+        while ((missingQuota().length > 0 || missingModels().length > 0) && performance.now() < deadline) {
           await sleep(lockPollMs);
           // A holder's fresh write satisfies even a --fresh waiter: that
           // write was itself a live fetch shared by this call.
