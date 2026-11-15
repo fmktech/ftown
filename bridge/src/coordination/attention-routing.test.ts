@@ -10,6 +10,7 @@ import type { Session } from '../types.js';
 import {
   decideRoute,
   deliverAttentionAnswer,
+  escalateOrphanedParentItems,
   escalateParentChildren,
   formatParentQuestionMail,
   markArchivedWorktreeRetained,
@@ -271,6 +272,52 @@ describe('attention-routing', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('escalateOrphanedParentItems escalates children of missing/dead/shell parents once and spares running parents (F2)', async () => {
+    const deadParent = makeSession('p-dead', { status: 'error' });
+    const liveParent = makeSession('p-live', { status: 'running', shellType: 'claude' });
+    const shellParent = makeSession('p-shell', { status: 'running', shellType: 'shell' });
+    const cDead = makeSession('c-dead', { parentSessionId: 'p-dead' });
+    const cLive = makeSession('c-live', { parentSessionId: 'p-live' });
+    const cGhost = makeSession('c-ghost', { parentSessionId: 'p-ghost' });
+    const cShell = makeSession('c-shell', { parentSessionId: 'p-shell' });
+    const items = new Map<string, AttentionItem[]>([
+      ['c-dead', [makeItem({ id: 'a-dead', route: 'parent', routedTo: 'p-dead' })]],
+      ['c-live', [makeItem({ id: 'a-live', route: 'parent', routedTo: 'p-live' })]],
+      ['c-ghost', [makeItem({ id: 'a-ghost', route: 'parent', routedTo: 'p-ghost' })]],
+      ['c-shell', [makeItem({ id: 'a-shell', route: 'parent', routedTo: 'p-shell' })]],
+    ]);
+    const notices: string[] = [];
+    const deps = {
+      listSessions: async () => [deadParent, liveParent, shellParent, cDead, cLive, cGhost, cShell],
+      attention: {
+        listRouted: async (childId: string) => (items.get(childId) ?? [])
+          .filter((item) => item.route === 'parent' && !item.resolvedAt)
+          .map((item) => ({ ...item })),
+        setRoute: async (sessionId: string, eventId: string, fields: AttentionRoutingFields, expectRoute?: 'parent' | 'human') => {
+          const item = (items.get(sessionId) ?? []).find((candidate) => candidate.id === eventId);
+          if (!item || item.resolvedAt) return undefined;
+          if (expectRoute !== undefined && item.route !== expectRoute) return undefined;
+          Object.assign(item, fields);
+          return { ...item };
+        },
+      },
+      now: () => Date.parse('2026-11-13T12:30:00.000Z'),
+      onEscalated: (childId: string, item: AttentionItem) => { notices.push(`${childId}:${item.id}`); },
+    };
+    const first = await escalateOrphanedParentItems(deps);
+    assert.deepEqual(first.map((entry) => entry.item.id).sort(), ['a-dead', 'a-ghost', 'a-shell']);
+    assert.deepEqual([...notices].sort(), ['c-dead:a-dead', 'c-ghost:a-ghost', 'c-shell:a-shell']);
+    assert.equal(items.get('c-live')![0].route, 'parent');
+    for (const childId of ['c-dead', 'c-ghost', 'c-shell']) {
+      assert.equal(items.get(childId)![0].route, 'human');
+      assert.equal(items.get(childId)![0].escalationNote, PARENT_UNAVAILABLE_NOTE);
+      assert.equal(items.get(childId)![0].escalatedAt, '2026-11-13T12:30:00.000Z');
+    }
+    const second = await escalateOrphanedParentItems(deps);
+    assert.deepEqual(second, []);
+    assert.equal(notices.length, 3);
   });
 
   it('markArchivedWorktreeRetained updates the archived tombstone worktree.retained field', async () => {
