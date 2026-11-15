@@ -272,7 +272,10 @@ export function asCachedModels(row: ProviderModels): ProviderModels {
   return {
     ...row,
     source: 'cached',
-    models: row.models.map(model => ({ ...model, efforts: [...model.efforts] })),
+    models: row.models.map(model => ({
+      ...model,
+      efforts: Array.isArray(model.efforts) ? [...model.efforts] : model.efforts,
+    })),
   };
 }
 
