@@ -1,7 +1,7 @@
 import type { Activity, AttentionItem } from '../attention-events.js';
 import type { PullRequestState } from '../pull-request-status-protocol.js';
 import type { MailMessage, Session } from '../types.js';
-import { escalateParentChildren } from './attention-routing.js';
+import { escalateOrphanedParentItems as sweepOrphanedParentItems, escalateParentChildren, type EscalateParentChildrenDeps } from './attention-routing.js';
 import { BoardService } from './board.js';
 import { CardStore } from './card-store.js';
 import type { AttentionRoute, AttentionRoutingFields } from './contract-b.js';
@@ -86,6 +86,13 @@ export interface Coordination {
    */
   onSessionExit(sessionId: string, snapshot?: Session): Promise<void>;
   onSessionStart(sessionId: string): void;
+  /**
+   * Start-up sweep (run once, after session resurrection): escalate open
+   * parent-routed items whose parent is not running. Covers parents that died
+   * before this bridge started and so never hit onSessionExit or resurrection.
+   * Idempotent; never re-notifies an item the live exit path already escalated.
+   */
+  escalateOrphanedParentItems(): Promise<Array<{ sessionId: string; item: AttentionItem }>>;
 }
 
 export function rootOf(session: Pick<Session, 'id' | 'parentSessionId'>): string {
@@ -164,9 +171,9 @@ export function createCoordination(deps: CoordinationDeps): Coordination {
     now: deps.now,
   });
 
-  async function escalateExitingParent(sessionId: string): Promise<void> {
-    if (!deps.attention.listRouted || !deps.attention.setRoute) return;
-    await escalateParentChildren(sessionId, {
+  function routingDeps(): EscalateParentChildrenDeps | undefined {
+    if (!deps.attention.listRouted || !deps.attention.setRoute) return undefined;
+    return {
       listSessions: () => deps.store.listSessions(),
       attention: {
         listRouted: (id) => deps.attention.listRouted!(id),
@@ -174,7 +181,27 @@ export function createCoordination(deps: CoordinationDeps): Coordination {
       },
       now: deps.now,
       onEscalated: deps.onAttentionEscalated,
-    });
+    };
+  }
+
+  async function escalateExitingParent(sessionId: string): Promise<void> {
+    const routing = routingDeps();
+    if (!routing) return;
+    await escalateParentChildren(sessionId, routing);
+  }
+
+  async function escalateOrphanedParentItems(): Promise<Array<{ sessionId: string; item: AttentionItem }>> {
+    const routing = routingDeps();
+    if (!routing) return [];
+    try {
+      return await sweepOrphanedParentItems(routing);
+    } catch (error) {
+      console.warn(
+        '[Coordination] Failed to escalate orphaned parent-routed attention:',
+        error instanceof Error ? error.message : String(error),
+      );
+      return [];
+    }
   }
 
   async function onSessionExit(sessionId: string, snapshot?: Session): Promise<void> {
@@ -329,5 +356,6 @@ export function createCoordination(deps: CoordinationDeps): Coordination {
     emit,
     onSessionExit,
     onSessionStart,
+    escalateOrphanedParentItems,
   };
 }
