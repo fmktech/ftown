@@ -21,7 +21,13 @@ test('build', () => {
 
 test('selftest defaults and flags', () => {
   const c = parseArgs(['selftest', '--times', '3', '--mem', '2048', '--jobs', '1']);
-  assert.deepEqual(c, { cmd: 'selftest', times: 3, vm: { memMb: 2048, icountShift: 1, timeoutSec: 300, jobs: 1 }, longSeconds: null });
+  assert.deepEqual(c, { cmd: 'selftest', times: 3, vm: { memMb: 2048, icountShift: 1, timeoutSec: 300, jobs: 1 }, longSeconds: null, noBuild: false });
+  const nb = parseArgs(['selftest', '--no-build']);
+  assert.ok(nb.cmd === 'selftest');
+  assert.equal(nb.noBuild, true);
+  const rnb = parseArgs(['run', '--seeds', '1', '--no-build']);
+  assert.ok(rnb.cmd === 'run');
+  assert.equal(rnb.noBuild, true);
   const l = parseArgs(['selftest', '--long', '600']);
   assert.ok(l.cmd === 'selftest');
   assert.deepEqual([l.longSeconds, l.vm.timeoutSec], [600, 3600]);

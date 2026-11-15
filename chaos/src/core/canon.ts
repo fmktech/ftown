@@ -5,7 +5,7 @@ import type { Rec } from '../contract.ts';
 const TOP_ORDER: Readonly<Record<Rec['k'], readonly string[]>> = {
   run: ['k', 'seed', 'level', 'profile', 'contract'],
   schedule: ['k', 'faults'],
-  fault: ['k', 't', 'id', 'phase', 'kind', 'target', 'ok'],
+  fault: ['k', 't', 'doneT', 'id', 'phase', 'kind', 'target', 'ok'],
   op: ['k', 't', 'op', 'ok', 'error'],
   agent: ['k', 't', 'role', 'e'],
   checkpoint: ['k', 't', 'name', 'final', 'snap'],

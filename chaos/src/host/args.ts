@@ -16,8 +16,8 @@ export interface VmOptions {
 export type Command =
   | { cmd: 'help' }
   | { cmd: 'build'; image: string | null; checkRepro: boolean }
-  | { cmd: 'selftest'; times: number; vm: VmOptions; longSeconds: number | null }
-  | { cmd: 'run' | 'campaign'; seeds: number[]; level: ChaosLevel; profile: RunProfile; times: number; vm: VmOptions; dropFaults: string | null };
+  | { cmd: 'selftest'; times: number; vm: VmOptions; longSeconds: number | null; noBuild: boolean }
+  | { cmd: 'run' | 'campaign'; seeds: number[]; level: ChaosLevel; profile: RunProfile; times: number; vm: VmOptions; dropFaults: string | null; noBuild: boolean };
 
 export class UsageError extends Error {}
 
@@ -28,7 +28,7 @@ export const USAGE = `usage: npm run test:chaos -- <command> [flags]
   repro --seed N [--profile short|soak] [--times 5] [--level low]     (also: --repro N) one seed, several times
   run/repro: --drop-faults f2,f4|<kind>         guest skips these faults; output in out/<seed>-<profile>[-drop-<list>]/
   campaign --seeds 1-20 [--profile short|soak] [--times 2]            run + chaos/out/campaign.json
-common: --jobs 1  --mem 3072 (selftest 1536)  --timeout <s> (short 2000, soak 3000)  --icount-shift 1`;
+common: --jobs 1  --mem 3072 (selftest 1536)  --timeout <s> (short 2000, soak 3000)  --icount-shift 1  --no-build`;
 
 /** Seed list per core/seeds.ts (e.g. "1-3,2,7"); its errors become usage errors (exit 64). */
 export function parseSeedRange(spec: string): number[] {
@@ -37,7 +37,7 @@ export function parseSeedRange(spec: string): number[] {
   }
 }
 
-const BOOL_FLAGS = new Set(['check-repro']);
+const BOOL_FLAGS = new Set(['check-repro', 'no-build']);
 const VALUE_FLAGS = new Set(['drop-faults', 'long', 'image', 'times', 'seeds', 'seed', 'repro', 'level', 'profile', 'jobs', 'mem', 'timeout', 'icount-shift']);
 
 function posInt(flag: string, v: string, min = 1): number {
@@ -73,10 +73,10 @@ export function parseArgs(argv: readonly string[]): Command {
 
   const allowed: Record<string, string[]> = {
     build: ['image', 'check-repro'],
-    selftest: ['long', 'times', 'jobs', 'mem', 'timeout', 'icount-shift'],
-    run: ['drop-faults', 'seeds', 'level', 'profile', 'times', 'jobs', 'mem', 'timeout', 'icount-shift'],
-    campaign: ['seeds', 'level', 'profile', 'times', 'jobs', 'mem', 'timeout', 'icount-shift'],
-    repro: ['drop-faults', 'seed', 'repro', 'level', 'profile', 'times', 'jobs', 'mem', 'timeout', 'icount-shift'],
+    selftest: ['long', 'times', 'jobs', 'mem', 'timeout', 'icount-shift', 'no-build'],
+    run: ['drop-faults', 'seeds', 'level', 'profile', 'times', 'jobs', 'mem', 'timeout', 'icount-shift', 'no-build'],
+    campaign: ['seeds', 'level', 'profile', 'times', 'jobs', 'mem', 'timeout', 'icount-shift', 'no-build'],
+    repro: ['drop-faults', 'seed', 'repro', 'level', 'profile', 'times', 'jobs', 'mem', 'timeout', 'icount-shift', 'no-build'],
   };
   const ok = allowed[sub];
   if (ok === undefined) throw new UsageError(`unknown command ${sub}`);
@@ -96,9 +96,10 @@ export function parseArgs(argv: readonly string[]): Command {
     jobs: flags.has('jobs') ? posInt('jobs', flags.get('jobs')!) : 1,
   };
   if (vm.icountShift > 10) throw new UsageError('--icount-shift must be 0..10');
+  const noBuild = flags.has('no-build');
   const defaultTimes = sub === 'repro' ? 5 : 2;
   const times = flags.has('times') ? posInt('times', flags.get('times')!) : defaultTimes;
-  if (isSelftest) return { cmd: 'selftest', times, vm, longSeconds: flags.has('long') ? posInt('long', flags.get('long')!) : null };
+  if (isSelftest) return { cmd: 'selftest', times, vm, longSeconds: flags.has('long') ? posInt('long', flags.get('long')!) : null, noBuild };
 
   const levelRaw = flags.get('level') ?? (profile === 'short' ? 'low' : 'high');
   if (levelRaw !== 'off' && levelRaw !== 'low' && levelRaw !== 'high') throw new UsageError(`bad --level ${levelRaw}`);
@@ -117,11 +118,11 @@ export function parseArgs(argv: readonly string[]): Command {
     const s = flags.get('seed') ?? flags.get('repro');
     if (s === undefined) throw new UsageError('repro needs --seed N');
     seeds = [posInt('seed', s, 0)];
-    return { cmd: 'run', seeds, level, profile, times, vm, dropFaults };
+    return { cmd: 'run', seeds, level, profile, times, vm, dropFaults, noBuild };
   }
   const spec = flags.get('seeds');
   if (spec === undefined) throw new UsageError(`${sub} needs --seeds`);
   seeds = parseSeedRange(spec);
-  return { cmd: sub === 'campaign' ? 'campaign' : 'run', seeds, level, profile, times, vm, dropFaults };
+  return { cmd: sub === 'campaign' ? 'campaign' : 'run', seeds, level, profile, times, vm, dropFaults, noBuild };
 }
 

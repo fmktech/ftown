@@ -17,7 +17,7 @@ Findings with a security angle are not listed here or anywhere in the repository
 | Date | Contract | Profile / level | Seeds | Runs per seed | Pairs identical | Bridge violations |
 |---|---|---|---|---|---|---|
 | 2026-11-14 | v8 | short / off | 1 | 2 | yes | none |
-| 2026-11-14 | v8 | short / low | 1–4 | 2 | yes (4 of 4) | none |
+| 2026-11-14 | v8 | short / low | 1–4 | 2 | yes (4 of 4) | none reported by v8 (seed 2 contained an undetected F1 outage of ~51 s that old R2 missed; fixed in contract v9) |
 | 2026-11-14 | v6 | soak / high | 1 | 2 | yes | none in the pair; F1 found in an earlier run of this seed with clock faults |
 
 A short run takes about 3.7 minutes of wall time on a lightly loaded host.
@@ -41,6 +41,14 @@ until the next scheduled heal. Without the clock jump the same restart succeeds.
   deterministic. Re-confirm with a soak pair before relying on exact timings. The reproduction
   commands in the detail file predate run profiles and need `--profile soak` added.
 - Suggested direction: measure the deadline with a monotonic clock.
+- Fix confirmation (2026-11-14, fix commit `a33c8bc`, #226): confirmed on contract v9 with
+  seed 2 (`--profile short --level low`, `f1` `bridge_kill9` at 83,531 ms followed by
+  `clock_jump_fwd` +90,000 ms at 107,248 ms). Pre-fix (`bridge/` at `309b678` on v9 harness,
+  source fingerprint `5297ec8714be`): `H_run=6587cd4c9479`, `exit=1`, `R2` violated
+  (`heal failed: f1 bridge_kill9 t=86100 doneT=108327`), `side-bridge.log` recorded
+  `hub did not become healthy within 30000ms` and checkpoints `cp6`–`cp8` showed `bridgeAlive: false`.
+  Post-fix (source fingerprint `5f6a682a4488`, `--times 2`): identical pair `H_run=85caa5790c30`,
+  `exit=0`, `R2` passed, checkpoints `cp8`–`cp9` showed `bridgeAlive: true` and `bridgeResponsive: true`.
 
 ## Observations
 

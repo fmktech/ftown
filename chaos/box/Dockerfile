@@ -43,7 +43,8 @@ RUN groupmod --new-name ftown node \
     && touch /home/ftown/.zshrc && chown ftown:ftown /home/ftown/.zshrc
 COPY --from=bridge /opt/ftown/bridge /opt/ftown/bridge
 COPY --from=hub /opt/chaos-seed/hub /opt/chaos-seed/hub
-COPY chaos/ /opt/chaos/
+COPY chaos/box/ /opt/chaos/box/
+COPY chaos/package.json /opt/chaos/package.json
 RUN mkdir -p /opt/chaos-bin /opt/chaos-seed/panel \
     && cp /opt/chaos/box/panel-stub/server.js /opt/chaos-seed/panel/server.js \
     && printf '#!/bin/sh\nexec node /opt/ftown/bridge/dist/ftown-cli.js "$@"\n' > /opt/chaos-bin/ftown \

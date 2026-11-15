@@ -9,7 +9,7 @@ The `chaos/` harness runs deterministic chaos testing for `ftown`. A pseudorando
 - **Node.js**: Node 24 (`>=24.12.0`), executing TypeScript directly via type stripping.
 - **Docker**: Docker daemon running on the host, used to build container images and run headless QEMU.
 - **First Build Downloads**: The initial build downloads hermetic dependencies pinned by version or digest:
-  - Base container images: `debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc` and `node:24.22.1-bookworm-slim@sha256:be8204d4bd327363357f532187b752ff62759c31bedf98e9e18fc08c9cbd605c` (or devbox `node:24-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54`).
+  - Base container images: `debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc` and `node:24.22.1-bookworm-slim@sha256:be8204d4bd327363357f532187b752ff62759c31bedf98e9e18fc08c9cbd605c`.
   - Pinned Debian packages: `qemu=1:7.2+dfsg-7+deb12u18` (source), `qemu-system-x86=1:7.2+dfsg-7+deb12u18+b3` (runtime and SeaBIOS firmware), and `linux-image-6.1.0-54-cloud-amd64=6.1.190-1` (guest kernel).
   - Pinned Centrifugo archive: `v6.10.2` linux-amd64 verified against `CENTRIFUGO_SHA256['linux-amd64']` from `bridge/src/solo/contract.ts` via `sha256sum -c`.
 - **Build Time**: Approximate build time on arbitrary machines is unknown. Factsheet records show ~84 s for a clean `--no-cache` build on developer hardware with base layers pulled, and ~5 s cached.
@@ -22,7 +22,7 @@ Builds the kernel (`vmlinuz`), initramfs (`initramfs.cpio.gz`), and QEMU contain
 npm run test:chaos -- build
 ```
 Flags and defaults:
-- `--image <tag>`: Custom container image tag (default: uses `ftown-chaos-box:dev` if present, otherwise builds `ftown-chaos-devbox:dev`).
+- `--image <tag>`: Custom container image tag (default: builds `ftown-chaos-box:dev` from `chaos/box/Dockerfile`).
 - `--check-repro`: Builds initramfs twice and asserts identical SHA-256 digests (default: false).
 
 ### 2. Run guest selftest
@@ -37,6 +37,7 @@ Flags and defaults:
 - `--mem <mb>`: Guest memory in MiB (default: `1536`, minimum: `1536`).
 - `--timeout <s>`: Watchdog per boot in seconds (default: `300`, or `3600` with `--long`).
 - `--icount-shift <n>`: Instruction-count shift where ns per instruction = 2^shift (default: `1`).
+- `--no-build`: Fail instead of rebuilding if `chaos/.cache/` is missing or stale (default: false).
 
 ### 3. Run one seed
 Executes the workload and fault schedule for a seed, comparing runs for determinism:
@@ -57,13 +58,14 @@ Flags and defaults:
 - `--mem <mb>`: Guest RAM in MiB (default: `3072`, minimum: `1536`).
 - `--timeout <s>`: Watchdog per boot in seconds (default: `2000` for `short`, `3000` for `soak`).
 - `--icount-shift <n>`: Instruction-count shift (default: `1`).
+- `--no-build`: Fail instead of rebuilding if `chaos/.cache/` is missing or stale (default: false).
 
 ### 4. Run a campaign
 Runs a sequence of seeds and writes aggregated summaries to `chaos/out/campaign.json`:
 ```bash
 npm run test:chaos -- campaign --seeds 1-20
 ```
-Flags and defaults: Accepts `--seeds`, `--profile`, `--level`, `--times`, `--jobs`, `--mem`, `--timeout`, and `--icount-shift` with the same defaults as `run`. Does not accept `--drop-faults`.
+Flags and defaults: Accepts `--seeds`, `--profile`, `--level`, `--times`, `--jobs`, `--mem`, `--timeout`, `--icount-shift`, and `--no-build` with the same defaults as `run`. Does not accept `--drop-faults`.
 
 ### 5. Reproduce a seed (`--repro`)
 Runs a single seed repeatedly (default 5 boots) to verify determinism:
@@ -74,7 +76,7 @@ Or equivalently:
 ```bash
 npm run test:chaos -- --repro 1
 ```
-Flags and defaults: Accepts `--seed <N>` (or `--repro <N>`), `--profile`, `--level`, `--times` (default: `5`), `--drop-faults`, `--jobs`, `--mem`, `--timeout`, and `--icount-shift`.
+Flags and defaults: Accepts `--seed <N>` (or `--repro <N>`), `--profile`, `--level`, `--times` (default: `5`), `--drop-faults`, `--jobs`, `--mem`, `--timeout`, `--icount-shift`, and `--no-build`.
 
 ## Profiles and Levels
 

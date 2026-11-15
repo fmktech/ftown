@@ -1,9 +1,10 @@
 // Host runner: `npm run test:chaos -- <command>`. See USAGE in args.ts.
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { DEFAULT_PROFILE, EXIT } from '../contract.ts';
 import { parseArgs, USAGE, UsageError, type Command, type VmOptions } from './args.ts';
-import { build, readBuildInfo } from './build.ts';
+import { build, computeSourceFingerprint, inspectImageId, readBuildInfo, type BuildInfo, type SourceFingerprint } from './build.ts';
 import { boot, cleanupContainers, qemuArgs, RTC_BASE, type GuestParams } from './qemu.ts';
 import { OUT_DIR, seedOutDir } from './paths.ts';
 import { selftestAssertions, differingKeys, formatSeedLine, normalizeConsole, sha256, summarizeSeed, worstExit, type BootResult, type SeedSummary } from './summary.ts';
@@ -22,10 +23,74 @@ async function pool<T>(jobs: number, tasks: (() => Promise<T>)[]): Promise<T[]> 
   return results;
 }
 
-function requireBuild(): void {
-  const info = readBuildInfo();
-  if (info === null) throw new Error('no build found: run `npm run test:chaos -- build` first');
-  console.log(`image ${info.image}  kernel ${info.kernelVersion}  initramfs sha256 ${info.initramfsSha256} (${info.initramfsBytes} bytes)`);
+export interface EnsureBuildDeps {
+  readBuildInfo(): BuildInfo | null;
+  computeFingerprint(): Promise<SourceFingerprint>;
+  build(imageArg: string | null, checkRepro?: boolean): Promise<BuildInfo>;
+  inspectImageId(image: string): Promise<string | null>;
+  log(msg: string): void;
+}
+
+const defaultEnsureDeps: EnsureBuildDeps = {
+  readBuildInfo,
+  computeFingerprint: () => computeSourceFingerprint(),
+  build,
+  inspectImageId,
+  log: (msg) => console.log(msg),
+};
+
+export async function ensureBuild(noBuild: boolean, deps: EnsureBuildDeps = defaultEnsureDeps): Promise<BuildInfo> {
+  const cached = deps.readBuildInfo();
+  const current = await deps.computeFingerprint();
+  let info: BuildInfo;
+  if (cached === null) {
+    if (noBuild) throw new Error('no cached build: run `npm run test:chaos -- build` first');
+    deps.log('no cached build: building');
+    info = await deps.build(null);
+  } else if (cached.sourceFingerprint.startsWith('custom-image:')) {
+    if (current.boxDirty) {
+      deps.log(`notice: chaos/box changes do not apply to custom image ${cached.image}`);
+    }
+    const currentImageId = await deps.inspectImageId(cached.image);
+    const chaosMatch = cached.chaosFingerprint === current.chaosSha256;
+    const imageMatch = currentImageId !== null && currentImageId === cached.imageId;
+    if (!chaosMatch || !imageMatch) {
+      const parts: string[] = [];
+      if (!chaosMatch) {
+        const cachedHex = (cached.chaosFingerprint || 'unknown').slice(0, 8);
+        const currentHex = current.chaosSha256.slice(0, 8);
+        parts.push(`cached ${cachedHex} != current ${currentHex}`);
+      }
+      if (!imageMatch) {
+        const shortId = (id: string) => id.slice(0, 19);
+        parts.push(
+          currentImageId === null
+            ? `image ${cached.image} missing (cached ${shortId(cached.imageId)})`
+            : `imageId ${shortId(cached.imageId)} != ${shortId(currentImageId)}`,
+        );
+      }
+      const reason = parts.join(', ');
+      if (noBuild) {
+        throw new Error(`chaos build is stale (${reason}): run \`npm run test:chaos -- build --image ${cached.image}\` first`);
+      }
+      deps.log(`chaos build is stale (${reason}): rebuilding`);
+      info = await deps.build(cached.image);
+    } else {
+      info = cached;
+    }
+  } else if (cached.sourceFingerprint !== current.sha256) {
+    const cachedHex = (cached.sourceFingerprint || 'unknown').slice(0, 8);
+    const currentHex = current.sha256.slice(0, 8);
+    if (noBuild) {
+      throw new Error(`chaos build is stale (cached ${cachedHex} != current ${currentHex}): run \`npm run test:chaos -- build\` first`);
+    }
+    deps.log(`chaos build is stale (cached ${cachedHex} != current ${currentHex}): rebuilding`);
+    info = await deps.build(null);
+  } else {
+    info = cached;
+  }
+  deps.log(`image ${info.image}  kernel ${info.kernelVersion}  initramfs sha256 ${info.initramfsSha256} (${info.initramfsBytes} bytes)  source ${info.sourceFingerprint.slice(0, 12)}`);
+  return info;
 }
 
 function params(
@@ -39,8 +104,8 @@ function params(
   return { cmd, seed, level, profile, memMb: vm.memMb, icountShift: vm.icountShift, dropFaults };
 }
 
-async function selftest(times: number, vm: VmOptions): Promise<number> {
-  requireBuild();
+async function selftest(times: number, vm: VmOptions, noBuild: boolean): Promise<number> {
+  await ensureBuild(noBuild);
   console.log(`qemu: ${qemuArgs(params('selftest', 0, 'off', DEFAULT_PROFILE, vm)).join(' ')}`);
   const root = join(OUT_DIR, 'selftest');
   const boots = await pool(vm.jobs, Array.from({ length: times }, (_, k) => async () => {
@@ -77,8 +142,8 @@ async function selftest(times: number, vm: VmOptions): Promise<number> {
   return code;
 }
 
-async function selftestLong(times: number, seconds: number, vm: VmOptions): Promise<number> {
-  requireBuild();
+async function selftestLong(times: number, seconds: number, vm: VmOptions, noBuild: boolean): Promise<number> {
+  await ensureBuild(noBuild);
   const p: GuestParams = { cmd: 'selftest-long', seed: seconds, level: 'off', profile: DEFAULT_PROFILE, memMb: vm.memMb, icountShift: vm.icountShift };
   console.log(`qemu: ${qemuArgs(p).join(' ')}`);
   const results = await pool(vm.jobs, Array.from({ length: times }, (_, k) => async (): Promise<BootResult> => {
@@ -95,7 +160,7 @@ async function selftestLong(times: number, seconds: number, vm: VmOptions): Prom
 }
 
 async function runSeeds(c: Extract<Command, { cmd: 'run' | 'campaign' }>): Promise<number> {
-  requireBuild();
+  await ensureBuild(c.noBuild);
   mkdirSync(OUT_DIR, { recursive: true });
   const tasks = c.seeds.flatMap((seed) => Array.from({ length: c.times }, (_, k) => ({ seed, k })));
   const results = await pool(c.vm.jobs, tasks.map(({ seed, k }) => async (): Promise<BootResult> => {
@@ -132,25 +197,27 @@ async function main(argv: string[]): Promise<number> {
       console.log(JSON.stringify(info, null, 2));
       return EXIT.ok;
     }
-    case 'selftest': return c.longSeconds === null ? selftest(c.times, c.vm) : selftestLong(c.times, c.longSeconds, c.vm);
+    case 'selftest': return c.longSeconds === null ? selftest(c.times, c.vm, c.noBuild) : selftestLong(c.times, c.longSeconds, c.vm, c.noBuild);
     case 'run':
     case 'campaign': return runSeeds(c);
   }
 }
 
-let stopping = false;
-for (const sig of ['SIGINT', 'SIGTERM'] as const) {
-  process.on(sig, () => {
-    if (stopping) return;
-    stopping = true;
-    console.error(`${sig}: removing chaos containers`);
-    void cleanupContainers().finally(() => process.exit(EXIT.infra));
-  });
-}
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  let stopping = false;
+  for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+    process.on(sig, () => {
+      if (stopping) return;
+      stopping = true;
+      console.error(`${sig}: removing chaos containers`);
+      void cleanupContainers().finally(() => process.exit(EXIT.infra));
+    });
+  }
 
-try {
-  process.exitCode = await main(process.argv.slice(2));
-} catch (err) {
-  console.error(err instanceof Error ? err.message : String(err));
-  process.exitCode = EXIT.infra;
+  try {
+    process.exitCode = await main(process.argv.slice(2));
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exitCode = EXIT.infra;
+  }
 }
