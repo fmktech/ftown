@@ -1,9 +1,14 @@
-import { describe, it } from 'node:test';
+import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { CLAUDE_MOD_FILES } from './claude-mod-installer.js';
+
+const originalHome = process.env.HOME;
+let isolatedHome: string;
+before(() => { isolatedHome = mkdtempSync(join(tmpdir(), 'ftown-agent-commands-')); process.env.HOME = isolatedHome; });
+after(() => { if (originalHome === undefined) delete process.env.HOME; else process.env.HOME = originalHome; rmSync(isolatedHome, { recursive: true, force: true }); });
 
 import {
   buildGrokCommand,

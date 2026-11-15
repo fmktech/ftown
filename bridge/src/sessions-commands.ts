@@ -258,6 +258,7 @@ class SessionExit extends Error {
 /** Injectable so tests need not really sleep. */
 export const attentionClock = {
   now: (): number => Date.now(),
+  monotonicNow: (): number => performance.now(),
   sleep: (ms: number): Promise<void> => new Promise((done) => setTimeout(done, ms)),
 };
 
@@ -308,10 +309,10 @@ async function fetchAttentionItem(sessionId: string, eventId: string, waitSecond
 
 async function waitForAttentionAnswer(sessionId: string, eventId: string, timeoutSeconds: number): Promise<void> {
   console.error(`Waiting for an answer (attention ${eventId})...`);
-  const deadline = attentionClock.now() + timeoutSeconds * 1000;
+  const deadline = attentionClock.monotonicNow() + timeoutSeconds * 1000;
   let failures = 0;
-  while (attentionClock.now() < deadline) {
-    const remainingSeconds = Math.ceil((deadline - attentionClock.now()) / 1000);
+  while (attentionClock.monotonicNow() < deadline) {
+    const remainingSeconds = Math.ceil((deadline - attentionClock.monotonicNow()) / 1000);
     const waitSeconds = Math.max(1, Math.min(ATTENTION_ITEM_WAIT_MAX_SECONDS, remainingSeconds));
     let item: WaitedAttentionItem;
     try { item = await fetchAttentionItem(sessionId, eventId, waitSeconds); failures = 0; }

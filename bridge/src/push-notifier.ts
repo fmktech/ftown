@@ -8,11 +8,12 @@ export interface BridgePushNotifierOptions {
 }
 interface Pending { sessionId: string; notice: PushNotice; expires: number; attempt: number; nextAttemptAt: number; canceled: boolean }
 interface Dependencies {
+  /** Elapsed-time clock for queue expiry and retry scheduling. */
   fetch: typeof fetch; now: () => number;
   schedule: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
   cancel: (timer: ReturnType<typeof setTimeout>) => void;
 }
-const defaults: Dependencies = { fetch: (...args) => fetch(...args), now: Date.now,
+const defaults: Dependencies = { fetch: (...args) => fetch(...args), now: () => performance.now(),
   schedule: (fn, ms) => setTimeout(fn, ms), cancel: clearTimeout };
 /** A bounded, best-effort queue. Cloud event/delivery keys provide durable dedup. */
 export class BridgePushNotifier {

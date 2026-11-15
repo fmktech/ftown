@@ -75,3 +75,22 @@ describe('staggerSpawn', () => {
     assert.deepEqual(clock.wakeTimes, []);
   });
 });
+
+it('default reservations ignore wall-clock steps', async () => {
+  const original = Date.now;
+  const originalPerformanceNow = Object.getOwnPropertyDescriptor(performance, 'now');
+  Object.defineProperty(performance, 'now', { configurable: true, value: () => 1000 });
+  try {
+    for (const jump of [-600_000, 600_000]) {
+      resetSpawnStaggerForTest(); let wall=1_000_000; Date.now=()=>wall;
+      const waits:number[]=[]; const sleep=async (ms:number) => { waits.push(ms); };
+      await staggerSpawn('wall-step', 60_000, { sleep }); wall+=jump;
+      await staggerSpawn('wall-step', 60_000, { sleep });
+      assert.deepEqual(waits, [60_000]);
+    }
+  } finally {
+    Date.now=original; resetSpawnStaggerForTest();
+    if (originalPerformanceNow) Object.defineProperty(performance, 'now', originalPerformanceNow);
+    else delete (performance as { now?: () => number }).now;
+  }
+});

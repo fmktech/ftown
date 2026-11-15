@@ -162,7 +162,7 @@ describe("SessionOverview", () => {
     const snapshot: OverviewSnapshot = {
       board: { rootId: "manager", cards: [snapCard("child-1", "Child one", card("working"))] },
       events: [],
-      attention: [{ sessionId: "child-1", event: { id: "e1", title: "Which DB?", route: "human", escalationNote: "manager unsure", prompt: { questions: [{ options: [{ label: "pg" }, { label: "sqlite" }] }] } } }],
+      attention: [{ sessionId: "child-1", event: { id: "e1", title: "Which DB?", route: "human", escalationNote: "manager unsure", prompt: { channel: "mail", questions: [{ question: "Which DB?", multiSelect: false, allowText: false, options: [{ label: "pg" }, { label: "sqlite" }] }] } } }],
     };
     renderOverview(manager, [manager, child], { snapshot });
     expect(within(screen.getByRole("region", { name: "Needs attention" })).getByText("you")).toBeTruthy();

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
@@ -45,4 +45,42 @@ test('Claude Mod installation refuses foreign symlink destinations', () => {
 test('Claude Mod version gate rejects unknown and prerelease versions', () => {
   for (const version of ['2.1.287', '2.1.302 (Claude Code)', '2.2.0', '3.0.0']) assert.equal(supportsClaudeMods(version), true, version);
   for (const version of ['', 'unknown', '2.1.286', '2.0.999', '1.99.999', '2.1.287-beta.1', 'bad 2.1.302']) assert.equal(supportsClaudeMods(version), false, version);
+});
+
+
+test('default compatibility cache ignores wall steps at its exact expiry', () => {
+  if (process.platform === 'win32') return;
+  const temporary = mkdtempSync(join(tmpdir(), 'ftown-claude-cache-'));
+  const originalPath = process.env.PATH, originalDateNow = Date.now;
+  const originalPerformanceNow = Object.getOwnPropertyDescriptor(performance, 'now');
+  let wall = 1_000_000, elapsed = 0;
+  Date.now = () => wall;
+  Object.defineProperty(performance, 'now', { configurable: true, value: () => elapsed });
+  try {
+    for (const jump of [-600_000, 600_000]) for (const supported of [true, false]) {
+      const home = join(temporary, `${jump}-${supported}`), bin = join(home, 'bin');
+      const destination = join(home, '.ftown/claude-plugin');
+      for (const file of CLAUDE_MOD_FILES) { mkdirSync(dirname(join(destination, file)), { recursive: true }); writeFileSync(join(destination, file), 'asset'); }
+      mkdirSync(bin, { recursive: true });
+      const version = join(home, 'version'), calls = join(home, 'calls');
+      writeFileSync(join(bin, 'claude'), `#!/bin/sh\nread -r version < '${version}'\necho \"$version\"\necho x >> '${calls}'\n`);
+      chmodSync(join(bin, 'claude'), 0o755); process.env.PATH = bin;
+      const initial = supported ? '2.1.302' : '2.1.286';
+      const changed = supported ? '2.1.286' : '2.1.302';
+      writeFileSync(version, initial); wall = 1_000_000; elapsed = 0;
+      assert.equal(claudeModLaunchPath({ home }), supported ? destination : undefined);
+      writeFileSync(version, changed); wall += jump; elapsed = 59_999;
+      assert.equal(claudeModLaunchPath({ home }), supported ? destination : undefined);
+      assert.equal(readFileSync(calls, 'utf8'), 'x\n');
+      elapsed = 60_000;
+      assert.equal(claudeModLaunchPath({ home }), supported ? undefined : destination);
+      assert.equal(readFileSync(calls, 'utf8'), 'x\nx\n');
+    }
+  } finally {
+    if (originalPath === undefined) delete process.env.PATH; else process.env.PATH = originalPath;
+    Date.now = originalDateNow;
+    if (originalPerformanceNow) Object.defineProperty(performance, 'now', originalPerformanceNow);
+    else delete (performance as { now?: () => number }).now;
+    rmSync(temporary, { recursive: true, force: true });
+  }
 });
