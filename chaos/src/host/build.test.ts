@@ -1,25 +1,25 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { constants, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import test from 'node:test';
-import { computeSourceFingerprint, defaultFingerprintDeps, hasDirtyInput, isChaosFingerprintInput, isFingerprintInput, type FingerprintDeps } from './build.ts';
-import { sha256 } from './summary.ts';
+import { BUILD_LOCK_STALE_MS, acquireBuildLock, collectSourceInputs, computeSourceFingerprint, defaultFingerprintDeps, hasDirtyInput, isChaosFingerprintInput, isFingerprintInput, listFingerprintInputs, readRegularFile, releaseBuildLock, stageSourceTree, type FingerprintDeps, type InputFs, type LockOps } from './build.ts';
 
 function fakeDeps(
   files: Record<string, string | null>,
-  opts: { head?: string; dirty?: boolean; chaosDirty?: boolean; boxDirty?: boolean; listed?: string[] } = {},
+  opts: { head?: string; dirty?: boolean; chaosDirty?: boolean; boxDirty?: boolean; listed?: string[]; exec?: Record<string, boolean> } = {},
 ): FingerprintDeps {
   const listed = opts.listed ?? Object.keys(files);
   return {
     async listFiles() {
       return listed;
     },
-    async hashFile(relPath: string) {
+    async readFile(relPath: string) {
       if (!(relPath in files)) throw new Error(`read error: ${relPath}`);
       const content = files[relPath];
-      return content === null ? null : sha256(content);
+      if (content === null) return null;
+      return { bytes: Buffer.from(content), executable: opts.exec?.[relPath] ?? false };
     },
     async getHead() {
       return opts.head ?? '0123456789abcdef0123456789abcdef01234567';
@@ -29,6 +29,78 @@ function fakeDeps(
       if (pred('chaos/src/guest/main.ts')) return opts.chaosDirty ?? opts.dirty ?? false;
       if (pred('chaos/box/Dockerfile')) return opts.boxDirty ?? opts.dirty ?? false;
       return false;
+    },
+  };
+}
+
+function walkFiles(root: string): string[] {
+  const out: string[] = [];
+  const walk = (dir: string): void => {
+    for (const ent of readdirSync(dir, { withFileTypes: true })) {
+      const abs = join(dir, ent.name);
+      if (ent.isDirectory()) walk(abs);
+      else out.push(relative(root, abs).split('\\').join('/'));
+    }
+  };
+  walk(root);
+  return out.sort();
+}
+
+function walkDirs(root: string): string[] {
+  const out: string[] = [];
+  const walk = (dir: string): void => {
+    for (const ent of readdirSync(dir, { withFileTypes: true })) {
+      if (!ent.isDirectory()) continue;
+      const abs = join(dir, ent.name);
+      out.push(relative(root, abs).split('\\').join('/'));
+      walk(abs);
+    }
+  };
+  walk(root);
+  return out.sort();
+}
+
+/** Directories implied by the fingerprint list. An extra directory fails a deepEqual against this. */
+function parentDirs(files: readonly string[]): string[] {
+  const dirs = new Set<string>();
+  for (const file of files) {
+    const parts = file.split('/');
+    for (let i = 1; i < parts.length; i++) dirs.add(parts.slice(0, i).join('/'));
+  }
+  return [...dirs].sort();
+}
+
+function heldPid(ops: LockOps, dir: string): string {
+  return ops.readFile(`${dir}/pid`).split('\n')[0] ?? '';
+}
+
+function memLock(): LockOps {
+  const dirs = new Set<string>();
+  const files = new Map<string, string>();
+  return {
+    mkdir(path: string) {
+      if (dirs.has(path)) {
+        const err = new Error('EEXIST') as NodeJS.ErrnoException;
+        err.code = 'EEXIST';
+        throw err;
+      }
+      dirs.add(path);
+    },
+    writeFile(path: string, data: string) { files.set(path, data); },
+    readFile(path: string) {
+      const data = files.get(path);
+      if (data === undefined) {
+        const err = new Error('ENOENT') as NodeJS.ErrnoException;
+        err.code = 'ENOENT';
+        throw err;
+      }
+      return data;
+    },
+    rm(path: string) {
+      dirs.delete(path);
+      for (const key of [...files.keys()]) {
+        if (key === path || key.startsWith(`${path}/`)) files.delete(key);
+      }
     },
   };
 }
@@ -198,4 +270,296 @@ test('computeSourceFingerprint does NOT change when an unrelated file (e.g. ui/)
 test('computeSourceFingerprint fails loudly on unexpected file read errors', async () => {
   const deps = fakeDeps(BASE_FILES, { listed: [...Object.keys(BASE_FILES), 'bridge/src/unreadable.ts'] });
   await assert.rejects(computeSourceFingerprint(deps), /read error: bridge\/src\/unreadable\.ts/);
+});
+
+test('staging list equals the fingerprint list; an ignored path is in neither and an untracked path is in both', async () => {
+  const ignored = 'bridge/data/ignored.txt';
+  const untracked = 'bridge/src/untracked.ts';
+  const files: Record<string, string | null> = {
+    ...BASE_FILES,
+    [untracked]: 'export const extra = 1;\n',
+    [ignored]: 'should-not-be-listed\n',
+  };
+  // listFiles is git ls-files --exclude-standard: the ignored path is absent, the untracked path is present.
+  const deps = fakeDeps(files, {
+    listed: Object.keys(files).filter((p) => p !== ignored),
+    exec: { 'chaos/qemu/init': true },
+  });
+  const inputs = await collectSourceInputs(deps);
+  const fingerprintPaths = await listFingerprintInputs(deps);
+  assert.deepEqual(inputs.map((f) => f.path), fingerprintPaths);
+  assert.equal(fingerprintPaths.includes(ignored), false);
+  assert.equal(fingerprintPaths.includes(untracked), true);
+
+  const dest = mkdtempSync(join(tmpdir(), 'chaos-stage-'));
+  try {
+    const staged = stageSourceTree(dest, inputs);
+    assert.deepEqual(staged, fingerprintPaths);
+    assert.equal(existsSync(join(dest, ignored)), false);
+    assert.equal(readFileSync(join(dest, untracked), 'utf8'), 'export const extra = 1;\n');
+    assert.equal(statSync(join(dest, 'chaos/qemu/init')).mode & 0o777, 0o755);
+    assert.equal(statSync(join(dest, 'chaos/box/Dockerfile')).mode & 0o777, 0o644);
+    assert.deepEqual(walkFiles(dest), fingerprintPaths);
+    assert.deepEqual(walkDirs(dest), parentDirs(fingerprintPaths));
+    // BuildKit's context sync is metadata-based (size, mtime, mode, uid/gid) and
+    // skips the byte read when they match. A pinned mtime would keep old COPY bytes
+    // for a same-size edit. Write-time stamps are not the epoch, and two stagings
+    // of the same content a few milliseconds apart are allowed to differ.
+    const stagedFile = join(dest, 'chaos/box/Dockerfile');
+    const firstMtime = statSync(stagedFile).mtimeMs;
+    assert.notEqual(firstMtime, 0);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    stageSourceTree(dest, inputs);
+    const secondMtime = statSync(stagedFile).mtimeMs;
+    assert.notEqual(secondMtime, 0);
+    assert.deepEqual(walkDirs(dest), parentDirs(fingerprintPaths));
+    mkdirSync(join(dest, 'bridge/unexpected'));
+    assert.notDeepEqual(walkDirs(dest), parentDirs(walkFiles(dest)));
+  } finally {
+    rmSync(dest, { recursive: true, force: true });
+  }
+
+  const withUntracked = await computeSourceFingerprint(deps);
+  const without = await computeSourceFingerprint(fakeDeps(BASE_FILES, { exec: { 'chaos/qemu/init': true } }));
+  assert.notEqual(withUntracked.sha256, without.sha256);
+  assert.equal(withUntracked.fileCount, fingerprintPaths.length);
+});
+
+test('an executable-bit flip changes the fingerprint; the same bit does not', async () => {
+  const base = await computeSourceFingerprint(fakeDeps(BASE_FILES));
+  const boxExec = await computeSourceFingerprint(fakeDeps(BASE_FILES, { exec: { 'chaos/box/Dockerfile': true } }));
+  const chaosExec = await computeSourceFingerprint(fakeDeps(BASE_FILES, { exec: { 'chaos/src/guest/main.ts': true } }));
+  const again = await computeSourceFingerprint(fakeDeps(BASE_FILES));
+  const nonInput = await computeSourceFingerprint(fakeDeps(BASE_FILES, {
+    exec: { 'chaos/src/guest/main.test.ts': true, 'ui/src/App.tsx': true },
+  }));
+
+  assert.notEqual(base.sha256, boxExec.sha256);
+  assert.equal(base.chaosSha256, boxExec.chaosSha256);
+  assert.notEqual(base.sha256, chaosExec.sha256);
+  assert.notEqual(base.chaosSha256, chaosExec.chaosSha256);
+  assert.equal(base.sha256, again.sha256);
+  assert.equal(base.chaosSha256, again.chaosSha256);
+  assert.equal(base.sha256, nonInput.sha256);
+});
+
+test('stageSourceTree refuses a path that escapes the stage directory', () => {
+  const dest = mkdtempSync(join(tmpdir(), 'chaos-stage-escape-'));
+  try {
+    assert.throws(() => stageSourceTree(dest, [{
+      path: 'bridge/../../chaos-stage-escaped-probe.txt',
+      digest: null,
+      executable: false,
+      bytes: Buffer.from('x'),
+    }]), /unsafe path/);
+    assert.equal(existsSync(join(dest, '..', 'chaos-stage-escaped-probe.txt')), false);
+  } finally {
+    rmSync(dest, { recursive: true, force: true });
+  }
+});
+
+test('defaultFingerprintDeps omits gitignored files, includes untracked file bytes, and an x-bit flip changes the fingerprint', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'chaos-list-'));
+  try {
+    const git = (...args: string[]) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' });
+    git('init', '-q');
+    git('config', 'user.email', 'test@example.com');
+    git('config', 'user.name', 'Test');
+    git('config', 'core.filemode', 'true');
+    mkdirSync(join(dir, 'bridge/src'), { recursive: true });
+    mkdirSync(join(dir, 'chaos/box'), { recursive: true });
+    writeFileSync(join(dir, '.gitignore'), 'data/\n');
+    writeFileSync(join(dir, 'bridge/src/x.ts'), 'export const x = 1;\n', { mode: 0o644 });
+    chmodSync(join(dir, 'bridge/src/x.ts'), 0o644);
+    writeFileSync(join(dir, 'chaos/box/Dockerfile'), 'FROM scratch\n', { mode: 0o644 });
+    git('add', '.');
+    git('commit', '-q', '-m', 'init');
+
+    const deps = defaultFingerprintDeps(dir);
+    const basePaths = await listFingerprintInputs(deps);
+    const baseInputs = await collectSourceInputs(deps);
+    assert.deepEqual(baseInputs.map((f) => f.path), basePaths);
+    const base = await computeSourceFingerprint(deps, baseInputs);
+
+    mkdirSync(join(dir, 'bridge/data'), { recursive: true });
+    writeFileSync(join(dir, 'bridge/data/secret.txt'), 'ignored\n');
+    assert.match(git('check-ignore', '-v', 'bridge/data/secret.txt'), /data\//);
+    const withIgnored = await collectSourceInputs(deps);
+    assert.deepEqual(withIgnored.map((f) => f.path), basePaths);
+    assert.equal((await computeSourceFingerprint(deps, withIgnored)).sha256, base.sha256);
+
+    const untracked = join(dir, 'bridge/src/extra.ts');
+    writeFileSync(untracked, 'export const extra = 1;\n');
+    assert.throws(() => git('check-ignore', '-q', 'bridge/src/extra.ts'));
+    const added = await collectSourceInputs(deps);
+    assert.equal(added.some((f) => f.path === 'bridge/src/extra.ts'), true);
+    assert.deepEqual(added.map((f) => f.path), await listFingerprintInputs(deps));
+    const addedFp = await computeSourceFingerprint(deps, added);
+    assert.notEqual(addedFp.sha256, base.sha256);
+
+    writeFileSync(untracked, 'export const extra = 2;\n');
+    const edited = await computeSourceFingerprint(deps);
+    assert.notEqual(edited.sha256, addedFp.sha256);
+
+    const stage = mkdtempSync(join(tmpdir(), 'chaos-list-stage-'));
+    try {
+      const staged = stageSourceTree(stage, await collectSourceInputs(deps));
+      assert.deepEqual(staged, await listFingerprintInputs(deps));
+      assert.equal(existsSync(join(stage, 'bridge/data/secret.txt')), false);
+      assert.equal(readFileSync(join(stage, 'bridge/src/extra.ts'), 'utf8'), 'export const extra = 2;\n');
+    } finally {
+      rmSync(stage, { recursive: true, force: true });
+    }
+
+    rmSync(untracked);
+    assert.equal((await computeSourceFingerprint(deps)).sha256, base.sha256);
+
+    chmodSync(join(dir, 'bridge/src/x.ts'), 0o755);
+    const flipped = await computeSourceFingerprint(deps);
+    assert.notEqual(flipped.sha256, base.sha256);
+    const flippedInputs = await collectSourceInputs(deps);
+    assert.equal(flippedInputs.find((f) => f.path === 'bridge/src/x.ts')?.executable, true);
+    chmodSync(join(dir, 'bridge/src/x.ts'), 0o644);
+    assert.equal((await computeSourceFingerprint(deps)).sha256, base.sha256);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('re-staging drops a path removed from the list and the on-disk set matches', () => {
+  const dest = mkdtempSync(join(tmpdir(), 'chaos-restage-'));
+  const keep = { path: 'bridge/src/keep.ts', digest: null, executable: false, bytes: Buffer.from('keep\n') };
+  const drop = { path: 'bridge/src/drop.ts', digest: null, executable: false, bytes: Buffer.from('drop\n') };
+  const gone = { path: 'bridge/only/gone.ts', digest: null, executable: false, bytes: Buffer.from('gone\n') };
+  try {
+    stageSourceTree(dest, [keep, drop, gone]);
+    assert.deepEqual(walkFiles(dest), ['bridge/only/gone.ts', 'bridge/src/drop.ts', 'bridge/src/keep.ts']);
+    assert.deepEqual(walkDirs(dest), parentDirs(walkFiles(dest)));
+    stageSourceTree(dest, [keep]);
+    assert.deepEqual(walkFiles(dest), ['bridge/src/keep.ts']);
+    assert.deepEqual(walkDirs(dest), parentDirs(['bridge/src/keep.ts']));
+    assert.equal(existsSync(join(dest, 'bridge/src/drop.ts')), false);
+    assert.equal(existsSync(join(dest, 'bridge/only')), false);
+    mkdirSync(join(dest, 'bridge/unexpected'));
+    assert.notDeepEqual(walkDirs(dest), parentDirs(walkFiles(dest)));
+  } finally {
+    rmSync(dest, { recursive: true, force: true });
+  }
+});
+
+test('defaultFingerprintDeps rejects a symlink instead of following it', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'chaos-link-'));
+  try {
+    const git = (...args: string[]) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' });
+    git('init', '-q');
+    git('config', 'user.email', 'test@example.com');
+    git('config', 'user.name', 'Test');
+    mkdirSync(join(dir, 'bridge/src'), { recursive: true });
+    writeFileSync(join(dir, 'bridge/src/x.ts'), 'export const x = 1;\n');
+    symlinkSync('x.ts', join(dir, 'bridge/src/link.ts'));
+    git('add', '.');
+    git('commit', '-q', '-m', 'init');
+    await assert.rejects(collectSourceInputs(defaultFingerprintDeps(dir)), /not a regular file: bridge\/src\/link\.ts/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('acquireBuildLock holds a fresh live pid, reclaims a dead or stale pid, and keeps an unreadable lock', () => {
+  const dir = '/cache/build.lock';
+  const now = 1_700_000_000_000;
+  const alive = memLock();
+  acquireBuildLock(dir, 10, alive, () => true, () => now);
+  assert.throws(() => acquireBuildLock(dir, 11, alive, (pid) => pid === 10, () => now + 1), /exits 3/);
+  assert.equal(heldPid(alive, dir), '10');
+
+  const old = memLock();
+  old.mkdir(dir);
+  old.writeFile(`${dir}/pid`, `10\n${now - BUILD_LOCK_STALE_MS - 1}\n`);
+  const notices: string[] = [];
+  acquireBuildLock(dir, 12, old, () => true, () => now, (line) => notices.push(line));
+  assert.equal(notices.length, 1);
+  assert.match(notices[0], /reclaiming stale lock/);
+  assert.match(notices[0], /exceeds 60 minutes/);
+  assert.equal(heldPid(old, dir), '12');
+
+  const dead = memLock();
+  dead.mkdir(dir);
+  dead.writeFile(`${dir}/pid`, `99\n${now}\n`);
+  const deadNotices: string[] = [];
+  acquireBuildLock(dir, 16, dead, () => false, () => now, (line) => deadNotices.push(line));
+  assert.deepEqual(deadNotices, []);
+  assert.equal(heldPid(dead, dir), '16');
+  releaseBuildLock(dir, 16, dead);
+  assert.throws(() => dead.readFile(`${dir}/pid`));
+
+  const other = memLock();
+  acquireBuildLock(dir, 13, other, () => true, () => now);
+  releaseBuildLock(dir, 14, other);
+  assert.equal(heldPid(other, dir), '13');
+
+  const unread = memLock();
+  unread.mkdir(dir);
+  assert.throws(() => acquireBuildLock(dir, 15, unread, () => false, () => now), /no readable pid/);
+  assert.throws(() => unread.readFile(`${dir}/pid`));
+});
+
+test('defaultFingerprintDeps rejects a directory and a fifo instead of hanging', { timeout: 10_000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'chaos-fifo-'));
+  try {
+    const git = (...args: string[]) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' });
+    git('init', '-q');
+    git('config', 'user.email', 'test@example.com');
+    git('config', 'user.name', 'Test');
+    mkdirSync(join(dir, 'bridge/src'), { recursive: true });
+    writeFileSync(join(dir, 'bridge/src/x.ts'), 'export const x = 1;\n');
+    writeFileSync(join(dir, 'bridge/src/entry.ts'), 'export const entry = 1;\n');
+    writeFileSync(join(dir, 'bridge/src/pipe.ts'), 'export const pipe = 1;\n');
+    git('add', '.');
+    git('commit', '-q', '-m', 'init');
+    rmSync(join(dir, 'bridge/src/entry.ts'));
+    mkdirSync(join(dir, 'bridge/src/entry.ts'));
+    await assert.rejects(
+      collectSourceInputs(defaultFingerprintDeps(dir)),
+      /not a regular file: bridge\/src\/entry\.ts/,
+    );
+    rmSync(join(dir, 'bridge/src/entry.ts'), { recursive: true });
+    git('checkout', '-q', '--', 'bridge/src/entry.ts');
+
+    // git ls-files does not list an untracked fifo, so the listed path is a
+    // tracked file replaced on disk. Open must return instead of waiting.
+    const fifo = join(dir, 'bridge/src/pipe.ts');
+    rmSync(fifo);
+    let created = false;
+    try {
+      execFileSync('mkfifo', [fifo], { stdio: 'ignore' });
+      created = true;
+    } catch {
+      created = false;
+    }
+    if (created) {
+      await assert.rejects(
+        collectSourceInputs(defaultFingerprintDeps(dir)),
+        /not a regular file: bridge\/src\/pipe\.ts/,
+      );
+    } else {
+      const fs: InputFs = {
+        open(_path, flags) {
+          assert.equal(flags & constants.O_NONBLOCK, constants.O_NONBLOCK);
+          assert.equal(flags & constants.O_NOFOLLOW, constants.O_NOFOLLOW);
+          return 3;
+        },
+        fstat() {
+          return { isFile: () => false, size: 0, mode: 0o10644 };
+        },
+        read() {
+          throw new Error('fifo read should not run');
+        },
+        close() {},
+      };
+      assert.throws(() => readRegularFile(fifo, 'bridge/src/pipe.ts', fs), /not a regular file: bridge\/src\/pipe\.ts/);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
