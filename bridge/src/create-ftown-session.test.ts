@@ -829,18 +829,36 @@ describe('createFtownSession — Pi launch', () => {
     const harness = fakeDeps();
     const session = await createFtownSession(harness.deps, {
       shellType: 'opencode',
-      model: 'anthropic/claude-sonnet-4-5',
+      model: 'opencode-go/kimi-k3.1-pro',
       prompt: "inspect today's changes",
+      env: { PATH: '/tools:/usr/bin', OPENCODE_CONFIG_CONTENT: '{"model":"ignored"}' },
     });
 
     assert.strictEqual(session.shellType, 'opencode');
-    assert.strictEqual(session.command, "opencode --auto -m 'anthropic/claude-sonnet-4-5'");
+    assert.strictEqual(session.command, 'opencode --standalone --auto');
     assert.strictEqual(
       harness.runs[0].command,
-      "opencode --auto -m 'anthropic/claude-sonnet-4-5' --prompt 'inspect today'\\''s changes'",
+      "opencode --standalone --auto --prompt 'inspect today'\\''s changes'",
     );
-    // No typed-input race: the prompt rode the command line.
     assert.strictEqual(harness.runs[0].initialInput, undefined);
+    assert.strictEqual(session.env?.PATH, '/tools:/usr/bin');
+    assert.strictEqual(session.env?.OPENCODE_CONFIG_CONTENT, '{"model":"opencode-go/kimi-k3.1-pro"}');
+    assert.strictEqual(harness.runs[0].env?.OPENCODE_CONFIG_CONTENT, '{"model":"opencode-go/kimi-k3.1-pro"}');
+    session.opencodeSessionId = 'ses_resume';
+    const relaunch = deriveRelaunchCommand(session);
+    assert.strictEqual(relaunch.isCustom, false);
+    assert.strictEqual(relaunch.command, "opencode --standalone --auto --session 'ses_resume'");
+  });
+
+  it('createFtownSession — opencode without a model keeps the frozen command and env', async () => {
+    const harness = fakeDeps();
+    const session = await createFtownSession(harness.deps, {
+      shellType: 'opencode',
+      prompt: 'hello',
+    });
+    assert.strictEqual(session.command, 'opencode --auto');
+    assert.strictEqual(harness.runs[0].command, "opencode --auto --prompt 'hello'");
+    assert.strictEqual(session.env, undefined);
   });
 });
 

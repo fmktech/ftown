@@ -11,6 +11,7 @@ import {
   harnessAcceptsPromptAsCliArg,
   InvalidShellTypeError,
   normalizeShellType,
+  opencodeLaunchEnv,
   SHELL_ALIASES,
   type HarnessSpec,
 } from './harness-registry.js';
@@ -525,16 +526,22 @@ async function createFtownSessionImpl(
   assertProviderAuthAvailable(shellType, sources);
   const providerRuntime = resolveProviderRuntimeEnv(shellType);
   const providerAuth = resolveProviderAuthEnv(shellType, sources);
+  // After input.env so a requested model wins, and a caller PATH stays put.
+  // Resume and retry replay session.env, so the model config has to be stored
+  // here rather than only on the first spawn.
+  const launchEnv = shellType === 'opencode' ? opencodeLaunchEnv(input.model) : undefined;
   const shouldSetSessionEnv =
     Boolean(input.env)
     || Object.keys(providerRuntime).length > 0
-    || Object.keys(providerAuth).length > 0;
+    || Object.keys(providerAuth).length > 0
+    || launchEnv !== undefined;
   const sessionEnv: Record<string, string> | undefined =
     shouldSetSessionEnv
       ? {
           ...providerRuntime,
           ...(input.env ?? {}),
           ...providerAuth,
+          ...launchEnv,
         }
       : undefined;
 
