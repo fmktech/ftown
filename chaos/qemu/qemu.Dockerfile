@@ -3,8 +3,10 @@
 # firmware and runtime libraries come from the pinned Debian package. Optional build args:
 # TLBFIX=1 (default, required for reproducible runs) applies patches/tlb-deterministic-resize.patch:
 # stock 7.2 sizes the softmmu TLB from host realtime, which leaks into guest PTE Accessed/Dirty bits.
-# PATCH=1 applies patches/icount-warp-race.patch (unproven, off by default); TRACE=1 adds
-# investigation-only tracing (patches/trace.py). Neither is used for real runs.
+# PATCH=1 (default) applies patches/icount-warp-race.patch: sleep=off must not advance
+# the virtual clock across a halted vCPU slice that is not yet in qemu_icount.
+# TRACE=1 adds investigation-only tracing (patches/trace.py), including a yield that
+# widens the warp window. TRACE is never used for real runs.
 FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS build
 ARG QEMU_VER=1:7.2+dfsg-7+deb12u18
 RUN sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/debian.sources \
@@ -15,8 +17,8 @@ RUN sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/debian.s
  && apt-get source --only-source "qemu=${QEMU_VER}" \
  && rm -rf /var/lib/apt/lists/*
 COPY patches/ /src/patches/
-# PATCH=1 applies the (unproven) icount warp patch, off by default; TRACE=1 adds investigation-only tracing (never for real runs).
-ARG PATCH=0
+# PATCH=1 (default) closes the sleep=off idle warp race. TRACE=1 is investigation only.
+ARG PATCH=1
 ARG TLBFIX=1
 ARG TRACE=0
 RUN cd /src/qemu-7.2+dfsg \
