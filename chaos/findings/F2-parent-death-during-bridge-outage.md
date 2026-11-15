@@ -2,11 +2,11 @@
 
 ## Summary
 
-A child asks a question that the bridge routes to its parent. The human inbox shows that question greyed, marked with the parent, and does not notify the human. The parent is then killed while the bridge is down for a restart, before the new bridge has attached to the parent's session. When the bridge comes back it records the parent as an error and leaves the question routed to the parent. The child stays blocked in a wait that is allowed to last a day (`chaos/src/fake-agent/agent.ts:72-73,215-224`), and on seed 9 it was still alive and still unanswered at the final checkpoint, about 149 seconds after the parent died.
+A child asks a question that the bridge routes to its parent. The human inbox shows that question greyed, marked with the parent, and does not notify the human. A human who opens the inbox can still answer the greyed "with parent" item. What is missing is the escalation and its notice. The parent is then killed while the bridge is down for a restart, before the new bridge has attached to the parent's session. When the bridge comes back it records the parent as an error and leaves the question routed to the parent. The child stays blocked in a wait that is allowed to last a day (`chaos/src/fake-agent/agent.ts:72-73,215-224`), and on seed 9 it was still alive and still unanswered at the final checkpoint, about 149 seconds after the parent died.
 
 ## Trigger
 
-Three things land together. The bridge is killed and is still down. The parent process is killed before the new bridge has re-attached to that session, so the bridge that owned the terminal never sees the exit, and the new process finds no tmux session to attach to (`remain-on-exit` is off, `bridge/src/tmux.ts:76`). The stored session is not resumable: it is a custom command with no recorded agent session id (`bridge/src/create-ftown-session.ts:401`), so startup marks it error instead of respawning it.
+Three things land together. The bridge is killed and is still down. The parent process is killed before the new bridge has re-attached to that session, so the bridge that owned the terminal never sees the exit, and the new process finds no tmux session to attach to (`remain-on-exit` is off, `bridge/src/tmux.ts:76`). The stored session is not resumable because it has no stored agent session id. Root's only hook fired during the outage, and the hook script exits 0 without reaching the bridge, so no id was recorded. `canResumeStoredSession` refuses resume for this shell unless `claudeSessionId` is set (`bridge/src/create-ftown-session.ts:401`), so startup marks the session error instead of respawning it.
 
 ## Evidence
 
@@ -16,7 +16,7 @@ Both runs below are contract 9 (`canon.jsonl` line 1), profile short, level low.
 | --- | --- | --- |
 | Seed 9, short, low | `canon.jsonl` L18, checkpoint `cp4`, t=60000 | `CHAOS-Q-4000` is already stored for child3, route `parent`, unresolved, not escalated. The root inbox already has the parent-question mail (`untaggedWakingMail` 1). |
 | Seed 9, short, low | `canon.jsonl` L20, t=62999 | child3 logs `ask_sent` for `CHAOS-Q-4000`, accepted. No `answer_received` for this tag exists in the log. |
-| Seed 9, short, low | `canon.jsonl` L29–L30 | `f1` `bridge_kill9` start t=83511 doneT=83519 ok. Heal starts t=85485 and `up.sh` returns at doneT=110538 ok. The bridge is down across that span. |
+| Seed 9, short, low | `canon.jsonl` L29–L30 | `f1` `bridge_kill9` start t=83511 doneT=83519 ok. Heal starts t=85485 and `up.sh` returns at doneT=110538 ok. The bridge process is dead at the 90 s checkpoint (`cp6`, t=90000) and the 105 s checkpoint (`cp7`, t=105000). The parent is killed at 101.2 s (t=101154), between them. The new bridge accepts its first CLI call at 105.8 s (t=105751) and the restart script returns at 110.5 s (doneT=110538). |
 | Seed 9, short, low | `canon.jsonl` L43, t=101154 doneT=101251 | `f3` `parent_kill9` of root, ok. This is inside the bridge-down span. |
 | Seed 9, short, low | `canon.jsonl` L44, checkpoint `cp7`, t=105000 | Bridge still dead. Root's on-disk status is still `running` because nothing has rewritten it. `tmuxAlive` false, `procAlive` false. The question is still route `parent`. |
 | Seed 9, short, low | `side-procs.txt` checkpoint `cp6` (header at line 344) vs `cp7` (header at line 420) | `cp6` still has the root agent process (`node … fake-agent/main.ts --role root`, line 398). From `cp7` on, that process is gone. |
