@@ -80,11 +80,11 @@ export function waitingInboxCount(entries: readonly InboxEntry[]): number {
   return entries.filter(entry => !isWithParent(entry.notice)).length;
 }
 
-export function InboxItemBody({ entry, onOpenSession, onDismiss, onReply, onAnswer, hideOpenSession }: { entry: InboxEntry; onOpenSession: (id: string) => void; onDismiss: (entry: InboxEntry) => Promise<void>; onReply: (entry: InboxEntry, message: string) => Promise<void>; onAnswer: (entry: InboxEntry, answers: AttentionAnswerEntry[]) => Promise<AttentionAnswerSubmitResult>; hideOpenSession?: boolean }) {
+export function InboxItemBody({ entry, onOpenSession, onDismiss, onReply, onAnswer, hideOpenSession, initiallyExpanded = false }: { entry: InboxEntry; onOpenSession: (id: string) => void; onDismiss: (entry: InboxEntry) => Promise<void>; onReply: (entry: InboxEntry, message: string) => Promise<void>; onAnswer: (entry: InboxEntry, answers: AttentionAnswerEntry[]) => Promise<AttentionAnswerSubmitResult>; hideOpenSession?: boolean; initiallyExpanded?: boolean }) {
   const [draft, setDraft] = useState(""); const [message, setMessage] = useState(""); const [error, setError] = useState("");
   const [sending, setSending] = useState(false); const [dismissing, setDismissing] = useState(false);
   const withParent = isWithParent(entry.notice);
-  const [expanded, setExpanded] = useState(!withParent);
+  const [expanded, setExpanded] = useState(!withParent || initiallyExpanded);
   const sendingRef = useRef(false), dismissingRef = useRef(false);
   const name = entry.session.name || entry.session.prompt?.slice(0, 36) || "Session";
   async function send() {

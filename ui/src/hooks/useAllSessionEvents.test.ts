@@ -683,6 +683,24 @@ describe("structured attention questions", () => {
     expect(h.current()?.attention).toBeUndefined();
   });
 
+  it("answers an item that is not the displayed slot and dismisses it by id", async () => {
+    const h = durableSetup(async command => {
+      if (command.type === "answer_session_attention") return respond(saved, { delivery: "mail" });
+      if (command.type === "resolve_session_attention") return respond(saved);
+      return respond({ ...saved, prompt: mailPrompt });
+    });
+    await settle();
+    const other = { ...h.current()!.attention!, attentionId: "other-item", attentionSequence: 4 };
+    let result: unknown;
+    await act(async () => { result = await h.result.current.answerAttentionItem("agent", other, answers); });
+    expect(result).toEqual({ ok: true, delivery: "mail" });
+    expect(h.rpc.sendCommand).toHaveBeenCalledWith(expect.objectContaining({ type: "answer_session_attention",
+      payload: { bridgeId: "bridge", sessionId: "agent", eventId: "other-item", answers } }));
+    await act(async () => { await h.result.current.dismissAttentionItem("agent", "other-item"); });
+    expect(h.rpc.sendCommand).toHaveBeenCalledWith(expect.objectContaining({ type: "resolve_session_attention",
+      payload: { bridgeId: "bridge", sessionId: "agent", eventId: "other-item" } }));
+  });
+
   it("does not send without an attentionId or a prompt", async () => {
     const h = durableSetup(async () => respond({ ...saved, prompt: mailPrompt }));
     await settle();

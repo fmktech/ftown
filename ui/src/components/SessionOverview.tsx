@@ -5,6 +5,11 @@ import type { Session, SessionCard, SessionStatus } from "@/types";
 import { markdownPreviewDocument } from "@/lib/session-preview";
 import { relativeTime } from "@/lib/relative-time";
 import type { SessionActivity } from "@/hooks/useAllSessionEvents";
+import type { AttentionPrompt } from "../../../bridge/src/attention-prompt-protocol";
+import type { AttentionAnswerEntry } from "../../../bridge/src/attention-prompt-protocol";
+import type { AttentionAnswerSubmitResult } from "./AttentionAnswerForm";
+import type { InboxEntry } from "./SessionInbox";
+import { ChildrenAttentionPanel, type ChildAttentionItem } from "./ChildrenAttentionPanel";
 import { SessionCardChip, cardStateLabel, cardStateStyle } from "./SessionCardChip";
 import { PullRequestLink } from "./PullRequestLink";
 
@@ -47,13 +52,18 @@ export interface SnapshotEvent {
 
 export interface SnapshotAttentionEvent {
   id: string;
+  type?: string;
   title: string;
   message?: string;
+  createdAt?: string;
+  sequence?: number;
   resolvedAt?: string;
   route?: string;
+  routedTo?: string;
   escalatedAt?: string;
   escalationNote?: string;
-  prompt?: { questions: ReadonlyArray<{ options: ReadonlyArray<{ label: string }> }> };
+  answeredBy?: { kind: "human" | "session"; sessionId?: string; name?: string };
+  prompt?: AttentionPrompt;
 }
 
 export interface OverviewSnapshot {
@@ -79,6 +89,16 @@ export interface SessionOverviewProps {
   plan?: PlanView;
   /** Clock for deterministic card-age rendering in tests. */
   now?: number;
+  /** Children's open attention items with the inbox answer/dismiss/reply handlers; renders the coordinator panel. */
+  childAttention?: {
+    items: ReadonlyArray<ChildAttentionItem>;
+    openId: string | null;
+    onOpenChange: (id: string | null) => void;
+    onOpenSession: (id: string) => void;
+    onDismiss: (entry: InboxEntry) => Promise<void>;
+    onReply: (entry: InboxEntry, message: string) => Promise<void>;
+    onAnswer: (entry: InboxEntry, answers: AttentionAnswerEntry[]) => Promise<AttentionAnswerSubmitResult>;
+  };
 }
 
 /** Children of `session`, oldest first (the order the tree was built in). */
@@ -311,6 +331,7 @@ interface RowContext {
   managerName: string;
   events: ReadonlyArray<SnapshotEvent>;
   items: SnapshotOverviewItems;
+  onOpenAttention?: (eventId: string) => void;
 }
 type SnapshotOverviewItems = OverviewSnapshot["attention"];
 
@@ -373,14 +394,16 @@ function OverviewRow({ entry, owner, open, onToggle, context, faint = false }: {
           {stateLabel && <Detail label="state">{stateLabel}</Detail>}
           {card?.state === "blocked" && card.blockedOn && <Detail label="blocked">{card.blockedOn.text}</Detail>}
           {questions.length > 0
-            ? questions.map(({ event }) => (
-                <Detail key={event.id} label="question">
-                  {event.title}
-                  {" · "}{event.route === "parent" && !event.escalatedAt ? `with ${managerName}` : "you"}
-                  {event.escalationNote ? ` · ${event.escalationNote}` : ""}
-                  {event.prompt?.questions[0]?.options.length ? ` · ${event.prompt.questions[0].options.map(option => option.label).join(" / ")}` : ""}
-                </Detail>
-              ))
+            ? questions.map(({ event }) => {
+                const label = `${event.title} · ${event.route === "parent" && !event.escalatedAt ? `with ${managerName}` : "you"}${event.escalationNote ? ` · ${event.escalationNote}` : ""}${event.prompt?.questions[0]?.options.length ? ` · ${event.prompt.questions[0].options.map(option => option.label).join(" / ")}` : ""}`;
+                return (
+                  <Detail key={event.id} label="question">
+                    {context.onOpenAttention ? (
+                      <button type="button" data-attention-open={event.id} onClick={() => context.onOpenAttention!(event.id)} style={{ ...resetButton, color: "var(--accent)", textDecoration: "underline", textUnderlineOffset: 2 }}>{label}</button>
+                    ) : label}
+                  </Detail>
+                );
+              })
             : entry.openAttention > 0 && <Detail label="question">{entry.openAttention} open</Detail>}
           {card?.next && <Detail label="next">{card.next}</Detail>}
           {activity && <Detail label="activity">{activity}</Detail>}
@@ -430,6 +453,11 @@ function isDisplayed(element: HTMLElement): boolean {
   return true;
 }
 
+function cssEscape(value: string): string {
+  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") return CSS.escape(value);
+  return value.replace(/[^a-zA-Z0-9_-]/g, character => `\\${character}`);
+}
+
 /** j/ArrowDown focuses the next row (the first when none is focused yet); k/ArrowUp the previous. */
 function moveRowFocus(rows: ReadonlyArray<HTMLElement>, target: HTMLElement | null, key: string): void {
   const index = target ? rows.indexOf(target) : -1;
@@ -476,8 +504,23 @@ export function SessionOverview(props: SessionOverviewProps) {
   const managerName = session.name || session.id;
   const events = snapshot?.events ?? [];
   const plan = props.plan ?? snapshot?.board.plan ?? (session.plan?.items.length ? orderPlan(session.plan.items) : undefined);
-  const context: RowContext = { now, managerName, events, items: snapshot?.attention ?? [] };
+  const childAttention = props.childAttention;
+  const openAttention = (eventId: string) => {
+    childAttention?.onOpenChange(eventId);
+    requestAnimationFrame(() => {
+      const target = rootRef.current?.querySelector<HTMLElement>(`#child-attention-${cssEscape(eventId)}`);
+      target?.scrollIntoView?.({ block: "nearest" });
+    });
+  };
+  const context: RowContext = { now, managerName, events, items: snapshot?.attention ?? [], ...(childAttention ? { onOpenAttention: openAttention } : {}) };
   const brief = session.brief;
+
+  useEffect(() => {
+    const openId = childAttention?.openId;
+    if (!openId) return;
+    const target = rootRef.current?.querySelector<HTMLElement>(`#child-attention-${cssEscape(openId)}`);
+    target?.scrollIntoView?.({ block: "nearest" });
+  }, [childAttention?.openId, childAttention?.items]);
 
   const flip = (set: ReadonlySet<string>, key: string): Set<string> => {
     const next = new Set(set);
@@ -527,6 +570,10 @@ export function SessionOverview(props: SessionOverviewProps) {
           <span style={{ fontSize: 13, fontWeight: 500, flexShrink: 0 }}>{managerName}</span>
           <SessionCardChip card={session.card} />
         </div>
+
+        {childAttention && childAttention.items.length > 0 && (
+          <ChildrenAttentionPanel items={childAttention.items} openId={childAttention.openId} onOpenChange={childAttention.onOpenChange} onOpenSession={childAttention.onOpenSession} onDismiss={childAttention.onDismiss} onReply={childAttention.onReply} onAnswer={childAttention.onAnswer} now={now} />
+        )}
 
         {groups.attention.length > 0 && (
           <section aria-label="Needs attention" style={{ display: "flex", flexDirection: "column", gap: 4 }}>

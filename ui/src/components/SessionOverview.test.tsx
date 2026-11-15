@@ -529,4 +529,43 @@ describe("SessionWorkspace overview toggle", () => {
     expect(screen.getByRole("button", { name: /FailedPR/ }).textContent).toContain("PR ✗");
     expect(screen.getByRole("button", { name: /PlainPR/ }).textContent).not.toContain("PR ");
   });
+
+  it("opens a child's question into the coordinator answer panel", () => {
+    const manager = managerSession({ brief: undefined });
+    const child = session("asker", { name: "Asker", parentSessionId: "manager", card: card("working") });
+    const prompt = { channel: "mail" as const, questions: [{ question: "Which database?", options: [{ label: "Postgres" }, { label: "SQLite" }], multiSelect: false, allowText: false }] };
+    const receivedAt = NOW - 60_000;
+    const notice = { type: "agent_needs_input" as const, title: "Database", message: "Which database?", receivedAt, attentionId: "evt-1", attentionSequence: 1, route: "parent" as const, routedTo: "manager", prompt };
+    const snapshot: OverviewSnapshot = {
+      board: { rootId: "manager", cards: [snapCard("asker", "Asker", child.card)] },
+      events: [],
+      attention: [{ sessionId: "asker", event: { id: "evt-1", title: "Database", message: "Which database?", route: "parent", prompt, createdAt: new Date(receivedAt).toISOString() } }],
+    };
+    const onOpenChange = vi.fn();
+    const childAttention = {
+      items: [{ entry: { session: child, notice, bridgeName: "bridge" }, eventId: "evt-1", live: true }],
+      openId: null as string | null,
+      onOpenChange, onOpenSession: vi.fn(), onDismiss: vi.fn(async () => {}), onReply: vi.fn(async () => {}),
+      onAnswer: vi.fn(async () => ({ ok: true as const, message: "Answer delivered to Asker." })),
+    };
+    const view = (openId: string | null) => (
+      <PullRequestStatusProvider send={send} sessions={[manager, child]} readyBridgeIds={["bridge"]} connected={false}>
+        <SessionOverview session={manager} sessions={[manager, child]} now={NOW} snapshot={snapshot} childAttention={{ ...childAttention, openId }} />
+      </PullRequestStatusProvider>
+    );
+    const { rerender } = render(view(null));
+    const overview = screen.getByRole("region", { name: "Overview: Manager" });
+    expect(within(overview).getByRole("region", { name: "Child attention requests" }).textContent).toContain("Waiting on coordinator");
+    expect(within(overview).queryByRole("button", { name: "Send answer" })).toBeNull();
+    const row = [...overview.querySelectorAll("[data-overview-row]")].find(node => node.textContent?.includes("Asker"));
+    expect(row).toBeTruthy();
+    fireEvent.click(row!);
+    const question = overview.querySelector("[data-attention-open='evt-1']");
+    expect(question).toBeTruthy();
+    fireEvent.click(question!);
+    expect(onOpenChange).toHaveBeenCalledWith("evt-1");
+    rerender(view("evt-1"));
+    expect(within(screen.getByRole("region", { name: "Child attention requests" })).getByRole("button", { name: "Send answer" })).toBeTruthy();
+    expect(screen.getByLabelText("SQLite")).toBeTruthy();
+  });
 });

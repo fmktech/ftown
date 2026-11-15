@@ -21,7 +21,10 @@ const state = vi.hoisted(() => ({
   bridgeExec: vi.fn().mockResolvedValue({ stdout: "", stderr: "", exitCode: 0 }),
   clearSessionAttention: vi.fn(),
   answerSessionAttention: vi.fn(),
+  answerAttentionItem: vi.fn(),
+  dismissAttentionItem: vi.fn(),
   refreshSessionAttention: vi.fn(),
+  boardSnapshot: null as unknown,
   rpcCommands: [] as string[],
   terminalGetText: vi.fn(() => "terminal output"),
   terminalPaste: vi.fn(),
@@ -35,12 +38,16 @@ vi.mock("@/hooks/useSessions", () => ({ useSessions: () => ({
   renameSession: vi.fn(), setSessionParent: vi.fn(), refreshSessions: vi.fn(),
 }) }));
 vi.mock("@/hooks/useBridgeRpc", () => ({ useBridgeRpc: () => ({ bridgeExec: state.bridgeExec,
-  sendCommand: vi.fn().mockImplementation(async command => { state.rpcCommands.push(command.type); return command.type === "send_message" ? { success: true, data: { sessionId: "ordinary", messageId: "m1", status: "queued" } } : { success: true, data: { sessionId: "ordinary", attention: null, sequence: 0 } }; }),
+  sendCommand: vi.fn().mockImplementation(async command => {
+    state.rpcCommands.push(command.type);
+    if (command.type === "get_session_board" && state.boardSnapshot) return { success: true, data: state.boardSnapshot };
+    return command.type === "send_message" ? { success: true, data: { sessionId: "ordinary", messageId: "m1", status: "queued" } } : { success: true, data: { sessionId: "ordinary", attention: null, sequence: 0 } };
+  }),
   onSubscribed: () => () => {},
 }) }));
 vi.mock("@/hooks/useBridges", () => ({ useBridges: () => ({ bridges: state.bridges, hasBridges: true, prepareLocalAccess: vi.fn() }) }));
 vi.mock("@/hooks/useAllSessionEvents", () => ({ useAllSessionEvents: () => ({
-  sessionActivity: state.activity, markSessionIdle: vi.fn(), clearSessionAttention: state.clearSessionAttention, answerSessionAttention: state.answerSessionAttention, refreshSessionAttention: state.refreshSessionAttention,
+  sessionActivity: state.activity, markSessionIdle: vi.fn(), clearSessionAttention: state.clearSessionAttention, answerSessionAttention: state.answerSessionAttention, answerAttentionItem: state.answerAttentionItem, dismissAttentionItem: state.dismissAttentionItem, refreshSessionAttention: state.refreshSessionAttention,
 }) }));
 vi.mock("./Terminal", async () => {
   const { forwardRef, useImperativeHandle } = await import("react");
@@ -90,7 +97,11 @@ beforeEach(() => {
   state.rpcCommands = [];
   state.createSession.mockResolvedValue(undefined);
   state.clearSessionAttention.mockResolvedValue(undefined);
+  state.answerSessionAttention.mockResolvedValue({ ok: true, delivery: "waiter" });
+  state.answerAttentionItem.mockResolvedValue({ ok: true, delivery: "waiter" });
+  state.dismissAttentionItem.mockResolvedValue(undefined);
   state.refreshSessionAttention.mockResolvedValue(undefined);
+  state.boardSnapshot = null;
   state.sessions = [
     session("ordinary", "Regular shell"),
     session("legacy", "Preserved run", { loopId: "retired-loop", status: "error" }),
@@ -385,6 +396,65 @@ describe("inbox document title", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Terminal" }));
     fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
     await waitFor(() => expect(document.title).toBe("(1) ftown base"));
+  });
+});
+
+const childPrompt = { channel: "mail" as const, questions: [{ question: "Which database?", options: [{ label: "Postgres" }, { label: "SQLite" }], multiSelect: false, allowText: false }] };
+
+describe("coordinator attention", () => {
+  const childNotice = { type: "agent_needs_input" as const, title: "Database", message: "Which database?", receivedAt: 10, attentionId: "att-child", attentionSequence: 1, route: "parent" as const, routedTo: "boss", prompt: childPrompt };
+
+  function bossSessions() {
+    state.sessions = [session("boss", "Boss"), session("child", "Worker", { parentSessionId: "boss" })];
+    state.activity = new Map([["child", { activity: "idle", attention: childNotice }]]);
+    state.boardSnapshot = {
+      board: {
+        rootId: "boss",
+        cards: [{
+          sessionId: "child", name: "Worker", stale: false, declared: null,
+          derived: { status: "running", activity: "idle", openAttention: 1, unreadMail: 0, previews: [] },
+        }],
+      },
+      events: [],
+      attention: [{ sessionId: "child", event: { id: "att-child", title: "Database", message: "Which database?", type: "agent_needs_input", route: "parent", routedTo: "boss", createdAt: "2026-11-15T00:00:00.000Z", prompt: childPrompt } }],
+    };
+  }
+
+  afterEach(() => { window.history.replaceState(null, "", "/dashboard"); });
+
+  it("lists a parent-routed child question on the Overview and answers it there", async () => {
+    window.matchMedia = vi.fn().mockReturnValue({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    bossSessions();
+    dashboard();
+    fireEvent.click(await screen.findByRole("button", { name: /Boss/ }));
+    const overview = await screen.findByRole("region", { name: "Overview: Boss" });
+    const panel = within(overview).getByRole("region", { name: "Child attention requests" });
+    expect(panel.textContent).toContain("Worker");
+    expect(panel.textContent).toContain("Waiting on coordinator");
+    const row = [...overview.querySelectorAll("[data-overview-row]")].find(node => node.textContent?.includes("Worker"));
+    expect(row).toBeTruthy();
+    fireEvent.click(row!);
+    await waitFor(() => expect(overview.querySelector("[data-attention-open='att-child']")).toBeTruthy());
+    fireEvent.click(overview.querySelector("[data-attention-open='att-child']")!);
+    expect(window.location.search).toContain("attention=att-child");
+    expect(window.location.search).toContain("session=boss");
+    const openPanel = within(overview).getByRole("region", { name: "Child attention requests" });
+    fireEvent.click(within(openPanel).getByLabelText("SQLite"));
+    fireEvent.click(within(openPanel).getByRole("button", { name: "Send answer" }));
+    await waitFor(() => expect(state.answerSessionAttention).toHaveBeenCalledWith("child", childNotice, [{ selected: [1] }]));
+  });
+
+  it("opens a deep-linked child question on the parent Overview", async () => {
+    window.matchMedia = vi.fn().mockReturnValue({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    window.history.replaceState(null, "", "/dashboard?session=boss&attention=att-child");
+    bossSessions();
+    dashboard();
+    const overview = await screen.findByRole("region", { name: "Overview: Boss" });
+    expect(within(overview).getByRole("region", { name: "Child attention requests" }).textContent).toContain("Waiting on coordinator");
+    expect(within(overview).getByRole("button", { name: "Send answer" })).toBeTruthy();
+    expect(window.location.search).toContain("session=boss");
+    expect(window.location.search).toContain("attention=att-child");
+    window.history.replaceState(null, "", "/dashboard");
   });
 });
 

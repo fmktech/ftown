@@ -127,6 +127,10 @@ export interface AllSessionEvents {
   markSessionIdle: (sessionId: string) => void;
   clearSessionAttention: (sessionId: string, expected?: ManualInputNotice) => Promise<void>;
   answerSessionAttention: (sessionId: string, expected: ManualInputNotice, answers: AttentionAnswerEntry[]) => Promise<AnswerSessionAttentionResult>;
+  /** Answer one durable item by id, even when it is not the session's displayed slot item (coordinator panel). Same answer RPC. */
+  answerAttentionItem: (sessionId: string, expected: ManualInputNotice, answers: AttentionAnswerEntry[]) => Promise<AnswerSessionAttentionResult>;
+  /** Dismiss one durable item by id, even when it is not the displayed slot item. Same resolve RPC. */
+  dismissAttentionItem: (sessionId: string, eventId: string) => Promise<void>;
   /** Re-read a session's durable attention snapshot (after a reply resolved it). */
   refreshSessionAttention: (sessionId: string) => Promise<void>;
 }
@@ -632,9 +636,56 @@ export function useAllSessionEvents(
     return effective;
   }, [activityMap, sessions]);
 
+  const answerAttentionItem = useCallback(async (
+    sessionId: string, expected: ManualInputNotice, answers: AttentionAnswerEntry[],
+  ): Promise<AnswerSessionAttentionResult> => {
+    const fail = (code: string, message: string): AnswerSessionAttentionResult => ({ ok: false, code, message });
+    if (!expected.attentionId || !expected.prompt) return fail("attention_not_answerable", "This question cannot be answered here.");
+    const session = sessionsRef.current.find(row => row.id === sessionId);
+    if (!session || !rpcRef.current) return fail("session_unavailable", "The session is unavailable. Reconnect and try again.");
+    const eventId = expected.attentionId;
+    const sequence = expected.attentionSequence ?? 0;
+    const payload: AnswerSessionAttentionPayload = { bridgeId: session.bridgeId, sessionId, eventId, answers };
+    let response;
+    try { response = await rpcRef.current.sendCommand({ type: "answer_session_attention", requestId: uuidv4(), payload }); }
+    catch { void hydrate(sessionId, true); return fail("rpc_failed", "Could not send the answer. Reconnect and try again."); }
+    if (!response.success) {
+      const data = response.data && typeof response.data === "object" ? response.data as Record<string, unknown> : {};
+      const code = typeof data.code === "string" ? data.code : "command_failed";
+      const bridgeMessage = response.error || "Could not send the answer. Try again.";
+      if (code === "unknown_command" || code === "unsupported_command" || response.error === "Unknown command type: answer_session_attention") {
+        void hydrate(sessionId, true);
+        return fail(code === "command_failed" ? "unsupported_command" : code, "Update this computer's ftown bridge to answer questions.");
+      }
+      if (code === "attention_already_resolved" || code === "attention_not_found") {
+        dismissedThrough.current.set(sessionId, Math.max(dismissedThrough.current.get(sessionId) ?? 0, sequence));
+      }
+      void hydrate(sessionId, true);
+      return fail(code, bridgeMessage);
+    }
+    const parsed = answerResponse(response.data, sessionId);
+    if (!parsed) { void hydrate(sessionId, true); return fail("invalid_response", "Could not confirm the answer. Try again."); }
+    dismissedThrough.current.set(sessionId, Math.max(dismissedThrough.current.get(sessionId) ?? 0, sequence));
+    await readSnapshot(sessionId, true);
+    return { ok: true, delivery: parsed.delivery };
+  }, [hydrate, readSnapshot]);
+
+  const dismissAttentionItem = useCallback(async (sessionId: string, eventId: string) => {
+    const session = sessionsRef.current.find(row => row.id === sessionId);
+    if (!session || !rpcRef.current) throw new Error("The session is unavailable. Reconnect and try again.");
+    let response;
+    try { response = await rpcRef.current.sendCommand({ type: "resolve_session_attention", requestId: uuidv4(),
+      payload: { bridgeId: session.bridgeId, sessionId, eventId } }); }
+    catch { throw new Error("Could not dismiss this message. Reconnect and try again."); }
+    if (!response.success) throw new Error("Could not dismiss this message. Try again.");
+    const snapshot = snapshotResponse(response.data, sessionId);
+    if (!snapshot) throw new Error("Could not confirm dismissal. Try again.");
+    await readSnapshot(sessionId, true);
+  }, [readSnapshot]);
+
   const refreshSessionAttention = useCallback(async (sessionId: string) => {
     await readSnapshot(sessionId, true);
   }, [readSnapshot]);
 
-  return { sessionActivity, markSessionIdle, clearSessionAttention, answerSessionAttention, refreshSessionAttention };
+  return { sessionActivity, markSessionIdle, clearSessionAttention, answerSessionAttention, answerAttentionItem, dismissAttentionItem, refreshSessionAttention };
 }
