@@ -154,6 +154,12 @@ export function classifyFailure(input: {
   const ending = status === 'error' || status === 'completed';
   if (status === 'running' && !hit) return { action: 'ignore', notify: false };
   if (!ending && !hit) return { action: 'ignore', notify: false };
+  // A shell reaches completed when it is stopped or its command finishes.
+  // It never mails a result, so that transition is not a missing report.
+  // A limit or auth screen still counts, and status error still counts.
+  if (status === 'completed' && session.shellType === 'shell' && !hit) {
+    return { action: 'ignore', notify: false };
+  }
 
   const exitUnavailable = Boolean(input.message && /without recording an exit code/i.test(input.message));
   const parsedCode = exitUnavailable ? undefined : parseExitCode(input.message);

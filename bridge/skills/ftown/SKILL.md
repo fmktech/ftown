@@ -147,8 +147,11 @@ child is removed or archived while not already exited.
 
 ## Blocked children
 
-A usage limit, rate limit, expired login, crash, or an exit/error with no
+A usage limit, rate limit, expired login, crash, or an agent exit/error with no
 result report is a failure even when the session status stays `running`.
+An interactive shell that reaches `completed` — stopped, or its command
+finished — is not a failure. A shell that errors still is. The blocked
+child is expanded in the sidebar once per transition so its card is visible.
 The bridge records a block (`usage_limit`, `rate_limit`, `auth`, `crashed`,
 or `exited`, plus `resetAt` when the screen names a time) and sends the
 parent one waking escalation per transition. The mail names the reason,
@@ -157,7 +160,10 @@ board row and the dashboard Overview show a blocked badge with that reason
 and reset time. That badge is the bridge's detection. It is separate from
 a card you set to `blocked` with `ftown status set`. A session with no
 parent raises a human attention item titled `Session blocked` instead of
-mail. The same transition is not mailed twice.
+mail. The same transition is not mailed twice. `ftown sessions create` waits a few
+seconds for the child to stay running. If it errors, exits, or becomes
+blocked during that wait, the command exits non-zero and prints the reason.
+A failure after create returns still mails the launching session.
 
 Hand the work to a fresh session in the same directory:
 

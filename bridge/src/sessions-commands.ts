@@ -266,6 +266,38 @@ export const attentionClock = {
   sleep: (ms: number): Promise<void> => new Promise((done) => setTimeout(done, ms)),
 };
 
+const LAUNCH_WAIT_MS = 4000;
+const LAUNCH_POLL_MS = 200;
+
+function startupFailureReason(session: Session): string {
+  const block = session.block;
+  const fromBlock = block
+    ? [block.reason, block.resetAt ? `resets ${block.resetAt}` : '', block.screenTail].filter(Boolean).join(': ')
+    : '';
+  const reason = session.lastError?.trim() || session.errorReason?.trim() || fromBlock.trim();
+  return reason || 'process ended without an exit code';
+}
+
+/** Wait until the child is still running, or throw with a non-empty reason. */
+async function waitForChildLaunch(id: string): Promise<void> {
+  const deadline = attentionClock.now() + LAUNCH_WAIT_MS;
+  for (;;) {
+    const { data } = await api('GET', `/api/sessions/${encodeURIComponent(id)}`);
+    const session = (data as { session?: Session } | null)?.session;
+    if (!session || session.id !== id) throw new Error(`Session ${id} disappeared during startup`);
+    if (session.status === 'error' || session.status === 'completed' || session.block) {
+      throw new Error(`child ${id} failed during startup: ${startupFailureReason(session)}`);
+    }
+    if (attentionClock.now() >= deadline) {
+      if (session.status !== 'running') {
+        throw new Error(`child ${id} failed during startup: session stayed ${session.status}`);
+      }
+      return;
+    }
+    await attentionClock.sleep(LAUNCH_POLL_MS);
+  }
+}
+
 const ATTENTION_DEFAULT_TIMEOUT_SECONDS = 600;
 const ATTENTION_MAX_TIMEOUT_SECONDS = 86400;
 const ATTENTION_POLL_RETRIES = 3;
@@ -562,6 +594,9 @@ async function executeSessionCommand(cmd: SessionCommand, rest: string[], option
         const headers = caller ? { 'X-Ftown-Session-Id': caller } : undefined;
 
         const { data } = await api('POST', '/api/sessions', body, headers);
+        const createdId = (data as { session?: { id?: string } } | null)?.session?.id;
+        if (!createdId) throw new Error('Create did not return a session');
+        await waitForChildLaunch(createdId);
         console.log(jsonOut ? JSON.stringify(data, null, 2) : formatCreated(data));
         break;
       }

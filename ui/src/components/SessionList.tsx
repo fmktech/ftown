@@ -625,6 +625,33 @@ export function SessionList({
     });
   }, [sessions, setCollapsedSessions]);
 
+  // A blocked child has to be on the board. Expand its parent once per
+  // transition, after the default fold above, and then leave a manual
+  // collapse alone.
+  const revealedBlocksRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!collapseDefaultsReadyRef.current) return;
+    const parents: string[] = [];
+    for (const session of sessions) {
+      const key = session.block?.transitionKey;
+      const parentId = session.parentSessionId;
+      if (!key || !parentId || parentId === session.id) continue;
+      const mark = `${session.id}:${key}`;
+      if (revealedBlocksRef.current.has(mark)) continue;
+      revealedBlocksRef.current.add(mark);
+      parents.push(parentId);
+    }
+    if (parents.length === 0) return;
+    setCollapsedSessions((prev) => {
+      const next = new Set(prev);
+      let changed = false;
+      for (const id of parents) {
+        if (next.delete(id)) changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [sessions, setCollapsedSessions]);
+
   useEffect(() => {
     if (editingSessionId && inputRef.current) {
       inputRef.current.focus();

@@ -442,8 +442,10 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
         // stop() initiated this exit; the caller persists the final status.
         return;
       }
-      if (exitCode === 0 || exitCode === null || exitCode === undefined) {
+      if (exitCode === 0) {
         this.emit('complete', sessionId);
+      } else if (exitCode === null || exitCode === undefined) {
+        this.emit('error', sessionId, new Error('process ended without an exit code'));
       } else {
         this.emit('error', sessionId, new Error(`Process exited with code ${exitCode}`));
       }

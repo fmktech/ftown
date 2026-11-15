@@ -106,8 +106,9 @@ Exit codes for `status`, `board` and `events`: 0 ok, 1 error, 2 usage,
 
 A card state of `blocked` is something the agent sets. Separately, the
 bridge marks a session blocked when its screen shows a usage limit, a rate
-limit, or an expired login, or when it reaches `error` or exits without a
-result report. Reasons are `usage_limit`, `rate_limit`, `auth`, `crashed`,
+limit, or an expired login, or when an agent reaches `error` or exits without a
+result report. An interactive shell that reaches `completed` is not a failure.
+Reasons are `usage_limit`, `rate_limit`, `auth`, `crashed`,
 and `exited`. `resetAt` is set when the screen names a reset time. The
 parent receives one waking escalation per transition (reason, reset time,
 last screen lines, worktree, linked PR, plan item). Repeating the same
@@ -467,6 +468,10 @@ Code with provider-specific default endpoint/model environment. They require a
 machine token on the bridge host, e.g. `ftown env set zai <token>`.
 
 Returns JSON with the new `session.id` — use that id for `screen` / `grep` / `keys`.
+`ftown sessions create` waits a few seconds for the child to stay running. If the
+child errors, exits, or becomes blocked during that wait, the command exits
+non-zero and prints the reason instead of a created line. A failure after the
+command returns still mails the launching session, with a non-empty reason.
 
 ## Typical workflow
 

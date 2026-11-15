@@ -133,6 +133,19 @@ test('a clean exit that already reported a result does not send exited', async (
   assert.equal(h.sessions.get('child')!.block?.transitionKey, before);
 });
 
+test('a completed shell is not a failure and raises no attention', async () => {
+  const h = harness();
+  h.sessions.set('solo', session({ id: 'solo', shellType: 'shell', command: 'zsh', status: 'completed' }));
+  h.monitor.observe('solo', 'user% \n[lost tty]\n');
+  await h.monitor.flush('solo');
+  await h.monitor.settle('solo', { kind: 'completed', message: 'Process exited with code 0' });
+  const solo = h.sessions.get('solo')!;
+  assert.equal(solo.block, undefined);
+  assert.equal(solo.lastError, undefined);
+  assert.equal(h.attention.length, 0);
+  assert.equal(h.mail.length, 0);
+});
+
 test('an exit without a result is a failure with a non-empty reason', async () => {
   const h = harness();
   h.sessions.set('parent', session({ id: 'parent' }));

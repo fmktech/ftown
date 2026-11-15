@@ -59,6 +59,7 @@ export interface Session {
   usage?: SessionUsage;
   card?: { state: string; headline: string; progress?: { done: number; total: number }; blockedOn?: { kind: string; ref?: string; text: string }; next?: string; updatedAt: string };
   lastError?: string;
+  errorReason?: string;
   exitCode?: number;
   block?: {
     reason: 'usage_limit' | 'rate_limit' | 'auth' | 'crashed' | 'exited';
