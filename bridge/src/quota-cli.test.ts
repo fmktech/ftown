@@ -217,6 +217,7 @@ describe('parseQuotaArgs', () => {
       ok: true,
       providers: [...QUOTA_PROVIDER_IDS],
       json: false,
+      fresh: false,
       timeoutMs: 15000,
       help: false,
       models: 'default',
@@ -229,6 +230,7 @@ describe('parseQuotaArgs', () => {
       ok: true,
       providers: ['claude', 'codex', 'muse'],
       json: false,
+      fresh: false,
       timeoutMs: 15000,
       help: false,
       models: 'default',
@@ -238,6 +240,12 @@ describe('parseQuotaArgs', () => {
   it('sets json', () => {
     const parsed = parseQuotaArgs(['--json']);
     assert.equal(parsed.ok && parsed.json, true);
+  });
+
+  it('sets fresh for --fresh', () => {
+    const parsed = parseQuotaArgs(['--fresh', 'claude']);
+    assert.equal(parsed.ok && parsed.fresh, true);
+    assert.equal(parsed.ok && parsed.providers.join(','), 'claude');
   });
 
   it('maps --models to show and --no-models to skip', () => {
@@ -1427,6 +1435,8 @@ describe('runQuota errors and help', () => {
     const result = await runQuota(['-h'], deps);
 
     assert.deepEqual(result, { exitCode: 0, stdout: QUOTA_HELP_TEXT, stderr: '', hung: false });
+    assert.match(QUOTA_HELP_TEXT, /--fresh/);
+    assert.match(QUOTA_HELP_TEXT, /quota-cache\.json/);
     assert.match(QUOTA_HELP_TEXT, /--models/);
     assert.match(QUOTA_HELP_TEXT, /--no-models/);
     assert.match(QUOTA_HELP_TEXT, /machine-readable report \(quota, routing advice, models, routing tiers, steering\) for agents/);

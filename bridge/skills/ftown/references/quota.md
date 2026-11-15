@@ -17,14 +17,31 @@ ftown quota --json                    # full report
 ftown quota claude codex --json       # only the named harnesses
 ftown quota --json --no-models        # skip model lists (picks become unchecked)
 ftown quota --json --timeout 30       # per-harness limit, 1-600 s, default 15
+ftown quota --json --fresh            # bypass the cache, fetch live and refresh it
 ```
 
 Harnesses: `claude`, `codex`, `grok`, `muse`, `agy`, `opencode`. If `ftown` is
 not on PATH, use `~/.ftown/ftown quota`. `--models` only affects table mode.
 
-A run takes several seconds. It launches hidden local CLIs to read their usage
-and model lists. It makes no model turns. The numbers describe the owner's
-subscription plans (5-hour and weekly windows), not API spend.
+A first run takes several seconds. It launches hidden local CLIs to read their
+usage and model lists. Later runs reuse the cache below and are fast. It makes
+no model turns. The numbers describe the owner's subscription plans (5-hour
+and weekly windows), not API spend.
+
+## Cache
+
+Results are cached per provider in `~/.ftown/quota-cache.json`, written
+atomically so separate CLI processes share them. An `ok` quota or model row
+serves for 5 minutes; a non-`ok` row (including a timed-out fetch) serves
+for at most 30 seconds, so a failing provider is retried soon without
+hammering it. One provider's failure never evicts another provider's entry.
+A cached row keeps its original `observedAt` and reports `source: "cached"`;
+table mode shows the age, for example `cached 3m ago`. The JSON shape is
+unchanged: no field was added, so read `source` and `observedAt` to tell a
+cached row and its age. Concurrent callers share one live fetch through a
+lock file next to the cache; a dead lock holder is taken over, never a
+deadlock. Use `--fresh` to bypass the cache for every provider, fetch live
+and refresh the cached rows.
 
 ## Decision procedure
 
@@ -169,6 +186,9 @@ the second pick: `codex`, `model-b`, effort `medium`.
 
 ## Limits
 
+- Quota and model rows may be up to 5 minutes old (`source: "cached"`), or
+  30 seconds for a failing provider. Pass `--fresh` when a decision needs
+  live numbers, for example after a worker stopped on a usage limit.
 - Grok has only a weekly window. `FTOWN_QUOTA_GROK_NO_REFRESH=1` skips its hidden
   refresh and uses the last logged value.
 - opencode lists only its subscription providers by default. Override with
