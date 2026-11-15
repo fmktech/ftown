@@ -4,6 +4,22 @@
 import os from 'node:os';
 import { isCliEntry } from './cli-entry.js';
 import {
+  cachedModelsRow,
+  cachedQuotaRow,
+  readQuotaCache,
+  removeStaleQuotaCacheLock,
+  resolveQuotaCachePath,
+  storeQuotaCacheEntries,
+  tryAcquireQuotaCacheLock,
+  QUOTA_CACHE_ERROR_TTL_MS,
+  QUOTA_CACHE_LOCK_POLL_MS,
+  QUOTA_CACHE_STALE_LOCK_MS,
+  QUOTA_CACHE_TTL_MS,
+  type QuotaCacheLockHandle,
+} from './quota/cache.js';
+
+export { invalidateQuotaCacheEntry } from './quota/cache.js';
+import {
   QUOTA_PROVIDER_IDS,
   type AnnotatedPick,
   type AnnotatedTier,
@@ -29,13 +45,17 @@ export const QUOTA_MAX_TIMEOUT_SECONDS = 600;
 export const QUOTA_GRACE_MS = 2000;
 
 export const QUOTA_HELP_TEXT = [
-  `Usage: ftown-quota [${QUOTA_PROVIDER_IDS.join('|')} ...] [--json] [--timeout <seconds>]`,
+  `Usage: ftown-quota [${QUOTA_PROVIDER_IDS.join('|')} ...] [--json] [--fresh] [--timeout <seconds>]`,
   '',
   'Shows how much of each subscription\'s 5-hour and weekly allowance is left, which harness to route work to first,',
   'and the models each harness offers. The report also includes your model-routing tiers and steering for a router agent.',
   '',
+  'Results are cached per provider for 5 minutes in ~/.ftown/quota-cache.json (errors for 30 seconds);',
+  'cached rows show "cached <age> ago" in table mode and source "cached" with the original observedAt in JSON.',
+  '',
   'Options:',
   '  --json               machine-readable report (quota, routing advice, models, routing tiers, steering) for agents',
+  '  --fresh              bypass the cache, fetch every provider live and refresh the cache',
   '  --models             table mode: also list the models each harness offers',
   '  --no-models          skip the model lists (JSON omits them)',
   `  --timeout <seconds>  time limit per provider, ${QUOTA_MIN_TIMEOUT_SECONDS}-${QUOTA_MAX_TIMEOUT_SECONDS} seconds (default ${QUOTA_DEFAULT_TIMEOUT_SECONDS})`,
@@ -49,7 +69,7 @@ export const MODEL_LIST_TABLE_LIMIT = 20;
 export type QuotaModelsMode = 'default' | 'show' | 'skip';
 
 export type QuotaArgs =
-  | { ok: true; providers: QuotaProviderId[]; json: boolean; timeoutMs: number; help: boolean; models: QuotaModelsMode }
+  | { ok: true; providers: QuotaProviderId[]; json: boolean; fresh: boolean; timeoutMs: number; help: boolean; models: QuotaModelsMode }
   | { ok: false; error: string };
 
 /** Reads the user's routing file; see quota/routing-config.ts. */
@@ -64,6 +84,17 @@ export type TierAnnotator = (
   now?: Date,
 ) => AnnotatedTier[];
 
+/** On-disk cache controls; defaults cache under `homeDir` for 5 minutes (30 s for errors). */
+export interface QuotaCacheOptions {
+  enabled?: boolean;
+  ttlMs?: number;
+  errorTtlMs?: number;
+  staleLockMs?: number;
+  lockPollMs?: number;
+  lockWaitMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
 export interface QuotaDeps {
   fetchers: Record<QuotaProviderId, QuotaFetcher>;
   modelFetchers: Record<QuotaProviderId, ModelsFetcher>;
@@ -75,6 +106,7 @@ export interface QuotaDeps {
   homeDir: string;
   /** Grace past the provider timeout before a hung fetcher becomes an error entry. Default QUOTA_GRACE_MS. */
   graceMs?: number;
+  cache?: QuotaCacheOptions;
 }
 
 export interface QuotaRunResult {
@@ -92,6 +124,8 @@ export interface CollectQuotaInput {
   includeModels: boolean;
   /** Also fetch model lists when the routing config has picks, so the tiers can be checked against them. */
   fetchModelsForRouting?: boolean;
+  /** Bypass the on-disk cache, fetch live and refresh the cache. */
+  fresh?: boolean;
 }
 
 export interface CollectedQuotaReport {
@@ -108,6 +142,7 @@ function isQuotaProviderId(name: string): name is QuotaProviderId {
 export function parseQuotaArgs(argv: string[]): QuotaArgs {
   const selected = new Set<QuotaProviderId>();
   let json = false;
+  let fresh = false;
   let help = false;
   let showModels = false;
   let skipModels = false;
@@ -130,6 +165,8 @@ export function parseQuotaArgs(argv: string[]): QuotaArgs {
       selected.add(name);
     } else if (arg === '--json') {
       json = true;
+    } else if (arg === '--fresh') {
+      fresh = true;
     } else if (arg === '-h' || arg === '--help') {
       help = true;
     } else if (arg === '--models') {
@@ -154,7 +191,7 @@ export function parseQuotaArgs(argv: string[]): QuotaArgs {
     ? [...QUOTA_PROVIDER_IDS]
     : QUOTA_PROVIDER_IDS.filter(id => selected.has(id));
   const models: QuotaModelsMode = skipModels ? 'skip' : showModels ? 'show' : 'default';
-  return { ok: true, providers, json, timeoutMs: Math.round(timeoutSeconds * 1000), help, models };
+  return { ok: true, providers, json, fresh, timeoutMs: Math.round(timeoutSeconds * 1000), help, models };
 }
 
 function errorRow(provider: QuotaProviderId, now: Date, message: string): ProviderQuota {
@@ -327,29 +364,137 @@ function annotateRouting(
   }
 }
 
+function quotaSleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 /**
- * Gathers everything the report needs: guarded quota and model fetches, routing
- * advice, and the annotated routing tiers. Never prints and never exits.
+ * Gathers everything the report needs: cached or guarded live quota and
+ * model fetches, routing advice, and the annotated routing tiers. Never
+ * prints and never exits.
+ *
+ * With the on-disk cache enabled (the default under a real `homeDir`),
+ * fresh per-provider rows serve from `~/.ftown/quota-cache.json` without
+ * calling their fetchers. Missing or expired providers fetch live under
+ * a cross-process lock file so concurrent callers share one fetch;
+ * waiters poll the cache and take over a dead holder's lock instead of
+ * deadlocking (see quota/cache.ts).
  */
 export async function collectQuotaReport(input: CollectQuotaInput, deps: QuotaDeps): Promise<CollectedQuotaReport> {
   const warnings: string[] = [];
-  const quotaRuns = Promise.all(
-    input.providers.map(provider => quotaWithin(provider, deps.fetchers[provider], input.timeoutMs, deps)),
-  );
-
   const loaded = await loadRoutingSafely(deps, warnings);
   const config = loaded.state.status === 'ok' ? loaded.config : null;
   const hasPicks = config !== null && Array.isArray(config.tiers)
     && config.tiers.some(tier => Array.isArray(tier.picks) && tier.picks.length > 0);
   const fetchModels = input.includeModels || (input.fetchModelsForRouting === true && hasPicks);
-  const modelRuns = fetchModels
-    ? Promise.all(input.providers.map(provider => modelsWithin(provider, deps.modelFetchers[provider], input.timeoutMs, deps)))
-    : Promise.resolve<Settled<ProviderModels>[]>([]);
 
-  const [quotaSettled, modelSettled] = await Promise.all([quotaRuns, modelRuns]);
-  const rows = quotaSettled.map(run => run.value);
-  const models = modelSettled.map(run => run.value);
-  const hung = [...quotaSettled, ...modelSettled].some(run => run.hung);
+  const useCache = deps.cache?.enabled !== false && resolveQuotaCachePath(deps.homeDir) !== '';
+  const fresh = input.fresh === true;
+  const ttlMs = deps.cache?.ttlMs ?? QUOTA_CACHE_TTL_MS;
+  const errorTtlMs = deps.cache?.errorTtlMs ?? QUOTA_CACHE_ERROR_TTL_MS;
+  const staleLockMs = deps.cache?.staleLockMs ?? QUOTA_CACHE_STALE_LOCK_MS;
+  const lockPollMs = deps.cache?.lockPollMs ?? QUOTA_CACHE_LOCK_POLL_MS;
+  const lockWaitMs = deps.cache?.lockWaitMs
+    ?? Math.max(staleLockMs * 2, input.timeoutMs + (deps.graceMs ?? QUOTA_GRACE_MS) + 10_000);
+  const sleep = deps.cache?.sleep ?? quotaSleep;
+  const nowMs = (): number => deps.now().getTime();
+
+  const quotaByProvider = new Map<QuotaProviderId, ProviderQuota>();
+  const modelsByProvider = new Map<QuotaProviderId, ProviderModels>();
+  let hung = false;
+
+  const refreshHits = async (allowCached: boolean): Promise<void> => {
+    if (!useCache || !allowCached) return;
+    const cache = await readQuotaCache(deps.homeDir);
+    const at = nowMs();
+    for (const provider of input.providers) {
+      if (!quotaByProvider.has(provider)) {
+        const hit = cachedQuotaRow(cache, provider, at, ttlMs, errorTtlMs);
+        if (hit !== null) quotaByProvider.set(provider, hit);
+      }
+      if (fetchModels && !modelsByProvider.has(provider)) {
+        const hit = cachedModelsRow(cache, provider, at, ttlMs, errorTtlMs);
+        if (hit !== null) modelsByProvider.set(provider, hit);
+      }
+    }
+  };
+
+  if (useCache && !fresh) await refreshHits(true);
+
+  const missingQuota = (): QuotaProviderId[] => input.providers.filter(provider => !quotaByProvider.has(provider));
+  const missingModels = (): QuotaProviderId[] => (fetchModels ? input.providers.filter(provider => !modelsByProvider.has(provider)) : []);
+
+  if (missingQuota().length > 0 || missingModels().length > 0) {
+    let lock: QuotaCacheLockHandle | null = null;
+    let lockUnavailable = false;
+    let contended = false;
+    if (useCache) {
+      try {
+        // Lock timestamps are real wall time, not the injectable quota
+        // clock, so filesystem mtimes and holder pids compare correctly.
+        lock = await tryAcquireQuotaCacheLock(deps.homeDir);
+      } catch {
+        lockUnavailable = true;
+      }
+      if (lock === null && !lockUnavailable) {
+        contended = true;
+        // Monotonic deadline: a wall-clock jump cannot extend the wait.
+        const deadline = performance.now() + lockWaitMs;
+        while ((missingQuota().length > 0 || missingModels().length > 0) && performance.now() < deadline) {
+          await sleep(lockPollMs);
+          // A holder's fresh write satisfies even a --fresh waiter: that
+          // write was itself a live fetch shared by this call.
+          await refreshHits(true);
+          if (missingQuota().length === 0 && missingModels().length === 0) break;
+          await removeStaleQuotaCacheLock(deps.homeDir, staleLockMs);
+          try {
+            lock = await tryAcquireQuotaCacheLock(deps.homeDir);
+          } catch {
+            lockUnavailable = true;
+            break;
+          }
+          if (lock !== null) break;
+        }
+      }
+    }
+
+    const stillMissingQuota = missingQuota();
+    const stillMissingModels = missingModels();
+    if (stillMissingQuota.length > 0 || stillMissingModels.length > 0) {
+      try {
+        if (lock !== null && useCache && (!fresh || contended)) {
+          // Double-check under the lock: another holder may have just
+          // written a row this call had not seen when it first read.
+          await refreshHits(true);
+        }
+        const fetchQuota = missingQuota();
+        const fetchModelsFor = missingModels();
+        const [quotaSettled, modelSettled] = await Promise.all([
+          Promise.all(fetchQuota.map(provider => quotaWithin(provider, deps.fetchers[provider], input.timeoutMs, deps))),
+          Promise.all(fetchModelsFor.map(provider => modelsWithin(provider, deps.modelFetchers[provider], input.timeoutMs, deps))),
+        ]);
+        for (const run of [...quotaSettled, ...modelSettled]) {
+          if (run.hung) hung = true;
+        }
+        quotaSettled.forEach((run, index) => quotaByProvider.set(fetchQuota[index], run.value));
+        modelSettled.forEach((run, index) => modelsByProvider.set(fetchModelsFor[index], run.value));
+        if (useCache) {
+          await storeQuotaCacheEntries(
+            deps.homeDir,
+            quotaSettled.map(run => run.value),
+            modelSettled.map(run => run.value),
+          );
+        }
+      } finally {
+        if (lock !== null) await lock.release();
+      }
+    } else if (lock !== null) {
+      await lock.release();
+    }
+  }
+
+  const rows = input.providers.map(provider => quotaByProvider.get(provider)!);
+  const models = fetchModels ? input.providers.map(provider => modelsByProvider.get(provider)!) : [];
 
   const now = deps.now();
   const advice = adviseOrFallback(rows, now, deps);
@@ -485,6 +630,7 @@ async function runQuotaLazy(argv: string[], getDeps: () => Promise<QuotaDeps>): 
     timeoutMs: args.timeoutMs,
     includeModels: args.models === 'show' || (args.models === 'default' && args.json),
     fetchModelsForRouting: args.models === 'default',
+    fresh: args.fresh,
   }, deps);
   const stderr = warnings.join('\n');
 

@@ -156,10 +156,10 @@ export function createRealModelRoutingService(homeDir: string): ModelRoutingServ
   return createModelRoutingService({
     homeDir,
     now: () => Date.now(),
-    collect: async () => {
+    collect: async (refresh) => {
       const { collect, deps } = await load();
       const { report } = await collect(
-        { providers: [...QUOTA_PROVIDER_IDS], timeoutMs: MODEL_ROUTING_COLLECT_TIMEOUT_MS, includeModels: true },
+        { providers: [...QUOTA_PROVIDER_IDS], timeoutMs: MODEL_ROUTING_COLLECT_TIMEOUT_MS, includeModels: true, fresh: refresh },
         { ...deps, homeDir },
       );
       return report;
