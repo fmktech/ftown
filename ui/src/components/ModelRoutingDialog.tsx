@@ -29,7 +29,10 @@ function ago(iso: string, now: number): string | null {
 
 function windowLeft(row: ProviderQuota, kind: QuotaWindowKind): string {
   const window = row.windows.find(candidate => candidate.kind === kind);
-  if (window?.usedPercent != null && Number.isFinite(window.usedPercent)) return `${Math.max(0, Math.round(100 - window.usedPercent))}% left`;
+  if (window?.usedPercent != null && Number.isFinite(window.usedPercent)) {
+    const left = `${Math.max(0, Math.round(100 - window.usedPercent))}% left`;
+    return window.limited === true ? `${left}, limited` : left;
+  }
   return window?.note ?? "–";
 }
 
@@ -51,6 +54,7 @@ function Subscriptions({ report }: { report: QuotaReport }) {
         {problem ? <span className="text-[var(--status-pending)]" title={row.message ?? undefined}>{problem}</span> : <>
           <span className="text-[var(--text-secondary)]"><span className="text-[var(--text-muted)]">5h </span>{windowLeft(row, "five_hour")}</span>
           <span className="text-[var(--text-secondary)]"><span className="text-[var(--text-muted)]">week </span>{windowLeft(row, "weekly")}</span>
+          {row.windows.some(candidate => candidate.kind === "monthly") ? <span className="text-[var(--text-secondary)]"><span className="text-[var(--text-muted)]">month </span>{windowLeft(row, "monthly")}</span> : null}
         </>}
         <span className="ml-auto"><AvailabilityBadge availability={routing?.availability ?? "unknown"} title={routing?.reason} /></span>
       </li>;

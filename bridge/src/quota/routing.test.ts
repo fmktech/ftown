@@ -396,6 +396,57 @@ describe('adviseQuotaRouting', () => {
     assert.equal(advice.reason, '5-hour window used up, resets in 3h 0m');
   });
 
+  it('treats a limited window as exhausted unless its reset is within 10 minutes', () => {
+    const far = assessWindow(
+      win({ kind: 'weekly', usedPercent: 13, limited: true, resetsAt: inMinutes(3000), windowMinutes: WEEK_MINUTES }),
+      NOW,
+    );
+    assert.equal(far.availability, 'exhausted');
+    assert.equal(far.leftPercent, 0);
+    const soon = assessWindow(
+      win({ kind: 'weekly', usedPercent: 100, limited: true, resetsAt: inMinutes(3), windowMinutes: WEEK_MINUTES }),
+      NOW,
+    );
+    assert.equal(soon.availability, 'available');
+    assert.equal(soon.leftPercent, 100);
+    assert.equal(soon.resetting, true);
+    const [advice] = adviseQuotaRouting(
+      [
+        row({
+          provider: 'opencode',
+          plan: 'Go',
+          windows: [
+            win({ kind: 'five_hour', usedPercent: 0, limited: false, resetsAt: inMinutes(120) }),
+            win({ kind: 'weekly', usedPercent: 13, limited: true, resetsAt: inMinutes(3000), windowMinutes: WEEK_MINUTES }),
+            win({ kind: 'monthly', usedPercent: 6, limited: false, resetsAt: inMinutes(20000) }),
+          ],
+        }),
+      ],
+      NOW,
+    );
+    assert.equal(advice.availability, 'exhausted');
+    assert.equal(advice.leftPercent, 0);
+    assert.equal(advice.bindingWindow, 'weekly');
+    assert.equal(advice.reason, 'weekly window is limited, resets in 2d 2h');
+  });
+
+  it('treats monthly as less binding than the short window when percent left matches', () => {
+    const [advice] = adviseQuotaRouting(
+      [
+        row({
+          provider: 'opencode',
+          windows: [
+            win({ kind: 'monthly', usedPercent: 40, resetsAt: inMinutes(40000) }),
+            win({ kind: 'five_hour', usedPercent: 40, resetsAt: inMinutes(100) }),
+          ],
+        }),
+      ],
+      NOW,
+    );
+    assert.equal(advice.bindingWindow, 'five_hour');
+    assert.equal(advice.availability, 'available');
+  });
+
   it('omits the reset clause when the binding window has no reset time', () => {
     const [available] = adviseQuotaRouting(
       [row({ provider: 'codex', windows: [win({ kind: 'weekly', usedPercent: 30 })] })],

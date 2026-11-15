@@ -1,13 +1,26 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { test } from 'node:test';
+import { opencodeSkillsDir } from './install-ftown-skill.js';
 import { assertSetupReady, acquireSetupLock, assertSetupVersion, readSetupState, setupHint, setupStatePath, writeSetupState, REQUIRED_SETUP_ASSETS } from './setup-state.js';
 import { REQUIRED_RUNTIME_FILES } from './installation-manifest.js';
 
+function linkOpencodeFtownSkill(home: string): void {
+  const dir = opencodeSkillsDir(home, process.env);
+  mkdirSync(dir, { recursive: true });
+  const link = join(dir, 'ftown');
+  try { unlinkSync(link); } catch { /* absent */ }
+  symlinkSync(relative(dir, join(home, '.ftown', 'skills', 'ftown')), link);
+}
+
 test('readiness is versioned and missing assets require explicit repair', () => {
   const home = mkdtempSync(join(tmpdir(), 'ftown-ready-'));
+  const savedOpen = process.env.OPENCODE_CONFIG_DIR;
+  const savedXdg = process.env.XDG_CONFIG_HOME;
+  delete process.env.OPENCODE_CONFIG_DIR;
+  delete process.env.XDG_CONFIG_HOME;
   try {
     assert.throws(() => assertSetupReady('1.2.3', home), /npx ftown@1\.2\.3 setup/);
     writeSetupState({ schema: 1, packageVersion: '1.2.3', completedMigrations: ['stable-v1'] }, home);
@@ -16,6 +29,8 @@ test('readiness is versioned and missing assets require explicit repair', () => 
       const full = join(home, '.ftown', path); mkdirSync(dirname(full), { recursive: true });
       writeFileSync(full, path === 'cli/installation.json' ? JSON.stringify({ schema: 1, packageVersion: '1.2.3', files: REQUIRED_RUNTIME_FILES }) : 'asset');
     }
+    assert.throws(() => assertSetupReady('1.2.3', home), /--repair/);
+    linkOpencodeFtownSkill(home);
     assert.doesNotThrow(() => assertSetupReady('1.2.3', home));
     rmSync(join(home, '.ftown/cli/dist/harness-commands.js'));
     assert.throws(() => assertSetupReady('1.2.3', home), /--repair/);
@@ -26,11 +41,26 @@ test('readiness is versioned and missing assets require explicit repair', () => 
     rmSync(native);
     assert.throws(() => assertSetupReady('1.2.3', home), /--repair/);
     writeFileSync(native, 'restored');
+    unlinkSync(join(opencodeSkillsDir(home, process.env), 'ftown'));
+    assert.throws(() => assertSetupReady('1.2.3', home), /--repair/);
+    linkOpencodeFtownSkill(home);
+    assert.doesNotThrow(() => assertSetupReady('1.2.3', home));
+    process.env.OPENCODE_CONFIG_DIR = join(home, 'oc-config');
+    assert.throws(() => assertSetupReady('1.2.3', home), /--repair/);
+    linkOpencodeFtownSkill(home);
+    assert.doesNotThrow(() => assertSetupReady('1.2.3', home));
+    delete process.env.OPENCODE_CONFIG_DIR;
     assert.throws(() => assertSetupReady('1.2.4', home), /npx ftown@1\.2\.4 setup/);
     assert.deepEqual(readSetupState(home).completedMigrations, ['stable-v1']);
     assert.equal(JSON.parse(readFileSync(setupStatePath(home), 'utf8')).packageVersion, '1.2.3');
     assert.equal(setupHint('1.2.4'), 'npx ftown@1.2.4 setup');
-  } finally { rmSync(home, { recursive: true, force: true }); }
+  } finally {
+    if (savedOpen === undefined) delete process.env.OPENCODE_CONFIG_DIR;
+    else process.env.OPENCODE_CONFIG_DIR = savedOpen;
+    if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = savedXdg;
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 

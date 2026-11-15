@@ -45,11 +45,19 @@ export function readSharedBridgeLog(name: "bridge" | "bridge-2"): string {
   try { return readFileSync(join(E2E_DIR, `${name}.log`), "utf8"); } catch { return ""; }
 }
 
-/** Environment for a test bridge: inherited FTOWN_* / tmux variables dropped (they could name the real bridge or tmux server). */
+/**
+ * Environment for a test bridge. Inherited FTOWN_* / tmux variables are dropped
+ * (they could name the real bridge or tmux server). OpenCode config location
+ * is dropped too: a host often sets XDG_CONFIG_HOME to its own ~/.config, which
+ * does not follow the HOME override. Setup and readiness both resolve the
+ * OpenCode skill link from that variable, so two scratch homes would share one
+ * symlink and the second setup would repoint it.
+ */
 export function isolatedBridgeEnv(home: string, tmuxDir: string): NodeJS.ProcessEnv {
   const inherited: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(process.env)) {
     if (key.startsWith("FTOWN_") || key === "TMUX" || key === "TMUX_PANE" || key === "TMUX_TMPDIR") continue;
+    if (key === "OPENCODE_CONFIG_DIR" || key === "XDG_CONFIG_HOME") continue;
     inherited[key] = value;
   }
   return { ...inherited, HOME: home, USERPROFILE: home, FTOWN_DATA_DIR: join(home, ".ftown", "data"), TMUX_TMPDIR: tmuxDir };

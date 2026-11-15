@@ -76,10 +76,15 @@ done
 # --- shared bridges: scratch HOME + data dir + private tmux socket dir, inherited FTOWN_*/TMUX* dropped ---
 # Replaces the CURRENT shell with <cmd>: call it only in a subshell — `( run_isolated … )` in the
 # foreground, or `run_isolated … &` (whose subshell becomes the command itself, so `$!` is its PID).
+# OPENCODE_CONFIG_DIR and XDG_CONFIG_HOME are dropped with them. Hosted runners set
+# XDG_CONFIG_HOME to the runner account's ~/.config, and that value does not follow the
+# HOME override. OpenCode's skill link is resolved from those variables, so both scratch
+# bridges would install the same symlink and the second setup would repoint it. The first
+# bridge then fails its readiness check the next time it starts.
 run_isolated() { # <home> <tmux dir> <cmd...>
   local home="$1" tmuxdir="$2"; shift 2
   for name in $(compgen -e); do
-    case "$name" in FTOWN_*|TMUX|TMUX_PANE|TMUX_TMPDIR) unset "$name" ;; esac
+    case "$name" in FTOWN_*|TMUX|TMUX_PANE|TMUX_TMPDIR|OPENCODE_CONFIG_DIR|XDG_CONFIG_HOME) unset "$name" ;; esac
   done
   cd "$home"
   export HOME="$home" USERPROFILE="$home" FTOWN_DATA_DIR="$home/.ftown/data" TMUX_TMPDIR="$tmuxdir"

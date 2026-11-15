@@ -17,14 +17,31 @@ ftown quota --json                    # full report
 ftown quota claude codex --json       # only the named harnesses
 ftown quota --json --no-models        # skip model lists (picks become unchecked)
 ftown quota --json --timeout 30       # per-harness limit, 1-600 s, default 15
+ftown quota --json --fresh            # bypass the cache, fetch live and refresh it
 ```
 
 Harnesses: `claude`, `codex`, `grok`, `muse`, `agy`, `opencode`. If `ftown` is
 not on PATH, use `~/.ftown/ftown quota`. `--models` only affects table mode.
 
-A run takes several seconds. It launches hidden local CLIs to read their usage
-and model lists. It makes no model turns. The numbers describe the owner's
-subscription plans (5-hour and weekly windows), not API spend.
+A first run takes several seconds. It launches hidden local CLIs to read their
+usage and model lists. Later runs reuse the cache below and are fast. It makes
+no model turns. The numbers describe the owner's subscription plans (5-hour
+and weekly windows, plus a monthly window when a provider reports one), not
+API spend.
+
+## Cache
+
+Results are cached per provider in `~/.ftown/quota-cache.json`, written
+atomically so separate CLI processes share them. An `ok` quota or model row
+serves for 5 minutes; a non-`ok` row (including a timed-out fetch) serves
+for at most 30 seconds, so a failing provider is retried soon without
+hammering it. One provider's failure never evicts another provider's entry.
+A cached row keeps its original `observedAt` and reports `source: "cached"`;
+table mode shows the age, for example `cached 3m ago`. The cache adds no field
+of its own, so read `source` and `observedAt` to tell a cached row and its age.
+Concurrent callers share one live fetch through a lock file next to the cache;
+a dead lock holder is taken over, never a deadlock. Use `--fresh` to bypass
+the cache for every provider, fetch live and refresh the cached rows.
 
 ## Decision procedure
 
@@ -65,14 +82,14 @@ Each pick carries its provider's `availability`. The same values appear in `rout
 - `low`: `leftPercent` below 15 in the binding (tightest) window, or `runway`
   below 0.5 when `runway` is not null. Use only for small tasks, when guidance
   allows it, or when nothing `available` fits.
-- `exhausted`: `leftPercent` 1 or less. Never use it before `resetsAt`.
+- `exhausted`: `leftPercent` 1 or less, or the binding window has `limited: true`. Never use it before `resetsAt`.
 - `unknown`: no usable numbers. It is not proof of empty or full quota. It ranks
   below `low` and above `exhausted`; use it as a fallback after `available` and
   `low`, and say so.
 
 If a window resets within 10 minutes it is reported as `available` with `leftPercent`
-100 and `runway` null, even if `usedPercent` was high. `routing[]` is ordered best
-first as available, then low, then unknown, then exhausted.
+100 and `runway` null, even if `usedPercent` was high or `limited` is true. `routing[]`
+is ordered best first as available, then low, then unknown, then exhausted.
 
 `leftPercent` is percent left in the binding (tightest) window. `windows[].usedPercent`
 in `providers` is percent used. Do not mix them up.
@@ -115,10 +132,14 @@ the harness documents it. Omit `--model` to take the harness default.
   `error`): read its `message`. Its routing is `unknown`. For `auth`, tell the
   user what to fix. A `models` entry with status other than `ok` has an empty
   `models` list, so its picks are `checked: false`.
-- opencode may expose no plan usage at all, so when it reports no windows its
-  availability will be `unknown`. That is expected when it happens. Judge it by
-  `pricing` (`free` models are safe to use) and by the owner's guidance, not by
-  quota.
+- opencode Go usage is experimental. It comes from the CLI's undocumented local
+  route `GET /api/experimental/usage/limits`. `rolling` is the short window
+  (`five_hour`), `weekly` is `weekly`, and `monthly` is `monthly`. `limited: true`
+  makes that window `exhausted` until it resets. No `go` block means there is no
+  Go subscription (`no_data`, routing `unknown`), not an error. A missing route,
+  a non-JSON body, or an unexpected shape is an error that names the opencode
+  version. Console budgets are not mapped. When usage is `unknown`, judge opencode
+  by `pricing` (`free` models are safe to use) and by the owner's guidance.
 
 ## JSON field reference
 
@@ -126,7 +147,7 @@ the harness documents it. Omit `--model` to take the harness default.
 |---|---|
 | `generatedAt` | ISO time of the report |
 | `providers[]` | raw readings: `provider`, `status`, `plan`, `windows[]`, `source`, `observedAt`, `message`, optional `scopedLimits[]` |
-| `providers[].windows[]` | `kind` (`five_hour`/`weekly`), `usedPercent` (used, may be null), `resetsAt`, `windowMinutes`, `note` |
+| `providers[].windows[]` | `kind` (`five_hour`/`weekly`/`monthly`), `usedPercent` (used, may be null), `resetsAt`, `windowMinutes`, `note`, optional `limited` |
 | `scopedLimits[]` | partial limit: `scope` (e.g. a model family), `kind`, `usedPercent`, `resetsAt` |
 | `routing[]` | per provider, best first: `provider`, `availability`, `leftPercent`, `bindingWindow`, `resetsAt`, `resetsInMinutes`, `runway` (1 = on pace, >1 spare, <1 will run out early, null when length or reset unknown), `reason` |
 | `models[]` | per provider: `provider`, `status` (`ok`/`unavailable`/`error`; empty `models` unless `ok`), `models[]`, `source` (`live`/`cached`), `observedAt`, `message`, `modelFlag`, `effortFlag` |
@@ -169,6 +190,9 @@ the second pick: `codex`, `model-b`, effort `medium`.
 
 ## Limits
 
+- Quota and model rows may be up to 5 minutes old (`source: "cached"`), or
+  30 seconds for a failing provider. Pass `--fresh` when a decision needs
+  live numbers, for example after a worker stopped on a usage limit.
 - Grok has only a weekly window. `FTOWN_QUOTA_GROK_NO_REFRESH=1` skips its hidden
   refresh and uses the last logged value.
 - opencode lists only its subscription providers by default. Override with
