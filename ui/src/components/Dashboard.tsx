@@ -21,6 +21,7 @@ import { SessionList } from "./SessionList";
 import type { AttentionAnswerEntry } from "../../../bridge/src/attention-prompt-protocol";
 import type { AttentionAnswerSubmitResult } from "./AttentionAnswerForm";
 import { SessionInboxPage, SessionInboxTrigger, inboxEntries, inboxItemKey, isWithParent, waitingInboxCount, noticeKey, queueSessionReply, attentionAnswerSubmitResult, type InboxEntry } from "./SessionInbox";
+import { parseAttentionDeepLink, resolveAttentionTarget } from "./ChildrenAttentionPanel";
 import { PullRequestStatusProvider } from "./PullRequestStatusProvider";
 import { SessionWorkspace } from "./SessionWorkspace";
 import { childSessionsOf } from "./SessionOverview";
@@ -131,6 +132,10 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const startCommand = buildBridgeStartCommand({ apiUrl: typeof window !== "undefined" ? window.location.origin : "" });
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [inboxOpen, setInboxOpen] = useState(false);
+  /** Child attention item opened in the Overview coordinator panel; mirrored to `?attention=` URL state. */
+  const [openAttentionId, setOpenAttentionId] = useState<string | null>(null);
+  /** Deep-linked attention id (plus its session hint) waiting to be opened. */
+  const [pendingAttention, setPendingAttention] = useState<{ attentionId: string; sessionHint: string | null } | null>(null);
   const [showNewSession, setShowNewSession] = useState(false);
   const [sessionDefaults, setSessionDefaults] = useState<SessionDefaults | undefined>(undefined);
   const [showToken, setShowToken] = useState(false);
@@ -316,7 +321,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
       return next;
     });
   }, [bridges, rawSessions, setBridgeOrder]);
-  const { sessionActivity, markSessionIdle, clearSessionAttention, answerSessionAttention, refreshSessionAttention } = useAllSessionEvents(client, rawSessions, userId, rpc);
+  const { sessionActivity, markSessionIdle, clearSessionAttention, answerSessionAttention, answerAttentionItem, dismissAttentionItem, refreshSessionAttention } = useAllSessionEvents(client, rawSessions, userId, rpc);
   // When each session's activity became idle: stamped from the live activity map
   // (hook events and optimistic interrupts) and kept for the Overview's `idle <n>m`.
   const [idleSince, setIdleSince] = useState<Record<string, string>>({});
@@ -600,6 +605,7 @@ PY`;
 
   const handleSelectSession = useCallback((id: string | null) => {
     setSelectedSessionId(id);
+    setOpenAttentionId(null);
     setSessionActivation(count => count + 1);
     setAttentionHidden(null);
     setInboxOpen(false);
@@ -657,6 +663,38 @@ PY`;
     if (!canReply(current.bridgeId)) return { ok: false, message: "This browser does not have permission to answer this session." };
     const result = await answerSessionAttention(current.id, notice, answers);
     return attentionAnswerSubmitResult(current.name || current.prompt?.slice(0, 36) || "Session", result);
+  };
+  /** The panel entry is the session's live inbox item (same guarded path as the inbox). */
+  const isLiveEntry = (entry: InboxEntry): boolean => {
+    const notice = sessionActivity.get(entry.session.id)?.attention;
+    return !!notice && !!entry.notice.attentionId && notice.attentionId === entry.notice.attentionId
+      && noticeKey(entry.session.id, notice) === noticeKey(entry.session.id, entry.notice);
+  };
+  const answerChildAttention = async (entry: InboxEntry, answers: AttentionAnswerEntry[]): Promise<AttentionAnswerSubmitResult> => {
+    if (isLiveEntry(entry)) return answerInbox(entry, answers);
+    const current = sessions.find(session => session.id === entry.session.id && session.bridgeId === entry.session.bridgeId);
+    if (!current) return { ok: false, message: "The session is unavailable. Reconnect and try again." };
+    if (current.status !== "running") return { ok: false, message: "This session is no longer running. Open it to check." };
+    if (!inboxReady.has(current.bridgeId)) return { ok: false, message: "Reconnect this computer before replying." };
+    if (!canReply(current.bridgeId)) return { ok: false, message: "This browser does not have permission to answer this session." };
+    // Same answer_session_attention RPC the inbox uses; the bridge allows a human answer to a parent-routed item.
+    const result = await answerAttentionItem(current.id, entry.notice, answers);
+    return attentionAnswerSubmitResult(current.name || current.prompt?.slice(0, 36) || "Session", result);
+  };
+  const dismissChildAttention = async (entry: InboxEntry) => {
+    if (isLiveEntry(entry)) { await clearSessionAttention(entry.session.id, entry.notice); return; }
+    if (!entry.notice.attentionId) throw new Error("This message has changed. Review the latest notice.");
+    await dismissAttentionItem(entry.session.id, entry.notice.attentionId);
+  };
+  const replyChildAttention = async (entry: InboxEntry, message: string) => {
+    if (isLiveEntry(entry)) return replyToInbox(entry, message);
+    const current = sessions.find(session => session.id === entry.session.id && session.bridgeId === entry.session.bridgeId);
+    if (!current) throw new Error("The session is unavailable. Reconnect and try again.");
+    if (current.status !== "running") throw new Error("This session is no longer running. Open it to check.");
+    if (!inboxReady.has(current.bridgeId)) throw new Error("Reconnect this computer before replying.");
+    if (!canReply(current.bridgeId)) throw new Error("This browser does not have permission to reply to this session.");
+    await queueSessionReply(rpc.sendCommand, { ...entry, session: current }, message);
+    await refreshSessionAttention(current.id);
   };
 
   const handleCreateSession = useCallback(
