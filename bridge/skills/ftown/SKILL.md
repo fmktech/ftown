@@ -68,6 +68,7 @@ ftown attention list
 ftown worktrees list
 ftown harness mail send <session-id> --type task "review the API client"
 ftown harness mail read
+ftown sessions handoff <session-id> --shell grok --model fast
 ftown env --help
 ftown setup --help
 ftown start --help
@@ -143,6 +144,33 @@ items (`→ <id> <title>`, then `+N more`). `ftown board --all` also shows
 retired (archived) children after the live ones, suffixed `(retired)`.
 Tree events include the `plan` kind for plan changes and `removed` when a
 child is removed or archived while not already exited.
+
+## Blocked children
+
+A usage limit, rate limit, expired login, crash, or an exit/error with no
+result report is a failure even when the session status stays `running`.
+The bridge records a block (`usage_limit`, `rate_limit`, `auth`, `crashed`,
+or `exited`, plus `resetAt` when the screen names a time) and sends the
+parent one waking escalation per transition. The mail names the reason,
+reset time, last screen lines, worktree, linked PR, and plan item. The
+board row and the dashboard Overview show a blocked badge with that reason
+and reset time. That badge is the bridge's detection. It is separate from
+a card you set to `blocked` with `ftown status set`. A session with no
+parent raises a human attention item titled `Session blocked` instead of
+mail. The same transition is not mailed twice.
+
+Hand the work to a fresh session in the same directory:
+
+```bash
+ftown sessions handoff <session-id> [--shell <harness>] [--model <model>] [--name <name>]
+```
+
+Handoff commits uncommitted changes in a dedicated or bridge-created
+worktree as `wip: handoff from <id>`, starts the new session there with a
+brief (original prompt, recent screen, git log and diff stat, PR, plan
+item), moves the plan item and PR link onto it, archives the old session,
+and prints the new id. Omit `--shell` and `--model` to take the next
+routing pick that still has quota. `--plain` prints only the new id.
 
 ## Plan list
 

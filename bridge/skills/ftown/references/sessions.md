@@ -50,6 +50,9 @@ ftown sessions archive
 # conversation when a claude/cursor/codex/Pi/grok/antigravity session id was recorded; Kimi Code
 # continues by working directory; the revived session gets a NEW id)
 ftown sessions revive <session-id>
+
+# Continue a blocked session in a new session on the same worktree
+ftown sessions handoff <session-id> [--shell <harness>] [--model <model>] [--name <name>]
 ```
 
 ## Status, board and events
@@ -100,6 +103,38 @@ while not already exited).
 
 Exit codes for `status`, `board` and `events`: 0 ok, 1 error, 2 usage,
 3 wait timed out with the condition unmet.
+
+A card state of `blocked` is something the agent sets. Separately, the
+bridge marks a session blocked when its screen shows a usage limit, a rate
+limit, or an expired login, or when it reaches `error` or exits without a
+result report. Reasons are `usage_limit`, `rate_limit`, `auth`, `crashed`,
+and `exited`. `resetAt` is set when the screen names a reset time. The
+parent receives one waking escalation per transition (reason, reset time,
+last screen lines, worktree, linked PR, plan item). Repeating the same
+transition does not send another mail. Plain `ftown board` appends
+`blocked <reason>` and, when known, `resets HH:MM`. The dashboard session
+row and Overview show the same badge. A session with no parent raises a
+human attention item titled `Session blocked` instead.
+
+## Hand off a blocked session
+
+```bash
+ftown sessions handoff <session-id> [--shell <harness>] [--model <model>] [--name <name>]
+```
+
+Handoff commits uncommitted changes as `wip: handoff from <id>` only in a
+bridge-created worktree, a linked git worktree, or a working directory that
+is itself the git toplevel and is not this checkout. Otherwise it records
+why it skipped the commit and still continues. It then creates a new
+session in that same directory. The brief carries the original prompt, the
+block reason, about the last 300 screen lines, `git log` and `git diff
+--stat` against the worktree base, the linked PR, and the plan item. The
+plan item and PR link move to the new session. The old session is archived.
+The command prints the new session as JSON, or only the id with `--plain`.
+The default name is `<old name> handoff`. Omit `--shell` and `--model` and
+the bridge picks the next routing model that still has quota; if routing
+has none, it keeps the old harness and model. Exit codes: 0 ok, 1 error,
+2 usage.
 
 ## Plan list
 
@@ -496,6 +531,7 @@ The CLI wraps the loopback API. Raw access if needed:
 |--------|------|---------|
 | GET | `/api/sessions` | List |
 | POST | `/api/sessions` | Create |
+| POST | `/api/sessions/:id/handoff` | Hand off (`{ shellType?, model?, name? }` → `{ session }`). Blank harness and model use the next routing pick with quota. A partial failure is HTTP 500 and the error text includes the new session id. |
 | PATCH | `/api/sessions/:id` | Rename, move or associate a PR (`{ name?, parentSessionId?, pullRequestUrl? }`; `null` detaches/clears) |
 | POST | `/api/sessions/:id/attention` | Request input (`{ message, title?, questions?, to?: 'human' }`) → `{ event }`; invalid `questions` → 400 `invalid_prompt` |
 | POST | `/api/sessions/:id/attention/:eventId/answer` | Parent answers a child (`{ answers }`); 403 not the parent, 409 resolved |

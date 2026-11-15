@@ -48,7 +48,7 @@ test('create --help describes options without opening transport or creating a se
 }));
 
 test('generated help and invalid command options finish before any transport access', async () => fixture(async (requests, output) => {
-  for (const command of ['list', 'create', 'get', 'screen', 'grep', 'keys', 'tell', 'inbox', 'mail', 'running', 'usage', 'remove', 'archive', 'revive', 'attention', 'attention-status', 'pr']) {
+  for (const command of ['list', 'create', 'get', 'screen', 'grep', 'keys', 'tell', 'inbox', 'mail', 'running', 'usage', 'remove', 'archive', 'revive', 'attention', 'attention-status', 'pr', 'handoff']) {
     assert.equal(await runSessions([command, '--help']), 0, command);
   }
   assert.ok(output.some((line) => line.includes('Usage: ftown sessions create')));
@@ -72,6 +72,21 @@ test('create --shell resolves alias agy to canonical antigravity in request body
   assert.equal(requests.length, 1);
   assert.equal(requests[0].method, 'POST');
   assert.deepEqual(requests[0].body, { shellType: 'antigravity', model: 'gemini-4-hydrogen-medium', prompt: 'hello' });
+}));
+
+test('handoff posts the chosen harness and prints the new session id', async () => fixture(async (requests, output) => {
+  assert.equal(await runSessions(['handoff', 'old-id', '--shell', 'shell', '--model', 'plain', '--name', 'next', '--plain']), 0);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].method, 'POST');
+  assert.ok(requests[0].url.endsWith('/api/sessions/old-id/handoff'));
+  assert.deepEqual(requests[0].body, { shellType: 'shell', model: 'plain', name: 'next' });
+  assert.equal(output.at(-1), 'created');
+}, () => ({ session: { id: 'created', name: 'next', status: 'pending' } })));
+
+test('handoff --shell rejects an unknown harness before any request', async () => fixture(async (requests, output) => {
+  assert.equal(await runSessions(['handoff', 'old-id', '--shell', 'bogus-shell']), 1);
+  assert.equal(requests.length, 0);
+  assert.ok(output.some((line) => line.includes('Invalid shellType') && line.includes('Valid values:')));
 }));
 
 test('create --shell rejects invalid shellType without calling the API', async () => fixture(async (requests, output) => {

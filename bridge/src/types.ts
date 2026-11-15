@@ -68,6 +68,12 @@ export interface Session {
   previewSource?: SessionPreviewSource;
   runtime?: SessionRuntime;
   errorReason?: string;
+  /** Non-empty failure text recorded when the session blocks or ends without a result. */
+  lastError?: string;
+  /** Process exit code when the harness reported one. Omitted when unknown. */
+  exitCode?: number;
+  /** Bridge-detected blocked sub-state. Distinct from an agent-declared card state. */
+  block?: SessionBlock;
   loopId?: string; // Historical provenance only; retired automation can never be relaunched
   usage?: SessionUsage;
   /** Agent-declared status card (coordination contract). */
@@ -81,6 +87,22 @@ export interface Session {
 }
 
 export type SessionStatus = 'pending' | 'running' | 'completed' | 'error';
+
+export type BlockReason = 'usage_limit' | 'rate_limit' | 'auth' | 'crashed' | 'exited';
+
+/** Why a session can no longer make progress, plus the screen evidence. */
+export interface SessionBlock {
+  reason: BlockReason;
+  /** ISO time the limit resets, when the screen stated one. */
+  resetAt?: string;
+  screenTail: string;
+  exitCode?: number;
+  detectedAt: string;
+  /** `${reason}|${resetAt ?? ''}|${status}` so one transition notifies once. */
+  transitionKey: string;
+  /** Set only after durable mail or a human attention item is stored. */
+  notifiedAt?: string;
+}
 
 /** Tombstone written to <dataDir>/archive.jsonl when a session is removed. */
 export interface ArchivedSession extends Session {
@@ -120,7 +142,7 @@ export interface Command {
 }
 
 export type CommandType = 'get_pull_request_review' | 'get_pull_request_review_chunk' | 'preview_chat_list' | 'preview_chat_send' | 'preview_chat_reply' | 'get_pull_request_statuses' | 'session_preview_status' | 'session_preview_chunk' | 'get_bridge_update' | 'update_bridge' | 'security_devices' | 'security_invite' | 'security_revoke' | 'ledger_head' | 'ledger_chain' | 'create_session' | 'stop_session' | 'list_sessions' | 'get_history' | 'retry_session' | 'send_message' | 'rename_session' | 'remove_session' | 'bridge_exec' | 'clear_terminal' | 'update_session_parent' | 'get_session_usage' | 'get_sessions_usage' | 'get_session_attention' | 'resolve_session_attention' | 'answer_session_attention' | 'get_session_board'
-  | 'get_model_routing' | 'set_model_routing';
+  | 'get_model_routing' | 'set_model_routing' | 'handoff_session';
 
 export interface GetSessionAttentionPayload { bridgeId: string; sessionId: string }
 export interface ResolveSessionAttentionPayload extends GetSessionAttentionPayload { eventId: string }
@@ -167,6 +189,13 @@ export interface StopSessionPayload {
   bridgeId?: string;
 }
 
+export interface HandoffSessionPayload {
+  sessionId: string;
+  shellType?: ShellType;
+  model?: string;
+  name?: string;
+}
+
 export interface GetHistoryPayload {
   sessionId: string;
 }
@@ -201,7 +230,7 @@ export interface GetSessionsUsagePayload {
   bridgeId?: string;
 }
 
-export type CommandPayload = SendSessionMessagePayload | GetPullRequestStatusesPayload | SessionPreviewStatusRequest | SessionPreviewChunkRequest | GetBridgeUpdatePayload | UpdateBridgePayload | GetSessionAttentionPayload | ResolveSessionAttentionPayload | AnswerSessionAttentionPayload | CreateSessionPayload | StopSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | ClearTerminalPayload | UpdateSessionParentPayload | GetSessionUsagePayload | GetSessionsUsagePayload | Record<string, unknown>
+export type CommandPayload = SendSessionMessagePayload | GetPullRequestStatusesPayload | SessionPreviewStatusRequest | SessionPreviewChunkRequest | GetBridgeUpdatePayload | UpdateBridgePayload | GetSessionAttentionPayload | ResolveSessionAttentionPayload | AnswerSessionAttentionPayload | CreateSessionPayload | StopSessionPayload | HandoffSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | ClearTerminalPayload | UpdateSessionParentPayload | GetSessionUsagePayload | GetSessionsUsagePayload | Record<string, unknown>
   | import('./quota/types.js').GetModelRoutingPayload | import('./quota/types.js').SetModelRoutingPayload;
 
 export interface CommandResponse {

@@ -3,6 +3,39 @@ import type { SessionPreviewDescriptor, SessionPreviewStatusRequest, SessionPrev
 
 export type SessionStatus = 'pending' | 'running' | 'completed' | 'error' | 'disconnected';
 
+export type BlockReason = 'usage_limit' | 'rate_limit' | 'auth' | 'crashed' | 'exited';
+
+export interface SessionBlock {
+  reason: BlockReason;
+  resetAt?: string;
+  screenTail: string;
+  exitCode?: number;
+  detectedAt: string;
+  transitionKey: string;
+  notifiedAt?: string;
+}
+
+const BLOCK_REASONS = new Set<BlockReason>(['usage_limit', 'rate_limit', 'auth', 'crashed', 'exited']);
+
+/** Keep a well-formed block. Anything else is dropped rather than rejecting the session. */
+export function parseSessionBlock(value: unknown): SessionBlock | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const row = value as Record<string, unknown>;
+  if (typeof row.reason !== 'string' || !BLOCK_REASONS.has(row.reason as BlockReason)) return undefined;
+  if (typeof row.screenTail !== 'string' || typeof row.detectedAt !== 'string' || !row.detectedAt) return undefined;
+  if (typeof row.transitionKey !== 'string' || !row.transitionKey) return undefined;
+  const block: SessionBlock = {
+    reason: row.reason as BlockReason,
+    screenTail: row.screenTail,
+    detectedAt: row.detectedAt,
+    transitionKey: row.transitionKey,
+  };
+  if (typeof row.resetAt === 'string' && row.resetAt) block.resetAt = row.resetAt;
+  if (typeof row.exitCode === 'number' && Number.isFinite(row.exitCode)) block.exitCode = row.exitCode;
+  if (typeof row.notifiedAt === 'string' && row.notifiedAt) block.notifiedAt = row.notifiedAt;
+  return block;
+}
+
 export type ShellType = 'claude' | 'cursor' | 'codex' | 'shell' | 'zai' | 'kimi' | 'opencode' | 'deepseek' | 'fireworks' | 'grok' | 'pi' | 'kimi-code' | 'muse' | 'antigravity';
 
 export interface Session {
@@ -38,6 +71,9 @@ export interface Session {
   brief?: { text?: string; notes: { ts: string; text: string }[]; updatedAt: string };
   plan?: { seq: number; items: Array<{ id: string; title: string; note?: string; after: string[]; priority: 1 | 2 | 3; state: 'todo' | 'started' | 'done' | 'dropped'; sessionId?: string; createdAt: string; updatedAt: string }> };
   worktree?: { repoRoot: string; path: string; branch: string; base: string; createdByBridge: true; retained?: { reason: string; at: string } };
+  lastError?: string;
+  exitCode?: number;
+  block?: SessionBlock;
 }
 
 /** Mirrors bridge SessionCardDeclared (bridge/src/coordination/contract.ts). */
@@ -130,7 +166,7 @@ export type CommandType =
   | 'get_model_routing' | 'set_model_routing'
   | 'get_session_attention' | 'resolve_session_attention' | 'answer_session_attention' | 'get_session_board' | 'send_message'
   | 'create_session' | 'stop_session' | 'list_sessions' | 'get_history'
-  | 'retry_session' | 'rename_session' | 'remove_session' | 'bridge_exec'
+  | 'retry_session' | 'handoff_session' | 'rename_session' | 'remove_session' | 'bridge_exec'
   | 'update_session_parent'
   | 'get_session_usage' | 'get_sessions_usage';
 
@@ -200,6 +236,13 @@ export interface RemoveSessionPayload {
   onlyIfFinished?: boolean;
 }
 
+export interface HandoffSessionPayload {
+  sessionId: string;
+  shellType?: ShellType;
+  model?: string;
+  name?: string;
+}
+
 export interface GetSessionUsagePayload {
   sessionId: string;
   bridgeId?: string;
@@ -217,7 +260,7 @@ export interface BridgeExecPayload {
   bridgeId?: string;
 }
 
-export type CommandPayload = PreviewChatListRequest | PreviewChatWriteRequest | SendSessionMessagePayload | GetPullRequestStatusesPayload | SessionPreviewStatusRequest | SessionPreviewChunkRequest | GetBridgeUpdatePayload | UpdateBridgePayload | GetSessionAttentionPayload | ResolveSessionAttentionPayload | AnswerSessionAttentionPayload | CreateSessionPayload | StopSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | UpdateSessionParentPayload | GetSessionUsagePayload | GetSessionsUsagePayload | Record<string, unknown>;
+export type CommandPayload = PreviewChatListRequest | PreviewChatWriteRequest | SendSessionMessagePayload | GetPullRequestStatusesPayload | SessionPreviewStatusRequest | SessionPreviewChunkRequest | GetBridgeUpdatePayload | UpdateBridgePayload | GetSessionAttentionPayload | ResolveSessionAttentionPayload | AnswerSessionAttentionPayload | CreateSessionPayload | StopSessionPayload | HandoffSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | UpdateSessionParentPayload | GetSessionUsagePayload | GetSessionsUsagePayload | Record<string, unknown>;
 
 export interface CommandResponse {
   requestId: string;

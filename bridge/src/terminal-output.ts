@@ -32,7 +32,7 @@ export interface TerminalOutputDeps {
     publishTerminalScreen(sessionId: string, screen: string): void;
   };
   watchRegistry: { hasWatchers(sessionId: string): boolean };
-  lifecycle: Pick<TerminalPumpDeps, 'publishSessionUpdate' | 'publishHookEvent' | 'unregisterSession' | 'collectUsage'>;
+  lifecycle: Pick<TerminalPumpDeps, 'publishSessionUpdate' | 'publishHookEvent' | 'unregisterSession' | 'collectUsage' | 'onOutput' | 'onLifecycle'>;
 }
 
 export interface TerminalOutput {

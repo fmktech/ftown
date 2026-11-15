@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
-import type { Session, SessionCard, SessionStatus } from "@/types";
+import type { Session, SessionBlock, SessionCard, SessionStatus } from "@/types";
+import { HandoffDialog, SessionBlockBadge, type HandoffInput } from "./SessionBlockBadge";
 import { markdownPreviewDocument } from "@/lib/session-preview";
 import { relativeTime } from "@/lib/relative-time";
 import type { SessionActivity } from "@/hooks/useAllSessionEvents";
@@ -31,6 +32,7 @@ export interface SnapshotCard {
     previews: string[];
     shellType?: string;
     model?: string;
+    block?: SessionBlock;
   };
   stale: boolean;
 }
@@ -79,6 +81,8 @@ export interface SessionOverviewProps {
   plan?: PlanView;
   /** Clock for deterministic card-age rendering in tests. */
   now?: number;
+  /** Continue a blocked child in a new session. Blank fields let the bridge pick. */
+  onHandoff?: (sessionId: string, input: HandoffInput) => Promise<void>;
 }
 
 /** Children of `session`, oldest first (the order the tree was built in). */
@@ -130,6 +134,7 @@ export interface OverviewEntry {
   worktree?: Session["worktree"];
   previews: string[];
   agent: string;
+  block?: SessionBlock;
 }
 
 export interface PartitionedChildren<T> { attention: T[]; active: T[]; done: T[] }
@@ -206,6 +211,7 @@ function buildEntries(children: ReadonlyArray<Session>, props: SessionOverviewPr
       worktree: session?.worktree,
       previews: card.derived.previews,
       agent: agentLabel(card.derived.shellType ?? session?.shellType, card.derived.model ?? session?.model),
+      block: session?.block ?? card.derived.block,
     });
   }
   for (const child of children) {
@@ -224,6 +230,7 @@ function buildEntries(children: ReadonlyArray<Session>, props: SessionOverviewPr
       worktree: child.worktree,
       previews: child.preview?.files.map(file => file.fileName) ?? [],
       agent: agentLabel(child.shellType, child.model),
+      block: child.block,
     });
   }
   return entries;
@@ -234,6 +241,7 @@ function attentionOwners(entries: ReadonlyArray<OverviewEntry>): Map<string, Att
   for (const entry of entries) {
     const state = entry.card?.state;
     if (entry.humanQuestions > 0 || (state === "blocked" && entry.card?.blockedOn?.kind === "human")) owners.set(entry.id, "you");
+    else if (entry.block) owners.set(entry.id, "manager");
     else if (state === "failed" || state === "blocked") owners.set(entry.id, "manager");
   }
   return owners;
@@ -325,13 +333,14 @@ function prRequirementBadge(entry: OverviewEntry): { label: string; color: strin
   return { label: "PR ◷", color: entry.prState === "in_progress" || entry.prUrl ? "var(--status-pending)" : "var(--text-faint)" };
 }
 
-function OverviewRow({ entry, owner, open, onToggle, context, faint = false }: {
+function OverviewRow({ entry, owner, open, onToggle, context, faint = false, onHandoff }: {
   entry: OverviewEntry;
   owner?: AttentionOwner;
   open: boolean;
   onToggle: () => void;
   context: RowContext;
   faint?: boolean;
+  onHandoff?: () => void;
 }) {
   const { now, managerName } = context;
   const card = entry.card;
@@ -352,24 +361,33 @@ function OverviewRow({ entry, owner, open, onToggle, context, faint = false }: {
 
   return (
     <li className="ov-row" data-open={open} style={{ listStyle: "none" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 4, minWidth: 0 }}>
       <button
         type="button"
         data-overview-row=""
         aria-expanded={open}
         onClick={onToggle}
         onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); onToggle(); } }}
-        style={{ ...resetButton, display: "flex", alignItems: "baseline", gap: 8, width: "100%", padding: "5px 4px", fontSize: 13, lineHeight: 1.4 }}
+        style={{ ...resetButton, display: "flex", alignItems: "baseline", gap: 8, width: "100%", minWidth: 0, padding: "5px 4px", fontSize: 13, lineHeight: 1.4 }}
       >
         <span aria-hidden style={{ color: glyphColor, width: 12, flexShrink: 0 }}>{glyph.icon}</span>
         {retired && <span style={{ ...MONO, color: "var(--text-faint)", flexShrink: 0 }}>retired</span>}
         <span style={{ color: faint ? "var(--text-faint)" : "var(--text-primary)", fontWeight: loud ? 600 : 500, flexShrink: 0 }}>{entry.name}</span>
         <span title={headline} style={{ color: faint ? "var(--text-faint)" : loud ? "var(--text-primary)" : "var(--text-muted)", flex: 1, minWidth: 0, ...(open ? { overflowWrap: "anywhere" } : { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }) }}>{headline}</span>
+        {entry.block && <SessionBlockBadge block={entry.block} />}
         {prBadge && <span style={{ ...MONO, color: prBadge.color, flexShrink: 0 }}>{prBadge.label}</span>}
         {card && <span className="ov-age" style={{ ...MONO, color: "var(--text-faint)", flexShrink: 0 }}>{relativeTime(card.updatedAt, now)}</span>}
         {owner && <span style={{ ...MONO, color: owner === "you" ? "var(--status-pending)" : "var(--text-faint)", flexShrink: 0 }}>{owner === "you" ? "you" : managerName}</span>}
       </button>
+      {entry.block && onHandoff && (
+        <button type="button" aria-label={`Hand off ${entry.name}`} onClick={onHandoff} style={{ ...resetButton, flexShrink: 0, minHeight: 36, padding: "4px 8px", fontSize: 12, color: "var(--status-pending)" }}>
+          Hand off
+        </button>
+      )}
+      </div>
       {open && (
         <dl style={{ ...MONO, margin: "2px 0 8px 24px", display: "flex", flexDirection: "column", gap: 2 }}>
+          {entry.block && <Detail label="blocked"><SessionBlockBadge block={entry.block} /></Detail>}
           {stateLabel && <Detail label="state">{stateLabel}</Detail>}
           {card?.state === "blocked" && card.blockedOn && <Detail label="blocked">{card.blockedOn.text}</Detail>}
           {questions.length > 0
@@ -445,6 +463,7 @@ export function SessionOverview(props: SessionOverviewProps) {
   const [openFolds, setOpenFolds] = useState<ReadonlySet<string>>(new Set());
   const [eventLimit, setEventLimit] = useState(EVENTS_PAGE);
   const [unwrapped, setUnwrapped] = useState<ReadonlySet<string>>(new Set());
+  const [handoffEntry, setHandoffEntry] = useState<OverviewEntry | null>(null);
   const rootRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
@@ -488,7 +507,7 @@ export function SessionOverview(props: SessionOverviewProps) {
   const toggleFold = (key: string) => setOpenFolds(current => flip(current, key));
   const rows = (list: OverviewEntry[], faint = false) => (
     <ul style={{ margin: 0, padding: 0 }}>
-      {list.map(entry => <OverviewRow key={entry.id} entry={entry} owner={faint ? undefined : owners.get(entry.id)} open={isOpen(entry.id)} onToggle={() => setToggled(current => flip(current, entry.id))} context={context} faint={faint} />)}
+      {list.map(entry => <OverviewRow key={entry.id} entry={entry} owner={faint ? undefined : owners.get(entry.id)} open={isOpen(entry.id)} onToggle={() => setToggled(current => flip(current, entry.id))} context={context} faint={faint} onHandoff={props.onHandoff && entry.block ? () => setHandoffEntry(entry) : undefined} />)}
     </ul>
   );
 
@@ -521,6 +540,9 @@ export function SessionOverview(props: SessionOverviewProps) {
   return (
     <section ref={rootRef} aria-label={`Overview: ${managerName}`} onKeyDown={onKeyDown}
       style={{ flex: 1, minHeight: 0, overflowY: "auto", background: "var(--bg-base)", color: "var(--text-primary)" }}>
+      {handoffEntry && props.onHandoff && (
+        <HandoffDialog sessionName={handoffEntry.name} onClose={() => setHandoffEntry(null)} onSubmit={(input) => props.onHandoff!(handoffEntry.id, input)} />
+      )}
       <style>{STYLE_SHEET}</style>
       <div style={{ padding: "16px 16px 32px", maxWidth: 760, margin: "0 auto", display: "flex", flexDirection: "column", gap: 28 }}>
         <div data-testid="manager-line" style={{ display: "flex", alignItems: "baseline", gap: 10, minWidth: 0, marginBottom: 8 }}>

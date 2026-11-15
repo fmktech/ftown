@@ -147,7 +147,7 @@ interface SessionsOptions {
   add?: string[]; remove?: string[];
 }
 type SessionCommand = 'preview-reply' | 'preview' | 'list' | 'create' | 'get' | 'screen' | 'grep' | 'keys' | 'tell'
-  | 'inbox' | 'mail' | 'running' | 'usage' | 'remove' | 'archive' | 'revive' | 'attention' | 'attention-status' | 'pr';
+  | 'inbox' | 'mail' | 'running' | 'usage' | 'remove' | 'archive' | 'revive' | 'attention' | 'attention-status' | 'pr' | 'handoff';
 
 function sessionProgram(): Command {
   const program = new Command().name('ftown sessions').description('List, create, read and drive ftown agent sessions');
@@ -218,6 +218,11 @@ function sessionProgram(): Command {
     .option('--timeout <seconds>', 'With --wait: give up after this many seconds (1-86400, default 600)')
     .option('--session-id <id>', 'Target session; defaults to FTOWN_SESSION_ID')
     .action((eventId: string, _opts, cmd: Command) => run('attention-status', [eventId], cmd));
+  command('handoff <session-id>', 'Commit uncommitted work and continue it in a new session')
+    .option('--shell <type>', 'Harness for the new session; otherwise the next routing pick with quota')
+    .option('--model <name>', 'Model for the new session')
+    .option('--name <label>', 'Dashboard name for the new session')
+    .action((id: string, _opts, cmd: Command) => run('handoff', [id], cmd));
   command('pr [url]', 'Attach or replace this session’s GitHub pull request')
     .option('--clear', 'Remove the current pull request association')
     .option('--session-id <id>', 'Target session; defaults to FTOWN_SESSION_ID')
@@ -468,6 +473,20 @@ async function executeSessionCommand(cmd: SessionCommand, rest: string[], option
         if (code !== undefined) throw new SessionExit(code);
         if (!options.wait) { console.log('Pending: no answer yet.'); throw new SessionExit(3); }
         await waitForAttentionAnswer(id, eventId, timeoutSeconds);
+        break;
+      }
+      case 'handoff': {
+        const id = rest[0];
+        if (!id) throw new Error('Missing session id');
+        const shellType = options.shell !== undefined ? normalizeShellType(options.shell) : undefined;
+        const body: Record<string, unknown> = {};
+        if (shellType) body.shellType = shellType;
+        if (options.model) body.model = options.model;
+        if (options.name) body.name = options.name;
+        const { data } = await api('POST', `/api/sessions/${encodeURIComponent(id)}/handoff`, body);
+        const newId = (data as { session?: { id?: string } } | null)?.session?.id;
+        if (!newId) throw new Error('Handoff did not return a session');
+        console.log(jsonOut ? JSON.stringify(data, null, 2) : newId);
         break;
       }
       case 'pr': {

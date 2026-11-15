@@ -10,9 +10,11 @@ import {
   Command,
   CommandResponse,
   CreateSessionPayload,
+  HandoffSessionPayload,
   RenameSessionPayload,
   RemoveSessionPayload,
   UpdateSessionParentPayload,
+  parseSessionBlock,
 } from "@/types";
 import type { BridgeRpc } from "@/hooks/useBridgeRpc";
 import { accountChannel } from "@security/ledger/channels";
@@ -46,6 +48,16 @@ function isSessionUsage(value: unknown): value is SessionUsage {
     && usage.models.every((model) => typeof model === "string")
     && typeof usage.harness === "string"
     && typeof usage.collectedAt === "string";
+}
+
+function acceptSessionRow(value: unknown): Session | null {
+  if (!isSessionRow(value)) return null;
+  if (value.block !== undefined) {
+    const block = parseSessionBlock(value.block);
+    if (block) value.block = block;
+    else delete value.block;
+  }
+  return value;
 }
 
 function isSessionRow(value: unknown): value is Session {
@@ -146,6 +158,7 @@ interface UseSessionsResult {
   createSession: (prompt: string, options?: CreateSessionOptions) => Promise<Session>;
   stopSession: (sessionId: string) => void;
   retrySession: (sessionId: string) => void;
+  handoffSession: (sessionId: string, options?: { shellType?: string; model?: string; name?: string }) => Promise<Session>;
   renameSession: (sessionId: string, name: string) => void;
   setSessionParent: (sessionId: string, parentSessionId: string | null) => void;
   removeSession: (sessionId: string, onlyIfFinished?: boolean, ownerOnline?: boolean) => void;
@@ -275,7 +288,7 @@ export function useSessions(
       const data = response.data as { sessions?: unknown; bridgeId?: unknown };
       if (!Array.isArray(data.sessions)) return;
       const snapshotRows = data.sessions;
-      const rows = snapshotRows.filter(isSessionRow);
+      const rows = snapshotRows.map(acceptSessionRow).filter((row): row is Session => row !== null);
       const candidate = requests.get(response.requestId);
       const request = candidate?.contextGeneration === usageGenerationRef.current ? candidate : undefined;
       const bridgeId = typeof data.bridgeId === "string" && data.bridgeId.length > 0 ? data.bridgeId : (request ? client?.sessionSnapshotBridgeId : undefined);
@@ -332,13 +345,14 @@ export function useSessions(
         if ((data.session.status as string) === "removed") {
           confirm(data.session.id);
           updateSessions(prev => prev.filter(s => s.id !== data.session.id));
-        } else if (!isSessionRow(data.session)) {
+        } else if (!acceptSessionRow(data.session)) {
           updateSessions(prev => clearInvalidPreviews(prev, [data.session]));
         } else if (!blocked(data.session.id)) {
-          observe(data.session.id);
+          const accepted = data.session;
+          observe(accepted.id);
           updateSessions(prev => {
-            const current = prev.find(s => s.id === data.session.id);
-            const incoming = mergeSessionSnapshot(current, data.session);
+            const current = prev.find(s => s.id === accepted.id);
+            const incoming = mergeSessionSnapshot(current, accepted);
             return current ? prev.map(s => s.id === incoming.id ? incoming : s) : [incoming, ...prev];
           });
         }
@@ -470,8 +484,8 @@ export function useSessions(
         if (requestGeneration !== usageGenerationRef.current) {
           throw new Error("Session creation context changed; refresh before retrying.");
         }
-        const created = (resp.data as { session?: unknown } | undefined)?.session;
-        if (!isSessionRow(created) || (options?.bridgeId && created.bridgeId !== options.bridgeId)) {
+        const created = acceptSessionRow((resp.data as { session?: unknown } | undefined)?.session);
+        if (!created || (options?.bridgeId && created.bridgeId !== options.bridgeId)) {
           throw new Error("Bridge returned an invalid created session; refresh before retrying.");
         }
         if (confirmedRemovedRef.current.has(created.id)
@@ -506,6 +520,29 @@ export function useSessions(
       publishCommand(command);
     },
     [userId, publishCommand]
+  );
+
+  const handoffSession = useCallback(
+    (sessionId: string, options?: { shellType?: string; model?: string; name?: string }): Promise<Session> => {
+      if (!userId) return Promise.reject(new Error("Not connected"));
+      const payload: HandoffSessionPayload = { sessionId };
+      if (options?.shellType) payload.shellType = options.shellType as ShellType;
+      if (options?.model) payload.model = options.model;
+      if (options?.name) payload.name = options.name;
+      const command: Command = { type: "handoff_session", payload, requestId: uuidv4() };
+      return sendCommand(command).then((resp) => {
+        if (!resp.success) throw new Error(resp.error ?? "handoff_session failed");
+        const created = acceptSessionRow((resp.data as { session?: unknown } | undefined)?.session);
+        if (!created) throw new Error("Bridge returned an invalid session");
+        updateSessions(prev => {
+          const current = prev.find(row => row.id === created.id);
+          const reconciled = mergeSessionSnapshot(current, created);
+          return current ? prev.map(row => row.id === created.id ? reconciled : row) : [reconciled, ...prev];
+        });
+        return created;
+      });
+    },
+    [userId, sendCommand, updateSessions],
   );
 
   const retrySession = useCallback(
@@ -574,6 +611,7 @@ export function useSessions(
     createSession,
     stopSession,
     retrySession,
+    handoffSession,
     renameSession,
     setSessionParent,
     removeSession,

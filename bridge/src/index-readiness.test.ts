@@ -116,6 +116,7 @@ async function startup(pointerFails = false, restart: 'none' | 'success' | 'fail
       await deps.publishCommandResponse({ requestId: 'isolated-command', success: true, data: { invitation: 'inert' } });
     };
     const setTimeout = (next: () => void, milliseconds: number) => { callback = next; timerMs = milliseconds; };
+    const runHandoff = async () => ({ session: { id: 'inert' } });
     ${ready.getText(indexTree)}
     ${dispatch.getText(indexTree)}
     const messageFor = (application: unknown) => ({ envelope: { messageId: 'isolated-command' }, application, principal: {} });

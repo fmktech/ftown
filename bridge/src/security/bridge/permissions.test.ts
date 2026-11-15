@@ -2,6 +2,13 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { classifyCommand, classifyHttp, classifyTerminal } from './permissions.js';
 
+test('handoff is a control operation on one session', () => {
+  assert.deepEqual(classifyHttp('POST', '/api/sessions/session/handoff'), { permission: 'control', mutating: true, operation: 'handoff_send', sessionId: 'session' });
+  assert.equal(classifyCommand('handoff_session', { sessionId: 'session' }).permission, 'control');
+  assert.throws(() => classifyHttp('GET', '/api/sessions/session/handoff'), { code: 'permission_denied' });
+  assert.throws(() => classifyCommand('not_a_command'), { code: 'permission_denied' });
+});
+
 test('reads cannot consume inboxes or register native wake targets, while POST history search remains read-only', () => {
   assert.equal(classifyHttp('GET', '/api/sessions/session/inbox').permission, 'control');
   assert.equal(classifyHttp('GET', '/api/sessions/session/inbox?peek=1').permission, 'read');

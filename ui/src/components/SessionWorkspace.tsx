@@ -45,6 +45,7 @@ interface Props {
   openAttentionBySession?: ReadonlyMap<string, OpenAttentionCount>;
   /** ISO timestamp at which each session's activity became idle, tracked by the dashboard. */
   idleSince?: Readonly<Record<string, string>>;
+  onHandoff?: (sessionId: string, input: { shellType?: string; model?: string; name?: string }) => Promise<void>;
 }
 type PreviewErrorReason = 'missing' | 'too_large' | 'invalid_utf8' | 'invalid_file' | 'unavailable';
 function previewErrorMessage(reason: PreviewErrorReason, fileName: string): string {
@@ -56,7 +57,7 @@ function previewErrorMessage(reason: PreviewErrorReason, fileName: string): stri
     case 'unavailable': return `${fileName} is unavailable`;
   }
 }
-export function SessionWorkspace({ session, client, userId, readable, sendCommand, subscribeAuthority, securityGeneration, open, onClose, isDesktop, mobileTab, onMobileTab, onRefit, children, sessions = [], activity, activityBySession, openAttentionBySession, idleSince, reviewOpen = false, reviewActivation = 0, onCloseReview = () => {}, sessionActivation = 0, attention }: Props) {
+export function SessionWorkspace({ session, client, userId, readable, sendCommand, subscribeAuthority, securityGeneration, open, onClose, isDesktop, mobileTab, onMobileTab, onRefit, children, sessions = [], activity, activityBySession, openAttentionBySession, idleSince, reviewOpen = false, reviewActivation = 0, onCloseReview = () => {}, sessionActivation = 0, attention, onHandoff }: Props) {
   const mainRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
   const [ratio, setRatio] = useState(50);
@@ -325,7 +326,7 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
         {children}
         {/* Compact layouts cover the still-mounted terminal with the Overview; on a desktop the Overview has its own column beside it. */}
         {compact && view === 'overview' && session && <div id="session-overview-panel" role="tabpanel" aria-label="Overview" style={{ position: 'absolute', inset: 0, zIndex: 5, display: 'flex', background: 'var(--bg-base)' }}>
-          <SessionOverview session={session} sessions={sessions} activityBySession={activityBySession} openAttentionBySession={openAttentionBySession} snapshot={boardSnapshot ?? undefined} idleSince={idleSince} />
+          <SessionOverview session={session} sessions={sessions} activityBySession={activityBySession} openAttentionBySession={openAttentionBySession} snapshot={boardSnapshot ?? undefined} idleSince={idleSince} onHandoff={onHandoff} />
         </div>}
       </div>
       {(hasAux || switcherColumn) && !compact && !activeExpanded && <div role="separator" aria-label="Resize terminal and preview" aria-orientation="vertical" aria-valuemin={Number(min.toFixed(1))} aria-valuemax={Number(max.toFixed(1))} aria-valuenow={Number(actualRatio.toFixed(1))} tabIndex={0} className="session-preview-separator" onPointerDown={start} onPointerMove={move} onPointerUp={finish} onPointerCancel={finish} onLostPointerCapture={finish} onKeyDown={keyDown} onDoubleClick={() => setSplit(50)} />}
@@ -373,7 +374,7 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
         </div>}
       </section>}
       {switcherColumn && view === 'overview' && session && <div id="session-overview-panel" role="tabpanel" aria-label="Overview" style={{ flex: 1, minHeight: 0, display: 'flex' }}>
-        <SessionOverview session={session} sessions={sessions} activityBySession={activityBySession} openAttentionBySession={openAttentionBySession} snapshot={boardSnapshot ?? undefined} idleSince={idleSince} />
+        <SessionOverview session={session} sessions={sessions} activityBySession={activityBySession} openAttentionBySession={openAttentionBySession} snapshot={boardSnapshot ?? undefined} idleSince={idleSince} onHandoff={onHandoff} />
       </div>}
       {reviewOpen && <PullRequestReview session={session} client={client} userId={userId} visible={reviewVisible} readable={readable} securityGeneration={securityGeneration} sendCommand={sendCommand} subscribeAuthority={subscribeAuthority} onClose={onCloseReview} expanded={activeExpanded} onExpand={() => setExpanded(value => !value)} />}
       </div>}

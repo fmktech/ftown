@@ -45,6 +45,8 @@ import { createCoordination } from './coordination/wiring.js';
 import { removeFtownSession } from './remove-ftown-session.js';
 import { SessionResurrection, shouldResurrectStoredSession } from './session-resurrection.js';
 import { createTerminalOutput } from './terminal-output.js';
+import { SessionFailureMonitor } from './session-block.js';
+import { handoffSession, type HandoffRequest } from './session-handoff.js';
 import { collectSessionUsage } from './usage-collector.js';
 import { AgentSessionIdPersister } from './session-ids.js';
 import { HookUsagePersister } from './hook-usage.js';
@@ -843,7 +845,9 @@ program
     localApiServer.setSessionFactory(sessionFactoryDeps);
 
     // Terminal output pump: buffers runner PTY output and owns the runner
-    // 'complete'/'error' lifecycle handlers.
+    // 'complete'/'error' lifecycle handlers. The monitor is assigned after the
+    // pump exists because classification takes the pump's write lock.
+    let failureMonitor: SessionFailureMonitor | undefined;
     const terminalOutput = createTerminalOutput({
       store,
       terminalManager,
@@ -855,9 +859,29 @@ program
         publishHookEvent: (sid, event) => centrifugo.publishHookEvent(userId, sid, event),
         unregisterSession: handleSessionExit,
         collectUsage: (session) => collectSessionUsage(session),
+        onOutput: (sessionId, data) => { failureMonitor?.observe(sessionId, data); },
+        onLifecycle: (sessionId, event) => failureMonitor?.settle(sessionId, event) ?? Promise.resolve(),
       },
     });
     const pump = terminalOutput.pump;
+    failureMonitor = new SessionFailureMonitor({
+      loadSession: (id) => store.loadSession(id),
+      saveSession: (session) => store.saveSession(session),
+      publishSession: (session) => centrifugo.publishSessionUpdate(userId, session),
+      withSessionWrite: (id, task) => pump.withSessionWrite(id, task),
+      loadTerminalLog: (id) => store.loadTerminalLog(id),
+      listMail: async (sessionId) => (await mailStore.listAll(sessionId, 0)).map((message) => ({ from: message.from, type: message.type })),
+      acceptMail: (parent, body) => localApiServer.acceptSessionMail(parent, body),
+      recordAttention: async (sessionId, input) => {
+        const item = await attentionStore.record(sessionId, 'Notification', {
+          notification_type: 'agent_needs_input',
+          title: input.title,
+          message: input.message,
+          notification_id: input.notificationId,
+        });
+        return item !== undefined;
+      },
+    });
 
     // Resurrection engine for sessions left live by a previous bridge process.
     const resurrection = new SessionResurrection({
@@ -869,8 +893,12 @@ program
       wireTerminalInput,
       withSessionWrite: (id, task) => pump.withSessionWrite(id, task),
       // A parent that died while this bridge was down gets the same
-      // parent-children escalation the live exit path runs.
-      onSessionDead: (session) => coordination.onSessionExit(session.id, session),
+      // parent-children escalation the live exit path runs. Settle first so
+      // a session marked error without a reason still reports a failure.
+      onSessionDead: async (session) => {
+        await failureMonitor?.settle(session.id, { kind: 'error', message: session.errorReason ?? session.lastError });
+        await coordination.onSessionExit(session.id, session);
+      },
     });
 
     // Persists Claude/Cursor/Codex-native session ids from hook events.
@@ -1008,6 +1036,20 @@ program
 
     let ready = false;
     const modelRouting = createRealModelRoutingService(homedir());
+    const runHandoff = (sessionId: string, request: HandoffRequest) => handoffSession({
+      loadSession: (id) => store.loadSession(id),
+      saveSession: (session) => store.saveSession(session),
+      publishSession: (session) => centrifugo.publishSessionUpdate(userId, session),
+      createSession: (input) => createFtownSession(sessionFactoryDeps, input),
+      archiveSession: async (id) => {
+        const result = await sessionController.remove(id, undefined, 'keep');
+        if (!result.removed) throw new Error(`could not archive session ${id}`);
+      },
+      plan: coordination.plan,
+      loadTerminalLog: (id) => store.loadTerminalLog(id),
+      routing: modelRouting,
+    }, sessionId, request);
+    localApiServer.setHandoff(runHandoff);
     const dispatchCommand = async (message: VerifiedApplication): Promise<ApplicationJson> => {
       if (!ready) return { type: 'command_response', response: { requestId: message.envelope.messageId, success: false, error: 'bridge_offline' } };
       const route = message.application.route;
@@ -1030,6 +1072,7 @@ program
         },
         enqueueSessionMessage: (session, message) => localApiServer.enqueueSessionMessage(session, message),
         acceptSessionMail: (session, body) => localApiServer.acceptSessionMail(session, body),
+        handoffSession: runHandoff,
         publishAttentionChanged: (sessionId) => { localApiServer.emit('event', { sessionId, eventName: 'AttentionSnapshot', data: {} }); },
         publishCommandResponse: async response => { result = response; },
       })(message.application.data as unknown as Parameters<ReturnType<typeof createCommandHandler>>[0], message);

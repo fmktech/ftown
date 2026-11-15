@@ -13,7 +13,7 @@ import { normalizePullRequestUrl } from './pull-request-url.js';
 import type { PullRequestStatusService } from './pull-request-status.js';
 import type { PrReviewService, PrReviewRequest, PrReviewChunkRequest } from './pull-request-review-protocol.js';
 import { PR_REVIEW_CHUNK_BYTES } from './pull-request-review-protocol.js';
-import { InvalidShellTypeError, normalizeShellType } from './harness-registry.js';
+import { InvalidShellTypeError, normalizeShellType, type ShellType } from './harness-registry.js';
 import { PlanItemError, WorkingDirMissingError } from './create-ftown-session.js';
 import { WorktreeError } from './coordination/contract-b.js';
 import { BOARD_SNAPSHOT_EVENTS, type BoardSnapshot } from './coordination/contract-c.js';
@@ -40,6 +40,7 @@ import type {
   CommandResponse,
   CreateSessionPayload,
   GetHistoryPayload,
+  HandoffSessionPayload,
   GetSessionUsagePayload,
   GetSessionsUsagePayload,
   RemoveSessionPayload,
@@ -87,6 +88,8 @@ export interface CommandRpcDeps {
   modelRouting?: () => ModelRoutingService;
   /** Read-only board snapshot for `get_session_board`. Absent → unavailable. */
   sessionBoard?: SessionBoardSource;
+  /** One-step replacement of a session in its current directory. */
+  handoffSession?: (sessionId: string, request: { shellType?: ShellType; model?: string; name?: string }) => Promise<{ session: Session }>;
   publishCommandResponse: (response: CommandResponse, verified?: VerifiedApplication) => Promise<void>;
 }
 
@@ -623,6 +626,26 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
           response = result.ok
             ? { requestId: command.requestId, success: true, data: { usage: result.usage } }
             : { requestId: command.requestId, success: false, error: result.message };
+          break;
+        }
+
+        case 'handoff_session': {
+          const payload = command.payload as HandoffSessionPayload;
+          if (!payload.sessionId) {
+            response = { requestId: command.requestId, success: false, error: 'Missing sessionId' };
+            break;
+          }
+          if (!deps.handoffSession) {
+            response = { requestId: command.requestId, success: false, error: 'Handoff is not available' };
+            break;
+          }
+          const shellType = payload.shellType !== undefined ? normalizeShellType(payload.shellType) : undefined;
+          const result = await deps.handoffSession(payload.sessionId, {
+            ...(shellType ? { shellType } : {}),
+            ...(typeof payload.model === 'string' ? { model: payload.model } : {}),
+            ...(typeof payload.name === 'string' ? { name: payload.name } : {}),
+          });
+          response = { requestId: command.requestId, success: true, data: { session: toWireSession(result.session) } };
           break;
         }
 
