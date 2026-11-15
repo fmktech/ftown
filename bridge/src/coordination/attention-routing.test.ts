@@ -285,7 +285,8 @@ describe('attention-routing', () => {
     const items = new Map<string, AttentionItem[]>([
       ['c-dead', [makeItem({ id: 'a-dead', route: 'parent', routedTo: 'p-dead' })]],
       ['c-live', [makeItem({ id: 'a-live', route: 'parent', routedTo: 'p-live' })]],
-      ['c-ghost', [makeItem({ id: 'a-ghost', route: 'parent', routedTo: 'p-ghost' })]],
+      ['c-ghost', [makeItem({ id: 'a-ghost', route: 'parent', routedTo: 'p-ghost' }),
+        makeItem({ id: 'a-resolved', route: 'parent', routedTo: 'p-ghost', resolvedAt: '2026-11-13T11:00:00.000Z' })]],
       ['c-shell', [makeItem({ id: 'a-shell', route: 'parent', routedTo: 'p-shell' })]],
     ]);
     const notices: string[] = [];
@@ -310,6 +311,7 @@ describe('attention-routing', () => {
     assert.deepEqual(first.map((entry) => entry.item.id).sort(), ['a-dead', 'a-ghost', 'a-shell']);
     assert.deepEqual([...notices].sort(), ['c-dead:a-dead', 'c-ghost:a-ghost', 'c-shell:a-shell']);
     assert.equal(items.get('c-live')![0].route, 'parent');
+    assert.equal(items.get('c-ghost')!.find((item) => item.id === 'a-resolved')!.route, 'parent');
     for (const childId of ['c-dead', 'c-ghost', 'c-shell']) {
       assert.equal(items.get(childId)![0].route, 'human');
       assert.equal(items.get(childId)![0].escalationNote, PARENT_UNAVAILABLE_NOTE);
