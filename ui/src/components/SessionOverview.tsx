@@ -453,6 +453,11 @@ function isDisplayed(element: HTMLElement): boolean {
   return true;
 }
 
+function cssEscape(value: string): string {
+  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") return CSS.escape(value);
+  return value.replace(/[^a-zA-Z0-9_-]/g, character => `\\${character}`);
+}
+
 /** j/ArrowDown focuses the next row (the first when none is focused yet); k/ArrowUp the previous. */
 function moveRowFocus(rows: ReadonlyArray<HTMLElement>, target: HTMLElement | null, key: string): void {
   const index = target ? rows.indexOf(target) : -1;
@@ -503,7 +508,7 @@ export function SessionOverview(props: SessionOverviewProps) {
   const openAttention = (eventId: string) => {
     childAttention?.onOpenChange(eventId);
     requestAnimationFrame(() => {
-      const target = rootRef.current?.querySelector<HTMLElement>(`#child-attention-${CSS.escape(eventId)}`);
+      const target = rootRef.current?.querySelector<HTMLElement>(`#child-attention-${cssEscape(eventId)}`);
       target?.scrollIntoView?.({ block: "nearest" });
     });
   };
@@ -513,7 +518,7 @@ export function SessionOverview(props: SessionOverviewProps) {
   useEffect(() => {
     const openId = childAttention?.openId;
     if (!openId) return;
-    const target = rootRef.current?.querySelector<HTMLElement>(`#child-attention-${CSS.escape(openId)}`);
+    const target = rootRef.current?.querySelector<HTMLElement>(`#child-attention-${cssEscape(openId)}`);
     target?.scrollIntoView?.({ block: "nearest" });
   }, [childAttention?.openId, childAttention?.items]);
 

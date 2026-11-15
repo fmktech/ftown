@@ -21,7 +21,7 @@ import { SessionList } from "./SessionList";
 import type { AttentionAnswerEntry } from "../../../bridge/src/attention-prompt-protocol";
 import type { AttentionAnswerSubmitResult } from "./AttentionAnswerForm";
 import { SessionInboxPage, SessionInboxTrigger, inboxEntries, inboxItemKey, isWithParent, waitingInboxCount, noticeKey, queueSessionReply, attentionAnswerSubmitResult, type InboxEntry } from "./SessionInbox";
-import { parseAttentionDeepLink, resolveAttentionTarget } from "./ChildrenAttentionPanel";
+import { attentionLinkTarget, parseAttentionDeepLink } from "./ChildrenAttentionPanel";
 import { PullRequestStatusProvider } from "./PullRequestStatusProvider";
 import { SessionWorkspace } from "./SessionWorkspace";
 import { childSessionsOf } from "./SessionOverview";
@@ -134,8 +134,12 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [inboxOpen, setInboxOpen] = useState(false);
   /** Child attention item opened in the Overview coordinator panel; mirrored to `?attention=` URL state. */
   const [openAttentionId, setOpenAttentionId] = useState<string | null>(null);
-  /** Deep-linked attention id (plus its session hint) waiting to be opened. */
-  const [pendingAttention, setPendingAttention] = useState<{ attentionId: string; sessionHint: string | null } | null>(null);
+  /** Deep-linked attention id (plus its session hint) waiting to be opened. Read once so a later URL write cannot drop it. */
+  const [pendingAttention, setPendingAttention] = useState<{ attentionId: string; sessionHint: string | null } | null>(() => {
+    if (typeof window === "undefined") return null;
+    const link = parseAttentionDeepLink(window.location.search);
+    return link.attentionId ? { attentionId: link.attentionId, sessionHint: link.sessionId } : null;
+  });
   const [showNewSession, setShowNewSession] = useState(false);
   const [sessionDefaults, setSessionDefaults] = useState<SessionDefaults | undefined>(undefined);
   const [showToken, setShowToken] = useState(false);
@@ -706,20 +710,72 @@ PY`;
     [createSession, handleSelectSession, scheduleTerminalRenderAdjustment]
   );
 
+  const handleOpenAttentionChange = useCallback((id: string | null) => {
+    setOpenAttentionId(id);
+    if (id && !window.matchMedia("(min-width: 768px)").matches) setMobileTab("overview");
+  }, []);
+
   useEffect(() => {
-    const sessionId = new URLSearchParams(window.location.search).get("session");
-    if (sessionId && rawSessions.some((session) => session.id === sessionId)) {
-      handleSelectSession(sessionId);
-      const url = new URL(window.location.href); url.searchParams.delete("session");
+    if (!pendingAttention) return;
+    const target = attentionLinkTarget({ attentionId: pendingAttention.attentionId, sessionHint: pendingAttention.sessionHint, entries: inbox, sessions });
+    if (!target) return;
+    setSelectedSessionId(target.selectSessionId);
+    setSessionActivation(count => count + 1);
+    setAttentionHidden(null);
+    setInboxOpen(false);
+    setOpenAttentionId(target.viaParent ? pendingAttention.attentionId : null);
+    if (!window.matchMedia("(min-width: 768px)").matches) {
+      if (target.viaParent) setMobileTab("overview");
+      else {
+        const session = sessions.find(item => item.id === target.selectSessionId);
+        const waiting = inbox.some(entry => entry.session.id === target.selectSessionId && !isWithParent(entry.notice));
+        const previewShown = !!session?.preview && isPreviewDescriptor(session.preview);
+        setMobileTab(waiting || previewShown ? "preview" : "terminal");
+      }
+    }
+    setPendingAttention(null);
+  }, [pendingAttention, inbox, sessions]);
+
+  useEffect(() => {
+    if (pendingAttention) return;
+    const url = new URL(window.location.href);
+    if (openAttentionId && selectedSessionId) {
+      if (url.searchParams.get("session") === selectedSessionId && url.searchParams.get("attention") === openAttentionId) return;
+      url.searchParams.set("session", selectedSessionId);
+      url.searchParams.set("attention", openAttentionId);
       window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+      return;
+    }
+    if (!url.searchParams.has("attention")) return;
+    url.searchParams.delete("attention");
+    url.searchParams.delete("session");
+    window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  }, [openAttentionId, selectedSessionId, pendingAttention]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const attentionInUrl = parseAttentionDeepLink(params.toString()).attentionId;
+    // A session-only link (a notification that names no item) still opens that session, then leaves the URL clean.
+    if (!attentionInUrl && !pendingAttention) {
+      const sessionId = params.get("session");
+      if (sessionId && /^[A-Za-z0-9_-]{1,200}$/.test(sessionId) && rawSessions.some(session => session.id === sessionId)) {
+        handleSelectSession(sessionId);
+        const url = new URL(window.location.href);
+        url.searchParams.delete("session");
+        window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+      }
     }
     const onNotification = (event: MessageEvent) => {
-      if (event.data?.type === "ftown-open-session" && typeof event.data.sessionId === "string"
-        && rawSessions.some((session) => session.id === event.data.sessionId)) handleSelectSession(event.data.sessionId);
+      const data = event.data;
+      if (!data || data.type !== "ftown-open-session" || typeof data.sessionId !== "string") return;
+      if (!rawSessions.some(session => session.id === data.sessionId)) return;
+      const attentionId = typeof data.attentionId === "string" && /^[A-Za-z0-9_-]{1,200}$/.test(data.attentionId) ? data.attentionId : null;
+      if (attentionId) { setPendingAttention({ attentionId, sessionHint: data.sessionId }); return; }
+      handleSelectSession(data.sessionId);
     };
     navigator.serviceWorker?.addEventListener("message", onNotification);
     return () => navigator.serviceWorker?.removeEventListener("message", onNotification);
-  }, [rawSessions, handleSelectSession]);
+  }, [rawSessions, handleSelectSession, pendingAttention]);
 
   const handleMobileTabSwitch = useCallback((tab: "sessions" | "terminal" | "overview" | "preview" | "review") => {
     setInboxOpen(false);
@@ -1343,7 +1399,7 @@ PY`;
           <SessionInboxPage entries={inbox} open={inboxOpen} onClose={() => { restoreInboxFocusRef.current = true; setInboxOpen(false); scheduleTerminalRenderAdjustment(); }}
             onOpenSession={id => { focusOpenedSessionRef.current = true; handleSelectSession(id); scheduleTerminalRenderAdjustment(); }} onDismiss={entry => clearSessionAttention(entry.session.id, entry.notice)} onReply={replyToInbox} onAnswer={answerInbox} />
           <div ref={workspaceFocusRef} role="region" aria-label={`Session workspace: ${selectedSession?.name || selectedSession?.prompt?.slice(0, 48) || "Session"}`} tabIndex={-1} className="relative min-h-0 min-w-0 flex-1 flex-col focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--accent)]" style={{ display: inboxOpen ? "none" : "flex" }} aria-hidden={inboxOpen}>
-          <SessionWorkspace session={selectedSession} sessions={sessions} activity={selectedSessionId ? sessionActivity.get(selectedSessionId) : undefined} activityBySession={sessionActivity} openAttentionBySession={openAttentionBySession} idleSince={idleSince} client={client} userId={userId} readable={connectionStatus === "connected" && !!selectedSession && activeBridgeIds.has(selectedSession.bridgeId) && bridgeSecurityStates.get(selectedSession.bridgeId) === "ready"} securityGeneration={securityGeneration} sendCommand={rpc.sendCommand} open={previewOpen} onClose={() => setPreviewOpen(false)} isDesktop={isDesktop} mobileTab={mobileTab} onMobileTab={handleMobileTabFallback} sessionActivation={sessionActivation} onRefit={refitPreviewTerminal} reviewOpen={reviewOpen} reviewActivation={reviewChoice.activation} onCloseReview={closeReview} attention={selectedWaitingEntry ? { entry: selectedWaitingEntry, shown: attentionShown, onShow: showAttention, onHide: hideAttention, onDismiss: entry => clearSessionAttention(entry.session.id, entry.notice), onReply: replyToInbox, onAnswer: answerInbox } : undefined}>
+          <SessionWorkspace session={selectedSession} sessions={sessions} activity={selectedSessionId ? sessionActivity.get(selectedSessionId) : undefined} activityBySession={sessionActivity} openAttentionBySession={openAttentionBySession} idleSince={idleSince} client={client} userId={userId} readable={connectionStatus === "connected" && !!selectedSession && activeBridgeIds.has(selectedSession.bridgeId) && bridgeSecurityStates.get(selectedSession.bridgeId) === "ready"} securityGeneration={securityGeneration} sendCommand={rpc.sendCommand} open={previewOpen} onClose={() => setPreviewOpen(false)} isDesktop={isDesktop} mobileTab={mobileTab} onMobileTab={handleMobileTabFallback} sessionActivation={sessionActivation} onRefit={refitPreviewTerminal} reviewOpen={reviewOpen} reviewActivation={reviewChoice.activation} onCloseReview={closeReview} attentionEntries={inbox} openAttentionId={openAttentionId} onOpenAttentionChange={handleOpenAttentionChange} onDismissAttention={dismissChildAttention} onReplyAttention={replyChildAttention} onAnswerAttention={answerChildAttention} onOpenSessionById={handleSelectSession} attention={selectedWaitingEntry ? { entry: selectedWaitingEntry, shown: attentionShown, onShow: showAttention, onHide: hideAttention, onDismiss: entry => clearSessionAttention(entry.session.id, entry.notice), onReply: replyToInbox, onAnswer: answerInbox } : undefined}>
           <Terminal
             ref={terminalRef}
             transport={transport}

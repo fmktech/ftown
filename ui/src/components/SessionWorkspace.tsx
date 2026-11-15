@@ -207,6 +207,12 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
     observer.observe(node); return () => observer.disconnect();
   }, []);
   useEffect(() => { setCompactTab('preview'); setAuxTab('preview'); setExpanded(false); setConversationOpen(false); }, [session?.bridgeId, session?.id]);
+  // A deep link or an Overview question opens the coordinator panel, which lives on the Overview tab.
+  useEffect(() => {
+    if (!openAttentionId) return;
+    setCompactTab('overview');
+    setAuxTab('overview');
+  }, [openAttentionId, session?.bridgeId, session?.id]);
   const previewId = descriptor?.id;
   const previousPreviewId = useRef(previewId);
   useEffect(() => {

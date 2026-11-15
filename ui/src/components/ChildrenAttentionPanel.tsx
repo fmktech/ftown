@@ -58,6 +58,10 @@ export function mergeChildAttentionItems(input: {
     const session = input.sessionsById.get(sessionId);
     if (!session) continue;
     seen.add(event.id);
+    const routedParent = event.route === "parent" && event.routedTo ? input.sessionsById.get(event.routedTo) : undefined;
+    const parentName = event.route === "parent" && event.routedTo
+      ? routedParent?.name || routedParent?.prompt?.slice(0, 36) || event.routedTo
+      : undefined;
     const receivedAt = event.createdAt ? Date.parse(event.createdAt) : 0;
     const notice: ManualInputNotice = {
       type: event.type === "ask_user" ? "ask_user" : "agent_needs_input",
@@ -78,6 +82,7 @@ export function mergeChildAttentionItems(input: {
         session,
         notice,
         bridgeName: session.bridgeId,
+        ...(parentName ? { parentName } : {}),
         ...(session.status !== "running" ? { replyDisabledReason: "This session is not running." } : {}),
       },
       eventId: event.id,
@@ -108,6 +113,32 @@ export function resolveAttentionTarget(input: {
   const parentId = entry.session.parentSessionId;
   const viaParent = !!parentId && parentId !== entry.session.id && input.sessions.some(session => session.id === parentId);
   return { selectSessionId: viaParent ? parentId! : entry.session.id, entry, viaParent };
+}
+
+/**
+ * Session to select for a deep link. Prefers the live inbox entry (its parent
+ * when it has one). Otherwise uses the session hint: a child's parent, the
+ * hinted coordinator, or the hinted session itself.
+ */
+export function attentionLinkTarget(input: {
+  attentionId: string;
+  sessionHint: string | null;
+  entries: ReadonlyArray<InboxEntry>;
+  sessions: ReadonlyArray<Session>;
+}): { selectSessionId: string; viaParent: boolean } | null {
+  const resolved = resolveAttentionTarget(input);
+  if (resolved) return { selectSessionId: resolved.selectSessionId, viaParent: resolved.viaParent };
+  if (!input.sessionHint) return null;
+  const hinted = input.sessions.find(session => session.id === input.sessionHint);
+  if (!hinted) return null;
+  const parentId = hinted.parentSessionId;
+  if (parentId && parentId !== hinted.id && input.sessions.some(session => session.id === parentId)) {
+    return { selectSessionId: parentId, viaParent: true };
+  }
+  if (input.sessions.some(session => session.parentSessionId === hinted.id && session.id !== hinted.id)) {
+    return { selectSessionId: hinted.id, viaParent: true };
+  }
+  return { selectSessionId: hinted.id, viaParent: false };
 }
 
 export function ChildrenAttentionPanel({ items, openId, onOpenChange, onOpenSession, onDismiss, onReply, onAnswer, now = Date.now() }: {
@@ -142,8 +173,8 @@ export function ChildrenAttentionPanel({ items, openId, onOpenChange, onOpenSess
           return (
             <article key={eventId} id={`child-attention-${eventId}`} data-child-attention={eventId} className="min-w-0 rounded-md border border-[var(--border-muted)] bg-[var(--bg-base)]">
               <button type="button" aria-expanded={open} aria-controls={`child-attention-body-${eventId}`} className="flex min-h-11 w-full min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1 p-3 text-left" onClick={() => onOpenChange(open ? null : eventId)}>
-                <span className="break-words text-sm font-semibold [overflow-wrap:anywhere]">{childName}</span>
-                <span className="min-w-0 flex-1 break-words text-sm [overflow-wrap:anywhere]">{entry.notice.title}</span>
+                <span className="max-w-full break-words text-sm font-semibold [overflow-wrap:anywhere]">{childName}</span>
+                <span className="max-w-full break-words text-sm [overflow-wrap:anywhere]">{entry.notice.title}</span>
                 <span className="text-xs text-[var(--text-muted)]">{relativeTime(entry.notice.receivedAt, now)}</span>
                 <span data-attention-state={state} className={`text-xs ${state === "coordinator" ? "text-[var(--text-muted)]" : state === "answered" ? "text-[var(--text-muted)]" : "text-[var(--status-pending)]"}`}>{childAttentionStateLabel(state)}</span>
               </button>
