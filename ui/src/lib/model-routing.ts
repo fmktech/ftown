@@ -642,6 +642,8 @@ const RUNWAY_CAP = 99;
 const WINDOW_MINUTES_BY_KIND: Record<QuotaWindowKind, number> = {
   five_hour: 300,
   weekly: 10080,
+  // agy does not report a monthly window. 0 keeps the record exhaustive and is never applied.
+  monthly: 0,
 };
 const SEVERITY: Record<QuotaAvailability, number> = {
   available: 0,
@@ -652,6 +654,12 @@ const SEVERITY: Record<QuotaAvailability, number> = {
 const KIND_ORDER: Record<QuotaWindowKind, number> = {
   five_hour: 0,
   weekly: 1,
+  monthly: 2,
+};
+const WINDOW_LABEL: Record<QuotaWindowKind, string> = {
+  five_hour: '5-hour',
+  weekly: 'weekly',
+  monthly: 'monthly',
 };
 
 function assessPoolWindow(
@@ -663,16 +671,22 @@ function assessPoolWindow(
     used !== null && Number.isFinite(used)
       ? Math.round(Math.min(100, Math.max(0, 100 - used)))
       : null;
-  if (measuredLeft === null) return { availability: 'unknown', leftPercent: null };
 
   const resetMs = window.resetsAt !== null ? Date.parse(window.resetsAt) : Number.NaN;
   const resetsInMinutes = Number.isNaN(resetMs)
     ? null
     : Math.max(0, Math.floor((resetMs - nowMs) / MINUTE_MS));
 
-  if (resetsInMinutes !== null && resetsInMinutes <= IMMINENT_RESET_MINUTES) {
+  if (
+    measuredLeft !== null &&
+    resetsInMinutes !== null &&
+    resetsInMinutes <= IMMINENT_RESET_MINUTES
+  ) {
     return { availability: 'available', leftPercent: 100 };
   }
+
+  if (window.limited === true) return { availability: 'exhausted', leftPercent: 0 };
+  if (measuredLeft === null) return { availability: 'unknown', leftPercent: null };
 
   const windowMinutes = window.windowMinutes;
   let runway: number | null = null;
@@ -756,7 +770,7 @@ function adviseAgyModelFromRow(
   });
 
   const pool = agyQuotaPool(modelId);
-  const label = binding.window.kind === 'five_hour' ? '5-hour' : 'weekly';
+  const label = WINDOW_LABEL[binding.window.kind];
   const scopeNote = pool ?? binding.window.note ?? null;
   const reason =
     binding.availability === 'exhausted'

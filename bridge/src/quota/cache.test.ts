@@ -312,6 +312,46 @@ describe('quota cache via collectQuotaReport', () => {
     assert.equal(collected.report.providers[0].status, 'ok');
   });
 
+  it('keeps a monthly window and the limited flag through the cache', async t => {
+    const h = await harness(t, {
+      quota: (provider, _index, observedAt) => ({
+        ...okQuota(provider, observedAt, 'Go'),
+        windows: [
+          { kind: 'weekly', usedPercent: 13, resetsAt: null, windowMinutes: 10080, note: null, limited: true },
+          { kind: 'monthly', usedPercent: 6, resetsAt: null, windowMinutes: null, note: null, limited: false },
+        ],
+      }),
+    });
+    await collectQuotaReport({ providers: ['opencode'], timeoutMs: 1000, includeModels: false }, h.deps);
+    const second = await collectQuotaReport({ providers: ['opencode'], timeoutMs: 1000, includeModels: false }, h.deps);
+    assert.equal(h.quotaCalls.length, 1);
+    const row = second.report.providers[0];
+    assert.equal(row.source, 'cached');
+    assert.equal(row.windows.find(window => window.kind === 'monthly')?.usedPercent, 6);
+    assert.equal(row.windows.find(window => window.kind === 'weekly')?.limited, true);
+  });
+
+  it('refetches when a cached window kind or limited flag is not a real window', async t => {
+    const h = await harness(t);
+    const cachePath = resolveQuotaCachePath(h.homeDir);
+    await mkdir(dirname(cachePath), { recursive: true });
+    const base = JSON.parse(JSON.stringify(okQuota('opencode', START.toISOString()))) as {
+      windows: Array<Record<string, unknown>>;
+    };
+    base.windows[0].kind = 'daily';
+    await writeFile(cachePath, `${JSON.stringify({ version: 1, entries: { opencode: { quota: base, models: null } } })}\n`);
+    const unknownKind = await collectQuotaReport({ providers: ['opencode'], timeoutMs: 1000, includeModels: false }, h.deps);
+    assert.equal(h.quotaCalls.length, 1);
+    assert.equal(unknownKind.report.providers[0].source, 'live');
+
+    base.windows[0].kind = 'five_hour';
+    base.windows[0].limited = 'yes';
+    await writeFile(cachePath, `${JSON.stringify({ version: 1, entries: { opencode: { quota: base, models: null } } })}\n`);
+    const badFlag = await collectQuotaReport({ providers: ['opencode'], timeoutMs: 1000, includeModels: false }, h.deps);
+    assert.equal(h.quotaCalls.length, 2);
+    assert.equal(badFlag.report.providers[0].source, 'live');
+  });
+
   it('corrupt cache file is ignored and rewritten', async t => {
     const h = await harness(t);
     const cachePath = resolveQuotaCachePath(h.homeDir);

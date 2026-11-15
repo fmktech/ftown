@@ -115,16 +115,19 @@ function ledgerBridge(env = {}, uid = 501) {
   }, { process: { env, getuid: () => uid } });
 }
 
-test('isolatedBridgeEnv drops inherited FTOWN_* and tmux variables', () => {
+test('isolatedBridgeEnv drops inherited FTOWN_*, tmux, and OpenCode config location', () => {
   const { isolatedBridgeEnv } = ledgerBridge({
     HOME: '/unowned', USERPROFILE: '/unowned', FTOWN_DATA_DIR: '/unowned/data', FTOWN_PUBLIC_URL: 'x', FTOWN_ANYTHING: '1',
     TMUX: '/tmp/tmux-1/default,1,0', TMUX_PANE: '%3', TMUX_TMPDIR: '/unowned/tmux', KEEP: 'preserved', PATH: '/bin',
+    XDG_CONFIG_HOME: '/unowned/.config', OPENCODE_CONFIG_DIR: '/unowned/opencode',
   });
   const env = isolatedBridgeEnv('/h', '/tmp/ftpk-abc123');
   assert.equal(env.TMUX, undefined);
   assert.equal(env.TMUX_PANE, undefined);
   assert.equal(env.FTOWN_PUBLIC_URL, undefined);
   assert.equal(env.FTOWN_ANYTHING, undefined);
+  assert.equal(env.XDG_CONFIG_HOME, undefined);
+  assert.equal(env.OPENCODE_CONFIG_DIR, undefined);
   assert.equal(env.KEEP, 'preserved');
   assert.equal(env.PATH, '/bin');
   assert.equal(env.HOME, '/h');
@@ -132,6 +135,12 @@ test('isolatedBridgeEnv drops inherited FTOWN_* and tmux variables', () => {
   assert.equal(env.FTOWN_DATA_DIR, path.join('/h', '.ftown', 'data'));
   assert.equal(env.TMUX_TMPDIR, '/tmp/ftpk-abc123');
   assert.deepEqual(Object.keys(env).filter(k => k.startsWith('FTOWN_')), ['FTOWN_DATA_DIR']);
+});
+
+test('shared bridge startup drops the same OpenCode config location', () => {
+  const script = readFileSync(path.join(repo, 'e2e/scripts/start-services.sh'), 'utf8');
+  const isolation = script.slice(script.indexOf('run_isolated()'), script.indexOf('start_bridge()'));
+  assert.match(isolation, /OPENCODE_CONFIG_DIR\|XDG_CONFIG_HOME\) unset/);
 });
 
 test('tmuxSocket accepts only /tmp/ftpk-XXXXXX directories', () => {
@@ -168,7 +177,7 @@ test('replacement bridge keeps the exact entrypoint, no removed flags, isolated 
   const spawned = []; const writes = []; const readiness = []; let unreferenced = false;
   const proc = {
     env: { HOME: '/unowned', USERPROFILE: '/unowned', FTOWN_DATA_DIR: '/unowned/data', FTOWN_PUBLIC_URL: 'leak', TMUX: 'leak',
-      TMUX_PANE: '%1', TMUX_TMPDIR: '/unowned/tmux', KEEP: 'preserved' },
+      TMUX_PANE: '%1', TMUX_TMPDIR: '/unowned/tmux', XDG_CONFIG_HOME: '/unowned/.config', OPENCODE_CONFIG_DIR: '/unowned/opencode', KEEP: 'preserved' },
     getuid: () => 501,
     kill: () => { throw new Error('old fixture process is absent'); },
   };
@@ -205,7 +214,7 @@ test('replacement bridge keeps the exact entrypoint, no removed flags, isolated 
   assert.equal(options.env.FTOWN_DATA_DIR, path.join(home, '.ftown', 'data'));
   assert.equal(options.env.TMUX_TMPDIR, tmuxDir);
   assert.equal(options.env.KEEP, 'preserved');
-  for (const key of ['TMUX', 'TMUX_PANE', 'FTOWN_PUBLIC_URL']) assert.equal(options.env[key], undefined, key);
+  for (const key of ['TMUX', 'TMUX_PANE', 'FTOWN_PUBLIC_URL', 'XDG_CONFIG_HOME', 'OPENCODE_CONFIG_DIR']) assert.equal(options.env[key], undefined, key);
   assert.deepEqual(Object.keys(options.env).filter(k => k.startsWith('FTOWN_')), ['FTOWN_DATA_DIR']);
   assert.equal(options.detached, true); assert.equal(unreferenced, true);
   assert.deepEqual(JSON.parse(JSON.stringify(writes)), [[path.join(e2e, '.bridge.pid'), '901\n']]);

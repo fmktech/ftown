@@ -539,8 +539,11 @@ Run `npx ftown@<version> setup`, using the
 version in the bridge readiness hint. This works before the installed alias
 exists and installs the `ftown` command, compatible
 launchers, `~/.ftown/notify.sh`, and updates the unified skill
-under `~/.ftown/skills/ftown/` (linked into ~/.agents/skills and
-~/.claude/skills).
+under `~/.ftown/skills/ftown/` (linked into ~/.agents/skills,
+~/.claude/skills, and the OpenCode skills directory:
+`$OPENCODE_CONFIG_DIR/skills`, otherwise `$XDG_CONFIG_HOME/opencode/skills`
+or `~/.config/opencode/skills`). `ftown setup --repair` restores a missing
+OpenCode link. Ordinary starts only check it.
 
 An unpaired `ftown start` prints a `/pair` link and a 6-digit code: open the link on a device with the
 account passkey and type the code. A computer removed from the account resets its own identity, keeps its

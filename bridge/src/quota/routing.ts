@@ -45,11 +45,13 @@ const RANK: Record<QuotaAvailability, number> = {
 const KIND_ORDER: Record<QuotaWindowKind, number> = {
   five_hour: 0,
   weekly: 1,
+  monthly: 2,
 };
 
 const LABEL: Record<QuotaWindowKind, string> = {
   five_hour: '5-hour',
   weekly: 'weekly',
+  monthly: 'monthly',
 };
 
 /** Assesses one window against `now`. Pure: never reads the clock. */
@@ -86,6 +88,17 @@ export function assessWindow(
       resetsInMinutes,
       runway: null,
       resetting: true,
+    };
+  }
+
+  // A provider can block a window before the used percent reaches the usual threshold.
+  if (window.limited === true) {
+    return {
+      availability: 'exhausted',
+      leftPercent: 0,
+      resetsInMinutes,
+      runway: null,
+      resetting: false,
     };
   }
 
@@ -189,7 +202,8 @@ function reasonFor(binding: UsableWindow): string {
     return `${base}${suffix}`;
   }
   if (binding.availability === 'exhausted') {
-    return `${label} window used up${resetClause}${suffix}`;
+    const why = binding.window.limited === true ? 'is limited' : 'used up';
+    return `${label} window ${why}${resetClause}${suffix}`;
   }
   if (binding.availability === 'low' && left < 15) {
     return `only ${left}% of the ${label} window left${resetClause}${runwayClause}${suffix}`;

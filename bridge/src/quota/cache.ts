@@ -86,6 +86,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function isQuotaWindowKind(value: unknown): boolean {
+  return value === 'five_hour' || value === 'weekly' || value === 'monthly';
+}
+
 function isValidQuotaRow(value: unknown, provider: QuotaProviderId): value is ProviderQuota {
   if (!isRecord(value)) return false;
   if (value.provider !== provider) return false;
@@ -94,11 +98,12 @@ function isValidQuotaRow(value: unknown, provider: QuotaProviderId): value is Pr
   if (!Array.isArray(value.windows)) return false;
   for (const window of value.windows) {
     if (!isRecord(window)) return false;
-    if (window.kind !== 'five_hour' && window.kind !== 'weekly') return false;
+    if (!isQuotaWindowKind(window.kind)) return false;
     if (!(window.usedPercent === null || (typeof window.usedPercent === 'number' && Number.isFinite(window.usedPercent)))) return false;
     if (!(window.resetsAt === null || typeof window.resetsAt === 'string')) return false;
     if (!(window.windowMinutes === null || (typeof window.windowMinutes === 'number' && Number.isFinite(window.windowMinutes)))) return false;
     if (!(window.note === null || typeof window.note === 'string')) return false;
+    if (window.limited !== undefined && typeof window.limited !== 'boolean') return false;
   }
   if (value.source !== 'live' && value.source !== 'cached') return false;
   if (typeof value.observedAt !== 'string' || Number.isNaN(Date.parse(value.observedAt))) return false;
@@ -108,7 +113,7 @@ function isValidQuotaRow(value: unknown, provider: QuotaProviderId): value is Pr
     for (const limit of value.scopedLimits) {
       if (!isRecord(limit)) return false;
       if (typeof limit.scope !== 'string') return false;
-      if (limit.kind !== 'five_hour' && limit.kind !== 'weekly') return false;
+      if (!isQuotaWindowKind(limit.kind)) return false;
       if (!(limit.usedPercent === null || (typeof limit.usedPercent === 'number' && Number.isFinite(limit.usedPercent)))) return false;
       if (!(limit.resetsAt === null || typeof limit.resetsAt === 'string')) return false;
     }

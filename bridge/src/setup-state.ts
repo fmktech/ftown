@@ -1,9 +1,10 @@
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync, unlinkSync, rmdirSync, rmSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, renameSync, writeFileSync, unlinkSync, rmdirSync, rmSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { REQUIRED_SETUP_ASSETS, RUNTIME_INVENTORY_FILE, parseRuntimeInventory } from './installation-manifest.js';
 export { REQUIRED_SETUP_ASSETS } from './installation-manifest.js';
+import { opencodeSkillsDir } from './install-ftown-skill.js';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 
 export interface SetupState { schema: 1; packageVersion?: string; completedMigrations: string[] }
 export function setupStatePath(home = homedir()): string { return join(home, '.ftown', 'setup-state.json'); }
@@ -34,6 +35,18 @@ export function setupHint(version: string): string {
   return `npx ftown@${version} setup`;
 }
 
+/** True when ~/.config/opencode/skills/ftown (or the env override) is the canonical skill link. */
+function ftownOpencodeSkillLinked(home: string): boolean {
+  const skillsDir = opencodeSkillsDir(home, process.env);
+  const linkPath = join(skillsDir, 'ftown');
+  try {
+    if (!lstatSync(linkPath).isSymbolicLink()) return false;
+    return readlinkSync(linkPath) === relative(skillsDir, join(home, '.ftown', 'skills', 'ftown'));
+  } catch {
+    return false;
+  }
+}
+
 export function assertSetupReady(version: string, home = homedir()): void {
   const state = readSetupState(home);
   let inventoryFiles: string[] = [];
@@ -60,7 +73,7 @@ export function assertSetupReady(version: string, home = homedir()): void {
     } catch { return true; }
     try { return !lstatSync(join(home, '.ftown', asset)).isFile(); } catch { return true; }
   });
-  if (state.packageVersion !== version || missing) {
+  if (state.packageVersion !== version || missing || !ftownOpencodeSkillLinked(home)) {
     const repair = state.packageVersion === version ? ' --repair' : '';
     throw new Error(`FTown setup is missing, incomplete or outdated. Run: ${setupHint(version)}${repair}`);
   }

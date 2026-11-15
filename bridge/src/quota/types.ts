@@ -14,8 +14,9 @@ export const QUOTA_PROVIDER_IDS: readonly QuotaProviderId[] = ['claude', 'codex'
 /**
  * `five_hour` is the provider's short rolling block (its real length is in
  * `windowMinutes` when the provider states it). `weekly` is the 7-day block.
+ * `monthly` is a calendar-month block when a provider reports one.
  */
-export type QuotaWindowKind = 'five_hour' | 'weekly';
+export type QuotaWindowKind = 'five_hour' | 'weekly' | 'monthly';
 
 export interface QuotaWindow {
   kind: QuotaWindowKind;
@@ -30,6 +31,12 @@ export interface QuotaWindow {
   windowMinutes: number | null;
   /** Short human note for this window (e.g. "no active window"), or null. */
   note: string | null;
+  /**
+   * True when the provider says this window is blocked even though
+   * `usedPercent` is below the usual exhaustion threshold. Omitted when
+   * the provider did not report the flag.
+   */
+  limited?: boolean;
 }
 
 /**

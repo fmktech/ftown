@@ -231,14 +231,19 @@ npx ftown@<new-version> setup
 ```
 
 This installs that version's CLI/runtime assets, hooks/plugins, ftown skill and
-PATH entries. Start that copied version with `ftown start`, or use
-`ftown start --solo` for Solo. `npx ftown start` accepts the same options. The
-installed alias runs independently of the original npm cache and does not fetch
-or discover a newer package. `npx ftown-bridge` remains a compatible launcher.
-Ordinary bridge starts only check readiness and write runtime connection state.
-Use installed `ftown setup --repair` to recheck the current copied version,
-restore its missing assets, or detect newly installed integrations. If its runtime
-is incomplete, use the matching package entrypoint above with `--repair`.
+PATH entries. The skill is linked into `~/.agents/skills`, `~/.claude/skills`,
+and the OpenCode skills directory (`$OPENCODE_CONFIG_DIR/skills`, otherwise
+`$XDG_CONFIG_HOME/opencode/skills` or `~/.config/opencode/skills`). Start that
+copied version with `ftown start`, or use `ftown start --solo` for Solo.
+`npx ftown start` accepts the same options. The installed alias runs
+independently of the original npm cache and does not fetch or discover a newer
+package. `npx ftown-bridge` remains a compatible launcher. Ordinary bridge
+starts only check readiness, including the OpenCode skill link, and write
+runtime connection state. They do not create the link. Use installed
+`ftown setup --repair` to recheck the current copied version, restore its
+missing assets (including that link), or detect newly installed integrations.
+If its runtime is incomplete, use the matching package entrypoint above with
+`--repair`.
 Setup keeps completed cleanup migration IDs across package upgrades; repair can
 safely repeat them while preserving customized assets and saved data.
 
