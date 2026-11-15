@@ -19,12 +19,16 @@ Findings with a security angle are not listed here or anywhere in the repository
 | 2026-11-14 | v8 | short / off | 1 | 2 | yes | none |
 | 2026-11-14 | v8 | short / low | 1–4 | 2 | yes (4 of 4) | none reported by v8 (seed 2 contained an undetected F1 outage of ~51 s that old R2 missed; fixed in contract v9) |
 | 2026-11-14 | v6 | soak / high | 1 | 2 | yes | none in the pair; F1 found in an earlier run of this seed with clock faults |
+| 2026-11-14/15 | v9 | short / low | 1–40 | 2 | yes (40 of 40) | A2 on seeds 9 and 36 (F2) |
+
+The 2026-11-14/15 contract v9 short/low campaign ran on the bridge before the F2 fix (`39f03f5`).
 
 A short run takes about 3.7 minutes of wall time on a lightly loaded host.
 
-Coverage is small: four seeds at level low exercise bridge kill -9, bridge SIGTERM and agent
-faults in a 40-second window. No long faults, no clock jumps and no parent-death case ran in the
-short campaign. A clean table here says little about those.
+The v8 rows cover four seeds at level low. The v9 row covers seeds 1–40 at short / low.
+Those runs exercise bridge kill -9, bridge SIGTERM, parent death, and clock jumps inside a
+40-second fault window. What short runs never include is long faults. A clean table here says
+little about long faults.
 
 ## Findings
 
@@ -49,6 +53,13 @@ until the next scheduled heal. Without the clock jump the same restart succeeds.
   `hub did not become healthy within 30000ms` and checkpoints `cp6`–`cp8` showed `bridgeAlive: false`.
   Post-fix (source fingerprint `5f6a682a4488`, `--times 2`): identical pair `H_run=85caa5790c30`,
   `exit=0`, `R2` passed, checkpoints `cp8`–`cp9` showed `bridgeAlive: true` and `bridgeResponsive: true`.
+
+### F2 — A child question stays with a parent that died during a bridge outage (grade A)
+
+The child keeps waiting, up to a day, and the human gets no notice. A human who opens the inbox can still answer the greyed "with parent" item. What is missing is the escalation and its notice. Startup marks the dead parent as an error and, on the bridge before the fix, leaves the question routed to the parent. Reproduced byte-identical on seed 9 and on seed 36, short, level low. Seed 6 kills the parent while the bridge is up, and the question moves. The counterfactual that drops `bridge_kill9` on seed 9 passes A2.
+
+- Details: [F2-parent-death-during-bridge-outage.md](F2-parent-death-during-bridge-outage.md)
+- Fix confirmation (2026-11-15, fix commit `39f03f5`, #229): confirmed on contract v9, short / low. Pre-fix campaign: seed 9 `H_run=51fbe1c3a3de`, `violated=A2`, `exit=1`; seed 36 `H_run=9a38a903144b`, `violated=A2`, `exit=1`. Counterfactual (`--drop-faults bridge_kill9`, source fingerprint `0508bf92547a`): `H_run=14fba9da891c`, `violated=-`, `exit=0`, A2 pass, final route `human`, `escalated` true. Post-fix (source fingerprint `b1014caec549`, different from the counterfactual): seed 9 pair `H_run=3dfc8f602ab7`, `exit=0`, A2 pass; seed 36 pair `H_run=e5eb2f6f5e39`, `exit=0`, A2 pass. Both pairs byte-identical.
 
 ## Observations
 
