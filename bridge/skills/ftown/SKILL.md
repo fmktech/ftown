@@ -16,9 +16,12 @@ description: >-
 
 Use `ftown start`, `ftown sessions`, `ftown harness`, and `ftown env`. Run `ftown --help`
 for command discovery; if it is missing from PATH, use `~/.ftown/ftown`.
-The bridge installs this skill at `~/.ftown/skills/ftown`, linked from the agent
-skill directories. Startup checks setup readiness and never rewrites global
-integrations. Before the installed command exists, run setup from the package:
+The bridge installs this skill at `~/.ftown/skills/ftown`, linked from
+`~/.agents/skills`, `~/.claude/skills`, and the OpenCode skills directory
+(`$OPENCODE_CONFIG_DIR/skills`, otherwise `$XDG_CONFIG_HOME/opencode/skills`,
+or `~/.config/opencode/skills`). Startup checks setup readiness, including that
+OpenCode link, and never rewrites global integrations. Before the installed
+command exists, run setup from the package:
 
 ```bash
 npx ftown setup

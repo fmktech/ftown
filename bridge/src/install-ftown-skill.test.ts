@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, symlinkSync, unlinkSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync, symlinkSync, unlinkSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -18,11 +18,17 @@ function pathExistsForLstat(path: string): boolean {
 
 describe('ftown skill installer', () => {
   let realHome: string | undefined;
+  let savedOpen: string | undefined;
+  let savedXdg: string | undefined;
   let home: string;
   let bundled: string;
 
   beforeEach(() => {
     realHome = process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
+    savedOpen = process.env.OPENCODE_CONFIG_DIR;
+    savedXdg = process.env.XDG_CONFIG_HOME;
+    delete process.env.OPENCODE_CONFIG_DIR;
+    delete process.env.XDG_CONFIG_HOME;
     home = mkdtempSync(join(tmpdir(), 'ftw-skill-install-'));
     bundled = join(home, 'bundled-skill');
     mkdirSync(join(bundled, 'scripts'), { recursive: true });
@@ -34,6 +40,10 @@ describe('ftown skill installer', () => {
   afterEach(() => {
     if (realHome === undefined) delete process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
     else process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = realHome;
+    if (savedOpen === undefined) delete process.env.OPENCODE_CONFIG_DIR;
+    else process.env.OPENCODE_CONFIG_DIR = savedOpen;
+    if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = savedXdg;
     rmSync(home, { recursive: true, force: true });
   });
 
@@ -64,6 +74,7 @@ describe('ftown skill installer', () => {
     assert.strictEqual(existsSync(join(home, '.ftown', 'skills', 'ftown-sessions')), false);
     assert.strictEqual(pathExistsForLstat(join(home, '.agents', 'skills', 'ftown-sessions')), false);
     assert.strictEqual(pathExistsForLstat(join(home, '.claude', 'skills', 'ftown-sessions')), false);
+    assert.strictEqual(pathExistsForLstat(join(home, '.config', 'opencode', 'skills', 'ftown-sessions')), false);
   });
 
   it('removes only recognized shipped automation copies and exact bridge-owned links', () => {
@@ -147,7 +158,7 @@ exec node "${join(ftown, 'ftown-workflows-cli.js')}" "$@"
       runtimeFiles: { 'workflow-runner.js': hash('old engine'), 'ftown-workflows-cli.js': hash('old cli') },
     };
     retireBundledAgentAssets(known);
-    for (const path of [join(ftown, 'skills', 'fticket'), join(home, '.agents', 'skills', 'fticket'), join(home, '.claude', 'skills', 'fticket'), join(skill, 'references', 'workflows.md'), join(ftown, 'workflow-runner.js'), join(ftown, 'ftown-workflows-cli.js'), join(ftown, 'ftown-workflows')]) assert.equal(pathExistsForLstat(path), false, path);
+    for (const path of [join(ftown, 'skills', 'fticket'), join(home, '.agents', 'skills', 'fticket'), join(home, '.claude', 'skills', 'fticket'), join(home, '.config', 'opencode', 'skills', 'fticket'), join(skill, 'references', 'workflows.md'), join(ftown, 'workflow-runner.js'), join(ftown, 'ftown-workflows-cli.js'), join(ftown, 'ftown-workflows')]) assert.equal(pathExistsForLstat(path), false, path);
     assert.equal(readFileSync(join(ftown, 'claude-trust.js'), 'utf8'), 'shared');
     assert.equal(readFileSync(join(ftown, 'workflows', 'run-1', 'result.json'), 'utf8'), 'user data');
     retireBundledAgentAssets(known);
@@ -202,6 +213,43 @@ exec node "${join(ftown, 'ftown-workflows-cli.js')}" "$@"
     retireBundledAgentAssets({ fticket: { 'SKILL.md': hash }, skillFiles: { 'references/workflows.md': hash }, runtimeFiles: {} });
     assert.equal(readFileSync(join(outside, 'skills', 'fticket', 'SKILL.md'), 'utf8'), 'known');
     assert.equal(readFileSync(join(refs, 'workflows.md'), 'utf8'), 'known');
+  });
+
+  it('links ftown into the opencode skills directory with a relative symlink, and a second install leaves it', () => {
+    installFtownSkill('ftown', bundled);
+    const link = join(home, '.config', 'opencode', 'skills', 'ftown');
+    assert.equal(lstatSync(link).isSymbolicLink(), true);
+    assert.equal(readlinkSync(link), '../../../.ftown/skills/ftown');
+    installFtownSkill('ftown', bundled);
+    assert.equal(readlinkSync(link), '../../../.ftown/skills/ftown');
+  });
+
+  it('repoints a wrong opencode symlink and removes that link with the skill', () => {
+    const dir = join(home, '.config', 'opencode', 'skills');
+    mkdirSync(dir, { recursive: true });
+    symlinkSync('somewhere-else', join(dir, 'ftown'));
+    installFtownSkill('ftown', bundled);
+    assert.equal(readlinkSync(join(dir, 'ftown')), '../../../.ftown/skills/ftown');
+    removeFtownSkill('ftown');
+    assert.equal(pathExistsForLstat(join(dir, 'ftown')), false);
+    assert.equal(existsSync(join(home, '.ftown', 'skills', 'ftown')), false);
+  });
+
+  it('honors OPENCODE_CONFIG_DIR ahead of XDG_CONFIG_HOME', () => {
+    process.env.XDG_CONFIG_HOME = join(home, 'xdg');
+    process.env.OPENCODE_CONFIG_DIR = join(home, 'oc-config');
+    installFtownSkill('ftown', bundled);
+    assert.equal(readlinkSync(join(home, 'oc-config', 'skills', 'ftown')), '../../.ftown/skills/ftown');
+    assert.equal(existsSync(join(home, 'xdg', 'opencode', 'skills', 'ftown')), false);
+    assert.equal(existsSync(join(home, '.config', 'opencode', 'skills', 'ftown')), false);
+  });
+
+  it('uses XDG_CONFIG_HOME/opencode/skills when OPENCODE_CONFIG_DIR is unset or blank', () => {
+    process.env.XDG_CONFIG_HOME = join(home, 'xdg');
+    process.env.OPENCODE_CONFIG_DIR = '   ';
+    installFtownSkill('ftown', bundled);
+    assert.equal(readlinkSync(join(home, 'xdg', 'opencode', 'skills', 'ftown')), '../../../.ftown/skills/ftown');
+    assert.equal(existsSync(join(home, '.config', 'opencode', 'skills', 'ftown')), false);
   });
 
 });

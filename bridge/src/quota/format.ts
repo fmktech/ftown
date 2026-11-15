@@ -72,6 +72,7 @@ export function formatWindowCell(
           : ' (reset due)';
     }
   }
+  if (window.limited === true) text += ' limited';
   return text;
 }
 
@@ -119,6 +120,10 @@ export const formatQuotaTable: QuotaTableFormatter = (rows, now) => {
   for (const row of rows) {
     const message = row.message?.trim() ?? '';
     if (message.length > 0) messages.push(`${row.provider}: ${message}`);
+    const monthly = row.windows.find((window) => window.kind === 'monthly');
+    if (monthly !== undefined) {
+      messages.push(`${row.provider} monthly: ${formatWindowCell(monthly, row.status, now)}`);
+    }
   }
   if (messages.length > 0) {
     lines.push('', ...messages);

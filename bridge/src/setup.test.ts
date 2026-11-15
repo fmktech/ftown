@@ -1,17 +1,38 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { test } from 'node:test';
+import { opencodeSkillsDir } from './install-ftown-skill.js';
 import { performSetup, type SetupDependencies } from './setup.js';
 import { readSetupState, REQUIRED_SETUP_ASSETS } from './setup-state.js';
 import { REQUIRED_RUNTIME_FILES } from './installation-manifest.js';
 
 async function fixture(run: (home: string, root: string) => Promise<void>): Promise<void> {
-  const previous = process.env.HOME; const temporary = mkdtempSync(join(tmpdir(), 'ftown-setup-'));
+  const previous = process.env.HOME;
+  const savedOpen = process.env.OPENCODE_CONFIG_DIR;
+  const savedXdg = process.env.XDG_CONFIG_HOME;
+  const temporary = mkdtempSync(join(tmpdir(), 'ftown-setup-'));
   const home = join(temporary, 'home'); const root = join(temporary, 'package'); mkdirSync(home); mkdirSync(root);
-  writeFileSync(join(root, 'package.json'), '{"version":"1.2.3"}'); process.env.HOME = home;
-  try { await run(home, root); } finally { if (previous === undefined) delete process.env.HOME; else process.env.HOME = previous; rmSync(temporary, { recursive: true, force: true }); }
+  writeFileSync(join(root, 'package.json'), '{"version":"1.2.3"}');
+  process.env.HOME = home;
+  delete process.env.OPENCODE_CONFIG_DIR;
+  delete process.env.XDG_CONFIG_HOME;
+  try { await run(home, root); } finally {
+    if (previous === undefined) delete process.env.HOME; else process.env.HOME = previous;
+    if (savedOpen === undefined) delete process.env.OPENCODE_CONFIG_DIR; else process.env.OPENCODE_CONFIG_DIR = savedOpen;
+    if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = savedXdg;
+    rmSync(temporary, { recursive: true, force: true });
+  }
+}
+
+/** The stubbed skill install still has to leave the link readiness checks. */
+function linkOpencodeFtownSkill(home: string): void {
+  const dir = opencodeSkillsDir(home, process.env);
+  mkdirSync(dir, { recursive: true });
+  const link = join(dir, 'ftown');
+  try { unlinkSync(link); } catch { /* absent on the first install */ }
+  symlinkSync(relative(dir, join(home, '.ftown', 'skills', 'ftown')), link);
 }
 
 function dependencies(home: string, calls: string[], fail = false): SetupDependencies {
@@ -25,6 +46,7 @@ function dependencies(home: string, calls: string[], fail = false): SetupDepende
         const full = join(home, '.ftown', path); mkdirSync(dirname(full), { recursive: true });
         writeFileSync(full, path === 'cli/installation.json' ? JSON.stringify({ schema: 1, packageVersion: '1.2.3', files: REQUIRED_RUNTIME_FILES }) : path === 'cli/package.json' ? '{"version":"1.2.3"}' : 'asset');
       }
+      linkOpencodeFtownSkill(home);
     },
   };
 }

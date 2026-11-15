@@ -32,6 +32,8 @@ const WEEKLY_MINUTES = 10080;
 const WINDOW_MINUTES_BY_KIND: Record<QuotaWindowKind, number> = {
   five_hour: FIVE_HOUR_MINUTES,
   weekly: WEEKLY_MINUTES,
+  // agy does not report a monthly window. 0 keeps the record exhaustive and is never applied.
+  monthly: 0,
 };
 
 /**

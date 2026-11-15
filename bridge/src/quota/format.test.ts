@@ -167,4 +167,25 @@ describe('formatQuotaTable', () => {
     );
     assert.equal(output.split('\n')[1].endsWith('cached'), true);
   });
+
+  it('marks a limited window and appends a monthly line without changing the header', () => {
+    const output = formatQuotaTable(
+      [
+        row({
+          provider: 'opencode',
+          plan: 'Go',
+          windows: [
+            win({ kind: 'five_hour', usedPercent: 0, resetsAt: at(HOUR) }),
+            win({ kind: 'weekly', usedPercent: 13, limited: true, resetsAt: at(2 * DAY) }),
+            win({ kind: 'monthly', usedPercent: 6, resetsAt: at(20 * DAY) }),
+          ],
+        }),
+      ],
+      NOW,
+    );
+    const lines = output.split('\n');
+    assert.equal(lines[0], 'PROVIDER  PLAN  5H LEFT                 WEEKLY LEFT                    SOURCE');
+    assert.match(lines[1], /opencode\s+Go\s+100% \(resets in 1h 0m\)\s+87% \(resets in 2d 0h\) limited\s+live/);
+    assert.equal(lines[3], 'opencode monthly: 94% (resets in 20d 0h)');
+  });
 });

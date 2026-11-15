@@ -15,22 +15,38 @@ import {
   unlinkSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 
 export function ftownSkillPath(skillName: string): string {
   return join(homedir(), '.ftown', 'skills', skillName);
 }
 
-// Both ~/.agents/skills/<name> and ~/.claude/skills/<name> are exactly two
-// levels under $HOME, so the same relative target points to the canonical dir.
-function relativeTarget(skillName: string): string {
-  return `../../.ftown/skills/${skillName}`;
+/**
+ * OpenCode skills directory. `OPENCODE_CONFIG_DIR` replaces the config
+ * directory itself. Otherwise skills live under `$XDG_CONFIG_HOME/opencode`
+ * or `~/.config/opencode`.
+ */
+export function opencodeSkillsDir(home: string, env: NodeJS.ProcessEnv = process.env): string {
+  const override = env.OPENCODE_CONFIG_DIR;
+  if (typeof override === 'string' && override.trim().length > 0) return join(override.trim(), 'skills');
+  const xdg = env.XDG_CONFIG_HOME;
+  const configHome = typeof xdg === 'string' && xdg.trim().length > 0 ? xdg.trim() : join(home, '.config');
+  return join(configHome, 'opencode', 'skills');
+}
+
+function skillLinkDirs(home: string, env: NodeJS.ProcessEnv): readonly string[] {
+  return [join(home, '.agents', 'skills'), join(home, '.claude', 'skills'), opencodeSkillsDir(home, env)];
+}
+
+/** Relative symlink target from a skill link directory back to the canonical skill. */
+function relativeTarget(skillsDir: string, skillName: string, home = homedir()): string {
+  return relative(skillsDir, join(home, '.ftown', 'skills', skillName));
 }
 
 function linkSkillInto(skillsDir: string, skillName: string): void {
   mkdirSync(skillsDir, { recursive: true });
   const linkPath = join(skillsDir, skillName);
-  const target = relativeTarget(skillName);
+  const target = relativeTarget(skillsDir, skillName);
 
   // lstat instead of existsSync: a dangling symlink must still be detected
   // and replaced, or symlinkSync below throws EEXIST.
@@ -105,7 +121,7 @@ function removeSkillLinkFrom(skillsDir: string, skillName: string): void {
     } catch {
       current = undefined;
     }
-    if (current === relativeTarget(skillName)) {
+    if (current === relativeTarget(skillsDir, skillName)) {
       unlinkSync(linkPath);
       console.log(`[Bridge] Removed stale skill link: ${linkPath}`);
     }
@@ -115,9 +131,10 @@ function removeSkillLinkFrom(skillsDir: string, skillName: string): void {
 
 }
 
-/** Copy bundled skill to ~/.ftown/skills/<name> (canonical) and symlink from ~/.agents/skills and ~/.claude/skills. */
+/** Copy bundled skill to ~/.ftown/skills/<name> and symlink it from the agent and OpenCode skill dirs. */
 export function installFtownSkill(skillName: string, bundledSkillDir: string): void {
-  const ftownSkillsDir = join(homedir(), '.ftown', 'skills');
+  const home = homedir();
+  const ftownSkillsDir = join(home, '.ftown', 'skills');
   const dest = ftownSkillPath(skillName);
 
   mkdirSync(ftownSkillsDir, { recursive: true });
@@ -133,8 +150,7 @@ export function installFtownSkill(skillName: string, bundledSkillDir: string): v
   writeFileSync(join(dest, '.ftown-owned-assets.json'), JSON.stringify(treeSignatures(bundledSkillDir)) + '\n');
   console.log(`[Bridge] Installed skill at ${dest}`);
 
-  linkSkillInto(join(homedir(), '.agents', 'skills'), skillName);
-  linkSkillInto(join(homedir(), '.claude', 'skills'), skillName);
+  for (const dir of skillLinkDirs(home, process.env)) linkSkillInto(dir, skillName);
 }
 
 /** Remove a bridge-owned skill from the canonical store and known agent skill link dirs. */
@@ -147,8 +163,8 @@ export function removeFtownSkill(skillName: string): void {
   } catch (error) { preserveUnknown(error); /* Unrecognized/customized directories are user-owned. */ }
   // Preserve the discovery links when an unrecognized/customized tree survives.
   if (!pathExists(dest) && ownedSkillParentIsReal()) {
-    removeSkillLinkFrom(join(homedir(), '.agents', 'skills'), skillName);
-    removeSkillLinkFrom(join(homedir(), '.claude', 'skills'), skillName);
+    const home = homedir();
+    for (const dir of skillLinkDirs(home, process.env)) removeSkillLinkFrom(dir, skillName);
   }
 }
 
@@ -202,6 +218,9 @@ export function retireBundledAutomationAssets(
     } catch (error) { preserveUnknown(error); /* Preserve custom trees, foreign links and symlink parents. */ }
     if (ownedSkillParentIsReal() && !pathExists(dest)) removeSkillLinkFrom(skills, 'factory');
   }
+  if (ownedSkillParentIsReal() && !pathExists(dest)) {
+    removeSkillLinkFrom(opencodeSkillsDir(homedir(), process.env), 'factory');
+  }
 
   const references = join(ftownSkillPath('ftown'), 'references');
   const reference = join(references, 'loops.md');
@@ -244,6 +263,9 @@ export function retireBundledAgentAssets(
       if (matchesTree(legacy, known.fticket)) rmSync(legacy, { recursive: true });
     } catch (error) { preserveUnknown(error); /* Foreign links and customized trees survive. */ }
     if (ownedSkillParentIsReal() && !pathExists(canonical)) removeSkillLinkFrom(skillsDir, 'fticket');
+  }
+  if (ownedSkillParentIsReal() && !pathExists(canonical)) {
+    removeSkillLinkFrom(opencodeSkillsDir(home, process.env), 'fticket');
   }
 
   const skill = ftownSkillPath('ftown');
