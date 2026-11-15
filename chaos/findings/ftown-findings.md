@@ -24,7 +24,7 @@ Findings with a security angle are not listed here or anywhere in the repository
 
 The 2026-11-14/15 contract v9 short/low campaign ran on the bridge before the F2 fix (`39f03f5`).
 
-The 2026-11-15 soak / high row is the campaign that found F3. The counterfactual that drops `clock_jump_back` on seeds 6 and 10 is running; the result is pending.
+The 2026-11-15 soak / high row is the campaign that found F3. The same-build counterfactual dropping only `clock_jump_back` passes M5 and all always/unreachable properties on both seeds (exit 0; `H_run` prefixes `0c83ac100058` and `bcec72f7af52`).
 
 A short run takes about 3.7 minutes of wall time on a lightly loaded host.
 
@@ -64,9 +64,9 @@ The child keeps waiting, up to a day, and the human gets no notice. A human who 
 - Details: [F2-parent-death-during-bridge-outage.md](F2-parent-death-during-bridge-outage.md)
 - Fix confirmation (2026-11-15, fix commit `39f03f5`, #229): confirmed on contract v9, short / low. Pre-fix campaign: seed 9 `H_run=51fbe1c3a3de`, `violated=A2`, `exit=1`; seed 36 `H_run=9a38a903144b`, `violated=A2`, `exit=1`. Counterfactual (`--drop-faults bridge_kill9`, source fingerprint `0508bf92547a`): `H_run=14fba9da891c`, `violated=-`, `exit=0`, A2 pass, final route `human`, `escalated` true. Post-fix (source fingerprint `b1014caec549`, different from the counterfactual): seed 9 pair `H_run=3dfc8f602ab7`, `exit=0`, A2 pass; seed 36 pair `H_run=e5eb2f6f5e39`, `exit=0`, A2 pass. Both pairs byte-identical.
 
-### F3 — A backward wall-clock step delays mail nudges (grade B)
+### F3 — A backward wall-clock step delays mail nudges (grade A)
 
-An idle session with unread waking mail is not nudged for about as long as the clock stepped back. The mail is already in the inbox; a manual read sees it; the nudge fires when the rescheduled timer does, or on a bridge restart. Soak / high, contract v9, seeds 6 and 10, each pair byte-identical. Grade B: the code path is identified, and the counterfactual that drops `clock_jump_back` is running, result pending.
+A backward wall-clock step can delay the idle safety-net nudge by roughly the step. Mail stays readable; a later successful real-agent hook pump or inbox consumer can deliver it sooner. Eventual timer recovery or fresh-delay recovery after restart is inferred from code. Soak / high, contract v9, seeds 6 and 10, each pair byte-identical. Grade A: the code path is identified and the same clean-build counterfactual dropping only `clock_jump_back` passes M5 on both seeds. Fix not yet merged.
 
 - Details: [F3-backward-clock-jump-delays-mail-nudges.md](F3-backward-clock-jump-delays-mail-nudges.md)
 
