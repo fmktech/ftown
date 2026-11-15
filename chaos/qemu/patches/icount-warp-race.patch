@@ -3,21 +3,37 @@ Derived from QEMU 1:7.2+dfsg-7+deb12u18, softmmu/icount.c, accel/tcg/tcg-accel-o
 
 Subject: icount: do not warp QEMU_CLOCK_VIRTUAL over an unaccounted vCPU slice
 
-icount_start_warp_timer() runs in the main loop (main_loop_wait, timerlist_rearm) and
-advances qemu_icount_bias by the distance to the next QEMU_CLOCK_VIRTUAL deadline when
-all vCPUs are idle. The main thread has current_cpu == NULL, so QEMU_CLOCK_VIRTUAL there
-is qemu_icount as of the last icount_process_data(). Between a vCPU executing HLT
-(halted = 1, so "idle") and icount_process_data() accounting that slice, the clock lags
-by the slice's instructions, the computed deadline is too large and the warp overshoots.
-Whether the main loop wakes inside that window depends on host scheduling, so two runs
-of the same guest diverge by a few ms of guest time under host load.
+icount_start_warp_timer() runs on the main thread (main_loop_wait,
+timerlist_rearm) and, with -icount sleep=off, adds the precomputed distance
+to the next QEMU_CLOCK_VIRTUAL deadline onto qemu_icount_bias. The main
+thread has current_cpu == NULL, and cpu->running is not set on the normal
+exec path, so that clock is qemu_icount as of the last icount_update().
 
-Skip the warp while any vCPU slice is unaccounted (icount_budget != 0). The vCPU thread
-notifies the main loop after accounting when all CPUs are idle (rr_cpu_thread_fn), so the
-warp then happens with an exact clock.
+do_hlt() sets halted before the slice is published, so all_cpu_threads_idle()
+is true while icount_budget is still the slice. icount_update_locked() then
+does `budget -= executed` (a plain store, which is 0 when the slice ran to
+completion) before the relaxed store of qemu_icount, both under
+vm_clock_lock. An acquire load of icount_budget that does not take that lock
+can observe 0 while qemu_icount still lags, and the warp overshoots by the
+unpublished tail. Host scheduling decides whether the main thread samples
+inside that window.
+
+Skip the warp while any icount_budget is nonzero, and take vm_clock_lock
+around that load. Do not sample the deadline and do not notify on the skip.
+rr_cpu_thread_fn calls qemu_notify_event() after icount_process_data() when
+every CPU is idle, and aio_compute_bh_timeout() turns that into a zero poll
+timeout, so the warp is retried with a published clock. When every budget is
+already 0 the existing `qemu_icount_bias += deadline` line is unchanged.
+
+icount_decr and icount_extra are not read. The unpublished tail is
+budget - (decr + extra), so it is nonzero only when budget is nonzero.
+process_data clears decr and extra and then release-stores budget = 0 after
+icount_update() returns; an acquire load that sees that 0 also sees the
+published icount. A nonzero result only skips this attempt.
+
 --- a/softmmu/icount.c
 +++ b/softmmu/icount.c
-@@ -310,6 +310,16 @@
+@@ -310,6 +310,32 @@
      if (replay_mode != REPLAY_MODE_PLAY) {
          if (!all_cpu_threads_idle()) {
              return;
@@ -25,11 +41,27 @@ warp then happens with an exact clock.
 +
 +        {
 +            CPUState *cs;
++            bool unaccounted = false;
++
++            /*
++             * icount_update_locked stores `budget -= executed` (that store can
++             * be 0) before it stores qemu_icount, and both stores are covered
++             * by vm_clock_lock. Take that lock so this load cannot observe the
++             * 0 while the clock still lags. A nonzero budget is retried: the
++             * vCPU calls qemu_notify_event after icount_process_data.
++             */
++            seqlock_write_lock(&timers_state.vm_clock_seqlock,
++                               &timers_state.vm_clock_lock);
 +            CPU_FOREACH(cs) {
 +                if (qatomic_load_acquire(&cs->icount_budget) != 0) {
-+                    /* slice not yet accounted: the clock lags, see header */
-+                    return;
++                    unaccounted = true;
++                    break;
 +                }
++            }
++            seqlock_write_unlock(&timers_state.vm_clock_seqlock,
++                                 &timers_state.vm_clock_lock);
++            if (unaccounted) {
++                return;
 +            }
          }
  

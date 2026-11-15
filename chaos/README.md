@@ -219,7 +219,7 @@ The carried patch (`chaos/qemu/patches/tlb-deterministic-resize.patch`, enabled 
 
 ### Known Limits
 
-- **Soak Clock Race**: In soak-length runs (~8 min virtual time), an open rare clock race can cause run pairs to differ by milliseconds in the final record timestamp of `canon.jsonl`. Soak pairs are not yet guaranteed byte-identical.
+- **Sleep-off warp**: Closed by `PATCH=1` (default) in `chaos/qemu/qemu.Dockerfile`. A halted vCPU counts as idle before its slice is added to `qemu_icount`, so the main thread could add the distance to the next virtual timer onto the instruction-count bias and the timer fired late by that unpublished tail. That depended on host scheduling and showed up as a few milliseconds in the final `canon.jsonl` timestamp of a soak pair. The patch reads `icount_budget` under `vm_clock_lock` and skips that warp while the budget is nonzero. The vCPU wakes the main loop after it publishes the slice. A warp that already sees a zero budget adds the same bias as before.
 - **Single vCPU**: VMs run with `-smp 1` under single-threaded TCG. Multicore concurrency is not simulated.
 - **Process-Crash Faults Only**: Injects process kills, signal pauses, and guest clock jumps. Power-loss faults (ungraceful VM reset), filesystem corruption, and network partitions are not simulated.
 - **Not in CI Yet**: Due to QEMU `-icount` emulation cost, chaos tests are intended for manual runs, overnight campaigns, and targeted reproductions; they are not yet wired into CI pull-request checks.

@@ -10,7 +10,7 @@ For the upstream license terms, see the QEMU project website at [qemu.org](https
 
 ## QEMU Source Files Touched by Each Patch
 
-- **`icount-warp-race.patch`**:
+- **`icount-warp-race.patch`** (`PATCH=1`, default): reads `icount_budget` under `vm_clock_lock` and skips a sleep=off warp while that budget is nonzero.
   - `softmmu/icount.c`
   - `accel/tcg/tcg-accel-ops-icount.c`
 - **`tlb-deterministic-resize.patch`**:
