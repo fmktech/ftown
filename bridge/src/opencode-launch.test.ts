@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { describe, it } from 'node:test';
@@ -79,12 +79,20 @@ async function pollUntil<T>(label: string, read: () => Promise<T | undefined>): 
   throw new Error(`${label} timed out: ${last}`);
 }
 
+/** The tmux wrapper is `/bin/zsh -l -c`. Skip when that shell cannot start. */
+function launchRuntimeSkip(): string | false {
+  if (!isTmuxAvailable()) return 'tmux is not installed';
+  if (!existsSync('/bin/zsh')) return '/bin/zsh is not installed';
+  return false;
+}
+
 describe('opencode child launch', { concurrency: 1 }, () => {
-  // The unit CI job does not install tmux. The same launch is covered there by
-  // the command tests, and by e2e/tests/opencode-launch.spec.ts where tmux and
-  // zsh are installed. Locally this process test is the proof.
+  // Unit CI (ubuntu-26.04) has tmux and does not have /bin/zsh. The pane then
+  // exits before the EXIT trap, so no receipt is written. Command tests still
+  // run there. e2e/tests/opencode-launch.spec.ts launches the child where CI
+  // installs both tmux and zsh.
   it('stays up, receives the prompt, reaches idle, and records a failed launch', {
-    skip: isTmuxAvailable() ? false : 'tmux is not installed',
+    skip: launchRuntimeSkip(),
   }, async () => {
     const root = mkdtempSync(join(tmpdir(), 'oc-launch-'));
     const fakeDir = join(root, 'bin');
@@ -154,6 +162,10 @@ describe('opencode child launch', { concurrency: 1 }, () => {
       assert.equal(live.env?.OPENCODE_CONFIG_CONTENT, `{"model":"${MODEL}"}`);
 
       const receipt = await pollUntil('prompt receipt', async () => {
+        const session = await store.loadSession(live.id);
+        if (session?.status === 'error') {
+          throw new Error(session.errorReason ?? 'opencode launch failed without errorReason');
+        }
         try {
           const text = readFileSync(liveReceipt, 'utf8');
           if (!text.includes('hook_posted') && !text.includes('hook_error')) return undefined;
