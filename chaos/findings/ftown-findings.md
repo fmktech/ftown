@@ -19,6 +19,7 @@ Findings with a security angle are not listed here or anywhere in the repository
 | 2026-11-14 | v8 | short / off | 1 | 2 | yes | none |
 | 2026-11-14 | v8 | short / low | 1–4 | 2 | yes (4 of 4) | none reported by v8 (seed 2 contained an undetected F1 outage of ~51 s that old R2 missed; fixed in contract v9) |
 | 2026-11-14 | v6 | soak / high | 1 | 2 | yes | none in the pair; F1 found in an earlier run of this seed with clock faults |
+| — | not named in the campaign log | short / low | in progress, 18 of 40 seeds so far | 2 | yes (18 of 18 finished) | A2 on seed 9; none on seeds 1–8 and 10–18 |
 
 A short run takes about 3.7 minutes of wall time on a lightly loaded host.
 
@@ -49,6 +50,14 @@ until the next scheduled heal. Without the clock jump the same restart succeeds.
   `hub did not become healthy within 30000ms` and checkpoints `cp6`–`cp8` showed `bridgeAlive: false`.
   Post-fix (source fingerprint `5f6a682a4488`, `--times 2`): identical pair `H_run=85caa5790c30`,
   `exit=0`, `R2` passed, checkpoints `cp8`–`cp9` showed `bridgeAlive: true` and `bridgeResponsive: true`.
+
+### F2 — A child question stays with a parent that died during a bridge outage (grade B)
+
+The child keeps waiting, up to a day, and the human gets no notice. Startup marks the dead
+parent as an error and does not move the question to the human. Reproduced twice, byte-identical,
+on seed 9, short, level low. Seed 6 kills the parent while the bridge is up, and the question moves.
+The counterfactual that drops the bridge kill is not yet run.
+Details: [F2-parent-death-during-bridge-outage.md](F2-parent-death-during-bridge-outage.md)
 
 ## Observations
 
