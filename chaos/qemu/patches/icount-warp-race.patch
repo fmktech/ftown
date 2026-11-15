@@ -6,8 +6,9 @@ Subject: icount: do not warp QEMU_CLOCK_VIRTUAL over an unaccounted vCPU slice
 icount_start_warp_timer() runs on the main thread (main_loop_wait,
 timerlist_rearm) and, with -icount sleep=off, adds the precomputed distance
 to the next QEMU_CLOCK_VIRTUAL deadline onto qemu_icount_bias. The main
-thread has current_cpu == NULL, and cpu->running is not set on the normal
-exec path, so that clock is qemu_icount as of the last icount_update().
+thread's current_cpu is NULL, so icount_get_raw_locked() does not fold the
+vCPU budget in even though cpu_exec_start() has set cpu->running. The clock
+the warp reads is qemu_icount as of the last icount_update().
 
 do_hlt() sets halted before the slice is published, so all_cpu_threads_idle()
 is true while icount_budget is still the slice. icount_update_locked() then
@@ -29,7 +30,10 @@ icount_decr and icount_extra are not read. The unpublished tail is
 budget - (decr + extra), so it is nonzero only when budget is nonzero.
 process_data clears decr and extra and then release-stores budget = 0 after
 icount_update() returns; an acquire load that sees that 0 also sees the
-published icount. A nonzero result only skips this attempt.
+published icount. A nonzero result only skips this attempt. The plain
+`budget -= executed` store is covered by the same mutex this load holds, and
+the only store of icount_budget outside that mutex is the release store in
+process_data.
 
 --- a/softmmu/icount.c
 +++ b/softmmu/icount.c
