@@ -1,27 +1,7 @@
-# BuildKit per-Dockerfile ignore (build context = repo root).
-*
-!bridge
-!chaos
-**/node_modules
-bridge/dist
-**/.git
-**/*.tsbuildinfo
-**/*.log
-**/npm-debug.log*
-**/yarn-debug.log*
-**/yarn-error.log*
-**/pnpm-debug.log*
-**/.env
-**/.env.*
-**/.DS_Store
-**/Thumbs.db
-**/coverage
-**/.turbo
-**/node-compile-cache
-**/.secrets
-**/*.pem
-**/*.key
-bridge/build
-bridge/out
-chaos/out
-chaos/.cache
+# Docker does not require this file. BuildKit loads <Dockerfile>.dockerignore
+# from the context when the file is present, and this one is present because
+# it lives under chaos/box/ and is therefore on the fingerprint file list.
+# The context is already exactly that list (path, bytes, executable bit),
+# staged by chaos/src/host/build.ts. Patterns here would be a second filter
+# and could drop a listed file. This file matches nothing.
+# Do not add patterns.

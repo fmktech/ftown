@@ -10,6 +10,7 @@ the commit this file was added on.
   satisfies `bridge/package.json` engines `^24.22.1`). linux/amd64 only.
 - Bridge built from source at `/opt/ftown/bridge` (`npm ci && npm run build && npm prune --omit=dev`;
   node-pty compiled in a builder stage with python3/make/g++ and load-tested at build time).
+- Guest inputs are the source-fingerprint file list (path, bytes, executable bit staged as `0755` or `0644`). A gitignored file is not in that list and not in the image.
 - `/opt/chaos` = `chaos/box/`, `chaos/src/` (non-test), `chaos/package.json`, and
   `source-fingerprint.json` (no node_modules). `/opt/chaos-bin/ftown` = wrapper for
   `node /opt/ftown/bridge/dist/ftown-cli.js` (first on PATH).

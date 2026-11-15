@@ -22,8 +22,10 @@ Builds the kernel (`vmlinuz`), initramfs (`initramfs.cpio.gz`), and QEMU contain
 npm run test:chaos -- build
 ```
 Flags and defaults:
-- `--image <tag>`: Custom container image tag (default: builds `ftown-chaos-box:dev` from `chaos/box/Dockerfile`).
+- `--image <tag>`: Custom container image tag (default: builds `ftown-chaos-box:dev` from `chaos/box/Dockerfile`). A custom image keeps the chaos-side fingerprint only; the box is not rebuilt.
 - `--check-repro`: Builds initramfs twice and asserts identical SHA-256 digests (default: false).
+
+The guest image is a function of one file list: tracked and untracked, not gitignored, under `bridge/`, `chaos/src` (no `*.test.ts`), `chaos/box`, `chaos/qemu`, and `chaos/package.json`. The build stages that list at `chaos/.cache/context` with mode `0755` or `0644` and epoch timestamps. The box build reads the whole tree; the QEMU and kernel builds read its `chaos/qemu` prefix; the initramfs pack mounts `chaos/src`, `chaos/package.json`, and `chaos/qemu/init` from the same tree. Each fingerprint entry is the path, the byte hash, and the executable bit. `chaos/box/Dockerfile.dockerignore` is a comment and matches nothing.
 
 ### 2. Run guest selftest
 Boots the VM into selftest mode, verifying hardware invariants (no network beyond `lo`, no `rdrand`/`rdseed`, TSC clocksource, fixed RTC start date) and requiring byte-identical reports:
