@@ -35,6 +35,13 @@ case "$job" in
     ;;
   centrifugo) bash scripts/ci/validate-centrifugo.sh ;;
   unit)
+    # The opencode child-launch proof starts `/bin/zsh -l -c` inside tmux.
+    # A hosted runner without both never runs that regression.
+    sudo apt-get update
+    sudo apt-get install -y zsh tmux
+    # Runner images ship group-writable completion dirs. compaudit then blocks a login zsh.
+    zsh -c 'autoload -Uz compaudit; compaudit' 2>/dev/null | xargs -r sudo chmod -R g-w,o-w || true
+    zsh -c 'autoload -Uz compaudit; compaudit' || true
     node --test scripts/ci/bridge-version.test.mjs
     node --test e2e/scripts/setup-browser-trust.test.mjs
     (cd e2e && npm ci)
