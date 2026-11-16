@@ -171,12 +171,12 @@ test('parsePairingOutput returns the last link+code pair, else null', () => {
   assert.equal(parsePairingOutput(`${link(1)}\nType this code on the page to confirm it is this computer: 12345\n`), null);
 });
 
-test('session creation retry helper recognizes both legacy admission and typed startup refusals', () => {
+test('session creation retry helper recognizes only encrypted admission refusals', () => {
   const { TRANSIENT_CREATE_SESSION_REFUSAL } = helper('e2e/helpers/app.ts', {
     '@playwright/test': {}, './config': {}, './bridge-api': {}, './passkey': {}, './readiness': {},
   });
   assert.equal(TRANSIENT_CREATE_SESSION_REFUSAL.test('Encrypted request rejected'), true);
-  assert.equal(TRANSIENT_CREATE_SESSION_REFUSAL.test('Bridge is starting'), true);
+  assert.equal(TRANSIENT_CREATE_SESSION_REFUSAL.test('Bridge is starting'), false);
   assert.equal(TRANSIENT_CREATE_SESSION_REFUSAL.test('permission_denied'), false);
 });
 
