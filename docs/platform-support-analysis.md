@@ -403,7 +403,7 @@ job must be stable under repeated runs before it becomes required (flakes are fa
 | P1.7 | Grok quota refresh on Linux: use util-linux `script -qc` and PATH lookup instead of absolute BSD paths, then lift the darwin gate. | M | unit with a fake `script`; manual check on Linux |
 | P1.8 | Verify and document the claude credentials file on Linux; make the "not signed in" message name the path looked at. | S | unit; manual check |
 | P1.9 | WSL2 detection (`/proc/version` contains `microsoft`): correct the Solo LAN banner, and warn when the workdir is under `/mnt/`. | S | unit with injected probe |
-| P1.10 | Docker Solo: add `jq`/`curl` until P1.3 lands, fix the image tag mismatch, document uid mapping, add a `linux/amd64,linux/arm64` buildx check. | M | new `docker-solo` job builds both arches and boots to healthy |
+| P1.10 | Docker Solo: build the checked-out bridge source, keep the Compose image tag aligned with `bridge/package.json`, document uid mapping, and verify linux/amd64 + linux/arm64 with buildx. | M | `docker-solo` asserts the installed bridge package and Compose tag versions, builds both arches, and boots amd64 to healthy |
 | P1.11 | UI: accept Ctrl+Enter in `NewSessionModal`, show the right hint. | S | vitest component test |
 | P1.12 | Replace the UI's `python3` heredoc snippets with a bridge RPC that lists sessions in Node. Removes the python3 prerequisite and a Windows blocker. One task per picker (2 × M). | M each | bridge unit + existing e2e picker specs |
 | P1.13 | Document Linux and WSL2 as supported in the README with prerequisites. Depends on P1.1–P1.3. | S | docs review |
