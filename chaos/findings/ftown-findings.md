@@ -66,9 +66,10 @@ The child keeps waiting, up to a day, and the human gets no notice. A human who 
 
 ### F3 — A backward wall-clock step delays mail nudges (grade A)
 
-A backward wall-clock step can delay the idle safety-net nudge by roughly the step. Mail stays readable; a later successful real-agent hook pump or inbox consumer can deliver it sooner. Eventual timer recovery or fresh-delay recovery after restart is inferred from code. Soak / high, contract v9, seeds 6 and 10, each pair byte-identical. Grade A: the code path is identified and the same clean-build counterfactual dropping only `clock_jump_back` passes M5 on both seeds. Fix not yet merged.
+A backward wall-clock step can delay the idle safety-net nudge by roughly the step. Mail stays readable; a later successful real-agent hook pump or inbox consumer can deliver it sooner. Eventual timer recovery or fresh-delay recovery after restart is inferred from code. Soak / high, contract v9, seeds 6 and 10, each pair byte-identical. Grade A: the code path is identified and the same clean-build counterfactual dropping only `clock_jump_back` passes M5 on both seeds. Fixed in PR #241 (bridge 0.30.3), confirmed 2026-11-15.
 
 - Details: [F3-backward-clock-jump-delays-mail-nudges.md](F3-backward-clock-jump-delays-mail-nudges.md)
+- Fix confirmation: seeds 6 and 10 (soak / high) pass M5 twice each on the fixed bridge, byte-identical pairs.
 
 ## Observations
 
