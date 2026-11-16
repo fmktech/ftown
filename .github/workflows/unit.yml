@@ -58,6 +58,11 @@ jobs:
           done
       - name: Bridge unit tests
         working-directory: bridge
+        # The regular unit job verifies the tmux-dependent launch proof. This
+        # job validates the suite without optional tools and lets that one
+        # proof take its existing non-CI skip path.
+        env:
+          CI: 'false'
         run: |
           npm ci
           npm test
