@@ -48,6 +48,7 @@ FROM node:22.23.4-bookworm-slim
 # tmux:            required by bridge/src/tmux.ts and claude-runner.ts (session multiplexing).
 # git:             sessions frequently run git inside cloned repos under /workspace.
 # zsh:             claude-runner.ts:356 spawns '/bin/zsh' for shell-type sessions.
+# jq/curl:         required by the shell hooks until the Node hook ports land.
 # procps:          ps/kill etc. used by tmux/session bookkeeping and general debugging.
 # tini:            correct PID 1 signal handling / zombie reaping (also available via `docker run --init`).
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -55,6 +56,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       tmux \
       git \
       zsh \
+      jq \
+      curl \
       procps \
       tini \
     && update-ca-certificates \

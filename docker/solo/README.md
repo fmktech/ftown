@@ -103,6 +103,18 @@ from the same machine) and the key from the banner.
 - `/workspace` — bind-mounted from the host (`FTOWN_WORKSPACE`, default
   `./workspace`) so session shells/agents operate on real host files.
 
+### Bind-mount ownership on Linux
+
+The image runs as UID/GID `1000:1000` (`ftown`). Docker bind mounts preserve
+numeric ownership: files created under `/workspace` are owned by host UID 1000,
+regardless of the host username. If your Linux account uses another UID, files
+created by the container may appear owned by that numeric account and may not
+be writable by your user. Before starting the container, either make the
+workspace writable by UID 1000 (for example, `sudo chown -R 1000:1000 ./workspace`)
+or grant UID 1000 write access with your host's ACL tools. This also applies to
+any optional bind-mounted credentials. Named volumes are managed by Docker and
+are initialized with the image's ownership.
+
 ## Agent auth
 
 Sessions that spawn the `claude` CLI (`bridge/src/harness-registry.ts:229`)
