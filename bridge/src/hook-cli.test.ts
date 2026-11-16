@@ -177,13 +177,26 @@ describe('muse-session-start end to end', () => {
     assert.deepEqual(stderr, ['ftown hook: native hook payload is not valid JSON']);
   });
 
-  it('reports an unimplemented kind on stderr without posting', async () => {
+  it('dispatches a Grok event and posts its typed payload', async () => {
     const spy = recorder(okPost);
+    const stdout: string[] = [];
     const stderr: string[] = [];
-    const code = await runHookCommand({ args: ['grok'], input, env, post: spy.post, err: (m) => stderr.push(m) });
+    const code = await runHookCommand({
+      args: ['grok'],
+      input: JSON.stringify({ hook_event_name: 'PreToolUse', session_id: 'native-1', cwd: '/work', tool_name: 'read' }),
+      env, post: spy.post, out: (m) => stdout.push(m), err: (m) => stderr.push(m),
+    });
     assert.equal(code, 0);
-    assert.deepEqual(spy.payloads, []);
-    assert.match(stderr[0], /not implemented yet/);
+    assert.deepEqual(spy.payloads, [{
+      ftown_session_id: 'session-1',
+      ftown_session_source: 'env',
+      hook_event_name: 'PreToolUse',
+      session_id: 'native-1',
+      cwd: '/work',
+      tool_name: 'read',
+    }]);
+    assert.deepEqual(stdout, []);
+    assert.deepEqual(stderr, []);
   });
 
   it('reports a preflight stdin error on stderr', async () => {
