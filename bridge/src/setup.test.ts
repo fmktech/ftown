@@ -5,6 +5,8 @@ import { dirname, join, relative } from 'node:path';
 import { test } from 'node:test';
 import { opencodeSkillsDir } from './install-ftown-skill.js';
 import { performSetup, type SetupDependencies } from './setup.js';
+import { setupAccountTargets } from './setup.js';
+import { saveAccounts } from './accounts.js';
 import { readSetupState, REQUIRED_SETUP_ASSETS } from './setup-state.js';
 import { REQUIRED_RUNTIME_FILES } from './installation-manifest.js';
 
@@ -90,4 +92,15 @@ test('a held setup serializes integration writes and stale versions fail before 
   await assert.rejects(performSetup({ root, repair: true, dependencies: dependencies(home, calls) }), /newer/);
   assert.equal(calls.length, count);
   assert.equal(readSetupState().packageVersion, '1.2.3');
+}));
+
+test('setup targets the default and every distinct registered account config under a temporary HOME', async () => fixture(async (home) => {
+  saveAccounts({ version: 1, accounts: [
+    { id: 'personal', harness: 'claude', configDir: join(home, 'claude-personal') },
+    { id: 'codex-lab', harness: 'codex', configDir: join(home, 'codex-lab') },
+    { id: 'default-copy', harness: 'claude', configDir: join(home, '.claude') },
+  ] }, home);
+  assert.deepEqual(setupAccountTargets(home).map(account => account?.configDir ?? 'default'), [
+    'default', join(home, 'claude-personal'), join(home, 'codex-lab'),
+  ]);
 }));

@@ -52,6 +52,8 @@ export interface Session {
   workingDir?: string;
   shellType?: string;
   model?: string;
+  account?: string;
+  allowedAccounts?: string[];
   parentSessionId?: string;
   pullRequestUrl?: string;
   /** Historical automation provenance; new sessions cannot set it. */

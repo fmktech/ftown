@@ -18,6 +18,8 @@ import { writeHarnessAgentGuide } from './harness-installer.js';
 import { ensureFtownOnPath } from './ensure-ftown-path.js';
 import { readSetupState, writeSetupState, assertSetupReady, acquireSetupLock, assertSetupVersion } from './setup-state.js';
 import { runSetupMigrations } from './setup-migrations.js';
+import { loadAccounts, type HarnessAccount } from './accounts.js';
+import { claudeConfigDir, codexHome } from './config-dirs.js';
 import { assertUpdateReservationAllowed } from './update-handoff.js';
 import {
   defaultPreflightEnv,
@@ -70,16 +72,50 @@ async function installIntegrations(root: string): Promise<IntegrationResult[]> {
 }
 
 function defaultDependencies(): SetupDependencies {
+  const withAccountEnv = async <T>(account: HarnessAccount | undefined, task: () => T | Promise<T>): Promise<T> => {
+    if (!account) return await task();
+    const oldClaude = process.env.CLAUDE_CONFIG_DIR; const oldCodex = process.env.CODEX_HOME;
+    process.env.CLAUDE_CONFIG_DIR = account.configDir; process.env.CODEX_HOME = account.configDir;
+    try { return await task(); }
+    finally {
+      if (oldClaude === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = oldClaude;
+      if (oldCodex === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = oldCodex;
+    }
+  };
+  const targets = () => setupAccountTargets();
   return {
     installRuntime: (root) => { installFtownCommandCli(root); },
-    integrations: installIntegrations,
+    integrations: async (root) => {
+      const results: IntegrationResult[] = [];
+      for (const account of targets()) {
+        const current = await withAccountEnv(account, () => installIntegrations(root));
+        results.push(...current.map(result => account ? { ...result, name: `${account.id}/${result.name}` } : result));
+      }
+      return results;
+    },
     skillAndPath: (root) => {
       installFtownSkill('ftown', join(root, 'skills', 'ftown'));
+      for (const account of targets().slice(1)) if (account) withAccountEnvSync(account, () => installFtownSkill('ftown', join(root, 'skills', 'ftown')));
       writeHarnessAgentGuide({ wrapperPath: join(homedir(), '.ftown', 'bin', 'ftown-harness') });
       ensureFtownOnPath();
     },
     migrate: (repair) => runSetupMigrations(repair),
   };
+}
+
+/** Default harness configs plus each registered account's config directory. */
+export function setupAccountTargets(home = homedir()): Array<HarnessAccount | undefined> {
+  return [undefined, ...loadAccounts(home).accounts.filter(account => account.configDir !== (account.harness === 'claude' ? claudeConfigDir(home, {}) : codexHome(home, {})))];
+}
+
+function withAccountEnvSync<T>(account: HarnessAccount, task: () => T): T {
+  const oldClaude = process.env.CLAUDE_CONFIG_DIR; const oldCodex = process.env.CODEX_HOME;
+  process.env.CLAUDE_CONFIG_DIR = account.configDir; process.env.CODEX_HOME = account.configDir;
+  try { return task(); }
+  finally {
+    if (oldClaude === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = oldClaude;
+    if (oldCodex === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = oldCodex;
+  }
 }
 
 export async function performSetup(options: { root?: string; repair?: boolean; dependencies?: SetupDependencies } = {}): Promise<SetupResult> {
@@ -93,7 +129,7 @@ export async function performSetup(options: { root?: string; repair?: boolean; d
   try { installedVersion = packageVersion(join(homedir(), '.ftown', 'cli')); } catch { /* Fresh runtime; durable ready version still applies. */ }
   assertSetupVersion(version, state.packageVersion);
   assertSetupVersion(version, installedVersion);
-  if (!options.repair && state.packageVersion === version) {
+  if (!options.repair && state.packageVersion === version && loadAccounts().accounts.length === 0) {
     // Explicit repair is the recovery path for missing assets or new integrations.
     assertSetupReady(version);
     return { version, action: 'current', migrations: [], integrations: [] };

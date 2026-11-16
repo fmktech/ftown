@@ -15,16 +15,17 @@ const { copyProductionDependencies } = await import(pathToFileURL(join(bridge, '
 const { RUNTIME_DIRECTORIES } = await import(pathToFileURL(join(bridge, 'dist/installation-manifest.js')).href);
 const version = JSON.parse(readFileSync(join(bridge, 'package.json'), 'utf8')).version;
 const temporary = mkdtempSync(join(tmpdir(), 'ftown-structured-launch-'));
-const home = join(temporary, 'home'), work = join(temporary, 'work'), bin = join(temporary, 'bin');
+const home = join(temporary, 'home'), work = join(temporary, 'work'), bin = join(temporary, 'bin'), accountConfig = join(temporary, 'personal-config');
 const source = join(temporary, 'cache/node_modules/ftown');
-for (const directory of [home, work, bin, source]) mkdirSync(directory, { recursive: true });
+for (const directory of [home, work, bin, source, accountConfig, join(home, '.ftown')]) mkdirSync(directory, { recursive: true });
+writeFileSync(join(home, '.ftown', 'accounts.json'), JSON.stringify({ version:1, accounts:[{id:'personal',harness:'claude',label:'Personal',configDir:accountConfig}] }), { mode:0o600 });
 for (const [name, file] of [['node', process.execPath], ['bash', '/bin/bash'], ['sh', '/bin/sh']]) symlinkSync(file, join(bin, name));
 const receiptPath = join(temporary, 'launches.jsonl');
 const stub = `#!/usr/bin/env node
 const fs = require('node:fs');
 const args = process.argv.slice(2);
 if (args[0] === '--version') { console.log('2.1.302 (Claude Code)'); process.exit(0); }
-const record = value => fs.appendFileSync(${JSON.stringify(receiptPath)}, JSON.stringify({pid:process.pid,session:process.env.FTOWN_SESSION_ID,...value})+'\\n');
+const record = value => fs.appendFileSync(${JSON.stringify(receiptPath)}, JSON.stringify({pid:process.pid,session:process.env.FTOWN_SESSION_ID,configDir:process.env.CLAUDE_CONFIG_DIR,...value})+'\\n');
 if (process.stdin.isTTY) process.stdin.setRawMode(true);
 process.stdin.on('data', chunk => record({type:'input',text:chunk.toString()}));
 process.stdin.resume();
@@ -93,6 +94,14 @@ try {
   await until(() => output.includes('[Bridge] Ready and listening for commands'), 'bridge readiness');
   const status = await exec(installed, ['harness','--json','status'], { env, cwd:work, timeout:30_000 });
   assert.equal(JSON.parse(status.stdout).bridge, 'up');
+  const accountCreate = await exec(installed, ['sessions','create','--shell','claude','--account','personal','--workdir',work,'--prompt','account environment smoke','--json'], { env, cwd:work, timeout:30_000 });
+  const selected = JSON.parse(accountCreate.stdout).session;
+  owned.add(selected.id);
+  const selectedLaunch = await until(() => receipts(selected.id).find(value => value.type === 'launch'), 'account CLI launch');
+  assert.equal(selected.account, 'personal');
+  assert.equal(selectedLaunch.configDir, accountConfig, 'selected account arrives only as process environment');
+  assert.equal(selected.command.includes(accountConfig), false, 'account path is never embedded in command text');
+  await remove(selected.id);
   const task = "inspect today's changes; $(literal text)";
   const model = "fixture/model 'quoted'";
   const fresh = await create({ shellType:'claude', prompt:task, model, env:{FIXTURE_SETTING:'preserved'} });
@@ -133,6 +142,7 @@ try {
   await sleep(700); assert.equal(raw(), 'raw input\r', 'caller-owned raw submit remains exactly once');
   await remove(custom.session.id);
   console.log(JSON.stringify({result:'PASS',version,copiedPackage:true,cacheIndependent:true,harnessStatus:true,
+    account:'CLI --account launch received matching CLAUDE_CONFIG_DIR; command excludes path',
     standard:'registry model/env/workspace; quoted task once; persisted command has no task',
     resume:'native ID plus one new task; retry without replay',legacy:'custom flags/raw input preserved',realProvider:false,cloud:false,database:false}));
 } finally {

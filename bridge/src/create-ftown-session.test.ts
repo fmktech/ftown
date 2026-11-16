@@ -5,11 +5,13 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 import { buildSessionCommand } from './agent-commands.js';
+import { saveAccounts } from './accounts.js';
 import { HOOKED_SHELL_TYPES } from './harness-registry.js';
 import { TerminalManager } from './terminal-manager.js';
 import type { PlanItem, PlanState, SessionPlan } from './coordination/contract-c.js';
 import {
   assertProviderAuthAvailable,
+  AccountSelectionError,
   buildChildBriefing,
   canResumeStoredSession,
   createFtownSession,
@@ -30,6 +32,44 @@ import {
 import type { CreatePlanStoreDep, CreateFtownSessionDeps } from './create-ftown-session.js';
 import type { SessionWorktree, WorktreeCreateRequest } from './coordination/contract-b.js';
 import type { Session } from './types.js';
+
+describe('account-aware session creation', () => {
+  it('injects account configuration only into process env and inherits/narrows child policy', async () => {
+    const previousHome = process.env.HOME;
+    const home = mkdtempSync(join(tmpdir(), 'ftown-account-create-'));
+    process.env.HOME = home;
+    try {
+      const work = join(home, 'work'); mkdirSync(work);
+      saveAccounts({ version: 1, accounts: [
+        { id: 'personal', harness: 'claude', configDir: join(home, 'claude-personal') },
+        { id: 'other', harness: 'claude', configDir: join(home, 'claude-other') },
+      ] }, home);
+      const { deps, runs, saved } = fakeDeps();
+      const launched = await createFtownSession(deps, { shellType: 'claude', account: 'personal', workingDir: work });
+      assert.deepEqual(runs[0].env, { CLAUDE_CONFIG_DIR: join(home, 'claude-personal') });
+      assert.equal(launched.command.includes(join(home, 'claude-personal')), false);
+      assert.equal(launched.account, 'personal');
+
+      const parent = { ...fakeSession('parent'), shellType: 'claude' as const, account: 'personal', allowedAccounts: ['personal', 'other'] };
+      const childHarness = fakeDeps([parent]);
+      const child = await createFtownSession(childHarness.deps, { parentSessionId: 'parent', workingDir: work, allowedAccounts: ['personal'] });
+      assert.equal(child.account, 'personal');
+      assert.deepEqual(child.allowedAccounts, ['personal']);
+      assert.deepEqual(childHarness.runs[0].env, { CLAUDE_CONFIG_DIR: join(home, 'claude-personal') });
+
+      const rejected = fakeDeps([{ ...parent, allowedAccounts: ['personal'] }]);
+      await assert.rejects(createFtownSession(rejected.deps, { parentSessionId: 'parent', account: 'other', workingDir: work }),
+        (error: unknown) => error instanceof AccountSelectionError && error.code === 'account_not_allowed');
+      const mismatch = fakeDeps();
+      await assert.rejects(createFtownSession(mismatch.deps, { shellType: 'codex', account: 'personal', workingDir: work }),
+        (error: unknown) => error instanceof AccountSelectionError && error.code === 'account_harness_mismatch');
+      assert.equal(saved.length, 1);
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
 
 function restoreHome(realHome: string | undefined): void {
   if (realHome === undefined) delete process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];

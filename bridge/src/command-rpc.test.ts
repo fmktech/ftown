@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AttentionStore } from './attention-store.js';
-import { PlanItemError } from './create-ftown-session.js';
+import { AccountSelectionError, PlanItemError } from './create-ftown-session.js';
 import { WorktreeError } from './coordination/contract-b.js';
 import type { Board, SessionCard, TreeEvent } from './coordination/contract.js';
 import type { AttentionItem } from './attention-events.js';
@@ -383,6 +383,16 @@ test('create_session maps WorktreeError to a 400-class code without leaking git 
   } as unknown as SessionController, publishCommandResponse: async response => { responses.push(response); } });
   await handler({ type: 'create_session', requestId: 'wt', payload: { prompt: 'p', name: 'job', worktree: true } } as unknown as Command);
   assert.deepEqual(responses.at(-1), { requestId: 'wt', success: false, error: 'worktree path already exists', data: { code: 'exists' } });
+});
+
+test('create_session forwards account policy and returns typed account selection errors', async () => {
+  const responses: CommandResponse[] = []; let received: Record<string, unknown> | undefined;
+  const handler = createCommandHandler({ bridgeId: 'owner', sessionController: {
+    create: async (input: Record<string, unknown>) => { received = input; throw new AccountSelectionError('account_not_allowed', 'Account other is not allowed'); },
+  } as unknown as SessionController, publishCommandResponse: async response => { responses.push(response); } });
+  await handler({ type: 'create_session', requestId: 'account-policy', payload: { prompt: 'p', account: 'other', allowedAccounts: ['personal'] } } as unknown as Command);
+  assert.equal(received?.account, 'other'); assert.deepEqual(received?.allowedAccounts, ['personal']);
+  assert.equal(responses.at(-1)?.data?.code, 'account_not_allowed');
 });
 
 test('create_session forwards the grok and antigravity native session ids to the controller', async () => {

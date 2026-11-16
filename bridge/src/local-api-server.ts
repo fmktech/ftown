@@ -40,6 +40,7 @@ import {
   parseCreateSessionBody,
   PlanItemError,
   ProviderAuthMissingError,
+  AccountSelectionError,
   WorkingDirMissingError,
   type CreateFtownSessionDeps,
 } from './create-ftown-session.js';
@@ -1044,8 +1045,8 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
           useCallerAsParent ? callerSessionId : undefined,
         );
       } catch (err) {
-        if (err instanceof WorktreeError || err instanceof PlanItemError || err instanceof InvalidShellTypeError) {
-          jsonResponse(res, 400, { error: err.message });
+        if (err instanceof WorktreeError || err instanceof PlanItemError || err instanceof InvalidShellTypeError || err instanceof AccountSelectionError) {
+          jsonResponse(res, 400, { error: err.message, ...(err instanceof AccountSelectionError ? { code: err.code } : {}) });
           return;
         }
         throw err;
@@ -1068,8 +1069,8 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         const session = await controller.create(input);
         jsonResponse(res, 201, { session: toWireSession(session) });
       } catch (err) {
-        if (err instanceof WorktreeError || err instanceof PlanItemError || err instanceof InvalidShellTypeError) {
-          jsonResponse(res, 400, { error: err.message });
+        if (err instanceof WorktreeError || err instanceof PlanItemError || err instanceof InvalidShellTypeError || err instanceof AccountSelectionError) {
+          jsonResponse(res, 400, { error: err.message, ...(err instanceof AccountSelectionError ? { code: err.code } : {}) });
           return;
         }
         if (err instanceof ProviderAuthMissingError) {
@@ -1772,6 +1773,8 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
           env: tombstone.env,
           shellType: tombstone.shellType,
           model: tombstone.model,
+          account: tombstone.account,
+          allowedAccounts: tombstone.allowedAccounts,
           claudeSessionId: tombstone.claudeSessionId,
           cursorSessionId: tombstone.cursorSessionId,
           codexSessionId: tombstone.codexSessionId,
