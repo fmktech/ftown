@@ -5,7 +5,15 @@ import { Worker } from 'node:worker_threads';
  * (e.g. `(.|..)+X$` on an ordinary line) that a read-permission endpoint could
  * otherwise use to stall the bridge event loop.
  */
-export const GREP_REGEX_TIMEOUT_MS = 300;
+export const GREP_REGEX_TIMEOUT_MS = 2_000;
+
+/** Allow for worker startup separately from the matching budget. */
+export const GREP_WORKER_STARTUP_TIMEOUT_MS = 10_000;
+
+export type GrepMatchResult =
+  | { status: 'completed'; indexes: number[] }
+  | { status: 'timeout'; phase: 'startup' | 'match' }
+  | { status: 'error' };
 
 /** Maximum grep workers running at once for this bridge process. */
 export const GREP_MAX_CONCURRENT = 4;
@@ -46,25 +54,26 @@ function releaseSlot(): void {
 // indexes. It runs off the main event loop; the parent force-terminates it on
 // timeout, so a pathological regex cannot block command handling.
 const WORKER_SOURCE = `import('node:worker_threads').then(({ parentPort, workerData }) => {
-  try {
+  parentPort.postMessage({ ready: true });
+  parentPort.once('message', () => { try {
     const re = new RegExp(workerData.pattern, 'i');
     const lines = workerData.lines;
     const indexes = [];
     for (let i = 0; i < lines.length; i++) if (re.test(lines[i])) indexes.push(i);
     parentPort.postMessage({ indexes });
-  } catch { parentPort.postMessage({ invalid: true }); }
+  } catch { parentPort.postMessage({ error: true }); } });
 });`;
 
-function runWorker(pattern: string, lines: string[], timeoutMs: number): Promise<number[] | null> {
+function runWorker(pattern: string, lines: string[], timeoutMs: number): Promise<GrepMatchResult> {
   return new Promise(resolve => {
     // Resolve only once the worker has actually exited, so a pool slot is never
     // released while a terminating worker is still live.
     let settled = false;
     let exited = false;
-    let outcome: number[] | null = null;
+    let outcome: GrepMatchResult = { status: 'error' };
     let worker: Worker | undefined;
     let timer: NodeJS.Timeout | undefined;
-    const decide = (value: number[] | null): void => {
+    const decide = (value: GrepMatchResult): void => {
       if (settled) return;
       settled = true;
       outcome = value;
@@ -75,20 +84,29 @@ function runWorker(pattern: string, lines: string[], timeoutMs: number): Promise
     const onExit = (): void => {
       exited = true;
       if (settled) resolve(outcome);
-      else decide(null);
+      else decide({ status: 'error' });
     };
-    timer = setTimeout(() => decide(null), timeoutMs);
+    timer = setTimeout(() => decide({ status: 'timeout', phase: 'startup' }), GREP_WORKER_STARTUP_TIMEOUT_MS);
     try {
       worker = new Worker(WORKER_SOURCE, { eval: true, workerData: { pattern, lines } });
     } catch {
       if (timer) clearTimeout(timer);
-      resolve(null);
+      resolve({ status: 'error' });
       return;
     }
-    worker.once('message', (message: { indexes?: unknown; invalid?: boolean }) => {
-      decide(message?.invalid ? null : (Array.isArray(message?.indexes) ? (message.indexes as number[]) : []));
+    worker.on('message', (message: { ready?: boolean; indexes?: unknown }) => {
+      if (settled) return;
+      if (message?.ready) {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => decide({ status: 'timeout', phase: 'match' }), timeoutMs);
+        worker?.postMessage('start');
+      } else if (Array.isArray(message?.indexes)) {
+        decide({ status: 'completed', indexes: message.indexes as number[] });
+      } else {
+        decide({ status: 'error' });
+      }
     });
-    worker.once('error', () => decide(null));
+    worker.once('error', () => decide({ status: 'error' }));
     worker.once('exit', onExit);
   });
 }
@@ -96,7 +114,7 @@ function runWorker(pattern: string, lines: string[], timeoutMs: number): Promise
 /**
  * Test `pattern` against every line within a hard time budget, at most
  * `GREP_MAX_CONCURRENT` at once with a bounded wait queue.
- * Returns matching line indexes, or `null` when the match exceeded the budget.
+ * Returns matching line indexes, a timeout phase, or a worker error.
  * Throws `SyntaxError` for an invalid pattern and `GrepBusyError` when the pool
  * and queue are saturated (the caller should respond 429).
  */
@@ -104,9 +122,9 @@ export async function boundedMatchIndexes(
   pattern: string,
   lines: string[],
   timeoutMs: number = GREP_REGEX_TIMEOUT_MS,
-): Promise<number[] | null> {
+): Promise<GrepMatchResult> {
   // Compile in the parent to distinguish an invalid pattern (throw) from a
-  // timeout (null) cheaply and without spawning a worker for bad input.
+  // worker failure cheaply and without spawning a worker for bad input.
   new RegExp(pattern, 'i');
 
   if (!(await acquireSlot())) throw new GrepBusyError();
