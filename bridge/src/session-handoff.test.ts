@@ -181,10 +181,14 @@ test('handoff commits tracked edits and safe small untracked files only', async 
     const git = (cwd: string, args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8' });
     git(repo, ['init', '-b', 'main']);
     writeFileSync(join(repo, 'tracked.txt'), 'before\n');
+    writeFileSync(join(repo, '.env.production'), 'baseline secret file\n');
+    writeFileSync(join(repo, 'big-tracked.dat'), 'baseline large file\n');
     git(repo, ['-c', 'user.email=ftown@localhost', '-c', 'user.name=ftown', 'add', '-A']);
     git(repo, ['-c', 'user.email=ftown@localhost', '-c', 'user.name=ftown', 'commit', '-m', 'init']);
     git(repo, ['worktree', 'add', '-b', 'feature', wt]);
     writeFileSync(join(wt, 'tracked.txt'), 'after\n');
+    writeFileSync(join(wt, '.env.production'), 'changed tracked secret\n');
+    writeFileSync(join(wt, 'big-tracked.dat'), Buffer.alloc(1024 * 1024 + 1, 0x78));
     writeFileSync(join(wt, '.env'), 'not-for-commit\n');
     writeFileSync(join(wt, 'fake.key'), 'not-a-real-private-key\n');
     writeFileSync(join(wt, 'fake.pem'), 'not-a-real-certificate\n');
@@ -214,8 +218,42 @@ test('handoff commits tracked edits and safe small untracked files only', async 
     assert.match(h.created[0].prompt ?? '', /credentials\.json \(secret-like name\)/);
     assert.match(h.created[0].prompt ?? '', /bundle\.p12 \(secret-like name\)/);
     assert.match(h.created[0].prompt ?? '', /large\.dat \(larger than 1 MiB\)/);
+    assert.match(h.created[0].prompt ?? '', /\.env\.production \(secret-like name\)/);
+    assert.match(h.created[0].prompt ?? '', /big-tracked\.dat \(larger than 1 MiB\)/);
     assert.match(h.created[0].prompt ?? '', /outside-link\.txt \(outside worktree\)/);
     assert.equal(git(wt, ['status', '--porcelain']).includes('large.dat'), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('handoff refuses a staged-only change and preserves the caller index', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ftown-handoff-staged-only-'));
+  const repo = join(root, 'repo');
+  const wt = join(root, 'wt');
+  try {
+    mkdirSync(repo);
+    const git = (cwd: string, args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8' });
+    git(repo, ['init', '-b', 'main']);
+    writeFileSync(join(repo, 'tracked.txt'), 'before\n');
+    git(repo, ['-c', 'user.email=ftown@localhost', '-c', 'user.name=ftown', 'add', '-A']);
+    git(repo, ['-c', 'user.email=ftown@localhost', '-c', 'user.name=ftown', 'commit', '-m', 'init']);
+    git(repo, ['worktree', 'add', '-b', 'feature', wt]);
+    writeFileSync(join(wt, 'tracked.txt'), 'staged-only content\n');
+    git(wt, ['add', 'tracked.txt']);
+    writeFileSync(join(wt, 'tracked.txt'), 'before\n');
+
+    const h = harness({ scanStagedSecrets: async () => ({ code: 0, stdout: '[]', stderr: '' }) });
+    h.sessions.set('old', session({
+      id: 'old',
+      workingDir: wt,
+      worktree: { repoRoot: repo, path: wt, branch: 'feature', base: 'main', createdByBridge: true },
+    }));
+    const result = await handoffSession(h.deps, 'old', { shellType: 'shell' });
+    assert.equal(result.committed, false);
+    assert.match(h.created[0].prompt ?? '', /pre-staged changes are not auto-committed; commit or unstage them before handoff/);
+    assert.equal(git(wt, ['diff', '--cached', '--name-only']).trim(), 'tracked.txt');
+    assert.equal(git(wt, ['show', ':tracked.txt']), 'staged-only content\n');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -219,6 +219,13 @@ async function commitWork(session: Session, deps: SessionHandoffDeps, id: string
     return { committed: false, note: `no commit: ${status.stderr.trim() || 'git status failed'}` };
   }
   if (!status.stdout.trim()) return { committed: false, note: 'no commit: working tree clean' };
+  // A pre-staged tree may contain content that differs from the worktree (or
+  // files intentionally staged by the caller). Never replace that index with
+  // a handoff snapshot; ask the caller to resolve it explicitly.
+  const staged = await run(gitCwd, ['diff', '--cached', '--quiet', 'HEAD', '--']);
+  if (staged.code !== 0) {
+    return { committed: false, note: 'no commit: pre-staged changes are not auto-committed; commit or unstage them before handoff' };
+  }
   // Preserve the caller's index so a rejected scan can leave its staged set
   // exactly as it was. Unresolved index entries cannot be safely auto-committed.
   const savedIndex = await run(gitCwd, ['write-tree']);
@@ -228,7 +235,8 @@ async function commitWork(session: Session, deps: SessionHandoffDeps, id: string
   const headFiles = await run(gitCwd, ['ls-tree', '-r', '--name-only', '-z', 'HEAD']);
   const indexedFiles = await run(gitCwd, ['ls-files', '--cached', '-z']);
   const eligibleOthers = await run(gitCwd, ['ls-files', '--others', '--exclude-standard', '-z']);
-  if ([headFiles, indexedFiles, eligibleOthers].some((result) => result.code !== 0)) {
+  const trackedChanges = await run(gitCwd, ['diff', '--name-only', '-z', 'HEAD', '--']);
+  if ([headFiles, indexedFiles, eligibleOthers, trackedChanges].some((result) => result.code !== 0)) {
     return { committed: false, note: 'no commit: could not inventory worktree files safely' };
   }
   const splitNul = (value: string) => value.split('\0').filter(Boolean);
@@ -238,9 +246,17 @@ async function commitWork(session: Session, deps: SessionHandoffDeps, id: string
   const untracked = uniquePaths([...cachedUntracked, ...eligible]);
   const skippedFiles: string[] = [];
   const safeFiles: string[] = [];
-  for (const path of untracked) {
+  const trackedCandidates = splitNul(trackedChanges.stdout).filter((path) => tracked.has(path));
+  const approvedTracked = new Set<string>();
+  for (const path of uniquePaths([...trackedCandidates, ...untracked])) {
+    // A deleted tracked path has no content to add; allow its deletion.
+    if (tracked.has(path) && !existsSync(join(toplevel, path))) {
+      approvedTracked.add(path);
+      continue;
+    }
     const safety = safeUntrackedFile(toplevel, path);
     if (!safety.safe) skippedFiles.push(`${displayPath(path)} (${safety.reason})`);
+    else if (tracked.has(path)) approvedTracked.add(path);
     else safeFiles.push(path);
   }
 
@@ -250,10 +266,12 @@ async function commitWork(session: Session, deps: SessionHandoffDeps, id: string
   if (reset.code !== 0) {
     return { committed: false, note: `no commit: could not prepare a safe index (${reset.stderr.trim() || 'git read-tree failed'})`, skippedFiles };
   }
-  const addedTracked = await run(gitCwd, ['add', '-u', '--', '.']);
-  if (addedTracked.code !== 0) {
-    await run(gitCwd, ['read-tree', savedIndex.stdout.trim()]);
-    return { committed: false, note: `no commit: tracked changes could not be staged (${addedTracked.stderr.trim() || addedTracked.stdout.trim() || 'git add failed'})`, skippedFiles };
+  for (const path of approvedTracked) {
+    const added = await run(gitCwd, ['--literal-pathspecs', 'add', '-u', '--', path]);
+    if (added.code !== 0) {
+      await run(gitCwd, ['read-tree', savedIndex.stdout.trim()]);
+      return { committed: false, note: `no commit: tracked changes could not be staged (${added.stderr.trim() || added.stdout.trim() || 'git add failed'})`, skippedFiles };
+    }
   }
   for (const path of safeFiles) {
     const added = await run(gitCwd, ['--literal-pathspecs', 'add', '--', path]);
@@ -261,6 +279,17 @@ async function commitWork(session: Session, deps: SessionHandoffDeps, id: string
       await run(gitCwd, ['read-tree', savedIndex.stdout.trim()]);
       return { committed: false, note: `no commit: safe untracked file could not be staged (${added.stderr.trim() || added.stdout.trim() || 'git add failed'})`, skippedFiles: uniquePaths([...skippedFiles, ...safeFiles]) };
     }
+  }
+  const stagedCandidates = await run(gitCwd, ['diff', '--cached', '--name-only', '-z', 'HEAD', '--']);
+  if (stagedCandidates.code !== 0) {
+    await run(gitCwd, ['read-tree', savedIndex.stdout.trim()]);
+    return { committed: false, note: 'no commit: could not verify staged files safely', skippedFiles };
+  }
+  const allowed = new Set([...approvedTracked, ...safeFiles]);
+  const unsafeStaged = splitNul(stagedCandidates.stdout).filter((path) => !allowed.has(path));
+  if (unsafeStaged.length) {
+    await run(gitCwd, ['read-tree', savedIndex.stdout.trim()]);
+    return { committed: false, note: 'no commit: staged files failed safety checks', skippedFiles: uniquePaths([...skippedFiles, ...unsafeStaged]) };
   }
 
   const scan = await (deps.scanStagedSecrets ?? defaultStagedSecretScan)(gitCwd);

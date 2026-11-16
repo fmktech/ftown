@@ -27,6 +27,7 @@ function harness() {
   let now = new Date('2026-01-01T12:00:00.000Z');
   let mailOk = true;
   let mailCalls = 0;
+  const acceptedKeys: Array<string | undefined> = [];
   const deps = {
     loadSession: async (id) => {
       const found = sessions.get(id);
@@ -38,8 +39,9 @@ function harness() {
     listMail: async (id) => mail.filter((item) => item.to === id),
     acceptMail: async (parent, body) => {
       mailCalls += 1;
+      acceptedKeys.push(body.idempotencyKey);
       if (!mailOk) return { ok: false, error: 'down' };
-      if (!mail.some((existing) => existing.to === parent.id && existing.idempotencyKey === body.idempotencyKey)) {
+      if (body.idempotencyKey !== undefined && !mail.some((existing) => existing.to === parent.id && existing.idempotencyKey === body.idempotencyKey)) {
         mail.push({ to: parent.id, from: body.from, type: body.type, body: body.body, idempotencyKey: body.idempotencyKey });
       }
       return { ok: true };
@@ -59,6 +61,7 @@ function harness() {
     monitor,
     deps,
     mailCalls: () => mailCalls,
+    acceptedKeys,
     setNow(next: Date) { now = next; },
     setMailOk(ok: boolean) { mailOk = ok; },
   };
@@ -125,6 +128,8 @@ test('a restart after durable mail append retries with the same transition key a
 
   const restarted = new SessionFailureMonitor(h.deps);
   await restarted.flush('child');
+  assert.ok(h.acceptedKeys[0]);
+  assert.equal(h.acceptedKeys[1], h.acceptedKeys[0]);
   assert.equal(h.mail.length, 1);
   assert.equal(h.mailCalls(), 2);
   assert.ok(h.sessions.get('child')?.block?.notifiedAt);
