@@ -5,6 +5,7 @@ import {
   removeProviderToken,
   setProviderToken,
 } from './provider-env-store.js';
+import { formatPreflight, runPreflight, type PreflightReport } from './setup-preflight.js';
 
 /** Mask all but the last 4 chars; tokens of length <=4 are fully masked. */
 export function maskToken(value: string): string {
@@ -70,15 +71,19 @@ export interface DoctorFlavorEntry {
 export interface DoctorReport {
   flavors: DoctorFlavorEntry[];
   blocked: string[];
+  /** The same environment preflight `ftown setup` runs. */
+  preflight?: PreflightReport;
 }
 
 /**
  * Classify each flavor's token: stored in env.json wins over the process env;
  * a flavor absent from BOTH is "missing" and listed under `blocked`.
+ * The optional preflight is included verbatim so callers can pass a faked probe.
  */
 export function buildDoctorReport(
   store: Record<string, string>,
   processEnv: Record<string, string | undefined>,
+  preflight?: PreflightReport,
 ): DoctorReport {
   const flavors: DoctorFlavorEntry[] = PROVIDER_FLAVORS.map((flavor) => {
     const source = PROVIDER_AUTH_ENV[flavor].source;
@@ -89,7 +94,7 @@ export function buildDoctorReport(
     return { flavor, source, status };
   });
   const blocked = flavors.filter((f) => f.status === 'missing').map((f) => f.flavor);
-  return { flavors, blocked };
+  return { flavors, blocked, ...(preflight ? { preflight } : {}) };
 }
 
 /** Positional args, skipping flags and the values of value-taking flags. */
@@ -113,7 +118,7 @@ Commands:
   set <provider> [token]   Store a machine token for a provider
   ls                       List configured provider tokens (masked)
   rm <provider>            Remove a stored provider token
-  doctor                   Report which providers are configured / blocked
+  doctor                   Report provider tokens and environment readiness
 
 Providers: ${PROVIDER_FLAVORS.join(' | ')}
 
@@ -171,11 +176,12 @@ export async function run(argv: string[]): Promise<void> {
     }
 
     case 'doctor': {
-      const report = buildDoctorReport(listProviderEnv(), process.env);
+      const report = buildDoctorReport(listProviderEnv(), process.env, runPreflight());
       for (const f of report.flavors) {
         console.log(`${f.flavor.padEnd(9)} ${f.source.padEnd(20)} ${f.status}`);
       }
       console.log(`blocked: ${report.blocked.length ? report.blocked.join(', ') : '(none)'}`);
+      if (report.preflight) for (const line of formatPreflight(report.preflight)) console.log(line);
       break;
     }
 

@@ -4,6 +4,8 @@ import { open, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+import { quoteShellArgument } from '../session-shell.js';
+
 import type {
   ProviderQuota,
   QuotaFetchOptions,
@@ -43,9 +45,11 @@ const REFRESH_EXIT_WAIT_MS = 1000;
 const CLEANUP_POLL_MS = 50;
 const CMD_TIMEOUT_MS = 1000;
 const SYNC_CMD_TIMEOUT_MS = 500;
-const SCRIPT_BINARY = '/usr/bin/script';
-const PGREP_BIN = '/usr/bin/pgrep';
-const PS_BIN = '/bin/ps';
+// Bare names so Node resolves them through PATH: util-linux puts `script`,
+// `pgrep` and `ps` in /usr/bin on Linux, macOS keeps them in /usr/bin and /bin.
+const SCRIPT_BIN = 'script';
+const PGREP_BIN = 'pgrep';
+const PS_BIN = 'ps';
 
 const NO_DATA_MESSAGE = "no billing data in grok's log yet: open grok and run /usage";
 const PERIOD_ENDED_MESSAGE =
@@ -338,64 +342,93 @@ function sleep(ms: number): Promise<void> {
   });
 }
 
-/** The real OS layer. */
-export const realGrokSys: GrokSys = {
-  spawnTui(grokBinary, scratchDir) {
-    let exited = false;
-    const child = spawn(SCRIPT_BINARY, ['-q', '/dev/null', grokBinary, '--cwd', scratchDir], {
-      stdio: 'ignore',
-      detached: true,
-    });
-    child.on('exit', () => {
-      exited = true;
-    });
-    child.on('error', () => {
-      exited = true;
-    });
-    child.unref();
-    return {
-      pid: child.pid,
-      hasExited: () => exited || child.pid === undefined,
-    };
-  },
-  async listChildren(pid) {
-    const out = await runCommand(PGREP_BIN, ['-P', String(pid)]);
-    const children: number[] = [];
-    for (const line of out.split('\n')) {
-      const child = Number(line.trim());
-      if (Number.isInteger(child) && child > 0) {
-        children.push(child);
+/**
+ * argv for the `script` invocation that runs the grok TUI under a pseudo-terminal.
+ *
+ * BSD/macOS `script` takes the command as trailing argv after the output file:
+ *   script -q /dev/null <cmd> [args ...]
+ * util-linux `script` (Linux) takes one shell command string through -c:
+ *   script -qc '<cmd> [args ...]' /dev/null
+ *
+ * The -c payload is parsed by a shell, so its tokens are POSIX-quoted; the BSD
+ * form passes tokens straight through as argv. `platform` is injectable so both
+ * dialects can be verified on one machine.
+ */
+export function buildScriptArgs(
+  grokBinary: string,
+  scratchDir: string,
+  platform: NodeJS.Platform = process.platform,
+): string[] {
+  if (platform === 'darwin') {
+    return ['-q', '/dev/null', grokBinary, '--cwd', scratchDir];
+  }
+  const command = `${quoteShellArgument(grokBinary)} --cwd ${quoteShellArgument(scratchDir)}`;
+  return ['-qc', command, '/dev/null'];
+}
+
+/** Builds the real OS layer for a platform (injectable to test both script dialects). */
+export function createGrokSys(platform: NodeJS.Platform = process.platform): GrokSys {
+  return {
+    spawnTui(grokBinary, scratchDir) {
+      let exited = false;
+      const child = spawn(SCRIPT_BIN, buildScriptArgs(grokBinary, scratchDir, platform), {
+        stdio: 'ignore',
+        detached: true,
+      });
+      child.on('exit', () => {
+        exited = true;
+      });
+      child.on('error', () => {
+        exited = true;
+      });
+      child.unref();
+      return {
+        pid: child.pid,
+        hasExited: () => exited || child.pid === undefined,
+      };
+    },
+    async listChildren(pid) {
+      const out = await runCommand(PGREP_BIN, ['-P', String(pid)]);
+      const children: number[] = [];
+      for (const line of out.split('\n')) {
+        const child = Number(line.trim());
+        if (Number.isInteger(child) && child > 0) {
+          children.push(child);
+        }
       }
-    }
-    return children;
-  },
-  commandOf(pid) {
-    return new Promise((resolve, reject) => {
-      execFile(
-        PS_BIN,
-        ['-o', 'command=', '-p', String(pid)],
-        { timeout: CMD_TIMEOUT_MS, encoding: 'utf8' },
-        (err, stdout) => {
-          if (err) {
-            reject(err);
-          } else {
-            resolve(stdout);
-          }
-        },
-      );
-    });
-  },
-  kill(pid, signal, group) {
-    try {
-      process.kill(group ? -pid : pid, signal);
-      return true;
-    } catch (err) {
-      // kill(0) on a pid we do not own reports EPERM, which still means it exists.
-      return signal === 0 && isRecord(err) && err.code === 'EPERM';
-    }
-  },
-  sleep,
-};
+      return children;
+    },
+    commandOf(pid) {
+      return new Promise((resolve, reject) => {
+        execFile(
+          PS_BIN,
+          ['-o', 'command=', '-p', String(pid)],
+          { timeout: CMD_TIMEOUT_MS, encoding: 'utf8' },
+          (err, stdout) => {
+            if (err) {
+              reject(err);
+            } else {
+              resolve(stdout);
+            }
+          },
+        );
+      });
+    },
+    kill(pid, signal, group) {
+      try {
+        process.kill(group ? -pid : pid, signal);
+        return true;
+      } catch (err) {
+        // kill(0) on a pid we do not own reports EPERM, which still means it exists.
+        return signal === 0 && isRecord(err) && err.code === 'EPERM';
+      }
+    },
+    sleep,
+  };
+}
+
+/** The real OS layer for the current platform. */
+export const realGrokSys: GrokSys = createGrokSys();
 
 /** True for pids the module may signal: integers greater than 1. */
 export function isSignalablePid(pid: number): boolean {
@@ -625,9 +658,18 @@ export async function refreshGrokBilling(
   }
 }
 
-/** The real refresh runs only on darwin, when not disabled by env, and when grok is installed. */
-async function refreshAllowed(homeDir: string): Promise<boolean> {
-  if (process.env.FTOWN_QUOTA_GROK_NO_REFRESH === '1' || process.platform !== 'darwin') {
+/**
+ * The refresh needs a working `script`, `pgrep` and `ps`. Those exist on macOS
+ * and Linux (including WSL2); Windows has neither the BSD nor the util-linux
+ * `script`, so the cached log is used there.
+ */
+export function platformSupportsRefresh(platform: NodeJS.Platform = process.platform): boolean {
+  return platform === 'darwin' || platform === 'linux';
+}
+
+/** The real refresh runs on supported platforms, when enabled and grok is installed. */
+export async function refreshAllowed(homeDir: string, platform: NodeJS.Platform = process.platform): Promise<boolean> {
+  if (process.env.FTOWN_QUOTA_GROK_NO_REFRESH === '1' || !platformSupportsRefresh(platform)) {
     return false;
   }
   try {
