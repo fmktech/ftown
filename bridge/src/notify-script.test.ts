@@ -119,7 +119,13 @@ function makeHarnessBin(): { bin: string; harness: string } {
   const harness = join(bin, 'ftown-harness');
   writeFileSync(
     harness,
-    `#!/bin/bash\nexec ${process.execPath} --import tsx ${JSON.stringify(entry)} "$@"\n`,
+    [
+      '#!/bin/bash',
+      '# Answer the wrapper capability probe without paying tsx startup twice.',
+      'if [ "${1:-}" = hook ] && [ "${2:-}" = "--help" ]; then echo "hook help"; exit 0; fi',
+      `exec ${process.execPath} --import tsx ${JSON.stringify(entry)} "$@"`,
+      '',
+    ].join('\n'),
     { mode: 0o755 },
   );
   chmodSync(harness, 0o755);
@@ -269,5 +275,41 @@ describe('bridge/hooks/notify.sh', () => {
     assert.equal(grok.stdout, plain.stdout);
     assert.equal(grok.stderr, plain.stderr);
     assert.deepEqual(grokBridge.requests, plainBridge.requests);
+  });
+
+  it('logs visibly and exits 0 when ftown-harness is missing', async () => {
+    const bridge = await startFakeBridge();
+    const { bin } = makeHarnessBin();
+    const result = await runNotify(makeHome(), {
+      ...ftownEnv(bridge.port),
+      FTOWN_HARNESS: join(bin, 'missing-ftown-harness'),
+    }, JSON.stringify(CLAUDE_STOP_PAYLOAD));
+
+    assert.equal(result.exitCode, 0);
+    assert.equal(bridge.requests.length, 0);
+    assert.match(result.stderr, /ftown-harness is missing/);
+    assert.match(result.stderr, /notify event not delivered/);
+  });
+
+  it('logs visibly and exits 0 when ftown-harness is too old to have a hook command', async () => {
+    const bridge = await startFakeBridge();
+    const { bin } = makeHarnessBin();
+    const old = join(bin, 'old-ftown-harness');
+    writeFileSync(
+      old,
+      '#!/bin/bash\nif [ "${1:-}" = hook ] && [ "${2:-}" = "--help" ]; then echo "error: unknown command \'hook\'" >&2; exit 1; fi\nexit 0\n',
+      { mode: 0o755 },
+    );
+    chmodSync(old, 0o755);
+
+    const result = await runNotify(makeHome(), {
+      ...ftownEnv(bridge.port),
+      FTOWN_HARNESS: old,
+    }, JSON.stringify(CLAUDE_STOP_PAYLOAD));
+
+    assert.equal(result.exitCode, 0);
+    assert.equal(bridge.requests.length, 0);
+    assert.match(result.stderr, /no 'hook' command/);
+    assert.match(result.stderr, /notify event not delivered/);
   });
 });
