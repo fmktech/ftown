@@ -153,6 +153,30 @@ async function emitOut(names: readonly string[]): Promise<void> {
   for (const name of names) emitFile(name, await readFile(join(GUEST.outDir, name)), port);
 }
 
+/** Runs and records one bridge responsiveness probe without adding anything to the canonical log. */
+export async function probeBridge(
+  clock: Clock,
+  checkpoint: string,
+  run: () => Promise<{ code: number; stdout: string; stderr: string; timedOut: boolean }>,
+  append: (line: string) => Promise<void>,
+): Promise<boolean> {
+  const t = clock.now();
+  const result = await run();
+  const durationMs = clock.now() - t;
+  const ok = result.code === 0;
+  const line = {
+    t,
+    checkpoint,
+    ok,
+    exitCode: result.timedOut ? null : result.code,
+    timedOut: result.timedOut,
+    durationMs,
+    stderr: result.stderr.slice(0, 300).replace(/[\r\n]/g, ' '),
+  };
+  await append(`${JSON.stringify(line)}\n`);
+  return ok;
+}
+
 async function writeSideFiles(): Promise<void> {
   const tm = await asFtown(['tmux', '-L', 'ftown', 'ls'], { timeoutMs: 10_000 });
   await writeFile(join(GUEST.outDir, 'side-tmux.txt'), tm.stdout + tm.stderr);
@@ -190,7 +214,7 @@ function appendProcs(name: string, t: number): Promise<void> {
   return procsChain;
 }
 
-const OUT_FILES = ['canon.jsonl', 'verdicts.json', 'side-bridge.log', 'side-tmux.txt', 'side-agents.jsonl', 'side-procs.txt', ...ROLES.map((r) => `side-${r}.stderr.log`)];
+const OUT_FILES = ['canon.jsonl', 'verdicts.json', 'side-bridge.log', 'side-tmux.txt', 'side-agents.jsonl', 'side-procs.txt', 'side-probes.jsonl', ...ROLES.map((r) => `side-${r}.stderr.log`)];
 
 interface Outcome {
   verdicts: Extract<Rec, { k: 'verdict' }>[];
@@ -301,12 +325,20 @@ async function drive(seed: number, level: ChaosLevel, profile: RunProfile, clock
   // Root's first mail comes after its first sleep; the ids file must be complete before then.
   if (clock.now() > idsDeadline(rootCreateAt, rootFirstSleep)) throw new Infra('infra:ids_late');
 
-  const take = () =>
+  const take = (checkpointName: string) =>
     takeSnapshot({
       dataDir: GUEST.dataDir,
       ids,
       bridgePid: actions.pid(),
-      bridgeResponsive: async () => (await ftown(['sessions', 'list'], { timeoutMs: CONTROL_TIMEOUT_MS })).code === 0,
+      bridgeResponsive: async () => probeBridge(
+        clock,
+        checkpointName,
+        () => ftown(['sessions', 'list'], { timeoutMs: CONTROL_TIMEOUT_MS }),
+        async (line) => {
+          await mkdir(GUEST.outDir, { recursive: true });
+          await appendFile(join(GUEST.outDir, 'side-probes.jsonl'), line);
+        },
+      ),
       tmux: { user: GUEST.user, env: { HOME: FTOWN_ENV.HOME, TMUX_TMPDIR: FTOWN_ENV.TMUX_TMPDIR } },
     });
   // Each checkpoint also appends a process listing to side-procs.txt (sidecar, never hashed).

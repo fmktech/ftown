@@ -170,6 +170,7 @@ Outputs are saved in `chaos/out/<seed>-<profile>/run<k>` (or `chaos/out/<seed>-<
 - `verdicts.json`: Verdict array for all evaluated properties with kind, status, and evidence strings.
 - `side-bridge.log`: Full stdout and stderr of the `ftown start --solo` bridge process.
 - `side-procs.txt`: Periodic process table snapshots (`ps aux`) taken at each checkpoint.
+- `side-probes.jsonl`: Per-checkpoint bridge responsiveness probe results and diagnostics.
 - `side-tmux.log`: Tmux server and session activity logs.
 - `console.log`: Raw serial console log from kernel boot and guest `/init` (ttyS0).
 - `frames.txt`: Raw ttyS1 frame stream containing base64-encoded files.

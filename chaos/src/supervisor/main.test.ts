@@ -3,12 +3,12 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { encodeLog } from '../core/canon.ts';
+import { encodeLog, hashLog } from '../core/canon.ts';
 import { fakeClock } from '../core/clock.ts';
 import { PROFILE, PROPERTY_IDS } from '../contract.ts';
 import type { Rec, Snapshot } from '../contract.ts';
 import { runCheckpoints } from './checkpoints.ts';
-import { agentCommand, buildVerdictsReport, createArgs, idsDeadline, parseAgentLog, parseCli, parseCreatedId } from './main.ts';
+import { agentCommand, buildVerdictsReport, createArgs, idsDeadline, parseAgentLog, parseCli, parseCreatedId, probeBridge } from './main.ts';
 import { allProperties } from './props.ts';
 import { asFtownArgv, isAgentCmdline } from './target.ts';
 
@@ -108,6 +108,34 @@ test('ids deadline is root create start + root first sleep', () => {
   assert.equal(idsDeadline(4_000, 15_000), 19_000);
 });
 
+test('bridge responsiveness probes append ordered diagnostic JSON lines without changing snapshots', async () => {
+  const clock = fakeClock();
+  const lines: string[] = [];
+  const append = async (line: string) => { lines.push(line); };
+  const failed = await probeBridge(clock, 'cp1', async () => {
+    await clock.advance(7);
+    return { code: 1, stdout: '', stderr: 'Bridge security: expired\nretry', timedOut: false };
+  }, append);
+  const timedOut = await probeBridge(clock, 'cp2', async () => {
+    await clock.advance(20_000);
+    return { code: 124, stdout: '', stderr: 'Timed out', timedOut: true };
+  }, append);
+  const succeeded = await probeBridge(clock, 'final', async () => {
+    await clock.advance(3);
+    return { code: 0, stdout: '', stderr: '', timedOut: false };
+  }, append);
+
+  assert.equal(failed, false);
+  assert.equal(timedOut, false);
+  assert.equal(succeeded, true);
+  assert.deepEqual(lines.map((line) => JSON.parse(line)), [
+    { t: 0, checkpoint: 'cp1', ok: false, exitCode: 1, timedOut: false, durationMs: 7, stderr: 'Bridge security: expired retry' },
+    { t: 7, checkpoint: 'cp2', ok: false, exitCode: null, timedOut: true, durationMs: 20_000, stderr: 'Timed out' },
+    { t: 20_007, checkpoint: 'final', ok: true, exitCode: 0, timedOut: false, durationMs: 3, stderr: '' },
+  ]);
+  assert.deepEqual(Object.keys(JSON.parse(lines[0]!)), ['t', 'checkpoint', 'ok', 'exitCode', 'timedOut', 'durationMs', 'stderr']);
+});
+
 test('buildVerdictsReport records source fingerprint without altering canon.jsonl bytes', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'chaos-verdicts-'));
   try {
@@ -139,6 +167,7 @@ test('buildVerdictsReport records source fingerprint without altering canon.json
     const nullFp = await buildVerdictsReport(outcome, canonBefore, nullFpPath);
     const canonAfter = encodeLog(records);
     assert.equal(canonAfter, canonBefore);
+    assert.equal(withFp.H_run, hashLog(canonBefore));
     assert.equal(withFp.sourceFingerprint, 'abc123');
     assert.equal(withFp.sourceHead, 'deadbeef');
     assert.equal(withFp.sourceDirty, true);

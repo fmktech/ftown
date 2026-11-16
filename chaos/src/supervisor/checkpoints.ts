@@ -6,13 +6,13 @@ export const CHECKPOINT_POLL_MS = 1_000;
 
 export interface CheckpointDeps {
   clock: Clock;
-  take: () => Promise<Snapshot>;
+  take: (name: string) => Promise<Snapshot>;
   log: (rec: Rec) => void;
 }
 
 export async function checkpoint(deps: CheckpointDeps, name: string, final: boolean): Promise<void> {
   const t = deps.clock.now();
-  const snap = await deps.take();
+  const snap = await deps.take(name);
   deps.log({ k: 'checkpoint', t, name, final, snap });
 }
 
