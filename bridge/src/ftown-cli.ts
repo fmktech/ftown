@@ -11,12 +11,13 @@ import { runAttention } from './attention-cli.js';
 import { runBrief } from './brief-cli.js';
 import { runWorktrees } from './worktrees-cli.js';
 import { runPlan } from './plan-cli.js';
+import { runAccounts } from './accounts-cli.js';
 import { executeCli, isCliEntry } from './cli-entry.js';
 export { isCliEntry } from './cli-entry.js';
 
 export function usage(): string {
   return `Usage: ftown [bridge options]
-       ftown <setup|start|sessions|harness|env|security|quota|status|board|events|attention|brief|worktrees|plan> [args...]
+       ftown <setup|start|sessions|harness|env|accounts|security|quota|status|board|events|attention|brief|worktrees|plan> [args...]
 
 With no subcommand, start the bridge. Run setup explicitly before the first start.
 
@@ -27,6 +28,7 @@ Subcommands:
   harness    Inspect and drive the local ftown-bridge harness
   security   Pair browsers and inspect/revoke encrypted endpoints
   env        Manage per-provider machine tokens (~/.ftown/env.json)
+  accounts   Manage registered Claude and Codex accounts
   quota      Subscription quota left, routing advice and model lists per harness (--json for agents)
   status     Own status card: show, set or clear
   board      Child-session board for this session's tree
@@ -45,6 +47,7 @@ export async function runFtown(argv: string[], start: (argv: string[]) => Promis
     case 'sessions': return runSessions(args);
     case 'harness': return runHarness(args);
     case 'env': return runEnv(args);
+    case 'accounts': return runAccounts(args);
     case 'security': return runSecurity(args);
     case 'quota': return runQuotaCli(args);
     case 'status': return runStatus(args);

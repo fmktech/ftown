@@ -47,6 +47,8 @@ entrypoint with `--repair`.
 ```bash
 ftown sessions list
 ftown sessions create --prompt "Review the auth module" --workdir "$PWD" --parent
+ftown sessions create --shell claude --account personal --prompt "Review the auth module"
+ftown sessions create --parent --allowed-accounts personal,work --prompt "Delegate account-scoped work"
 ftown sessions screen <session-id> --limit 200
 ftown sessions attention --message "Please review the migration plan" --title "Review requested"
 ftown sessions attention --title "Pick a database" --message "Which database should I use?" --option Postgres --option SQLite --wait
@@ -70,6 +72,9 @@ ftown harness mail send <session-id> --type task "review the API client"
 ftown harness mail read
 ftown sessions handoff <session-id> --shell grok --model fast
 ftown env --help
+ftown accounts list [--json]
+ftown accounts add personal --harness claude --config-dir "$HOME/.claude-personal" --label Personal
+ftown accounts remove personal
 ftown setup --help
 ftown start --help
 ```
@@ -278,6 +283,28 @@ an already-admitted delivery can finish as a session stops. These facts do not
 authorize a merge or other action. Both commands target trimmed
 `$FTOWN_SESSION_ID` unless you supply `--session-id <id>`; they never guess identity from the working directory.
 Older bridges report `bridge_upgrade_required` before mutation.
+
+## Harness accounts
+
+Register separate Claude or Codex configuration directories with
+`ftown accounts add <id> --harness claude|codex --config-dir <absolute-path>`.
+Account IDs are lowercase slugs; `default` is reserved and means the harness's
+normal configuration directory. Paths must be absolute and are used as-is for
+the harness environment variable (`CLAUDE_CONFIG_DIR` or `CODEX_HOME`). FTown
+does not copy, link, or read credentials between account directories.
+
+Choose an account when starting a session with `ftown sessions create
+--shell claude --account personal ...` (or `--shell codex`). A child started
+with `--parent` inherits the parent's account unless `--account` is supplied.
+To constrain future children, set `--allowed-accounts personal,work`; the
+bridge enforces this policy for CLI and API requests, intersecting a child's
+requested list with inherited restrictions so descendants can only narrow it.
+When a parent resolves through an alias, both policies apply. Attempts to select an account outside the parent's
+list fail with `account_not_allowed`. An omitted policy leaves children
+unrestricted. Setup installs FTown hooks, skill links, and supported plugins
+for the default configuration and each registered account configuration. For
+Codex accounts, setup links the skill into `CODEX_HOME/skills`, a Codex
+compatibility skill root.
 
 To ask with options or free text, use `ftown sessions attention --option ...` or
 `--questions-json`, then check the returned event ID with `ftown sessions

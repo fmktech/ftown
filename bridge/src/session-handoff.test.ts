@@ -69,6 +69,8 @@ function harness(options: {
         shellType: input.shellType,
         model: input.model,
         parentSessionId: input.parentSessionId,
+        account: input.account,
+        allowedAccounts: input.allowedAccounts,
         ...(input.requireGreenPr ? { requireGreenPr: true } : {}),
         status: 'running',
       });
@@ -138,6 +140,8 @@ test('handoff commits a dirty linked worktree, moves the plan and pull request, 
       pullRequestUrl: 'https://github.com/owner/repo/pull/9',
       pullRequestLinkId: 'link-1',
       requireGreenPr: true,
+      account: 'work',
+      allowedAccounts: ['work', 'default'],
       worktree: { repoRoot: repo, path: wt, branch: 'feature', base: 'main', createdByBridge: true },
       block: { reason: 'usage_limit', resetAt: '2026-01-02T02:00:00.000Z', screenTail: 'Usage limit reached', detectedAt: '2026-01-01T00:00:00.000Z', transitionKey: 'usage_limit|2026-01-02T02:00:00.000Z|running' },
     }));
@@ -153,6 +157,10 @@ test('handoff commits a dirty linked worktree, moves the plan and pull request, 
     assert.equal(input.model, 'fast');
     assert.equal(input.parentSessionId, 'parent');
     assert.equal(input.requireGreenPr, true);
+    assert.equal(input.account, 'work');
+    assert.deepEqual(input.allowedAccounts, ['work', 'default']);
+    assert.equal(result.session.account, 'work');
+    assert.deepEqual(result.session.allowedAccounts, ['work', 'default']);
     assert.equal(input.worktree, undefined);
     assert.equal(input.planItem, undefined);
     assert.match(input.prompt ?? '', /original task/);
