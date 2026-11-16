@@ -30,8 +30,9 @@ trailing argument on `docker run`.
 
 The image builds and installs the bridge package from this checkout's `bridge/`
 directory, so it uses the same bridge source and version as the repository.
-Compose tags the image with the bridge version; the `docker-solo` CI job checks
-that the Compose tag and installed package version match `bridge/package.json`.
+Compose defaults to the `ftown-solo:latest` image tag. For a version-pinned
+build, set `FTOWN_VERSION` from the package metadata; the `docker-solo` CI job
+builds both tags and checks the installed package and Compose resolution.
 See the [retirement and rollback notes](../../docs/automation-sunset.md).
 
 The image runs explicit setup during its build, before HOME volume initialization.
@@ -52,6 +53,7 @@ setup fails before bridge listeners/auth with matching-version setup guidance.
 
 ```bash
 cd docker/solo
+export FTOWN_VERSION="$(jq -r .version ../../bridge/package.json)"
 docker compose up -d --build
 ```
 
@@ -59,7 +61,9 @@ or with plain Docker:
 
 ```bash
 # Run from the repository root.
-docker build -f docker/solo/Dockerfile -t ftown-solo:0.30.22 .
+export FTOWN_VERSION="$(jq -r .version bridge/package.json)"
+docker build -f docker/solo/Dockerfile \
+  -t "ftown-solo:${FTOWN_VERSION}" -t ftown-solo:latest .
 mkdir -p ./workspace
 docker run -d --init --name ftown-solo \
   -p 8040:8040 \
@@ -67,7 +71,7 @@ docker run -d --init --name ftown-solo \
   -v ftown-solo-home:/home/ftown/.ftown \
   -v "$(pwd)/workspace:/workspace" \
   -e ANTHROPIC_API_KEY=sk-ant-... \
-  ftown-solo
+  "ftown-solo:${FTOWN_VERSION}"
 ```
 
 ## Finding the access key / link

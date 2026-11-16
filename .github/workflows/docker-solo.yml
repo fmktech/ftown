@@ -31,7 +31,9 @@ jobs:
           context: .
           file: docker/solo/Dockerfile
           platforms: linux/amd64
-          tags: ftown-solo:${{ steps.bridge-version.outputs.version }}
+          tags: |
+            ftown-solo:${{ steps.bridge-version.outputs.version }}
+            ftown-solo:latest
           load: true
       - name: Assert image and Compose versions match bridge package
         env:
@@ -39,11 +41,13 @@ jobs:
         run: |
           set -euo pipefail
           expected=$(node -p "require('./bridge/package.json').version")
-          compose_tag=$(sed -n 's/^[[:space:]]*image: ftown-solo://p' docker/solo/compose.yml | tr -d '[:space:]')
+          compose_image=$(FTOWN_VERSION="$expected" docker compose -f docker/solo/compose.yml config --format json | node -e "let s='';process.stdin.on('data', d => s += d).on('end', () => console.log(JSON.parse(s).services['ftown-solo'].image))")
+          default_image=$(env -u FTOWN_VERSION docker compose -f docker/solo/compose.yml config --format json | node -e "let s='';process.stdin.on('data', d => s += d).on('end', () => console.log(JSON.parse(s).services['ftown-solo'].image))")
           installed=$(docker run --rm --entrypoint node "$IMAGE" -p "require('/usr/local/lib/node_modules/ftown-bridge/package.json').version")
-          test "$compose_tag" = "$expected"
+          test "$compose_image" = "ftown-solo:$expected"
+          test "$default_image" = ftown-solo:latest
           test "$installed" = "$expected"
-          echo "Compose tag and installed bridge package both match $expected"
+          echo "Compose resolves to version $expected and defaults to latest; installed package matches"
           docker run --rm --entrypoint ftown "$IMAGE" --help >/dev/null
       - name: Boot amd64 image and wait for health
         run: |
@@ -80,5 +84,7 @@ jobs:
           context: .
           file: docker/solo/Dockerfile
           platforms: linux/arm64
-          tags: ftown-solo:${{ steps.bridge-version.outputs.version }}-arm64
+          tags: |
+            ftown-solo:${{ steps.bridge-version.outputs.version }}-arm64
+            ftown-solo:latest-arm64
 

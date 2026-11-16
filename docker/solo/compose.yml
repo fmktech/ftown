@@ -3,7 +3,7 @@ services:
     build:
       context: ../..
       dockerfile: docker/solo/Dockerfile
-    image: ftown-solo:0.30.22
+    image: ftown-solo:${FTOWN_VERSION:-latest}
     container_name: ftown-solo
     init: true
     restart: unless-stopped
