@@ -35,6 +35,10 @@ case "$job" in
     ;;
   centrifugo) bash scripts/ci/validate-centrifugo.sh ;;
   unit)
+    # P0.5: shell scripts and hook assets stay LF, including on a Windows
+    # checkout with core.autocrlf=true.
+    bash scripts/ci/check-eol.sh
+    node --test scripts/ci/check-eol.test.mjs
     # The opencode child-launch proof starts the resolved login shell inside
     # tmux. A hosted runner without tmux never runs that regression.
     sudo apt-get update
