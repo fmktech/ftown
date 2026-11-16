@@ -133,6 +133,15 @@ it("shows the typed starting message after the picker exhausts its bounded backo
   expect(screen.getByRole("status").textContent).toContain("This computer is still starting");
 });
 
+it("shows the typed bridge startup refusal from session creation", async () => {
+  const onSubmit = vi.fn(async () => { throw new Error("Bridge is starting"); });
+  render(<NewSessionModal isOpen onClose={vi.fn()} onSubmit={onSubmit} bridges={bridges}
+    sendCommand={vi.fn(async () => ({ requestId: "accounts", success: true, data: { accounts } }))} />);
+  await waitFor(() => expect((screen.getByLabelText("Account") as HTMLSelectElement).disabled).toBe(false));
+  fireEvent.click(screen.getByRole("button", { name: "Create Session" }));
+  expect(await screen.findByText("Bridge is starting")).toBeTruthy();
+});
+
 it.each([
   ["missing a default", [defaultAccounts[0]]],
   ["duplicate default for one harness", [...defaultAccounts, defaultAccounts[0]]],
