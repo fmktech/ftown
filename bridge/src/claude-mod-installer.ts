@@ -27,24 +27,30 @@ export function supportsClaudeMods(version: string): boolean {
   return major > 2 || (major === 2 && (minor > 1 || (minor === 1 && patch >= 287)));
 }
 
-let cached: { key: string; expires: number; compatible: boolean } | undefined;
+type LaunchOptions = { home?: string; probeVersion?: () => string; now?: () => number };
+
+/** Create an independent cache around the default compatibility probe. */
+export function createClaudeModLaunchPath(defaultProbe: () => string): (options?: LaunchOptions) => string | undefined {
+  let cached: { key: string; expires: number; compatible: boolean } | undefined;
+  return (options: LaunchOptions = {}): string | undefined => {
+    const home = options.home ?? homedir();
+    const destination = join(home, '.ftown', 'claude-plugin');
+    if (!CLAUDE_MOD_FILES.every((file) => existsSync(join(destination, file)))) return undefined;
+    const key = `${home}\0${process.env.PATH ?? ''}`;
+    const now = options.now?.() ?? performance.now();
+    let compatible: boolean;
+    if (!options.probeVersion && cached?.key === key && now < cached.expires) compatible = cached.compatible;
+    else {
+      try {
+        compatible = supportsClaudeMods((options.probeVersion ?? defaultProbe)());
+      } catch { compatible = false; }
+      if (!options.probeVersion) cached = { key, expires: now + 60_000, compatible };
+    }
+    return compatible ? destination : undefined;
+  };
+}
 
 /** Read-only, bounded compatibility probe; a missing/old CLI retains classic hooks. */
-export function claudeModLaunchPath(options: { home?: string; probeVersion?: () => string; now?: () => number } = {}): string | undefined {
-  const home = options.home ?? homedir();
-  const destination = join(home, '.ftown', 'claude-plugin');
-  if (!CLAUDE_MOD_FILES.every((file) => existsSync(join(destination, file)))) return undefined;
-  const key = `${home}\0${process.env.PATH ?? ''}`;
-  const now = options.now?.() ?? performance.now();
-  let compatible: boolean;
-  if (!options.probeVersion && cached?.key === key && now < cached.expires) compatible = cached.compatible;
-  else {
-    try {
-      compatible = supportsClaudeMods(options.probeVersion ? options.probeVersion() : execFileSync('claude', ['--version'], {
-        encoding: 'utf8', timeout: 1500, maxBuffer: 8192, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true,
-      }));
-    } catch { compatible = false; }
-    if (!options.probeVersion) cached = { key, expires: now + 60_000, compatible };
-  }
-  return compatible ? destination : undefined;
-}
+export const claudeModLaunchPath = createClaudeModLaunchPath(() => execFileSync('claude', ['--version'], {
+  encoding: 'utf8', timeout: 1500, maxBuffer: 8192, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true,
+}));
