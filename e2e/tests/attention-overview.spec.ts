@@ -268,7 +268,10 @@ test("a notice and a retired child's item are answered with a typed error, never
     await expect(overview).toBeVisible({ timeout: 30_000 });
     const panel = overview.getByRole("region", { name: "Child attention requests" });
     await expect(panel).toContainText(childName);
-    await expect(panel.getByRole("button", { name: "Send answer" })).toHaveCount(0);
+    const item = panel.locator(`[data-child-attention="${eventId}"]`);
+    await item.getByRole("button").first().click();
+    await expect(item.getByRole("button", { name: "Dismiss" })).toBeVisible();
+    await expect(item.getByRole("button", { name: "Send answer" })).toHaveCount(0);
 
     // The bridge answers the notice with a typed error instead of staying silent.
     const answered = await bridgeCommand("answer_session_attention", { sessionId: childId, eventId, answers: [{ selected: [0] }] });
