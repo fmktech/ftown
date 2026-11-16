@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
+import { grokHookAdapter } from './grok-hook-adapter.js';
 import type {
   AntigravityHookPayload,
   AntigravityLifecycleEventName,
@@ -478,11 +479,11 @@ export function makeAntigravityAdapter(readInbox: AntigravityInboxReader): HookA
 export const antigravityAdapter: HookAdapter = makeAntigravityAdapter(readInboxViaFtownCli);
 
 /**
- * Adapter registry. All five Muse native events, notify and antigravity are
- * ported; only grok still fails visibly in the runner.
+ * Adapter registry for all implemented hook kinds.
  */
 export const HOOK_ADAPTERS: Readonly<Partial<Record<HookKind, HookAdapter>>> = Object.freeze({
   'muse-session-start': museSessionStartAdapter,
+  grok: grokHookAdapter,
   'muse-user-prompt-submit': museUserPromptSubmitAdapter,
   'muse-pre-tool-use': musePreToolUseAdapter,
   'muse-post-tool-use': musePostToolUseAdapter,

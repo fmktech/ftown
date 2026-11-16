@@ -30,7 +30,7 @@ export const HOOK_KINDS = [
 export type HookKind = (typeof HOOK_KINDS)[number];
 
 /** Only this kind has an adapter in the contract step; other kinds fail visibly. */
-export const IMPLEMENTED_HOOK_KINDS = ['muse-session-start'] as const;
+export const IMPLEMENTED_HOOK_KINDS = ['muse-session-start', 'grok'] as const;
 export type ImplementedHookKind = (typeof IMPLEMENTED_HOOK_KINDS)[number];
 
 export type HookSessionSource = 'env' | 'conversation' | 'workspace';
