@@ -1,7 +1,10 @@
-import { describe, it } from 'node:test';
+import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
-import { parseCodexConfigDefaults, parseCodexModels } from './models-codex.js';
+import { readConfigText, parseCodexConfigDefaults, parseCodexModels } from './models-codex.js';
 
 const OBSERVED = '2026-11-13T10:00:00.000Z';
 
@@ -331,4 +334,41 @@ describe('parseCodexConfigDefaults', () => {
     const toml = 'model = gpt-6.1-sol\nmodel_reasoning_effort = ""\n';
     assert.deepEqual(parseCodexConfigDefaults(toml), { model: null, effort: null });
   });
+});
+
+it('reads Codex model defaults from CODEX_HOME or the default config', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'codex-model-config-'));
+  const previous = process.env.CODEX_HOME;
+  try {
+    await mkdir(join(home, 'custom'), { recursive: true });
+    await mkdir(join(home, '.codex'), { recursive: true });
+    await writeFile(join(home, 'custom', 'config.toml'), 'model = "custom"\n');
+    await writeFile(join(home, '.codex', 'config.toml'), 'model = "default"\n');
+    process.env.CODEX_HOME = join(home, 'custom');
+    assert.equal(parseCodexConfigDefaults(await readConfigText(home)).model, 'custom');
+    process.env.CODEX_HOME = '';
+    assert.equal(parseCodexConfigDefaults(await readConfigText(home)).model, 'default');
+  } finally {
+    if (previous === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previous;
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+// Tests in this module own temporary homes and must not access inherited harness paths.
+const inheritedPathOverrides: NodeJS.ProcessEnv = {};
+const pathOverrideNames = [
+  'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME',
+  'OPENCODE_CONFIG_DIR', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME',
+] as const;
+before(() => {
+  for (const name of pathOverrideNames) {
+    inheritedPathOverrides[name] = process.env[name];
+    delete process.env[name];
+  }
+});
+after(() => {
+  for (const name of pathOverrideNames) {
+    const value = inheritedPathOverrides[name];
+    if (value === undefined) delete process.env[name]; else process.env[name] = value;
+  }
 });

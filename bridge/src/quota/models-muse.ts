@@ -1,5 +1,6 @@
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
+import { xdgConfigHome, xdgDataHome } from '../config-dirs.js';
 
 import type { HarnessModel, ModelsFetcher, ProviderModels, QuotaFetchOptions } from './types.js';
 
@@ -12,8 +13,6 @@ import type { HarnessModel, ModelsFetcher, ProviderModels, QuotaFetchOptions } f
  * locally: nothing is executed and no network is used.
  */
 
-const CATALOG_SEGMENTS = ['.local', 'share', 'muse', 'model-catalog'] as const;
-const SETTINGS_SEGMENTS = ['.config', 'muse', 'settings.json'] as const;
 const MODEL_FLAG = '--model <id>';
 const EFFORT_FLAG = '--reasoning-effort <level>';
 const FORMAT_MESSAGE = 'unrecognised muse model catalogue format';
@@ -182,7 +181,7 @@ async function newestCatalogFile(
 
 async function readSettings(homeDir: string): Promise<SettingsSelection> {
   try {
-    const parsed: unknown = JSON.parse(await readFile(join(homeDir, ...SETTINGS_SEGMENTS), 'utf8'));
+    const parsed: unknown = JSON.parse(await readFile(join(xdgConfigHome(homeDir), 'muse', 'settings.json'), 'utf8'));
     if (!isRecord(parsed)) return { model: null, effort: null };
     return {
       model: nonEmptyString(parsed.model),
@@ -194,7 +193,7 @@ async function readSettings(homeDir: string): Promise<SettingsSelection> {
 }
 
 async function readMuseModels(options: QuotaFetchOptions): Promise<ProviderModels> {
-  const catalogDir = join(options.homeDir, ...CATALOG_SEGMENTS);
+  const catalogDir = join(xdgDataHome(options.homeDir), 'muse', 'model-catalog');
   const now = observedNow(options);
 
   let names: string[];

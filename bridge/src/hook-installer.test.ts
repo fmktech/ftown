@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { test } from 'node:test';
+import { test, before, after } from 'node:test';
 import { installClaudeHooks } from './hook-installer.js';
 import { ASK_HOOK_TIMEOUT_SECONDS } from './attention-prompt-protocol.js';
 
@@ -160,4 +160,43 @@ test('install leaves user PreToolUse hooks and other ftown hooks untouched', () 
     assert.ok(stopCommands.some((c) => typeof c === 'string' && c.includes('hook-pump')));
     assert.equal(stopCommands.some((c) => typeof c === 'string' && c.includes('ask-hook')), false);
   });
+});
+
+test('Claude hooks use CLAUDE_CONFIG_DIR and fall back when it is blank', () => {
+  const previousHome = process.env.HOME;
+  const previousConfig = process.env.CLAUDE_CONFIG_DIR;
+  const home = mkdtempSync(join(tmpdir(), 'ftown-claude-config-'));
+  process.env.HOME = home;
+  try {
+    process.env.CLAUDE_CONFIG_DIR = join(home, 'custom');
+    assert.equal(installClaudeHooks(join(home, 'notify')), true);
+    assert.equal(existsSync(join(home, 'custom', 'settings.json')), true);
+    assert.equal(existsSync(join(home, '.claude', 'settings.json')), false);
+    process.env.CLAUDE_CONFIG_DIR = ' ';
+    assert.equal(installClaudeHooks(join(home, 'notify')), true);
+    assert.equal(existsSync(join(home, '.claude', 'settings.json')), true);
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
+    if (previousConfig === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previousConfig;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// Tests in this module own temporary homes and must not access inherited harness paths.
+const inheritedPathOverrides: NodeJS.ProcessEnv = {};
+const pathOverrideNames = [
+  'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME',
+  'OPENCODE_CONFIG_DIR', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME',
+] as const;
+before(() => {
+  for (const name of pathOverrideNames) {
+    inheritedPathOverrides[name] = process.env[name];
+    delete process.env[name];
+  }
+});
+after(() => {
+  for (const name of pathOverrideNames) {
+    const value = inheritedPathOverrides[name];
+    if (value === undefined) delete process.env[name]; else process.env[name] = value;
+  }
 });

@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, renameSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
+import { claudeConfigDir } from './config-dirs.js';
 
 const HOOK_EVENTS = ['Notification', 'Stop', 'SessionEnd', 'PreToolUse', 'PostToolUse', 'UserPromptSubmit'] as const;
 const MAIL_PUMP_EVENTS = ['Stop', 'UserPromptSubmit', 'SessionStart'] as const;
@@ -126,7 +127,7 @@ function upsertHookEntry(
 }
 
 export function installClaudeHooks(notifyScriptPath: string): boolean {
-  const settingsPath = join(homedir(), '.claude', 'settings.json');
+  const settingsPath = join(claudeConfigDir(), 'settings.json');
 
   let raw: string;
   try {

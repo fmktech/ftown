@@ -259,6 +259,32 @@ describe('fetchMuseModels', () => {
     await rm(homeDir, { recursive: true, force: true });
   });
 
+  it('reads catalogues and settings from XDG data and config homes', async () => {
+    const dir = await mkdtemp(join(homeDir, 'xdg-'));
+    const data = join(dir, 'data');
+    const config = join(dir, 'config');
+    const previousData = process.env.XDG_DATA_HOME;
+    const previousConfig = process.env.XDG_CONFIG_HOME;
+    try {
+      process.env.XDG_DATA_HOME = data;
+      process.env.XDG_CONFIG_HOME = config;
+      await mkdir(join(data, 'muse', 'model-catalog'), { recursive: true });
+      await mkdir(join(config, 'muse'), { recursive: true });
+      await writeFile(join(data, 'muse', 'model-catalog', 'models.json'), JSON.stringify(catalog([row({ model_id: 'choice' })])));
+      await writeFile(join(config, 'muse', 'settings.json'), JSON.stringify({ model: 'choice' }));
+      const found = await fetchMuseModels(options(dir));
+      assert.equal(found.status, 'ok');
+      assert.equal(found.models[0].id, 'choice');
+      assert.equal(found.models[0].isDefault, true);
+      process.env.XDG_DATA_HOME = '';
+      process.env.XDG_CONFIG_HOME = '';
+      assert.equal((await fetchMuseModels(options(dir))).status, 'unavailable');
+    } finally {
+      if (previousData === undefined) delete process.env.XDG_DATA_HOME; else process.env.XDG_DATA_HOME = previousData;
+      if (previousConfig === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = previousConfig;
+    }
+  });
+
   it('uses the newest catalogue file by mtime and reports its mtime as observedAt', async () => {
     const dir = await mkdtemp(join(homeDir, 'newest-'));
     await mkdir(catalogDir(dir), { recursive: true });
@@ -368,4 +394,23 @@ describe('fetchMuseModels', () => {
     assert.equal(result.message, 'unrecognised muse model catalogue format');
     assert.deepEqual(result.models, []);
   });
+});
+
+// Tests in this module own temporary homes and must not access inherited harness paths.
+const inheritedPathOverrides: NodeJS.ProcessEnv = {};
+const pathOverrideNames = [
+  'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME',
+  'OPENCODE_CONFIG_DIR', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME',
+] as const;
+before(() => {
+  for (const name of pathOverrideNames) {
+    inheritedPathOverrides[name] = process.env[name];
+    delete process.env[name];
+  }
+});
+after(() => {
+  for (const name of pathOverrideNames) {
+    const value = inheritedPathOverrides[name];
+    if (value === undefined) delete process.env[name]; else process.env[name] = value;
+  }
 });
