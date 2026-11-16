@@ -170,6 +170,40 @@ Consequence on Linux/WSL2: a machine without `jq` gets sessions that launch but 
 report status, attention or session ids, with no error anywhere. `jq` is not installed by
 default on most distributions (nor on macOS). Consequence on Windows: no hook can run.
 
+### 3.1 Shared Node hook entry point (P1.3 step 1)
+
+`ftown-harness hook <kind>` is the typed shared entry point the four shell hooks will
+be ported onto. Contract: `bridge/src/hook-contract.ts`; runner:
+`bridge/src/hook-cli.ts`; transport: `bridge/src/hook-transport.ts`; adapters:
+`bridge/src/hook-adapters.ts`. `kind` names a native input dialect, not a bridge event.
+
+| kind | Native source | Reads | Posts |
+|---|---|---|---|
+| `notify` | Claude/Codex/Cursor | stdin object, `FTOWN_SESSION_ID`, `HOOK_EVENT_NAME`, `GROK_HOOK_EVENT`, session registry | stdin object plus `ftown_session_id`/`ftown_session_source`; a `{hook_event_name}` fallback when stdin is not an object |
+| `grok` | grok harness | stdin, `GROK_SESSION_ID` | identity + `hook_event_name`, `session_id`, `cwd`, optional `tool_*`; Stop/end_turn drains the inbox first |
+| `antigravity` | agy harness | stdin camelCase, `ANTIGRAVITY_CONVERSATION_ID` | snake_case identity + event, `session_id`, `cwd`, optional tool fields; Stop drains first |
+| `muse-*` | muse plugin | stdin, per-event argv | SessionStart/UserPromptSubmit/Stop keep native `session_id` + `cwd`; tool events send only identity, tool name and call id |
+
+Transport: loopback `POST http://127.0.0.1:<port>/hook` with
+`Content-Type: application/json` and `Authorization: Bearer <token>` when present.
+Candidates are `FTOWN_HOOK_PORT`/`FTOWN_HOOK_TOKEN` first, then the bridge pointer at
+`FTOWN_BRIDGE_POINTER` or `~/.ftown/bridge.json` (`port`, `token`); exact duplicates are
+dropped. First 2xx wins and each attempt is bounded at 2 s, so two candidates have a
+4 s budget. No `jq` or `curl` is involved.
+
+Errors: a missing, unknown or extra kind is a usage error (stderr, exit 2). A valid
+event that cannot be parsed or delivered prints one sanitized stderr line and still
+exits 0 — hooks must never block an agent, but failures are no longer silent. Stderr
+never contains the token, pointer contents, payload or native input.
+
+Registration: direct-exec harnesses use `buildHookExecArgv(executablePath, kind)` (or
+`buildHookArgv(kind)` when the harness owns the executable); harnesses that store a shell
+command use `buildHookShellCommand(...)`, which POSIX single-quotes every argument and
+escapes embedded quotes so a path containing spaces survives.
+
+Status: only `muse-session-start` has an adapter today; the other kinds fail visibly
+until the four porting tasks land. This step removes no shell hook yet.
+
 ### 4. Harness adapters
 
 Common: binaries are bare names resolved through the login shell PATH. Neither
