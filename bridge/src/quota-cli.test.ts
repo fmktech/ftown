@@ -63,6 +63,10 @@ function okModels(provider: QuotaProviderId): ProviderModels {
   };
 }
 
+function defaultAccount<T extends ProviderQuota | ProviderModels>(row: T): T {
+  return { ...row, account: 'default' };
+}
+
 function routingFor(row: ProviderQuota, availability: ProviderRouting['availability'] = 'available'): ProviderRouting {
   return {
     provider: row.provider,
@@ -1006,9 +1010,9 @@ describe('runQuota JSON mode', () => {
     const report = JSON.parse(result.stdout) as QuotaReport;
     assert.deepEqual(Object.keys(report).sort(), ['generatedAt', 'models', 'providers', 'routing', 'routingConfig', 'steering', 'tiers']);
     assert.equal(report.generatedAt, NOW.toISOString());
-    assert.deepEqual(report.providers, [okRow('claude'), okRow('grok')]);
+    assert.deepEqual(report.providers, [defaultAccount(okRow('claude')), defaultAccount(okRow('grok'))]);
     assert.deepEqual(report.routing.map(entry => entry.provider), ['claude', 'grok']);
-    assert.deepEqual(report.models, [okModels('claude'), okModels('grok')]);
+    assert.deepEqual(report.models, [defaultAccount(okModels('claude')), defaultAccount(okModels('grok'))]);
     assert.equal(result.stdout, JSON.stringify(report, null, 2));
   });
 
@@ -1113,7 +1117,7 @@ describe('runQuota JSON mode', () => {
 
   it('includes model lists by default, and an empty models array with --no-models', async () => {
     const withModels = await runQuota(['--json', 'codex'], fakeDeps().deps);
-    assert.deepEqual((JSON.parse(withModels.stdout) as QuotaReport).models, [okModels('codex')]);
+    assert.deepEqual((JSON.parse(withModels.stdout) as QuotaReport).models, [defaultAccount(okModels('codex'))]);
 
     const { deps, modelCalls } = fakeDeps();
     const skipped = await runQuota(['--json', '--no-models', 'codex'], deps);
@@ -1173,9 +1177,10 @@ describe('runQuota JSON mode', () => {
     const result = await runQuota(['--json', 'claude', 'grok'], deps);
     const report = JSON.parse(result.stdout) as QuotaReport;
 
-    assert.deepEqual(report.providers, [okRow('claude'), okRow('grok')]);
+    assert.deepEqual(report.providers, [defaultAccount(okRow('claude')), defaultAccount(okRow('grok'))]);
     assert.deepEqual(report.models[0], {
       provider: 'claude',
+      account: 'default',
       status: 'error',
       models: [],
       source: 'live',
@@ -1184,7 +1189,7 @@ describe('runQuota JSON mode', () => {
       modelFlag: '',
       effortFlag: null,
     });
-    assert.deepEqual(report.models[1], okModels('grok'));
+    assert.deepEqual(report.models[1], defaultAccount(okModels('grok')));
   });
 
   it('turns a never-settling model fetcher into a timed-out model entry', async () => {
@@ -1195,10 +1200,10 @@ describe('runQuota JSON mode', () => {
     const result = await runQuota(['--json', 'codex', 'grok', '--timeout', '1'], deps);
     const report = JSON.parse(result.stdout) as QuotaReport;
 
-    assert.deepEqual(report.providers, [okRow('codex'), okRow('grok')]);
+    assert.deepEqual(report.providers, [defaultAccount(okRow('codex')), defaultAccount(okRow('grok'))]);
     assert.equal(report.models[0].status, 'error');
     assert.equal(report.models[0].message, 'codex model list timed out');
-    assert.deepEqual(report.models[1], okModels('grok'));
+    assert.deepEqual(report.models[1], defaultAccount(okModels('grok')));
   });
 
   it('calls only the selected quota and model fetchers, with the timeout and home directory', async () => {
@@ -1232,7 +1237,7 @@ describe('collectQuotaReport', () => {
     const collected = await collectQuotaReport({ providers: ['claude'], timeoutMs: 1000, includeModels: true }, deps);
 
     assert.equal(collected.hung, false);
-    assert.deepEqual(collected.report.models, [okModels('claude')]);
+    assert.deepEqual(collected.report.models, [defaultAccount(okModels('claude'))]);
   });
 });
 

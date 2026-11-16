@@ -413,6 +413,20 @@ describe('fetchClaudeModels', () => {
     });
   });
 
+  it('reads separate catalogues for two account environment overrides', async () => {
+    await withHome(async (home) => {
+      const dirs = [join(home, 'claude-a'), join(home, 'claude-b')];
+      for (const [index, config] of dirs.entries()) {
+        const dir = join(config, 'cache', 'model-catalog');
+        await mkdir(dir, { recursive: true });
+        await writeFile(join(dir, 'published-test.json'), JSON.stringify(fileFor(catalogue([entry(`choice-${index}`)]))));
+        await writeFile(join(config, 'settings.json'), JSON.stringify({ model: `choice-${index}` }));
+      }
+      const results = await Promise.all(dirs.map((configDir) => fetchClaudeModels({ ...optionsFor(home), env: { CLAUDE_CONFIG_DIR: configDir } })));
+      assert.deepEqual(results.map((result) => result.models[0]?.id), ['choice-0', 'choice-1']);
+    });
+  });
+
   it('reports unavailable when the catalogue directory is missing', async () => {
     await withHome(async (home) => {
       const result = await fetchClaudeModels(optionsFor(home));

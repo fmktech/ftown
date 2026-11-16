@@ -171,6 +171,20 @@ describe('quota cache via collectQuotaReport', () => {
     assert.equal(second.report.models[0].observedAt, START.toISOString());
   });
 
+  it('keeps each registered account in an independent quota and model cache slot', async t => {
+    const h = await harness(t);
+    await mkdir(join(h.deps.homeDir, '.ftown'), { recursive: true });
+    await writeFile(join(h.deps.homeDir, '.ftown', 'accounts.json'), JSON.stringify({ version: 1, accounts: [
+      { id: 'second', harness: 'claude', configDir: join(h.deps.homeDir, 'claude-second') },
+    ] }));
+    const first = await collectQuotaReport({ providers: ['claude'], timeoutMs: 1000, includeModels: true }, h.deps);
+    assert.deepEqual(first.report.providers.map(row => row.account), ['default', 'second']);
+    assert.deepEqual(first.report.models.map(row => row.account), ['default', 'second']);
+    const second = await collectQuotaReport({ providers: ['claude'], timeoutMs: 1000, includeModels: true }, h.deps);
+    assert.deepEqual(second.report.providers.map(row => row.source), ['cached', 'cached']);
+    assert.deepEqual(second.report.models.map(row => row.source), ['cached', 'cached']);
+  });
+
   it('expiry refetches after the 5 minute TTL', async t => {
     const h = await harness(t);
     await collectQuotaReport({ providers: ['claude'], timeoutMs: 1000, includeModels: false }, h.deps);
@@ -364,7 +378,7 @@ describe('quota cache via collectQuotaReport', () => {
     const rewritten: unknown = JSON.parse(await readFile(cachePath, 'utf8'));
     assert.equal(typeof rewritten, 'object');
     const cache = await readQuotaCache(h.homeDir);
-    assert.equal(cache.entries.claude?.quota?.provider, 'claude');
+    assert.equal(cache.entries['claude:default']?.quota?.provider, 'claude');
 
     const second = await collectQuotaReport({ providers: ['claude'], timeoutMs: 1000, includeModels: false }, h.deps);
     assert.equal(h.quotaCalls.length, 1);
@@ -392,8 +406,8 @@ describe('quota cache via collectQuotaReport', () => {
     assert.equal(h.quotaCalls.length, 2);
     await invalidateQuotaCacheEntry(h.homeDir, 'claude');
     const cache = await readQuotaCache(h.homeDir);
-    assert.equal(cache.entries.claude, undefined);
-    assert.equal(cache.entries.codex?.quota?.provider, 'codex');
+    assert.equal(cache.entries['claude:default'], undefined);
+    assert.equal(cache.entries['codex:default']?.quota?.provider, 'codex');
 
     const second = await collectQuotaReport({ providers: ['claude', 'codex'], timeoutMs: 1000, includeModels: true }, h.deps);
     assert.equal(h.quotaCalls.filter(p => p === 'claude').length, 2);
@@ -425,6 +439,6 @@ describe('quota cache via collectQuotaReport', () => {
     const report = JSON.parse(json.stdout) as { providers: ProviderQuota[] };
     assert.equal(report.providers[0].source, 'cached');
     assert.equal(report.providers[0].observedAt, START.toISOString());
-    assert.deepEqual(Object.keys(report.providers[0]).sort(), ['message', 'observedAt', 'plan', 'provider', 'source', 'status', 'windows']);
+    assert.deepEqual(Object.keys(report.providers[0]).sort(), ['account', 'message', 'observedAt', 'plan', 'provider', 'source', 'status', 'windows']);
   });
 });

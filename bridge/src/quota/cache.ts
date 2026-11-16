@@ -58,7 +58,11 @@ export interface QuotaCacheEntry {
 
 export interface QuotaCacheFile {
   version: 1;
-  entries: Partial<Record<QuotaProviderId, QuotaCacheEntry>>;
+  entries: Record<string, QuotaCacheEntry>;
+}
+
+export function quotaCacheKey(provider: QuotaProviderId, account: string = 'default'): string {
+  return `${provider}:${account}`;
 }
 
 export interface QuotaCacheLockHandle {
@@ -146,14 +150,18 @@ function parseCacheFile(text: string): QuotaCacheFile {
     return emptyCache();
   }
   if (!isRecord(parsed) || parsed.version !== 1 || !isRecord(parsed.entries)) return emptyCache();
-  const entries: Partial<Record<QuotaProviderId, QuotaCacheEntry>> = {};
-  for (const provider of QUOTA_PROVIDER_IDS) {
-    const raw = parsed.entries[provider];
+  const entries: Record<string, QuotaCacheEntry> = {};
+  for (const [key, raw] of Object.entries(parsed.entries)) {
     if (!isRecord(raw)) continue;
-    const quota = isValidQuotaRow(raw.quota, provider) ? (raw.quota as ProviderQuota) : null;
-    const models = isValidModelsRow(raw.models, provider) ? (raw.models as ProviderModels) : null;
+    const legacyProvider = QUOTA_PROVIDER_IDS.find(provider => key === provider);
+    const keyParts = key.split(':');
+    const provider = (legacyProvider ?? keyParts[0]) as QuotaProviderId;
+    if (!QUOTA_PROVIDER_IDS.includes(provider)) continue;
+    const account = legacyProvider ? 'default' : keyParts.slice(1).join(':') || 'default';
+    const quota = isValidQuotaRow(raw.quota, provider) ? { ...(raw.quota as ProviderQuota), account } : null;
+    const models = isValidModelsRow(raw.models, provider) ? { ...(raw.models as ProviderModels), account } : null;
     if (quota === null && models === null) continue;
-    entries[provider] = { quota, models };
+    entries[quotaCacheKey(provider, account)] = { quota, models };
   }
   return { version: 1, entries };
 }
@@ -195,14 +203,16 @@ export async function storeQuotaCacheEntries(
   if (quotaRows.length === 0 && modelRows.length === 0) return;
   const cache = await readQuotaCache(homeDir);
   for (const row of quotaRows) {
-    const entry = cache.entries[row.provider] ?? { quota: null, models: null };
+    const key = quotaCacheKey(row.provider, row.account);
+    const entry = cache.entries[key] ?? { quota: null, models: null };
     entry.quota = row;
-    cache.entries[row.provider] = entry;
+    cache.entries[key] = entry;
   }
   for (const row of modelRows) {
-    const entry = cache.entries[row.provider] ?? { quota: null, models: null };
+    const key = quotaCacheKey(row.provider, row.account);
+    const entry = cache.entries[key] ?? { quota: null, models: null };
     entry.models = row;
-    cache.entries[row.provider] = entry;
+    cache.entries[key] = entry;
   }
   await writeQuotaCache(homeDir, cache);
 }
@@ -212,13 +222,14 @@ export async function storeQuotaCacheEntries(
  * preserved. See the module header for where a bridge quota-error
  * observation should call this. Never throws.
  */
-export async function invalidateQuotaCacheEntry(homeDir: string, provider: QuotaProviderId): Promise<void> {
+export async function invalidateQuotaCacheEntry(homeDir: string, provider: QuotaProviderId, account: string = 'default'): Promise<void> {
   const cachePath = resolveQuotaCachePath(homeDir);
   if (cachePath === '') return;
   try {
     const cache = await readQuotaCache(homeDir);
-    if (!(provider in cache.entries)) return;
-    delete cache.entries[provider];
+    const key = quotaCacheKey(provider, account);
+    if (!(key in cache.entries)) return;
+    delete cache.entries[key];
     await writeQuotaCache(homeDir, cache);
   } catch {
     // Best effort: a failed invalidation only leaves a TTL-bounded stale row.
@@ -291,8 +302,9 @@ export function cachedQuotaRow(
   nowMs: number,
   ttlMs: number = QUOTA_CACHE_TTL_MS,
   errorTtlMs: number = QUOTA_CACHE_ERROR_TTL_MS,
+  account: string = 'default',
 ): ProviderQuota | null {
-  const row = cache.entries[provider]?.quota ?? null;
+  const row = cache.entries[quotaCacheKey(provider, account)]?.quota ?? null;
   if (row === null || !isQuotaRowFresh(row, nowMs, ttlMs, errorTtlMs)) return null;
   return asCachedQuota(row);
 }
@@ -304,8 +316,9 @@ export function cachedModelsRow(
   nowMs: number,
   ttlMs: number = QUOTA_CACHE_TTL_MS,
   errorTtlMs: number = QUOTA_CACHE_ERROR_TTL_MS,
+  account: string = 'default',
 ): ProviderModels | null {
-  const row = cache.entries[provider]?.models ?? null;
+  const row = cache.entries[quotaCacheKey(provider, account)]?.models ?? null;
   if (row === null || !isModelsRowFresh(row, nowMs, ttlMs, errorTtlMs)) return null;
   return asCachedModels(row);
 }

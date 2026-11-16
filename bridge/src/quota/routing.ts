@@ -172,6 +172,7 @@ function unknownAdvice(rawMessage?: string | null): WindowAdvice {
 function unknownRouting(row: ProviderQuota): ProviderRouting {
   return {
     provider: row.provider,
+    ...(row.account !== undefined ? { account: row.account } : {}),
     ...unknownAdvice(row.message),
   };
 }
@@ -282,6 +283,7 @@ function adviseRow(row: ProviderQuota, now: Date): ProviderRouting {
   const advice = adviseWindows(providerSummaryWindows(row), now, row.message);
   return {
     provider: row.provider,
+    ...(row.account !== undefined ? { account: row.account } : {}),
     ...advice,
   };
 }
@@ -302,13 +304,13 @@ function resolvePickNow(now: Date | undefined, observedAt: string | undefined): 
  * For all other providers, uses the provider-level routing entry.
  */
 export function advisePickRouting(
-  pick: Pick<RoutingPick, 'provider' | 'model'>,
+  pick: Pick<RoutingPick, 'provider' | 'model'> & { account?: string },
   quota: readonly ProviderQuota[],
   routing: readonly ProviderRouting[],
   now?: Date,
 ): WindowAdvice {
-  const quotaRow = quota.find((entry) => entry.provider === pick.provider);
-  const route = routing.find((entry) => entry.provider === pick.provider);
+  const quotaRow = quota.find((entry) => entry.provider === pick.provider && (entry.account ?? 'default') === (pick.account ?? 'default'));
+  const route = routing.find((entry) => entry.provider === pick.provider && (entry.account ?? 'default') === (pick.account ?? 'default'));
 
   if (pick.provider === 'agy' && quotaRow !== undefined && quotaRow.status === 'ok') {
     const poolWindows = agyWindowsForModel(quotaRow, pick.model);

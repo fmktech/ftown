@@ -343,6 +343,23 @@ it('uses CODEX_HOME for cached quota and defaults when blank', async () => {
   }
 });
 
+it('reads cached quota independently from two CODEX_HOME fixtures', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'codex-accounts-'));
+  try {
+    const homes = [join(home, 'account-a'), join(home, 'account-b')];
+    for (const [index, configDir] of homes.entries()) {
+      const dir = join(configDir, 'sessions', '2026', '11', '13');
+      await mkdir(dir, { recursive: true });
+      const limits = { primary: { used_percent: index === 0 ? 11 : 73, window_minutes: 300, resets_at: FUTURE_SECONDS } };
+      await writeFile(join(dir, 'rollout-test.jsonl'), JSON.stringify({ timestamp: OBSERVED, type: 'event_msg', payload: { type: 'token_count', rate_limits: limits } }));
+    }
+    const values = await Promise.all(homes.map(configDir => fetchCodexQuota({ homeDir: home, env: { CODEX_HOME: configDir }, timeoutMs: 1000, now: () => NOW })));
+    assert.deepEqual(values.map(value => value.windows[0]?.usedPercent), [11, 73]);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 // Tests in this module own temporary homes and must not access inherited harness paths.
 const inheritedPathOverrides: NodeJS.ProcessEnv = {};
 const pathOverrideNames = [

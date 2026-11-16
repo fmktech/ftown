@@ -2,6 +2,7 @@
 // `ftown-quota`: subscription allowance left per harness, routing advice, the models each offers,
 // and the user's model-routing tiers for a router agent.
 import os from 'node:os';
+import { accountEnv, loadAccounts, type HarnessAccount } from './accounts.js';
 import { isCliEntry } from './cli-entry.js';
 import {
   cachedModelsRow,
@@ -104,6 +105,8 @@ export interface QuotaDeps {
   annotate: TierAnnotator;
   now: () => Date;
   homeDir: string;
+  account?: string;
+  env?: NodeJS.ProcessEnv;
   /** Grace past the provider timeout before a hung fetcher becomes an error entry. Default QUOTA_GRACE_MS. */
   graceMs?: number;
   cache?: QuotaCacheOptions;
@@ -126,6 +129,21 @@ export interface CollectQuotaInput {
   fetchModelsForRouting?: boolean;
   /** Bypass the on-disk cache, fetch live and refresh the cache. */
   fresh?: boolean;
+}
+
+interface AccountProvider { provider: QuotaProviderId; account: string; env?: NodeJS.ProcessEnv }
+
+function accountProviderKey(target: AccountProvider): string { return `${target.provider}:${target.account}`; }
+
+function providerTargets(providers: readonly QuotaProviderId[], accounts: readonly HarnessAccount[]): AccountProvider[] {
+  const targets: AccountProvider[] = [];
+  for (const provider of providers) {
+    targets.push({ provider, account: 'default' });
+    const harness = provider === 'claude' || provider === 'codex' ? provider : null;
+    if (harness === null) continue;
+    for (const account of accounts) if (account.harness === harness) targets.push({ provider, account: account.id, env: accountEnv(account) });
+  }
+  return targets;
 }
 
 export interface CollectedQuotaReport {
@@ -272,7 +290,7 @@ function quotaWithin(
   deps: QuotaDeps,
 ): Promise<Settled<ProviderQuota>> {
   return settleWithin(
-    () => fetcher({ timeoutMs, now: deps.now, homeDir: deps.homeDir }),
+    () => fetcher({ timeoutMs, now: deps.now, homeDir: deps.homeDir, account: deps.account, env: deps.env }),
     failure => errorRow(
       provider,
       deps.now(),
@@ -290,7 +308,7 @@ function modelsWithin(
   deps: QuotaDeps,
 ): Promise<Settled<ProviderModels>> {
   return settleWithin(
-    () => fetcher({ timeoutMs, now: deps.now, homeDir: deps.homeDir }),
+    () => fetcher({ timeoutMs, now: deps.now, homeDir: deps.homeDir, account: deps.account, env: deps.env }),
     failure => modelErrorRow(
       provider,
       deps.now(),
@@ -311,7 +329,11 @@ function adviseOrFallback(
   deps: QuotaDeps,
 ): { routing: ProviderRouting[]; failure: string | null } {
   try {
-    return { routing: deps.advise(rows, now), failure: null };
+    const advised = deps.advise(rows, now);
+    return {
+      routing: advised.map((entry, index) => ({ ...entry, account: entry.account ?? rows[index]?.account ?? 'default' })),
+      failure: null,
+    };
   } catch (error) {
     const routing = rows.map((row): ProviderRouting => ({
       provider: row.provider,
@@ -399,30 +421,33 @@ export async function collectQuotaReport(input: CollectQuotaInput, deps: QuotaDe
   const sleep = deps.cache?.sleep ?? quotaSleep;
   const nowMs = (): number => deps.now().getTime();
 
-  const quotaByProvider = new Map<QuotaProviderId, ProviderQuota>();
-  const modelsByProvider = new Map<QuotaProviderId, ProviderModels>();
+  const accountsFile = await loadAccounts(deps.homeDir);
+  const targets = providerTargets(input.providers, accountsFile.accounts);
+  const quotaByProvider = new Map<string, ProviderQuota>();
+  const modelsByProvider = new Map<string, ProviderModels>();
   let hung = false;
 
   const refreshHits = async (allowCached: boolean): Promise<void> => {
     if (!useCache || !allowCached) return;
     const cache = await readQuotaCache(deps.homeDir);
     const at = nowMs();
-    for (const provider of input.providers) {
-      if (!quotaByProvider.has(provider)) {
-        const hit = cachedQuotaRow(cache, provider, at, ttlMs, errorTtlMs);
-        if (hit !== null) quotaByProvider.set(provider, hit);
+    for (const target of targets) {
+      const key = accountProviderKey(target);
+      if (!quotaByProvider.has(key)) {
+        const hit = cachedQuotaRow(cache, target.provider, at, ttlMs, errorTtlMs, target.account);
+        if (hit !== null) quotaByProvider.set(key, hit);
       }
-      if (fetchModels && !modelsByProvider.has(provider)) {
-        const hit = cachedModelsRow(cache, provider, at, ttlMs, errorTtlMs);
-        if (hit !== null) modelsByProvider.set(provider, hit);
+      if (fetchModels && !modelsByProvider.has(key)) {
+        const hit = cachedModelsRow(cache, target.provider, at, ttlMs, errorTtlMs, target.account);
+        if (hit !== null) modelsByProvider.set(key, hit);
       }
     }
   };
 
   if (useCache && !fresh) await refreshHits(true);
 
-  const missingQuota = (): QuotaProviderId[] => input.providers.filter(provider => !quotaByProvider.has(provider));
-  const missingModels = (): QuotaProviderId[] => (fetchModels ? input.providers.filter(provider => !modelsByProvider.has(provider)) : []);
+  const missingQuota = (): AccountProvider[] => targets.filter(target => !quotaByProvider.has(accountProviderKey(target)));
+  const missingModels = (): AccountProvider[] => (fetchModels ? targets.filter(target => !modelsByProvider.has(accountProviderKey(target))) : []);
 
   if (missingQuota().length > 0 || missingModels().length > 0) {
     let lock: QuotaCacheLockHandle | null = null;
@@ -470,19 +495,25 @@ export async function collectQuotaReport(input: CollectQuotaInput, deps: QuotaDe
         const fetchQuota = missingQuota();
         const fetchModelsFor = missingModels();
         const [quotaSettled, modelSettled] = await Promise.all([
-          Promise.all(fetchQuota.map(provider => quotaWithin(provider, deps.fetchers[provider], input.timeoutMs, deps))),
-          Promise.all(fetchModelsFor.map(provider => modelsWithin(provider, deps.modelFetchers[provider], input.timeoutMs, deps))),
+          Promise.all(fetchQuota.map(target => quotaWithin(target.provider, deps.fetchers[target.provider], input.timeoutMs, { ...deps, account: target.account, env: target.env }))),
+          Promise.all(fetchModelsFor.map(target => modelsWithin(target.provider, deps.modelFetchers[target.provider], input.timeoutMs, { ...deps, account: target.account, env: target.env }))),
         ]);
         for (const run of [...quotaSettled, ...modelSettled]) {
           if (run.hung) hung = true;
         }
-        quotaSettled.forEach((run, index) => quotaByProvider.set(fetchQuota[index], run.value));
-        modelSettled.forEach((run, index) => modelsByProvider.set(fetchModelsFor[index], run.value));
+        quotaSettled.forEach((run, index) => {
+          const target = fetchQuota[index];
+          if (target !== undefined) quotaByProvider.set(accountProviderKey(target), { ...run.value, account: target.account });
+        });
+        modelSettled.forEach((run, index) => {
+          const target = fetchModelsFor[index];
+          if (target !== undefined) modelsByProvider.set(accountProviderKey(target), { ...run.value, account: target.account });
+        });
         if (useCache) {
           await storeQuotaCacheEntries(
             deps.homeDir,
-            quotaSettled.map(run => run.value),
-            modelSettled.map(run => run.value),
+            quotaSettled.map((run, index) => ({ ...run.value, account: fetchQuota[index]?.account ?? 'default' })),
+            modelSettled.map((run, index) => ({ ...run.value, account: fetchModelsFor[index]?.account ?? 'default' })),
           );
         }
       } finally {
@@ -493,8 +524,8 @@ export async function collectQuotaReport(input: CollectQuotaInput, deps: QuotaDe
     }
   }
 
-  const rows = input.providers.map(provider => quotaByProvider.get(provider)!);
-  const models = fetchModels ? input.providers.map(provider => modelsByProvider.get(provider)!) : [];
+  const rows = targets.map(target => quotaByProvider.get(accountProviderKey(target))!);
+  const models = fetchModels ? targets.map(target => modelsByProvider.get(accountProviderKey(target))!) : [];
 
   const now = deps.now();
   const advice = adviseOrFallback(rows, now, deps);

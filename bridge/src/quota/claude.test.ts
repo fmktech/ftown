@@ -496,6 +496,30 @@ describe('loadClaudeCredentials with fixture homes', () => {
     assert.equal(loaded?.accessToken, 'keychain-token');
   });
 
+  it('resolves distinct registered Claude account paths and keychain services', async (t) => {
+    const home = await fixtureHome(t);
+    const alpha = join(home, 'claude-alpha');
+    const beta = join(home, 'claude-beta');
+    await Promise.all([alpha, beta].map((dir) => mkdir(dir, { recursive: true })));
+    await writeFile(join(alpha, '.credentials.json'), credsDocument('alpha-token'));
+    await writeFile(join(beta, '.credentials.json'), credsDocument('beta-token'));
+    const alphaEnv = { CLAUDE_CONFIG_DIR: alpha };
+    const betaEnv = { CLAUDE_CONFIG_DIR: beta };
+    const alphaSources = resolveClaudeCredentialSources(home, alphaEnv, 'darwin');
+    const betaSources = resolveClaudeCredentialSources(home, betaEnv, 'darwin');
+    assert.notEqual(alphaSources[0]?.location, betaSources[0]?.location);
+    assert.equal(alphaSources[1]?.location, join(alpha, '.credentials.json'));
+    assert.equal(betaSources[1]?.location, join(beta, '.credentials.json'));
+    const services: string[] = [];
+    const reader = { readKeychain: async (service: string) => { services.push(service); return null; } };
+    const [alphaCredentials, betaCredentials] = await Promise.all([
+      loadClaudeCredentials(resolveClaudeCredentialSources(home, alphaEnv), 1000, reader),
+      loadClaudeCredentials(resolveClaudeCredentialSources(home, betaEnv), 1000, reader),
+    ]);
+    assert.deepEqual([alphaCredentials?.accessToken, betaCredentials?.accessToken], ['alpha-token', 'beta-token']);
+    assert.notEqual(services[0], services[1]);
+  });
+
   it('returns null when no source holds a valid token', async (t) => {
     const home = await fixtureHome(t);
     await mkdir(join(home, '.claude'), { recursive: true });

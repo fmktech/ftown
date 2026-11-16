@@ -261,7 +261,7 @@ function parsePicks(value: unknown, at: string, errors: ErrorCollector): Routing
     }
     const pick = parsePick(entry, pickAt, errors);
     if (!pick) continue;
-    const key = JSON.stringify([pick.provider, pick.model, pick.effort]);
+    const key = JSON.stringify([pick.provider, pick.account ?? 'default', pick.model, pick.effort]);
     if (seen.has(key)) {
       errors.add(`${pickAt} repeats an earlier pick for the same provider, model and effort`);
       continue;
@@ -277,8 +277,12 @@ function parsePick(entry: Record<string, unknown>, at: string, errors: ErrorColl
   const provider = parseProvider(entry.provider, at, errors);
   const model = parseModel(entry.model, at, errors);
   const effort = parseEffort(entry.effort, at, errors);
+  const account = entry.account;
+  if (account !== undefined && (typeof account !== 'string' || !/^[a-z0-9-]{1,32}$/.test(account))) {
+    errors.add(`${at}.account must be a lowercase account id`);
+  }
   if (errors.count > before || provider === null || model === null) return null;
-  return { provider, model, effort };
+  return { provider, model, effort, ...(typeof account === 'string' ? { account } : {}) };
 }
 
 function parseProvider(value: unknown, at: string, errors: ErrorCollector): QuotaProviderId | null {
@@ -341,14 +345,10 @@ export function validatePicksAgainstModels(
   config: ModelRoutingConfig,
   models: readonly ProviderModels[],
 ): string[] {
-  const listByProvider = new Map<QuotaProviderId, ProviderModels>();
-  for (const list of models) {
-    if (!listByProvider.has(list.provider)) listByProvider.set(list.provider, list);
-  }
   const errors: string[] = [];
   for (const tier of config.tiers) {
     for (const pick of tier.picks) {
-      const list = listByProvider.get(pick.provider);
+      const list = models.find((candidate) => candidate.provider === pick.provider && (candidate.account ?? 'default') === (pick.account ?? 'default'));
       if (!list || list.status !== 'ok') continue;
       const where = `tiers.${tier.name}`;
       const model = list.models.find((candidate) => candidate.id === pick.model);

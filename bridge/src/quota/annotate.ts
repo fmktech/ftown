@@ -12,11 +12,12 @@ import type {
 } from './types.js';
 
 /** First entry for a provider, so duplicate provider rows resolve to the first one. */
-function firstFor<T extends { provider: QuotaProviderId }>(
+function firstFor<T extends { provider: QuotaProviderId; account?: string }>(
   list: readonly T[],
   provider: QuotaProviderId,
+  account: string | undefined,
 ): T | undefined {
-  return list.find((entry) => entry.provider === provider);
+  return list.find((entry) => entry.provider === provider && (entry.account ?? 'default') === (account ?? 'default'));
 }
 
 /** Annotate one pick with the pick's live pool/provider availability, scoped limits and model check. */
@@ -27,8 +28,8 @@ export function annotatePick(
   models: readonly ProviderModels[],
   now?: Date,
 ): AnnotatedPick {
-  const quotaRow = firstFor(quota, pick.provider);
-  const modelList = firstFor(models, pick.provider);
+  const quotaRow = firstFor(quota, pick.provider, pick.account);
+  const modelList = firstFor(models, pick.provider, pick.account);
   const advice = advisePickRouting(pick, quota, routing, now);
 
   const availability = advice.availability;
@@ -58,6 +59,7 @@ export function annotatePick(
 
   return {
     provider: pick.provider,
+    ...(pick.account !== undefined ? { account: pick.account } : {}),
     model: pick.model,
     effort: pick.effort,
     modelName,
