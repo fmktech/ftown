@@ -257,6 +257,7 @@ class SessionExit extends Error {
 
 /** Injectable so tests need not really sleep. */
 export const attentionClock = {
+  /** Unused wall-clock seam retained for compatibility; elapsed gates use monotonicNow. */
   now: (): number => Date.now(),
   monotonicNow: (): number => performance.now(),
   sleep: (ms: number): Promise<void> => new Promise((done) => setTimeout(done, ms)),

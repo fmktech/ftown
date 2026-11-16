@@ -15,6 +15,7 @@ interface CommandResult {
 }
 interface Dependencies {
   run?: (file: string, args: string[], options: CommandOptions) => Promise<CommandResult>;
+  /** Unused wall-clock seam retained for compatibility; elapsed gates use monotonicNow. */
   now?: () => number;
   monotonicNow?: () => number;
   env?: NodeJS.ProcessEnv;

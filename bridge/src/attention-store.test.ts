@@ -326,6 +326,35 @@ test('overdue restored cycles attempt once, while inactive and corrupt sessions 
     assert.equal(!!(await f.ledger()).idleCycle, active); await assert.rejects(stat(join(f.dir, 'missing')), { code: 'ENOENT' });
   }
 });
+for (const { name, wallStep, expectedDelay } of [
+  { name: 'future dueAt after backward step', wallStep: -600_000, expectedDelay: IDLE_NOTIFICATION_DELAY_MS },
+  { name: 'past dueAt after forward step', wallStep: 600_000, expectedDelay: 0 },
+  { name: 'normal remaining delay', wallStep: 0, expectedDelay: IDLE_NOTIFICATION_DELAY_MS - 30_000 },
+]) {
+  test(`restored idle cycle bounds remaining delay: ${name}`, async t => {
+    const f = await notifications(t);
+    await becomeIdle(f.store);
+    f.store.stopNotifications();
+    f.time.advance(30_000);
+    f.time.stepWall(wallStep);
+    const restored = new AttentionStore(f.resolve, 500, undefined, f.options);
+    t.after(() => restored.stopNotifications());
+    await restored.restoreIdleNotifications(['s1']);
+    assert.equal(f.time.tasks.size, 1);
+    const task = [...f.time.tasks.values()][0];
+    assert.equal(task.at - f.time.options.monotonicNow(), expectedDelay);
+    if (expectedDelay > 0) {
+      f.time.advance(expectedDelay - 1); await restored.list('s1');
+      assert.equal(f.signals.length, 0);
+      f.time.advance(1);
+    } else f.time.advance(0);
+    await restored.list('s1');
+    assert.equal(f.signals.length, 1);
+    f.time.advance(IDLE_NOTIFICATION_DELAY_MS); await restored.list('s1');
+    assert.equal(f.signals.length, 1, 'recovery attempts once');
+  });
+}
+
 test('resuming activity fences a callback blocked on asynchronous target lookup', async (t) => {
   let release!: () => void; let entered!: () => void; let sent = 0;
   const checking = new Promise<void>(resolve => { entered = resolve; });
@@ -683,12 +712,15 @@ test('waitForItem abort rejects as cancelled and clears liveness when no waits r
   await assert.rejects(f.store.waitForItem('s1', item.id, 5000, AbortSignal.abort()), /cancelled/);
 });
 
-test('liveness lasts ATTENTION_WAITER_TTL_MS after the latest poll started', async t => {
+test('liveness lasts ATTENTION_WAITER_TTL_MS after the latest poll started', { timeout: 10_000 }, async t => {
   const f = await fixture(t); const time = clock();
   const store = new AttentionStore(f.resolve, 500, undefined, time.options);
   const runPoll = async (id: string) => {
     const poll = store.waitForItem('s1', id, 30);
-    while (!time.tasks.size) await new Promise<void>(resolve => setImmediate(resolve));
+    for (let attempts = 0; !time.tasks.size; attempts++) {
+      if (attempts >= 10_000) assert.fail('poll did not schedule its timer');
+      await new Promise<void>(resolve => setImmediate(resolve));
+    }
     time.advance(30); await poll;
   };
   const item = (await store.record('s1', 'Notification', needsInput('Q'), { prompt: mailPrompt() }))!;
@@ -718,12 +750,15 @@ test('ledgers written before prompts existed still load', async t => {
   assert.equal(page.events[0].id, 'e1'); assert.equal(page.events[0].prompt, undefined);
 });
 
-test('liveness TTL runs from the end of the latest poll, not its start', async t => {
+test('liveness TTL runs from the end of the latest poll, not its start', { timeout: 10_000 }, async t => {
   const f = await fixture(t); const time = clock();
   const store = new AttentionStore(f.resolve, 500, undefined, time.options);
   const runPoll = async (eventId: string) => {
     const poll = store.waitForItem('s1', eventId, 25_000);
-    while (!time.tasks.size) await new Promise<void>(resolve => setImmediate(resolve));
+    for (let attempts = 0; !time.tasks.size; attempts++) {
+      if (attempts >= 10_000) assert.fail('poll did not schedule its timer');
+      await new Promise<void>(resolve => setImmediate(resolve));
+    }
     time.advance(25_000); await poll;
   };
   const hook = (await store.record('s1', 'PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'end', tool_input: askInput }))!;
@@ -919,7 +954,7 @@ test('idle deadlines survive wall steps, restore and early rechecks', async t =>
   }
 });
 
-test('poll deadlines and waiter expiry use elapsed time across wall steps', async t => {
+test('poll deadlines and waiter expiry use elapsed time across wall steps', { timeout: 10_000 }, async t => {
   for (const jump of [-600_000, 600_000]) {
     const f = await fixture(t); const time = clock();
     const store = new AttentionStore(f.resolve, 500, undefined, time.options);

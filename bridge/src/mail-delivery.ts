@@ -672,7 +672,7 @@ export class MailDeliveryService {
       this.fireMailNudge(sessionId).catch((err) => {
         console.error('[MailDelivery] Mail nudge failed:', err instanceof Error ? err.message : String(err));
       });
-    }, delayMs);
+    }, Math.ceil(delayMs));
     timer.unref?.();
     this.nudgeTimers.set(sessionId, timer);
   }
