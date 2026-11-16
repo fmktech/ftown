@@ -42,7 +42,7 @@ export type AccountHarness = 'claude' | 'codex';
 export interface HarnessAccount { id: string; harness: AccountHarness; label?: string; configDir: string }
 export interface AccountsFile { version: 1; accounts: HarnessAccount[] }
 /** Read-only account metadata returned by get_accounts; paths stay on the bridge. */
-export type HarnessAccountSummary = Omit<HarnessAccount, 'configDir'>;
+export type HarnessAccountSummary = Omit<HarnessAccount, 'configDir'> & { isDefault: boolean };
 
 export interface Session {
   id: string;

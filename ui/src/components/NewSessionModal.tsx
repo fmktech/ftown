@@ -37,12 +37,13 @@ function parseAccounts(value: unknown): HarnessAccountSummary[] | null {
   if (!value || typeof value !== "object" || !("accounts" in value) || !Array.isArray(value.accounts)) return null;
   const accounts: HarnessAccountSummary[] = [];
   for (const account of value.accounts) {
-    if (!account || typeof account !== "object" || typeof account.id !== "string" || account.id === "default" || !ACCOUNT_ID.test(account.id)
+    if (!account || typeof account !== "object" || typeof account.id !== "string" || !ACCOUNT_ID.test(account.id)
       || (account.harness !== "claude" && account.harness !== "codex") || (account.label !== undefined && typeof account.label !== "string")
-      || accounts.some(candidate => candidate.id === account.id)) return null;
-    accounts.push({ id: account.id, harness: account.harness, ...(account.label ? { label: account.label } : {}) });
+      || typeof account.isDefault !== "boolean" || (account.id === "default") !== account.isDefault
+      || accounts.some(candidate => candidate.id === account.id && (account.id !== "default" || candidate.harness === account.harness))) return null;
+    accounts.push({ id: account.id, harness: account.harness, isDefault: account.isDefault, ...(account.label !== undefined ? { label: account.label } : {}) });
   }
-  return accounts;
+  return (["claude", "codex"] as const).every(harness => accounts.some(account => account.harness === harness && account.isDefault)) ? accounts : null;
 }
 
 const FIREWORKS_MODELS_KEY = "ftown:fireworksModels";
@@ -398,11 +399,12 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
   const currentAccounts = accountsView?.bridgeId === effectiveBridgeId ? accountsView : null;
   const accountsLoading = Boolean(effectiveBridgeId) && (!currentAccounts || currentAccounts.status === "loading");
   const registeredAccounts = currentAccounts?.status === "ready" ? currentAccounts.accounts : [];
-  const choices = [
-    { id: "default", label: "Default account" },
-    ...registeredAccounts.filter(candidate => candidate.harness === accountHarness)
-      .sort((a, b) => a.id.localeCompare(b.id)).map(candidate => ({ id: candidate.id, label: candidate.label ? `${candidate.label} (${candidate.id})` : candidate.id })),
-  ].filter(candidate => parentPolicy === undefined || parentPolicy.includes(candidate.id));
+  const choices = (currentAccounts?.status === "ready"
+    ? registeredAccounts.filter(candidate => candidate.harness === accountHarness)
+      .sort((a, b) => Number(b.isDefault) - Number(a.isDefault) || a.id.localeCompare(b.id))
+      .map(candidate => ({ id: candidate.id, label: candidate.isDefault ? "Default account" : candidate.label ? `${candidate.label} (${candidate.id})` : candidate.id }))
+    : [{ id: "default", label: "Default account" }]
+  ).filter(candidate => parentPolicy === undefined || parentPolicy.includes(candidate.id));
   const preferredAccount = parent ? resolvedParent?.account ?? "default" : defaults?.account ?? "default";
   const missingPreferredAccount = accountHarness !== null && preferredAccount !== "default"
     && !accountsLoading && !registeredAccounts.some(candidate => candidate.id === preferredAccount);
@@ -411,7 +413,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
     : choices.some(candidate => candidate.id === preferredAccount) ? preferredAccount : choices[0]?.id ?? "";
   const policyChoices = [
     { id: "default", label: "Default account" },
-    ...registeredAccounts.slice().sort((a, b) => a.id.localeCompare(b.id)).map(candidate => ({ id: candidate.id, label: `${candidate.label ?? candidate.id} (${candidate.harness})` })),
+    ...registeredAccounts.filter(candidate => !candidate.isDefault).sort((a, b) => a.id.localeCompare(b.id)).map(candidate => ({ id: candidate.id, label: `${candidate.label ?? candidate.id} (${candidate.harness})` })),
   ].filter(candidate => parentPolicy === undefined || parentPolicy.includes(candidate.id));
   const incompatibleInheritance = Boolean(parent && !accountHarness && resolvedParent?.account !== undefined);
   const parentDisallowsDefault = Boolean(parent && !accountHarness && parentPolicy !== undefined && !parentPolicy.includes("default"));

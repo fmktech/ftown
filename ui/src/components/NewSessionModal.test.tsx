@@ -71,10 +71,15 @@ const bridges = [
   { bridgeId: "a", hostname: "first", clientId: "first", connectedAt: "2026-11-16" },
   { bridgeId: "b", hostname: "second", clientId: "second", connectedAt: "2026-11-16" },
 ];
+const defaultAccounts = [
+  { id: "default", harness: "claude", isDefault: true },
+  { id: "default", harness: "codex", isDefault: true },
+];
 const accounts = [
-  { id: "work", harness: "claude", label: "Work" },
-  { id: "spare", harness: "claude" },
-  { id: "coding", harness: "codex", label: "Coding" },
+  ...defaultAccounts,
+  { id: "work", harness: "claude", label: "Work", isDefault: false },
+  { id: "spare", harness: "claude", isDefault: false },
+  { id: "coding", harness: "codex", label: "Coding", isDefault: false },
 ];
 const parent: Session = { id: "parent", name: "Manager", bridgeId: "a", shellType: "claude", status: "running", createdAt: "2026-11-16", updatedAt: "2026-11-16", account: "work", allowedAccounts: ["work", "coding"] };
 
@@ -98,6 +103,18 @@ it("lists default first, filters accounts by harness, and submits the selected a
   fireEvent.click(within(childPolicy).getByLabelText("spare (claude)"));
   fireEvent.click(screen.getByRole("button", { name: "Create Session" }));
   expect(onSubmit).toHaveBeenCalledWith("", expect.objectContaining({ account: "work", allowedAccounts: ["coding", "work"] }));
+});
+
+it.each([
+  ["missing a default", [defaultAccounts[0]]],
+  ["duplicate default for one harness", [...defaultAccounts, defaultAccounts[0]]],
+  ["a non-boolean default flag", [...defaultAccounts, { id: "work", harness: "claude", isDefault: "false" }]],
+  ["a default flag on a registered id", [...defaultAccounts, { id: "work", harness: "claude", isDefault: true }]],
+  ["duplicate registered ids across harnesses", [...defaultAccounts, { id: "work", harness: "claude", isDefault: false }, { id: "work", harness: "codex", isDefault: false }]],
+])("rejects malformed account lists: %s", async (_description, rows) => {
+  accountsModal({ sendCommand: vi.fn(async () => ({ requestId: "bad", success: true, data: { accounts: rows } })) });
+  expect(await screen.findByText("Could not read the accounts returned by this computer.")).toBeTruthy();
+  expect(screen.queryByRole("option", { name: "work" })).toBeNull();
 });
 
 it("switches to Codex accounts and hides the account picker for other shells", async () => {
@@ -172,7 +189,7 @@ it("treats an unavailable resolved parent account as default while keeping the d
 it.each([
   { requestId: "error", success: false, error: "unavailable" },
   { requestId: "old", success: false, error: "Unknown command type: get_accounts" },
-  { requestId: "missing", success: true, data: { accounts: [] } },
+  { requestId: "missing", success: true, data: { accounts: defaultAccounts } },
 ])("does not silently replace an unverifiable cloned account ($requestId)", async response => {
   const { onSubmit } = accountsModal({ defaults: { account: "work" }, sendCommand: vi.fn(async () => response) });
   await screen.findByRole("alert");
@@ -199,7 +216,7 @@ it.each(["loading", "error", "unsupported", "stale"])("protects cloned child res
   const sendCommand = vi.fn(() => new Promise<CommandResponse>(resolve => { resolveRequest = resolve; }));
   const { onSubmit } = accountsModal({ defaults: { shellType: "shell", allowedAccounts: ["work"] }, sendCommand });
   if (status !== "loading") {
-    await act(async () => resolveRequest(status === "stale" ? { requestId: status, success: true, data: { accounts: [] } }
+    await act(async () => resolveRequest(status === "stale" ? { requestId: status, success: true, data: { accounts: defaultAccounts } }
       : { requestId: status, success: false, error: status === "unsupported" ? "Unknown command type: get_accounts" : "unavailable" }));
   }
   expect(screen.getByText(/child account restrictions cannot be verified/)).toBeTruthy();
@@ -240,7 +257,7 @@ it("discards late replies from the previous computer", async () => {
   let resolveFirst!: (response: CommandResponse) => void;
   const sendCommand = vi.fn((command: Command) => command.payload && "bridgeId" in command.payload && command.payload.bridgeId === "a"
     ? new Promise<CommandResponse>(resolve => { resolveFirst = resolve; })
-    : Promise.resolve({ requestId: "b", success: true, data: { accounts: [{ id: "second", harness: "claude" }] } }));
+    : Promise.resolve({ requestId: "b", success: true, data: { accounts: [...defaultAccounts, { id: "second", harness: "claude", isDefault: false }] } }));
   accountsModal({ sendCommand });
   fireEvent.change(screen.getByLabelText(/Bridge/), { target: { value: "b" } });
   await waitFor(() => expect(screen.getByRole("option", { name: "second" })).toBeTruthy());
