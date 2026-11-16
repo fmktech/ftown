@@ -4,6 +4,7 @@ import { createInterface } from 'node:readline';
 import { homedir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 
+import { claudeConfigDir, codexHome, xdgDataHome } from './config-dirs.js';
 import { defaultJsonlFoldCache, type JsonlFold, type JsonlFoldCache } from './jsonl-fold-cache.js';
 import type { ModelUsage, Session, SessionUsage } from './types.js';
 
@@ -36,9 +37,11 @@ export type UsageSessionRef = Pick<
 > &
   // createdAt is consumed by workdir-based extractors to disambiguate sessions
   // sharing a workingDir; optional so id-based callers/tests need not set it.
-  Partial<Pick<Session, 'createdAt'>>;
+  Partial<Pick<Session, 'createdAt' | 'env'>>;
 
 export interface UsageCollectorOptions {
+  /** Override the bridge environment for tests; session.env takes precedence. */
+  env?: NodeJS.ProcessEnv;
   /** Override for tests. Default: ~/.claude/projects */
   claudeProjectsDir?: string;
   /** Override for tests. Default: ~/.codex/sessions */
@@ -120,6 +123,14 @@ export async function collectSessionUsage(
   options: UsageCollectorOptions = {},
 ): Promise<SessionUsage | null> {
   try {
+    const env = { ...process.env, ...options.env, ...session.env };
+    const home = typeof env.HOME === 'string' && env.HOME.trim() !== '' ? env.HOME : homedir();
+    options = {
+      ...options,
+      claudeProjectsDir: options.claudeProjectsDir ?? join(claudeConfigDir(home, env), 'projects'),
+      codexSessionsDir: options.codexSessionsDir ?? join(codexHome(home, env), 'sessions'),
+      museSessionsDir: options.museSessionsDir ?? join(xdgDataHome(home, env), 'muse', 'sessions'),
+    };
     if (session.claudeSessionId && session.workingDir) {
       return await collectClaudeUsage(session.claudeSessionId, session.workingDir, options);
     }
@@ -327,7 +338,7 @@ async function collectClaudeUsage(
   // The id is interpolated into a file path; reject anything outside a safe
   // charset so a malformed id cannot traverse out of the projects directory.
   if (!/^[A-Za-z0-9._-]{1,200}$/.test(claudeSessionId)) return null;
-  const baseDir = options.claudeProjectsDir ?? join(homedir(), '.claude', 'projects');
+  const baseDir = options.claudeProjectsDir ?? join(claudeConfigDir(), 'projects');
   const filePath = join(baseDir, claudeProjectSlug(workingDir), `${claudeSessionId}.jsonl`);
 
   const usage = await (options.foldCache ?? defaultJsonlFoldCache).fold(
@@ -427,7 +438,7 @@ async function collectCodexUsage(
   codexSessionId: string,
   options: UsageCollectorOptions,
 ): Promise<SessionUsage | null> {
-  const baseDir = options.codexSessionsDir ?? join(homedir(), '.codex', 'sessions');
+  const baseDir = options.codexSessionsDir ?? join(codexHome(), 'sessions');
   const filePath = await findCodexRollout(baseDir, codexSessionId);
   if (!filePath) return null;
 
@@ -811,7 +822,7 @@ async function collectMuseUsageById(
   options: UsageCollectorOptions,
 ): Promise<SessionUsage | null> {
   const baseDir = options.museSessionsDir
-    ?? join(homedir(), '.local', 'share', 'muse', 'sessions');
+    ?? join(xdgDataHome(), 'muse', 'sessions');
   const filePath = await findMuseSessionFileById(baseDir, museSessionId);
   if (!filePath) return null;
   return sumMuseSessionFile(filePath, options);
@@ -823,7 +834,7 @@ async function collectMuseUsage(
   options: UsageCollectorOptions,
 ): Promise<SessionUsage | null> {
   const baseDir = options.museSessionsDir
-    ?? join(homedir(), '.local', 'share', 'muse', 'sessions');
+    ?? join(xdgDataHome(), 'muse', 'sessions');
   const deadline = Date.now() + (options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
 
   const filePath = await resolveMuseSessionFile(baseDir, workingDir, sessionCreatedAt, deadline);
