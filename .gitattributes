@@ -1,0 +1,17 @@
+# Shell scripts must use LF on every checkout. Bash treats a trailing CR as
+# part of the command, and a shebang ending in CR is not executable at all.
+# Without this, a Windows checkout with `core.autocrlf=true` rewrites the hooks
+# and every launcher to CRLF.
+*.sh text eol=lf
+
+# Shell scripts without a .sh suffix (launchers, git hooks, guest init).
+.githooks/pre-commit text eol=lf
+bridge/bin/ftown-sessions text eol=lf
+bridge/skills/ftown/scripts/ftown text eol=lf
+chaos/qemu/init text eol=lf
+
+# Hook assets installed beside the shell hooks and executed by their harness.
+bridge/claude-mod/hooks/register.js text eol=lf
+bridge/claude-mod/hooks/hooks.json text eol=lf
+bridge/opencode-plugin/ftown.js text eol=lf
+bridge/pi-extension/ftown.js text eol=lf
