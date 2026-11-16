@@ -239,13 +239,17 @@ test('hostile inputs never throw', async () => {
   assert.equal(await check(hostileCp, proof), false);
 });
 
-test('oversized signature is rejected quickly', async () => {
+test('oversized signature is rejected before any crypto work', async () => {
   const { device, checkpoint, fields } = await setup();
   const proof = await signAuthProof(device.privateKey, fields);
-  const started = Date.now();
+  // parseAuthProof rejects a wrong-length signature up front, so the oversized
+  // value never reaches verifyDomain. Asserting the parse result is a
+  // deterministic proof of bounded work (no wall-clock timing involved).
+  assert.equal(parseAuthProof({ ...proof, signature: 'A'.repeat(10_000_000) }), null);
   assert.equal(await check(checkpoint, { ...proof, signature: 'A'.repeat(10_000_000) }), false);
-  assert.ok(Date.now() - started < 200);
+  assert.equal(parseAuthProof({ ...proof, accountId: 'a'.repeat(65) }), null);
   assert.equal(await check(checkpoint, { ...proof, accountId: 'a'.repeat(65) }), false);
+  assert.equal(parseAuthProof({ ...proof, keyId: 'k'.repeat(129) }), null);
   assert.equal(await check(checkpoint, { ...proof, keyId: 'k'.repeat(129) }), false);
 });
 

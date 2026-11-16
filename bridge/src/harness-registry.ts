@@ -8,6 +8,7 @@
  */
 
 import { claudeModLaunchPath } from './claude-mod-installer.js';
+import { resolveSessionShell, sessionShellCommandLine } from './session-shell.js';
 
 /** Escape an argument for the direct runtime's platform shell. */
 export function shellQuote(value: string, platform: NodeJS.Platform = process.platform): string {
@@ -225,9 +226,10 @@ export function buildPiCommand(options: {
 
 export function buildKimiCodeCommand(options: { model?: string; resume?: boolean }): string {
   // Absolute path: the kimi-code installer adds ~/.kimi-code/bin to PATH only
-  // via .zshrc (interactive), but ftown launches agents with `zsh -l -c`
-  // (non-interactive login), which does NOT source .zshrc — so a bare `kimi`
-  // would fail to resolve. --yolo auto-approves all tool actions for unattended runs.
+  // via .zshrc (interactive), but ftown launches agents with a non-interactive
+  // login shell (`<shell> -l -c`), which does NOT source .zshrc/.bashrc — so a
+  // bare `kimi` may not resolve. --yolo auto-approves all tool actions for
+  // unattended runs.
   const parts = ['"$HOME/.kimi-code/bin/kimi"', '--yolo'];
   // Resurrection resume: `-c` continues the previous session for the working
   // directory. ftown launches each kimi-code session with a stable workingDir,
@@ -371,7 +373,7 @@ export const HARNESSES = {
 
   },
   shell: {
-    buildCommand: () => '/bin/zsh -l',
+    buildCommand: () => sessionShellCommandLine(resolveSessionShell()),
     hooked: false,
     promptAsCliArg: false,
 

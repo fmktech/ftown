@@ -1,6 +1,6 @@
 import { afterEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -24,9 +24,8 @@ const FAKE_CLI = `#!/bin/sh
 # Absolute paths: these tests clear PATH so the resolver cannot see a real opencode.
 dir=$(/usr/bin/dirname "$0")
 if [ "$1" = "--version" ]; then
-  if [ -f "$dir/version-sleep-ms.txt" ]; then
-    while :; do :; done
-  fi
+  # Observable marker: the success path must never invoke the version probe.
+  : > "$dir/version-probed.txt"
   if [ ! -f "$dir/version.txt" ]; then
     exit 1
   fi
@@ -170,7 +169,7 @@ describe('parseOpencodeUsageLimits', () => {
   });
 });
 
-async function installFakeCli(homeDir: string, files: Record<string, string>): Promise<void> {
+async function installFakeCli(homeDir: string, files: Record<string, string>): Promise<string> {
   const binDir = join(homeDir, '.opencode', 'bin');
   await mkdir(binDir, { recursive: true });
   const binary = join(binDir, 'opencode');
@@ -179,13 +178,31 @@ async function installFakeCli(homeDir: string, files: Record<string, string>): P
   for (const [name, contents] of Object.entries(files)) {
     await writeFile(join(binDir, name), contents);
   }
+  return binDir;
+}
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function fetchFromDir(
+  files: Record<string, string>,
+  timeoutMs = 5000,
+): Promise<{ quota: ProviderQuota; binDir: string }> {
+  const homeDir = await tempDir();
+  const binDir = await installFakeCli(homeDir, files);
+  process.env.PATH = await tempDir();
+  const quota = await fetchOpencodeQuota({ timeoutMs, now: () => NOW, homeDir });
+  return { quota, binDir };
 }
 
 async function fetchFrom(files: Record<string, string>, timeoutMs = 5000): Promise<ProviderQuota> {
-  const homeDir = await tempDir();
-  await installFakeCli(homeDir, files);
-  process.env.PATH = await tempDir();
-  return fetchOpencodeQuota({ timeoutMs, now: () => NOW, homeDir });
+  return (await fetchFromDir(files, timeoutMs)).quota;
 }
 
 describe('fetchOpencodeQuota', () => {
@@ -199,16 +216,18 @@ describe('fetchOpencodeQuota', () => {
   });
 
   it('reads the usage route and does not probe the version on success', async () => {
-    const started = Date.now();
-    const quota = await fetchFrom({
+    const { quota, binDir } = await fetchFromDir({
       'stdout.txt': JSON.stringify(goBody(meters())),
-      'version-sleep-ms.txt': '5000',
       'version.txt': 'opencode v2.3.0\n',
     });
-    assert.ok(Date.now() - started < 1000);
     assert.equal(quota.status, 'ok');
     assert.equal(quota.plan, 'Go');
     assert.equal(windowOf(quota, 'weekly').usedPercent, 13);
+    assert.equal(
+      await exists(join(binDir, 'version-probed.txt')),
+      false,
+      'a successful route read must not invoke --version',
+    );
   });
 
   it('names the opencode version when the route is missing or the body is not JSON', async () => {

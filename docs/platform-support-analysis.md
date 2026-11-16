@@ -236,7 +236,7 @@ CLI is a `.cmd` shim, which Node will not spawn without a shell.
 
 | Provider | Source | Linux / WSL2 | Windows |
 |---|---|---|---|
-| claude | macOS keychain, darwin only (`quota/claude.ts:16`, `:189`); fallback `~/.claude/.credentials.json` (`:182`); HTTP usage endpoint (`:14`) | caveat: depends on the CLI writing the credentials file; verify with `ls ~/.claude` after login | unknown: credentials location unverified |
+| claude | `<configDir>/.credentials.json` on every platform; macOS also tries the keychain first (`quota/claude.ts`, `resolveClaudeCredentialSources`); HTTP usage endpoint (`:14`) | works: Linux writes `~/.claude/.credentials.json` (mode 0600); `CLAUDE_CONFIG_DIR` moves it | works: `%USERPROFILE%\.claude\.credentials.json` |
 | codex | `codex app-server` over stdio (`quota/codex.ts:290`); fallback `~/.codex/sessions` (`:402`) | works | caveat: `.cmd` spawn |
 | grok | `~/.grok/logs/unified.jsonl` (`quota/grok.ts:556`); refresh darwin-only (`:630`) using `/usr/bin/script`, `/usr/bin/pgrep`, `/bin/ps` (`:46-48`) with BSD `script` syntax (`:345`) | caveat: stale data, log-only | caveat: log-only; `~/.grok/bin/grok` has no `.exe` candidate (`:557`) |
 | muse | `muse usage --json` (`quota/muse.ts:195`) | works | unknown |
@@ -249,6 +249,17 @@ CLI is a `.cmd` shim, which Node will not spawn without a shell.
 
 WSL2 note: credentials are read from the Linux home. A CLI logged in on the Windows side is
 invisible to a bridge running in WSL.
+
+P1.8 verification (2026-11-16, Claude Code CLI 2.1.325): the
+[authentication docs](https://code.claude.com/docs/en/authentication#credential-management)
+confirm that Linux and Windows keep the login in `~/.claude/.credentials.json`
+(mode 0600 on Linux) and that only macOS uses the Keychain, falling back to the
+same file when the Keychain write is rejected. `CLAUDE_CONFIG_DIR` moves the
+config directory, including the credentials file; the CLI also keys the macOS
+Keychain entry to that directory by appending eight hex digits of its SHA-256
+(observed in the 2.1.325 CLI binary). ftown's quota reader now resolves those
+same sources, honours the override and lists every source it consulted in the
+`auth` message. Fixture-home unit tests cover Linux and macOS.
 
 ### 6. Worktrees, git and paths
 
