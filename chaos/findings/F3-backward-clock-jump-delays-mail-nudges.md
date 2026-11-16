@@ -90,9 +90,26 @@ Direct comparison of `canon.jsonl` schedules shows that each is identical to its
 
 Every always/unreachable property passes in both runs. Both final checkpoints show the bridge alive and responsive and all tagged waking mail to live recipients delivered. Dead recipients can still have pending mail. Removing the backward step eliminates the observed M5 failures with the other scheduled faults retained; it confirms the trigger on this build.
 
+## Fix confirmation
+
+The fix is merged: PR #241, fix commit `ac5e8aa`, bridge 0.30.3, confirmed 2026-11-15. The elapsed-time gates in mail delivery and in the attention store now use a monotonic clock. A follow-up, PR #242, bridge 0.30.4, also caps the idle-notice delay recovered after a restart.
+
+Fixed bridge at commit `ac5e8aa`, source fingerprint `81ab6b5f3bf8`, contract v9, profile soak, level high.
+
+| Seed | Condition | H_run | M5 |
+| --- | --- | --- | --- |
+| 6 | fixed bridge, two runs, byte-identical pair | `6eb54d21fc77` | pass |
+| 10 | fixed bridge, two runs, byte-identical pair | `7a5f032b59ed` | pass |
+| 6 | fixed bridge, only `clock_jump_back` dropped, one run | `a2127372ef61` | pass |
+| 10 | fixed bridge, only `clock_jump_back` dropped, one run | `8a7f83f4c2c2` | pass |
+| 6 | campaign build before the fix, fingerprint `f9a98a2a5b06` | `6db8cb1fe34b` | violated |
+| 10 | campaign build before the fix, fingerprint `f9a98a2a5b06` | `0a6346b8a0dd` | violated |
+
+On the fixed bridge each seed was run twice. Both pairs are byte-identical, M5 passes, and no always/unreachable property is violated. The schedule still contains the 600-second backward clock jump. With only `clock_jump_back` dropped (`--drop-faults clock_jump_back`), one run per seed, M5 passes and nothing is violated. Before the fix, on the campaign build with source fingerprint `f9a98a2a5b06`, both seeds violated M5.
+
 ## Grade
 
-**A.** Reproduced on seeds 6 and 10, each pair byte-identical, on contract v9, soak, level high. The same-build counterfactual passes M5 on both seeds when only `clock_jump_back` is dropped, and the code path is identified. **Fix not yet merged.**
+**A.** Reproduced on seeds 6 and 10, each pair byte-identical, on contract v9, soak, level high. The same-build counterfactual passes M5 on both seeds when only `clock_jump_back` is dropped, and the code path is identified. Fixed in PR #241 (bridge 0.30.3), confirmed 2026-11-15.
 
 ## Related
 
