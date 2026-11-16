@@ -7,7 +7,7 @@ investigator: session-handoff agent
 git_commit: f7c9bbebbaf30adc5399f76f3d851f493b8f1f42
 branch: feat/session-handoff
 repository: ftown
-status: root-cause-proven
+status: resolved
 hypotheses_formed: 3
 hypotheses_rejected: 2
 hypotheses_proven: 1
@@ -107,4 +107,4 @@ Why 5? The session factory does not expose an awaitable readiness signal, so cal
 
 ## Resolution
 
-The readiness callback now polls until the replacement has an attached process, returns early if the stored session becomes terminal, and times out after 30 seconds. Regression tests cover delayed attach and terminal-state exit. Bridge build and 117 focused bridge tests pass; the exact-head GitHub E2E validation is pending.
+The readiness callback now polls until the replacement has an attached process, returns early if the stored session becomes terminal, and times out after 30 seconds. Regression tests cover delayed attach and terminal-state exit. Bridge build and all 117 focused bridge tests pass. On code head `bd8bdb4`, full unit checks, Gitleaks, and all three direct-transport E2E shards passed (workflow runs `43889849217`, `43889821768`, and `43889859593`); shard 3/3 includes both fixed handoff cases.
