@@ -12,6 +12,7 @@ import { usePersistentState, stringSetCodec } from "@/lib/use-persistent-state";
 import { parsePullRequestUrl } from "@/lib/pull-request-url";
 import { HarnessIcon } from "./HarnessIcon";
 import { SessionStateIndicator } from "./SessionStateIndicator";
+import { HandoffDialog, SessionBlockBadge } from "./SessionBlockBadge";
 import { SessionCardChip, formatCardRollup, rollupChildCards } from "./SessionCardChip";
 import { PullRequestBadgePlaceholder, PullRequestLink } from "./PullRequestLink";
 import type { BridgeSecurityState } from "@security/protocol";
@@ -46,6 +47,7 @@ interface SessionListProps {
   bridgeUpdates?: ReadonlyMap<string, UpdateView>;
   onOpenUpdates?: (bridgeId: string) => void;
   onOpenModelRouting?: (bridgeId: string) => void;
+  onHandoff?: (sessionId: string, input: { shellType?: string; model?: string; name?: string }) => Promise<void>;
 }
 
 type ContextMenuState =
@@ -364,6 +366,7 @@ function SessionContextMenu({
   onStop,
   onRemove,
   onClone,
+  onHandoff,
   onHide,
   onUnhide,
   isHidden,
@@ -375,6 +378,7 @@ function SessionContextMenu({
   onStop: (sessionId: string) => void;
   onRemove: (sessionId: string) => void;
   onClone: (session: Session) => void;
+  onHandoff?: (session: Session) => void;
   onHide: (sessionId: string) => void;
   onUnhide: (sessionId: string) => void;
   isHidden: boolean;
@@ -415,6 +419,9 @@ function SessionContextMenu({
         >
           Open pull request
         </a>
+      )}
+      {menu.session.block && onHandoff && (
+        <ContextMenuButton largeOnMobile label="Hand off" color="var(--status-pending)" onClick={() => { onHandoff(menu.session); onClose(); }} />
       )}
       <ContextMenuButton largeOnMobile label="Rename" onClick={() => { onRename(menu.session); onClose(); }} />
       <ContextMenuButton largeOnMobile label="Clone" onClick={() => { onClone(menu.session); onClose(); }} />
@@ -528,7 +535,9 @@ export function SessionList({
   bridgeUpdates,
   onOpenUpdates,
   onOpenModelRouting,
+  onHandoff,
 }: SessionListProps) {
+  const [handoffTarget, setHandoffTarget] = useState<Session | null>(null);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
@@ -613,6 +622,33 @@ export function SessionList({
       const next = new Set(prev);
       for (const id of newParents) next.add(id);
       return next;
+    });
+  }, [sessions, setCollapsedSessions]);
+
+  // A blocked child has to be on the board. Expand its parent once per
+  // transition, after the default fold above, and then leave a manual
+  // collapse alone.
+  const revealedBlocksRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!collapseDefaultsReadyRef.current) return;
+    const parents: string[] = [];
+    for (const session of sessions) {
+      const key = session.block?.transitionKey;
+      const parentId = session.parentSessionId;
+      if (!key || !parentId || parentId === session.id) continue;
+      const mark = `${session.id}:${key}`;
+      if (revealedBlocksRef.current.has(mark)) continue;
+      revealedBlocksRef.current.add(mark);
+      parents.push(parentId);
+    }
+    if (parents.length === 0) return;
+    setCollapsedSessions((prev) => {
+      const next = new Set(prev);
+      let changed = false;
+      for (const id of parents) {
+        if (next.delete(id)) changed = true;
+      }
+      return changed ? next : prev;
     });
   }, [sessions, setCollapsedSessions]);
 
@@ -1271,6 +1307,7 @@ export function SessionList({
             </span>
           )}
           <div className="flex items-center gap-1.5" style={{ gridColumn: 7 }}>
+            {session.block && <SessionBlockBadge block={session.block} />}
             <SessionStateIndicator
               status={session.status}
               activity={sessionActivity?.get(session.id)?.activity}
@@ -1751,6 +1788,7 @@ export function SessionList({
                   >
                     {displayName}
                   </span>
+                  {session.block && <SessionBlockBadge block={session.block} />}
                   <SessionStateIndicator
                     status={session.status}
                     activity={sessionActivity?.get(session.id)?.activity}
@@ -1774,7 +1812,15 @@ export function SessionList({
           onHide={onHideSession ?? (() => {})}
           onUnhide={onUnhideSession ?? (() => {})}
           isHidden={hiddenSet.has(contextMenu.session.id)}
+          onHandoff={onHandoff ? (session) => setHandoffTarget(session) : undefined}
           onClose={closeContextMenu}
+        />
+      )}
+      {handoffTarget && onHandoff && (
+        <HandoffDialog
+          sessionName={handoffTarget.name}
+          onClose={() => setHandoffTarget(null)}
+          onSubmit={(input) => onHandoff(handoffTarget.id, input)}
         />
       )}
       {contextMenu?.kind === "bridge" && (

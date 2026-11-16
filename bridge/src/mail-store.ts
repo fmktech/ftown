@@ -16,12 +16,15 @@ export interface MailMessageInput {
   to: string;
   type: MailMessage['type'];
   threadId?: string;
+  idempotencyKey?: string;
   body: string;
 }
 
 export function createMailMessage(input: MailMessageInput): MailMessage {
   return {
-    id: `${Date.now().toString(36)}-${randomBytes(3).toString('hex')}`,
+    id: input.idempotencyKey
+      ? `idem-${createHash('sha256').update(input.idempotencyKey).digest('hex').slice(0, 24)}`
+      : `${Date.now().toString(36)}-${randomBytes(3).toString('hex')}`,
     ts: new Date().toISOString(),
     ...input,
   };
@@ -186,7 +189,8 @@ export class MailStore {
     await this.withLock(msg.to, async () => {
       const dir = this.resolveDir(msg.to);
       await mkdir(dir, { recursive: true, mode: 0o700 });
-      await this.readInbox(msg.to);
+      const inbox = await this.readInbox(msg.to);
+      if (msg.idempotencyKey && inbox.messages.some((existing) => existing.idempotencyKey === msg.idempotencyKey)) return;
       // Mail can carry task details; owner-only like the session registry.
       const filePath = this.inboxPath(msg.to);
       try {

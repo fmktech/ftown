@@ -87,4 +87,3 @@ jobs:
           tags: |
             ftown-solo:${{ steps.bridge-version.outputs.version }}-arm64
             ftown-solo:latest-arm64
-

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Command, CommandResponse, Session, SessionCard } from "@/types";
 import type { SessionActivity } from "@/hooks/useAllSessionEvents";
@@ -29,10 +29,10 @@ function send(): Promise<CommandResponse> {
   return Promise.resolve({ requestId: "r", success: true });
 }
 
-function renderOverview(manager: Session, sessions: Session[], options: { activityBySession?: Map<string, SessionActivity>; openAttentionBySession?: Map<string, OpenAttentionCount>; snapshot?: OverviewSnapshot } = {}) {
+function renderOverview(manager: Session, sessions: Session[], options: { activityBySession?: Map<string, SessionActivity>; openAttentionBySession?: Map<string, OpenAttentionCount>; snapshot?: OverviewSnapshot; onHandoff?: (sessionId: string, input: { shellType?: string; model?: string; name?: string }) => Promise<void> } = {}) {
   return render(
     <PullRequestStatusProvider send={send} sessions={sessions} readyBridgeIds={["bridge"]} connected={false}>
-      <SessionOverview session={manager} sessions={sessions} now={NOW} activityBySession={options.activityBySession} openAttentionBySession={options.openAttentionBySession} snapshot={options.snapshot} />
+      <SessionOverview session={manager} sessions={sessions} now={NOW} activityBySession={options.activityBySession} openAttentionBySession={options.openAttentionBySession} snapshot={options.snapshot} onHandoff={options.onHandoff} />
     </PullRequestStatusProvider>,
   );
 }
@@ -528,6 +528,30 @@ describe("SessionWorkspace overview toggle", () => {
     expect(screen.getByRole("button", { name: /PassedPR/ }).textContent).toContain("PR ✓");
     expect(screen.getByRole("button", { name: /FailedPR/ }).textContent).toContain("PR ✗");
     expect(screen.getByRole("button", { name: /PlainPR/ }).textContent).not.toContain("PR ");
+  });
+
+  it("shows a blocked badge in needs attention and hands the session off", async () => {
+    const manager = managerSession();
+    const child = session("child", {
+      name: "Limited",
+      parentSessionId: "manager",
+      block: {
+        reason: "usage_limit",
+        resetAt: "2026-01-01T21:00:00.000Z",
+        screenTail: "Usage limit reached",
+        detectedAt: "2026-01-01T00:00:00.000Z",
+        transitionKey: "usage_limit|2026-01-01T21:00:00.000Z|running",
+      },
+    });
+    const onHandoff = vi.fn(async () => {});
+    renderOverview(manager, [manager, child], { onHandoff });
+    const needs = screen.getByRole("region", { name: "Needs attention" });
+    expect(within(needs).getByLabelText("Blocked: usage limit")).toBeTruthy();
+    fireEvent.click(within(needs).getByRole("button", { name: "Hand off Limited" }));
+    const dialog = screen.getByRole("dialog", { name: "Hand off session" });
+    fireEvent.change(within(dialog).getByLabelText("Harness"), { target: { value: "shell" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: /^Hand off$/ }));
+    await waitFor(() => expect(onHandoff).toHaveBeenCalledWith("child", { shellType: "shell" }));
   });
 
   it("opens a child's question into the coordinator answer panel", () => {

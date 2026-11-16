@@ -32,6 +32,13 @@ export interface TerminalPumpDeps {
   unwatchedFlushIntervalMs?: number;
   unwatchedMaxBufferBytes?: number;
   snapshotTimeoutMs?: number;
+  /** Live screen bytes, before they are flushed to the terminal log. */
+  onOutput?: (sessionId: string, data: string) => void;
+  /**
+   * After the status write has been released. Awaited before unregister so a
+   * failure notice sees the saved status. Absent callers keep the old cleanup.
+   */
+  onLifecycle?: (sessionId: string, event: { kind: 'completed' | 'error'; message?: string }) => Promise<void> | void;
 }
 
 const FLUSH_INTERVAL_MS = 16;
@@ -124,6 +131,7 @@ export class TerminalPump {
   }
 
   handleData(sessionId: string, data: string): void {
+    this.deps.onOutput?.(sessionId, data);
     this.deps.terminalManager.write(sessionId, data);
 
     let pending = this.pending.get(sessionId);
@@ -316,8 +324,21 @@ export class TerminalPump {
     }).catch((err) => {
       console.error(`[Bridge] Failed to handle completion for session ${sessionId}:`, err);
     }).finally(() => {
-      this.collectAndPersistUsage(sessionId);
-      this.deps.unregisterSession(sessionId);
+      const settle = this.deps.onLifecycle;
+      if (!settle) {
+        this.collectAndPersistUsage(sessionId);
+        this.deps.unregisterSession(sessionId);
+        return;
+      }
+      return this.track((async () => {
+        try {
+          await settle(sessionId, { kind: 'completed' });
+        } catch (err) {
+          console.error(`[Bridge] Failed to settle session ${sessionId}:`, err instanceof Error ? err.message : err);
+        }
+        this.collectAndPersistUsage(sessionId);
+        this.deps.unregisterSession(sessionId);
+      })());
     }));
   }
 
@@ -367,9 +388,23 @@ export class TerminalPump {
     }).catch((err) => {
       console.error(`[Bridge] Failed to handle error for session ${sessionId}:`, err);
     }).finally(() => {
-      this.collectAndPersistUsage(sessionId);
-      this.deps.unregisterSession(sessionId);
-      this.deps.terminalManager.destroy(sessionId);
+      const settle = this.deps.onLifecycle;
+      if (!settle) {
+        this.collectAndPersistUsage(sessionId);
+        this.deps.unregisterSession(sessionId);
+        this.deps.terminalManager.destroy(sessionId);
+        return;
+      }
+      return this.track((async () => {
+        try {
+          await settle(sessionId, { kind: 'error', message: error.message });
+        } catch (err) {
+          console.error(`[Bridge] Failed to settle session ${sessionId}:`, err instanceof Error ? err.message : err);
+        }
+        this.collectAndPersistUsage(sessionId);
+        this.deps.unregisterSession(sessionId);
+        this.deps.terminalManager.destroy(sessionId);
+      })());
     }));
   }
 }

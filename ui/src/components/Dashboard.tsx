@@ -278,7 +278,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   // session management consumes this shared transport.
   const rpc = useBridgeRpc(client, userId);
   const { bridgeExec } = rpc;
-  const { sessions: rawSessions, createSession, stopSession, retrySession, renameSession, setSessionParent, removeSession } = useSessions(client, userId, rpc);
+  const { sessions: rawSessions, createSession, stopSession, retrySession, handoffSession, renameSession, setSessionParent, removeSession } = useSessions(client, userId, rpc);
   const { bridges, prepareLocalAccess } = useBridges(client, userId);
   const securityRuntime = client?.securityRuntime;
   useEffect(() => securityRuntime?.onChange(() => setSecurityGeneration(value => value + 1)), [securityRuntime]);
@@ -622,6 +622,12 @@ PY`;
       setMobileTab(waiting || previewShown ? "preview" : "terminal");
     }
   }, [sessions, isDismissed]);
+
+  const handleHandoff = useCallback(async (sessionId: string, input: { shellType?: string; model?: string; name?: string }) => {
+    const created = await handoffSession(sessionId, input);
+    handleSelectSession(created.id);
+    scheduleTerminalRenderAdjustment();
+  }, [handoffSession, handleSelectSession, scheduleTerminalRenderAdjustment]);
 
   const handleReviewPullRequest = useCallback((id: string) => {
     const target = sessions.find(session => session.id === id);
@@ -1370,6 +1376,7 @@ PY`;
               bridgeUpdates={updateViews}
               onOpenUpdates={setUpdateBridgeId}
               onOpenModelRouting={setModelRoutingBridgeId}
+              onHandoff={handleHandoff}
             />
           </div>
           {!sidebarCollapsed && (
@@ -1399,7 +1406,7 @@ PY`;
           <SessionInboxPage entries={inbox} open={inboxOpen} onClose={() => { restoreInboxFocusRef.current = true; setInboxOpen(false); scheduleTerminalRenderAdjustment(); }}
             onOpenSession={id => { focusOpenedSessionRef.current = true; handleSelectSession(id); scheduleTerminalRenderAdjustment(); }} onDismiss={entry => clearSessionAttention(entry.session.id, entry.notice)} onReply={replyToInbox} onAnswer={answerInbox} />
           <div ref={workspaceFocusRef} role="region" aria-label={`Session workspace: ${selectedSession?.name || selectedSession?.prompt?.slice(0, 48) || "Session"}`} tabIndex={-1} className="relative min-h-0 min-w-0 flex-1 flex-col focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--accent)]" style={{ display: inboxOpen ? "none" : "flex" }} aria-hidden={inboxOpen}>
-          <SessionWorkspace session={selectedSession} sessions={sessions} activity={selectedSessionId ? sessionActivity.get(selectedSessionId) : undefined} activityBySession={sessionActivity} openAttentionBySession={openAttentionBySession} idleSince={idleSince} client={client} userId={userId} readable={connectionStatus === "connected" && !!selectedSession && activeBridgeIds.has(selectedSession.bridgeId) && bridgeSecurityStates.get(selectedSession.bridgeId) === "ready"} securityGeneration={securityGeneration} sendCommand={rpc.sendCommand} open={previewOpen} onClose={() => setPreviewOpen(false)} isDesktop={isDesktop} mobileTab={mobileTab} onMobileTab={handleMobileTabFallback} sessionActivation={sessionActivation} onRefit={refitPreviewTerminal} reviewOpen={reviewOpen} reviewActivation={reviewChoice.activation} onCloseReview={closeReview} attentionEntries={inbox} openAttentionId={openAttentionId} onOpenAttentionChange={handleOpenAttentionChange} onDismissAttention={dismissChildAttention} onReplyAttention={replyChildAttention} onAnswerAttention={answerChildAttention} onOpenSessionById={handleSelectSession} attention={selectedWaitingEntry ? { entry: selectedWaitingEntry, shown: attentionShown, onShow: showAttention, onHide: hideAttention, onDismiss: entry => clearSessionAttention(entry.session.id, entry.notice), onReply: replyToInbox, onAnswer: answerInbox } : undefined}>
+          <SessionWorkspace session={selectedSession} sessions={sessions} activity={selectedSessionId ? sessionActivity.get(selectedSessionId) : undefined} activityBySession={sessionActivity} openAttentionBySession={openAttentionBySession} idleSince={idleSince} client={client} userId={userId} readable={connectionStatus === "connected" && !!selectedSession && activeBridgeIds.has(selectedSession.bridgeId) && bridgeSecurityStates.get(selectedSession.bridgeId) === "ready"} securityGeneration={securityGeneration} sendCommand={rpc.sendCommand} open={previewOpen} onClose={() => setPreviewOpen(false)} isDesktop={isDesktop} mobileTab={mobileTab} onMobileTab={handleMobileTabFallback} sessionActivation={sessionActivation} onRefit={refitPreviewTerminal} reviewOpen={reviewOpen} reviewActivation={reviewChoice.activation} onCloseReview={closeReview} onHandoff={handleHandoff} attentionEntries={inbox} openAttentionId={openAttentionId} onOpenAttentionChange={handleOpenAttentionChange} onDismissAttention={dismissChildAttention} onReplyAttention={replyChildAttention} onAnswerAttention={answerChildAttention} onOpenSessionById={handleSelectSession} attention={selectedWaitingEntry ? { entry: selectedWaitingEntry, shown: attentionShown, onShow: showAttention, onHide: hideAttention, onDismiss: entry => clearSessionAttention(entry.session.id, entry.notice), onReply: replyToInbox, onAnswer: answerInbox } : undefined}>
           <Terminal
             ref={terminalRef}
             transport={transport}

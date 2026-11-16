@@ -110,6 +110,7 @@ function buildArchivedCard(session: Session): SessionCard {
     previews,
     ...(session.shellType !== undefined ? { shellType: session.shellType } : {}),
     ...(session.model !== undefined ? { model: session.model } : {}),
+    ...(session.block ? { block: session.block } : {}),
   };
   return {
     archived: true,
@@ -174,6 +175,7 @@ export class BoardService implements BoardServiceApi {
         previews,
         ...(session.shellType !== undefined ? { shellType: session.shellType } : {}),
         ...(session.model !== undefined ? { model: session.model } : {}),
+        ...(session.block ? { block: session.block } : {}),
       };
 
       const declared = session.card ?? null;

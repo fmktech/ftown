@@ -15,6 +15,7 @@ const state = vi.hoisted(() => ({
   bridges: [{ clientId: "client-a", bridgeId: "bridge-a", hostname: "alpha", connectedAt: "2026-10-16T00:00:00Z" }],
   activity: new Map<string, SessionActivity>(),
   createSession: vi.fn().mockResolvedValue(undefined),
+  handoffSession: vi.fn(),
   stopSession: vi.fn(),
   retrySession: vi.fn(),
   removeSession: vi.fn(),
@@ -33,7 +34,7 @@ const state = vi.hoisted(() => ({
 }));
 
 vi.mock("@/hooks/useSessions", () => ({ useSessions: () => ({
-  sessions: state.sessions, createSession: state.createSession, stopSession: state.stopSession,
+  sessions: state.sessions, createSession: state.createSession, handoffSession: state.handoffSession, stopSession: state.stopSession,
   retrySession: state.retrySession, removeSession: state.removeSession,
   renameSession: vi.fn(), setSessionParent: vi.fn(), refreshSessions: vi.fn(),
 }) }));
@@ -294,6 +295,37 @@ describe("new-session navigation", () => {
     expect(screen.getByRole("tab", { name: /^Workspace/ }).classList.contains("mobile-tab-active")).toBe(true);
     expect(screen.getByText("New Session")).toBeTruthy();
     expect(state.clearSessionAttention).not.toHaveBeenCalled();
+  });
+});
+
+describe("handoff navigation", () => {
+  it("opens the handed-off session on the phone terminal and shows its row again from Workspace", async () => {
+    window.matchMedia = vi.fn().mockReturnValue({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+    const blocked = session("blocked", "Quota child", {
+      block: { reason: "usage_limit", screenTail: "Usage limit reached", detectedAt: "2026-11-15T17:00:00Z", transitionKey: "usage_limit||running" },
+    });
+    const created = session("handed", "Quota child handoff");
+    state.sessions = [blocked, created];
+    state.handoffSession.mockResolvedValue(created);
+    dashboard();
+
+    const row = (await screen.findByText("Quota child", { exact: true })).closest("[data-session-row]") as HTMLElement;
+    expect(row).not.toBeNull();
+    fireEvent.click(within(row).getByRole("button", { name: "Session actions" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Hand off" }));
+    fireEvent.click(within(screen.getByRole("dialog", { name: "Hand off session" })).getByRole("button", { name: "Hand off" }));
+
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Terminal" }).getAttribute("aria-selected")).toBe("true"));
+    expect(screen.getByRole("region", { name: "Session workspace: Quota child handoff" })).toBeTruthy();
+    const sidebar = document.getElementById("dashboard-sidebar");
+    expect(sidebar?.className.split(/\s+/)).toContain("hidden");
+    expect(within(sidebar as HTMLElement).getByRole("button", { name: /Quota child handoff/, hidden: true })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("tab", { name: "Workspace" }));
+    expect(screen.getByRole("tab", { name: "Workspace" }).getAttribute("aria-selected")).toBe("true");
+    expect(sidebar?.className.split(/\s+/)).toContain("flex");
+    expect(sidebar?.className.split(/\s+/)).not.toContain("hidden");
+    expect(within(sidebar as HTMLElement).getByRole("button", { name: /Quota child handoff/ })).toBeTruthy();
   });
 });
 

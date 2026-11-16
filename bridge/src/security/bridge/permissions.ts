@@ -6,7 +6,7 @@ const session = /^[A-Za-z0-9_-]+$/;
 const readCommands = new Set(['get_pull_request_statuses', 'session_preview_status', 'session_preview_chunk', 'get_bridge_update', 'list_sessions', 'get_history', 'get_session_usage', 'get_sessions_usage', 'get_session_attention',
   'ledger_head', 'ledger_chain',
   'get_model_routing', 'get_session_board']);
-const controlCommands = new Set(['update_bridge', 'create_session', 'stop_session', 'retry_session', 'send_message', 'rename_session', 'remove_session',
+const controlCommands = new Set(['update_bridge', 'create_session', 'stop_session', 'retry_session', 'handoff_session', 'send_message', 'rename_session', 'remove_session',
   'bridge_exec', 'clear_terminal', 'update_session_parent', 'resolve_session_attention', 'answer_session_attention',
   'set_model_routing']);
 const adminCommands = new Set(['security_devices', 'security_invite', 'security_revoke']);
@@ -86,7 +86,7 @@ export function classifyHttp(method: string, path: string): OperationPermission 
     return method === 'GET' && !url.search ? result('read', 'worktrees_list') : deny();
   if (url.pathname === '/api/worktrees/prune')
     return method === 'POST' && !url.search ? result('control', 'worktrees_prune') : deny();
-  const match = /^\/api\/sessions\/([A-Za-z0-9_-]+)(?:\/(screen|grep|keys|message|inbox|resize|usage|running|revive|stop|retry|attention)(?:\/(ack|resolve|ask)|\/([A-Za-z0-9_-]{1,100})(?:\/(answer|escalate))?)?)?$/.exec(url.pathname);
+  const match = /^\/api\/sessions\/([A-Za-z0-9_-]+)(?:\/(screen|grep|keys|message|inbox|resize|usage|running|revive|stop|retry|handoff|attention)(?:\/(ack|resolve|ask)|\/([A-Za-z0-9_-]{1,100})(?:\/(answer|escalate))?)?)?$/.exec(url.pathname);
   if (!match) return deny();
   const [, id, suffix, attentionAction, eventId, attentionVerb] = match;
   if ((attentionAction || eventId || attentionVerb) && suffix !== 'attention') return deny();
@@ -117,7 +117,7 @@ export function classifyHttp(method: string, path: string): OperationPermission 
   }
   if (method === 'GET' && ['screen', 'usage', 'running', 'attention'].includes(suffix) && !attentionAction) return result('read', `${suffix}_get`, id);
   if (method === 'POST' && suffix === 'grep' && !attentionAction) return result('read', 'history_search', id);
-  if (method === 'POST' && ['keys', 'message', 'inbox', 'resize', 'revive', 'stop', 'retry', 'attention'].includes(suffix)) {
+  if (method === 'POST' && ['keys', 'message', 'inbox', 'resize', 'revive', 'stop', 'retry', 'handoff', 'attention'].includes(suffix)) {
     return result('control', attentionAction ? `attention_${attentionAction}` : `${suffix}_send`, id);
   }
   if (method === 'DELETE' && suffix === 'screen') return result('control', 'screen_clear', id);

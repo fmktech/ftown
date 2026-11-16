@@ -46,6 +46,7 @@ import {
 import { removeFtownSession } from './remove-ftown-session.js';
 import { collectSessionUsage } from './usage-collector.js';
 import { toWireSession } from './session-wire.js';
+import { normalizeShellType, type ShellType } from './harness-registry.js';
 import { CardValidationError, type CardPatch } from './coordination/contract.js';
 import {
   PARENT_UNAVAILABLE_NOTE,
@@ -325,6 +326,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   private port: number = 0;
   private sessionController: SessionController | null = null;
   private lifecycleController: SessionController | null = null;
+  private handoffSession: ((sessionId: string, request: { shellType?: ShellType; model?: string; name?: string }) => Promise<{ session: Session }>) | null = null;
   private coordination: Coordination | null = null;
   private defaultCoordination: Coordination | null = null;
   private mailStore: MailStore | null = null;
@@ -847,6 +849,10 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   setSessionController(controller: SessionController): void {
     this.sessionController = controller;
     this.lifecycleController = controller;
+  }
+
+  setHandoff(fn: (sessionId: string, request: { shellType?: ShellType; model?: string; name?: string }) => Promise<{ session: Session }>): void {
+    this.handoffSession = fn;
   }
 
   private getSessionController(): SessionController | null {
@@ -1588,6 +1594,40 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       const result = await controller.removePreview(sessionPreviewMatch[1], body.names);
       if (!result.ok) { jsonResponse(res, result.code === 'not_found' ? 404 : result.code === 'too_large' ? 413 : 400, { error: result.message }); return; }
       jsonResponse(res, 200, { session: toWireSession(result.session) }); return;
+    }
+
+    const handoffMatch = path.match(/^\/api\/sessions\/([^/]+)\/handoff$/);
+    if (handoffMatch && req.method === 'POST') {
+      if (!this.handoffSession) { jsonResponse(res, 503, { error: 'Server not ready' }); return; }
+      const body = await parseBody(req);
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        jsonResponse(res, 400, { error: 'Invalid handoff request' });
+        return;
+      }
+      for (const key of Object.keys(body)) {
+        if (key !== 'shellType' && key !== 'model' && key !== 'name') {
+          jsonResponse(res, 400, { error: `Unknown field: ${key}` });
+          return;
+        }
+      }
+      if (body.model !== undefined && typeof body.model !== 'string') { jsonResponse(res, 400, { error: 'Invalid model' }); return; }
+      if (body.name !== undefined && typeof body.name !== 'string') { jsonResponse(res, 400, { error: 'Invalid name' }); return; }
+      const shellType = body.shellType === undefined ? undefined : normalizeShellType(body.shellType);
+      const id = handoffMatch[1];
+      const existing = await (this.getSessionController()?.get(id) ?? this.store?.loadSession(id) ?? null);
+      if (!existing) { jsonResponse(res, 404, { error: 'Session not found' }); return; }
+      try {
+        const result = await this.handoffSession(id, {
+          ...(shellType ? { shellType } : {}),
+          ...(typeof body.model === 'string' ? { model: body.model } : {}),
+          ...(typeof body.name === 'string' ? { name: body.name } : {}),
+        });
+        jsonResponse(res, 200, { session: toWireSession(result.session) });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        jsonResponse(res, message.startsWith('Session not found') ? 404 : 500, { error: message });
+      }
+      return;
     }
 
     // Lifecycle routes use the same controller as dashboard RPC.

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { v4 as uuidv4 } from "uuid";
 import type { Command, Session, SessionCard } from "@/types";
+import { parseSessionBlock } from "@/types";
 import type { BridgeRpc } from "@/hooks/useBridgeRpc";
 import type { OverviewSnapshot, PlanItem, PlanView, SnapshotAttentionEvent, SnapshotCard, SnapshotEvent } from "@/components/SessionOverview";
 
@@ -122,6 +123,8 @@ function parseDerived(value: unknown): SnapshotDerived | null {
   if (shellType) derived.shellType = shellType;
   const model = asString(value.model);
   if (model) derived.model = model;
+  const block = parseSessionBlock(value.block);
+  if (block) derived.block = block;
   if (isRecord(value.pr)) {
     const url = asString(value.pr.url);
     const prState = asString(value.pr.state);

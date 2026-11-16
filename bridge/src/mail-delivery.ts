@@ -510,8 +510,13 @@ export class MailDeliveryService {
       typeof body.fromName === 'string' && body.fromName.trim() ? body.fromName.trim() : undefined;
     const threadId =
       typeof body.threadId === 'string' && body.threadId.trim() ? body.threadId.trim() : undefined;
+    const idempotencyKey =
+      typeof body.idempotencyKey === 'string' && body.idempotencyKey.trim() ? body.idempotencyKey.trim() : undefined;
+    if (idempotencyKey && idempotencyKey.length > 512) {
+      return { ok: false, error: 'Idempotency key too long (max 512 chars)' };
+    }
 
-    const msg = createMailMessage({ from, fromName, to: session.id, type, threadId, body: text });
+    const msg = createMailMessage({ from, fromName, to: session.id, type, threadId, idempotencyKey, body: text });
     await this.mailStore.append(msg);
     if (this.eventSink) {
       const sink = this.eventSink;

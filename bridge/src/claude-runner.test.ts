@@ -239,6 +239,20 @@ describe('ProcessRunner session generation ownership', () => {
     assert.deepEqual(completed, ['current']);
   });
 
+  it('direct: ending without an exit code is an error', () => {
+    const current = controlledPty(1);
+    const runner = new ProcessRunner({ spawn: () => current.process });
+    runner.getPreferredRuntime = () => 'direct';
+    const events: string[] = [];
+    runner.on('complete', () => events.push('complete'));
+    runner.on('error', (_id, error) => events.push(`error:${error.message}`));
+    runner.run('current', 'command', { initialInput: 'do the task', initialInputDelay: 0 });
+    current.data('bad flag\n');
+    current.exit(null as unknown as number);
+    assert.deepEqual(events, ['error:process ended without an exit code']);
+    assert.deepEqual(current.writes, []);
+  });
+
   it('tmux detach on shutdown suppresses completion and removes only its own client', () => {
     const current = controlledPty(1);
     const runner = new ProcessRunner({ spawn: () => current.process });

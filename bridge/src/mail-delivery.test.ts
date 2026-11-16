@@ -92,6 +92,7 @@ class FakeMailStore implements MailDeliveryMailStore {
   messages: MailMessage[] = [];
 
   async append(msg: MailMessage): Promise<void> {
+    if (msg.idempotencyKey && this.messages.some((existing) => existing.to === msg.to && existing.idempotencyKey === msg.idempotencyKey)) return;
     this.messages.push(msg);
   }
 
@@ -227,6 +228,24 @@ function participatingSession(id: string, overrides: Partial<Session> = {}): Ses
 }
 
 describe('MailDeliveryService receiver recovery', () => {
+  it('acceptMail preserves a stable idempotency key across retries', async () => {
+    const { service, mailStore } = setup();
+    const session = participatingSession('s1');
+    const input = {
+      body: 'Session blocked',
+      from: 'child',
+      type: 'escalation',
+      idempotencyKey: 'session-block:child:usage_limit||running',
+    };
+    const first = await service.acceptMail(session, input);
+    const retry = await service.acceptMail(session, input);
+    assert.equal(first.ok, true);
+    assert.deepEqual(retry, first);
+    assert.equal(mailStore.messages.length, 1);
+    assert.equal(mailStore.messages[0].idempotencyKey, input.idempotencyKey);
+    service.stop();
+  });
+
   it('recovers Codex pending mail after the recipient returns, respecting retry spacing', async () => {
     let attempts = 0;
     const { clock, store, runner, service, mailStore } = setup(undefined, async () => { attempts++; return { status: 'accepted' }; });

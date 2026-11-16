@@ -8,6 +8,9 @@ import { attentionClock, runSessions } from './sessions-commands.js';
 import { secureFixture } from './security/bridge/fixtures.test.js';
 
 interface Request { url: string; method: string; body?: unknown }
+function lastPost(requests: Request[]): Request | undefined {
+  return [...requests].reverse().find((request) => request.method === 'POST');
+}
 async function fixture(run: (requests: Request[], output: string[]) => Promise<void>, reply?: (request: Request) => unknown): Promise<void> {
   const home = mkdtempSync(join(tmpdir(), 'ftown-sessions-unit-'));
   const previousHome = process.env.HOME;
@@ -25,7 +28,7 @@ async function fixture(run: (requests: Request[], output: string[]) => Promise<v
   process.env.FTOWN_DATA_DIR = join(home, '.ftown', 'data');
   const secure = await secureFixture(join(home, '.ftown'), async (url, init) => {
     requests.push({ url: String(url), method: init?.method ?? 'GET', ...(init?.body ? { body: JSON.parse(String(init.body)) as unknown } : {}) });
-    return new Response(JSON.stringify(reply ? reply(requests.at(-1)!) : { session: { id: 'created', name: 'unit', status: 'idle' }, sessions: [], messages: [] }));
+    return new Response(JSON.stringify(reply ? reply(requests.at(-1)!) : { session: { id: 'created', name: 'unit', status: 'running' }, sessions: [], messages: [] }));
   }, 12345);
   writeFileSync(join(home, '.ftown', 'bridge.json'), JSON.stringify(secure.pointer));
   globalThis.fetch = secure.fetch;
@@ -48,7 +51,7 @@ test('create --help describes options without opening transport or creating a se
 }));
 
 test('generated help and invalid command options finish before any transport access', async () => fixture(async (requests, output) => {
-  for (const command of ['list', 'create', 'get', 'screen', 'grep', 'keys', 'tell', 'inbox', 'mail', 'running', 'usage', 'remove', 'archive', 'revive', 'attention', 'attention-status', 'pr']) {
+  for (const command of ['list', 'create', 'get', 'screen', 'grep', 'keys', 'tell', 'inbox', 'mail', 'running', 'usage', 'remove', 'archive', 'revive', 'attention', 'attention-status', 'pr', 'handoff']) {
     assert.equal(await runSessions([command, '--help']), 0, command);
   }
   assert.ok(output.some((line) => line.includes('Usage: ftown sessions create')));
@@ -58,20 +61,38 @@ test('generated help and invalid command options finish before any transport acc
   assert.equal(requests.length, 0);
 }));
 
-test('create preserves option payload and accepts the no-op orchestrator compatibility flag', async () => fixture(async (requests) => {
+test('create preserves option payload and accepts the no-op orchestrator compatibility flag', async () => withFakeClock(async () => fixture(async (requests) => {
   assert.equal(await runSessions(['create', '--shell', 'codex', '--prompt', 'hello', '--workdir', '/tmp/work', '--create-workdir',
     '--name', 'agent', '--command', 'custom', '--model', 'model', '--parent', '--parent-id', 'parent-id', '--orchestrator']), 0);
-  assert.equal(requests.length, 1);
-  assert.equal(requests[0].method, 'POST'); assert.ok(requests[0].url.endsWith('/api/sessions'));
-  assert.deepEqual(requests[0].body, { shellType: 'codex', prompt: 'hello', workingDir: '/tmp/work', createMissingWorkingDir: true,
+  const posts = requests.filter((request) => request.method === 'POST');
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].method, 'POST'); assert.ok(posts[0].url.endsWith('/api/sessions'));
+  assert.deepEqual(posts[0].body, { shellType: 'codex', prompt: 'hello', workingDir: '/tmp/work', createMissingWorkingDir: true,
     name: 'agent', command: 'custom', model: 'model', parentSessionId: 'parent-id' });
-}));
+  assert.ok(requests.some((request) => request.method === 'GET' && request.url.endsWith('/api/sessions/created')));
+})));
 
-test('create --shell resolves alias agy to canonical antigravity in request body', async () => fixture(async (requests) => {
+test('create --shell resolves alias agy to canonical antigravity in request body', async () => withFakeClock(async () => fixture(async (requests) => {
   assert.equal(await runSessions(['create', '--shell', 'agy', '--model', 'gemini-4-hydrogen-medium', '--prompt', 'hello']), 0);
+  const posts = requests.filter((request) => request.method === 'POST');
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].method, 'POST');
+  assert.deepEqual(posts[0].body, { shellType: 'antigravity', model: 'gemini-4-hydrogen-medium', prompt: 'hello' });
+})));
+
+test('handoff posts the chosen harness and prints the new session id', async () => fixture(async (requests, output) => {
+  assert.equal(await runSessions(['handoff', 'old-id', '--shell', 'shell', '--model', 'plain', '--name', 'next', '--plain']), 0);
   assert.equal(requests.length, 1);
   assert.equal(requests[0].method, 'POST');
-  assert.deepEqual(requests[0].body, { shellType: 'antigravity', model: 'gemini-4-hydrogen-medium', prompt: 'hello' });
+  assert.ok(requests[0].url.endsWith('/api/sessions/old-id/handoff'));
+  assert.deepEqual(requests[0].body, { shellType: 'shell', model: 'plain', name: 'next' });
+  assert.equal(output.at(-1), 'created');
+}, () => ({ session: { id: 'created', name: 'next', status: 'pending' } })));
+
+test('handoff --shell rejects an unknown harness before any request', async () => fixture(async (requests, output) => {
+  assert.equal(await runSessions(['handoff', 'old-id', '--shell', 'bogus-shell']), 1);
+  assert.equal(requests.length, 0);
+  assert.ok(output.some((line) => line.includes('Invalid shellType') && line.includes('Valid values:')));
 }));
 
 test('create --shell rejects invalid shellType without calling the API', async () => fixture(async (requests, output) => {
@@ -358,24 +379,24 @@ test('attention --wait retries transient poll failures three times then fails', 
   });
 }));
 
-test('create --worktree maps worktree, --branch and --base to POST body and rejects --branch/--base without --worktree', async () => fixture(async (requests, output) => {
+test('create --worktree maps worktree, --branch and --base to POST body and rejects --branch/--base without --worktree', async () => withFakeClock(async () => fixture(async (requests, output) => {
   assert.equal(await runSessions(['create', '--branch', 'feat/x']), 1);
   assert.equal(await runSessions(['create', '--base', 'main']), 1);
   assert.equal(requests.length, 0);
   assert.ok(output.some((line) => line.includes('--branch and --base require --worktree')));
 
   assert.equal(await runSessions(['create', '--prompt', 'work', '--worktree']), 0);
-  assert.deepEqual(requests.at(-1)?.body, { prompt: 'work', worktree: true });
+  assert.deepEqual(lastPost(requests)?.body, { prompt: 'work', worktree: true });
 
   assert.equal(await runSessions(['create', '--prompt', 'work', '--worktree', '--branch', 'feat/a']), 0);
-  assert.deepEqual(requests.at(-1)?.body, { prompt: 'work', worktree: { branch: 'feat/a' } });
+  assert.deepEqual(lastPost(requests)?.body, { prompt: 'work', worktree: { branch: 'feat/a' } });
 
   assert.equal(await runSessions(['create', '--prompt', 'work', '--worktree', '--base', 'main']), 0);
-  assert.deepEqual(requests.at(-1)?.body, { prompt: 'work', worktree: { base: 'main' } });
+  assert.deepEqual(lastPost(requests)?.body, { prompt: 'work', worktree: { base: 'main' } });
 
   assert.equal(await runSessions(['create', '--prompt', 'work', '--worktree', '--branch', 'feat/a', '--base', 'main']), 0);
-  assert.deepEqual(requests.at(-1)?.body, { prompt: 'work', worktree: { branch: 'feat/a', base: 'main' } });
-}));
+  assert.deepEqual(lastPost(requests)?.body, { prompt: 'work', worktree: { branch: 'feat/a', base: 'main' } });
+})));
 
 test('remove maps --keep-worktree and --force-worktree query params and prints worktreeOutcome', async () => {
   let currentOutcome: { action: string; reason?: string } | undefined;
@@ -415,7 +436,7 @@ test('attention --to human sends to:"human" in request body and rejects invalid 
   assert.deepEqual(requests.at(-1)?.body, { message: 'Need token', to: 'human' });
 }, (request) => request.method === 'GET' ? newCapabilities : { event: { id: 'evt-human' } }));
 
-test('create --plan-item maps to body.planItem and requires --parent/--parent-id', async () => fixture(async (requests, output) => {
+test('create --plan-item maps to body.planItem and requires --parent/--parent-id', async () => withFakeClock(async () => fixture(async (requests, output) => {
   assert.equal(await runSessions(['create', '--prompt', 'work', '--plan-item', 'p3']), 1);
   assert.equal(requests.length, 0, 'no POST without a parent');
   assert.ok(output.some((line) => line.includes('--plan-item requires --parent or --parent-id')));
@@ -425,15 +446,25 @@ test('create --plan-item maps to body.planItem and requires --parent/--parent-id
   assert.ok(output.some((line) => line.includes('--plan-item must be a plan item id')));
 
   assert.equal(await runSessions(['create', '--prompt', 'work', '--parent-id', 'p-uuid', '--plan-item', 'p3']), 0);
-  assert.equal(requests.at(-1)?.method, 'POST');
-  assert.deepEqual(requests.at(-1)?.body, { parentSessionId: 'p-uuid', prompt: 'work', planItem: 'p3' });
-}, (request) => ({ session: { id: 'child', name: 'child', status: 'running' } })));
+  assert.equal(lastPost(requests)?.method, 'POST');
+  assert.deepEqual(lastPost(requests)?.body, { parentSessionId: 'p-uuid', prompt: 'work', planItem: 'p3' });
+}, (request) => ({ session: { id: 'child', name: 'child', status: 'running' } }))));
 
-test('create --require-green-pr maps to body.requireGreenPr', async () => fixture(async (requests) => {
+test('create --require-green-pr maps to body.requireGreenPr', async () => withFakeClock(async () => fixture(async (requests) => {
   assert.equal(await runSessions(['create', '--prompt', 'work', '--parent-id', 'p-uuid', '--require-green-pr']), 0);
-  assert.equal(requests.at(-1)?.method, 'POST');
-  assert.deepEqual(requests.at(-1)?.body, { parentSessionId: 'p-uuid', prompt: 'work', requireGreenPr: true });
-}, () => ({ session: { id: 'child', name: 'child', status: 'running' } })));
+  assert.equal(lastPost(requests)?.method, 'POST');
+  assert.deepEqual(lastPost(requests)?.body, { parentSessionId: 'p-uuid', prompt: 'work', requireGreenPr: true });
+}, () => ({ session: { id: 'child', name: 'child', status: 'running' } }))));
+
+test('create exits non-zero when the child dies during startup', async () => fixture(async (requests, output) => {
+  assert.equal(await runSessions(['create', '--shell', 'opencode', '--prompt', 'hello']), 1);
+  assert.equal(requests[0]?.method, 'POST');
+  assert.ok(requests.some((request) => request.method === 'GET' && request.url.endsWith('/api/sessions/child')));
+  assert.ok(output.some((line) => line.includes('child child failed during startup: process exited with code 1')));
+  assert.ok(output.every((line) => !line.startsWith('created ')));
+}, (request) => request.method === 'POST'
+  ? { session: { id: 'child', name: 'unit', status: 'pending' } }
+  : { session: { id: 'child', name: 'unit', status: 'error', errorReason: 'process exited with code 1', lastError: 'process exited with code 1\nbad flag' } }));
 
 test('attention wait budget ignores wall-clock jumps', async () => {
   for (const jump of [-600_000, 600_000]) {

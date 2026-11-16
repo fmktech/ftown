@@ -51,6 +51,10 @@ export function formatBoardRow(card: SessionCard, nowMs: number): string {
     const ref = blockedOn.ref ? `:${blockedOn.ref}` : '';
     suffix += `  blocked on ${blockedOn.kind}${ref}: ${truncate(blockedOn.text, BLOCKED_TEXT_MAX)}`;
   }
+  if (card.derived.block) {
+    const reset = card.derived.block.resetAt ? ` resets ${formatLocalHHMM(card.derived.block.resetAt)}` : '';
+    suffix += `  blocked ${card.derived.block.reason}${reset}`;
+  }
   if (card.derived.pr) {
     suffix += `  PR:${card.derived.pr.state}`;
   }

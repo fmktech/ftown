@@ -6,7 +6,7 @@
 import type { Activity } from '../attention-events.js';
 import type { PullRequestState } from '../pull-request-status-protocol.js';
 import type { PlanView } from './contract-c.js';
-import type { MailMessage, Session, SessionStatus } from '../types.js';
+import type { MailMessage, Session, SessionBlock, SessionStatus } from '../types.js';
 
 // ───────────────────────── Session card (declared by the agent) ─────────────────────────
 
@@ -70,6 +70,8 @@ export interface CardDerived {
   previews: string[]; // preview file basenames
   shellType?: string;
   model?: string;
+  /** Bridge-detected block. Absent when the session is not blocked. */
+  block?: SessionBlock;
 }
 
 export interface SessionCard {

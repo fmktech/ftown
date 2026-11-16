@@ -58,6 +58,18 @@ export interface Session {
   loopId?: string;
   usage?: SessionUsage;
   card?: { state: string; headline: string; progress?: { done: number; total: number }; blockedOn?: { kind: string; ref?: string; text: string }; next?: string; updatedAt: string };
+  lastError?: string;
+  errorReason?: string;
+  exitCode?: number;
+  block?: {
+    reason: 'usage_limit' | 'rate_limit' | 'auth' | 'crashed' | 'exited';
+    resetAt?: string;
+    screenTail: string;
+    exitCode?: number;
+    detectedAt: string;
+    transitionKey: string;
+    notifiedAt?: string;
+  };
 }
 
 export type MailType = 'message' | 'task' | 'result' | 'escalation' | 'fyi';
@@ -72,6 +84,7 @@ export interface MailMessage {
   to: string;
   type: MailType;
   threadId?: string;
+  idempotencyKey?: string;
   body: string;
   deliveredAt?: string;
   deliveredVia?: string;
