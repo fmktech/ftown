@@ -3,7 +3,7 @@
  * Local bridge harness — talks to ftown-bridge LocalApiServer via ~/.ftown/bridge.json
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Command, CommanderError } from 'commander';
 import { api, loadPointer, bridgePointerPath, listSessions, resolveSessionId, fetchInbox, sendMail } from './cli-client.js';
@@ -440,8 +440,9 @@ async function cmdMailRead(
   for (const m of messages) console.log(formatMailMessage(m));
 }
 
-function pumpCountPath(sessionId: string): string {
-  return `/tmp/ftown-mail-pump-${sessionId}.count`;
+/** Counter file for the mail pump, under the OS temp dir so it works on Windows. */
+export function pumpCountPath(sessionId: string): string {
+  return join(tmpdir(), `ftown-mail-pump-${sessionId}.count`);
 }
 
 function readPumpCount(sessionId: string): number {
