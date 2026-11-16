@@ -21,17 +21,17 @@ Findings with a security angle are not listed here or anywhere in the repository
 | 2026-11-14 | v6 | soak / high | 1 | 2 | yes | none in the pair; F1 found in an earlier run of this seed with clock faults |
 | 2026-11-14/15 | v9 | short / low | 1–40 | 2 | yes (40 of 40) | A2 on seeds 9 and 36 (F2) |
 | 2026-11-15 | v9 | soak / high | 1–10 | 2 | yes (10 of 10) | M5 on seeds 6 and 10 (F3) |
-| 2026-11-16 | v9 | soak / high | 11–40 | 2 | yes (30 of 30) | none (seed 17 reported R2; harness problem, see below) |
+| 2026-11-16 | v9 | soak / high | 11–40 | 2 | yes (30 of 30) | none (seed 17 reported R2; harness problem, see harness problems) |
 
 The 2026-11-14/15 contract v9 short/low campaign ran on the bridge before the F2 fix (`39f03f5`).
 
 The 2026-11-15 soak / high row is the campaign that found F3. The same-build counterfactual dropping only `clock_jump_back` passes M5 and all always/unreachable properties on both seeds (exit 0; `H_run` prefixes `0c83ac100058` and `bcec72f7af52`).
 
-The 2026-11-16 campaign ran on bridge 0.30.4. Seeds 12, 22 and 32 first ended as infrastructure errors (one watchdog expiry under host load, two out-of-memory kills of the emulator while other work shared the container host) and were clean, identical pairs when re-run on a quiet host (`H_run` prefixes `18186da1c157`, `f1d02a5af19c`, `2fd69412159a`). Seed 17's pair was identical (`H_run` prefix `313459c6e7a2`) and reported R2.
+The 2026-11-16 campaign ran on bridge 0.30.4, which includes the F3 fix; this is why M5 is absent. Seeds 12, 22 and 32 first ended as infrastructure errors (one watchdog expiry under host load, two out-of-memory kills of the emulator while other work shared the container host) and were clean, identical pairs when re-run on a quiet host (`H_run` prefixes `18186da1c157`, `f1d02a5af19c`, `2fd69412159a`). Seed 17's pair was identical (`H_run` prefix `313459c6e7a2`) and reported R2, a false positive fixed in contract v10 (see harness problems).
 
 A short run takes about 3.7 minutes of wall time on a lightly loaded host.
 
-The v8 rows cover four seeds at level low. The v9 row covers seeds 1–40 at short / low.
+The v8 rows cover four seeds at level low. The first v9 row covers seeds 1–40 at short / low.
 Those runs exercise bridge kill -9, bridge SIGTERM, parent death, and clock jumps inside a
 40-second fault window. What short runs never include is long faults. A clean table here says
 little about long faults.
@@ -69,7 +69,7 @@ The child keeps waiting, up to a day, and the human gets no notice. A human who 
 
 ### F3 — A backward wall-clock step delays mail nudges (grade A)
 
-A backward wall-clock step can delay the idle safety-net nudge by roughly the step. Mail stays readable; a later successful real-agent hook pump or inbox consumer can deliver it sooner. Eventual timer recovery or fresh-delay recovery after restart is inferred from code. Soak / high, contract v9, seeds 6 and 10, each pair byte-identical. Grade A: the code path is identified and the same clean-build counterfactual dropping only `clock_jump_back` passes M5 on both seeds. Fixed in PR #241 (bridge 0.30.3), confirmed 2026-11-15.
+A backward wall-clock step can delay the idle safety-net nudge by roughly the step. Mail stays readable; a later successful real-agent hook pump or inbox consumer can deliver it sooner. Eventual timer recovery or fresh-delay recovery after restart is inferred from code. Soak / high, contract v9, seeds 6 and 10, each pair byte-identical. Grade A: the code path is identified and the same clean-build counterfactual dropping only `clock_jump_back` passes M5 on both seeds. Fixed in #241 (bridge 0.30.3), with follow-up #242 (bridge 0.30.4).
 
 - Details: [F3-backward-clock-jump-delays-mail-nudges.md](F3-backward-clock-jump-delays-mail-nudges.md)
 - Fix confirmation: seeds 6 and 10 (soak / high) pass M5 twice each on the fixed bridge, byte-identical pairs.

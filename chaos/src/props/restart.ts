@@ -30,7 +30,7 @@ const r2: Property = {
   id: 'R2',
   kind: 'unreachable',
   source: 'bridge/src/solo/hub-manager.ts (hub health wait); bridge/src/index.ts solo start',
-  title: 'bridge down while no bridge fault is active',
+  title: 'bridge dead, or unresponsive at two consecutive checkpoints, while no bridge fault is active',
   check(log: readonly Rec[]): PropResult {
     const intervals: BridgeInterval[] = [];
     const openById = new Map<string, BridgeInterval>();

@@ -136,6 +136,19 @@ test('bridge responsiveness probes append ordered diagnostic JSON lines without 
   assert.deepEqual(Object.keys(JSON.parse(lines[0]!)), ['t', 'checkpoint', 'ok', 'exitCode', 'timedOut', 'durationMs', 'stderr']);
 });
 
+test('probe result is preserved when diagnostic append rejects', async () => {
+  const clock = fakeClock();
+  const append = async () => { throw new Error('sidecar unavailable'); };
+  const succeeded = await probeBridge(clock, 'cp-ok', async () => ({
+    code: 0, stdout: '', stderr: '', timedOut: false,
+  }), append);
+  const failed = await probeBridge(clock, 'cp-failed', async () => ({
+    code: 1, stdout: '', stderr: '', timedOut: false,
+  }), append);
+  assert.equal(succeeded, true);
+  assert.equal(failed, false);
+});
+
 test('buildVerdictsReport records source fingerprint without altering canon.jsonl bytes', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'chaos-verdicts-'));
   try {

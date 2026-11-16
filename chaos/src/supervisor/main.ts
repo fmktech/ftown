@@ -173,7 +173,11 @@ export async function probeBridge(
     durationMs,
     stderr: result.stderr.slice(0, 300).replace(/[\r\n]/g, ' '),
   };
-  await append(`${JSON.stringify(line)}\n`);
+  try {
+    await append(`${JSON.stringify(line)}\n`);
+  } catch {
+    /* diagnostic sidecar only; preserve the probe result */
+  }
   return ok;
 }
 
@@ -295,6 +299,7 @@ async function drive(seed: number, level: ChaosLevel, profile: RunProfile, clock
   const timing = PROFILE[profile];
   const actions = makeActions(clock);
   if (!(await actions.bridgeUp())) throw new Infra('infra:bridge_up');
+  await mkdir(GUEST.outDir, { recursive: true });
 
   const scripts = buildScripts(seed, profile, deriveRng);
   await mkdir(GUEST.agentScriptDir, { recursive: true });
@@ -334,10 +339,7 @@ async function drive(seed: number, level: ChaosLevel, profile: RunProfile, clock
         clock,
         checkpointName,
         () => ftown(['sessions', 'list'], { timeoutMs: CONTROL_TIMEOUT_MS }),
-        async (line) => {
-          await mkdir(GUEST.outDir, { recursive: true });
-          await appendFile(join(GUEST.outDir, 'side-probes.jsonl'), line);
-        },
+        (line) => appendFile(join(GUEST.outDir, 'side-probes.jsonl'), line),
       ),
       tmux: { user: GUEST.user, env: { HOME: FTOWN_ENV.HOME, TMUX_TMPDIR: FTOWN_ENV.TMUX_TMPDIR } },
     });

@@ -72,7 +72,7 @@ test('exports exactly R2', () => {
   assert.deepEqual(restartProperties.map((p) => p.id), ['R2']);
   const r2 = get('R2');
   assert.equal(r2.kind, 'unreachable');
-  assert.equal(r2.title, 'bridge down while no bridge fault is active');
+  assert.equal(r2.title, 'bridge dead, or unresponsive at two consecutive checkpoints, while no bridge fault is active');
   assert.equal(
     r2.source,
     'bridge/src/solo/hub-manager.ts (hub health wait); bridge/src/index.ts solo start',
@@ -213,6 +213,58 @@ test('three consecutive unresponsive checkpoints emit one line per adjacent pair
   assert.deepEqual(r.evidence, [
     'bridge alive but unresponsive at cp20 t=20000 and cp30 t=30000 last bridge fault none healed doneT=none',
     'bridge alive but unresponsive at cp30 t=30000 and cp40 t=40000 last bridge fault none healed doneT=none',
+  ]);
+});
+
+test('unresponsive, exempt, then unresponsive does not form a violating pair', () => {
+  const r = get('R2').check([
+    cp(10_000, true, 'cp10'),
+    cp(20_000, true, 'cp20', false, false),
+    faultStart(45_000, 'f1'),
+    cp(45_000, true, 'cp45', false, false),
+    faultHeal(46_000, 'f1', 'bridge_kill9', true, 46_000),
+    cp(80_000, true, 'cp80', false, false),
+    cp(100_000, true, 'cp100'),
+  ]);
+  assert.deepEqual(r, { status: 'pass', evidence: [] });
+});
+
+test('dead followed by a final unresponsive checkpoint emits only dead evidence', () => {
+  const r = get('R2').check([
+    cp(10_000, true, 'cp10'),
+    cp(20_000, false, 'cp20'),
+    cp(30_000, true, 'cp30', true, false),
+  ]);
+  assert.equal(r.status, 'violated');
+  assert.deepEqual(r.evidence, [
+    'bridge dead at cp20 t=20000 last bridge fault none healed doneT=none',
+  ]);
+});
+
+test('unresponsive pair after a healed bridge fault names the latest heal', () => {
+  const r = get('R2').check([
+    cp(10_000, true, 'cp10'),
+    faultStart(20_000, 'f1', 'bridge_kill9', true, 20_000),
+    faultHeal(25_000, 'f1', 'bridge_kill9', true, 26_000),
+    cp(60_000, true, 'cp60', false, false),
+    cp(75_000, true, 'cp75', false, false),
+  ]);
+  assert.equal(r.status, 'violated');
+  assert.deepEqual(r.evidence, [
+    'bridge alive but unresponsive at cp60 t=60000 and cp75 t=75000 last bridge fault f1 healed doneT=26000',
+  ]);
+});
+
+test('bring-up dead checkpoints are ignored before an unresponsive pair', () => {
+  const r = get('R2').check([
+    cp(5_000, false, 'cp5'),
+    cp(10_000, false, 'cp10'),
+    cp(15_000, true, 'cp15', false, false),
+    cp(30_000, true, 'cp30', false, false),
+  ]);
+  assert.equal(r.status, 'violated');
+  assert.deepEqual(r.evidence, [
+    'bridge alive but unresponsive at cp15 t=15000 and cp30 t=30000 last bridge fault none healed doneT=none',
   ]);
 });
 
