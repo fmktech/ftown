@@ -79,6 +79,7 @@ export interface AskHookDeps {
   env: Record<string, string | undefined>;
   /** Local bridge API. Rejects when the bridge is unreachable. */
   request: (method: 'GET' | 'POST', path: string, body?: unknown, signal?: AbortSignal) => Promise<AskHookResponse>;
+  /** Unused wall-clock seam retained for compatibility; elapsed gates use monotonicNow. */
   now: () => number;
   monotonicNow?: () => number;
   sleep: (ms: number, signal?: AbortSignal) => Promise<void>;

@@ -156,7 +156,7 @@ export class AttentionStore implements AttentionRoutingStoreApi {
     if (this.notificationsStopped || cycle.notifiedAt || !this.notificationOptions.onSubagentIdle) return;
     const existing = this.idleTimers.get(id);
     const deadline = newDeadline ?? (existing?.cycleId === cycle.id ? existing.deadline
-      : this.notificationOptions.monotonicNow() + Math.max(0, Date.parse(cycle.dueAt) - this.notificationOptions.now()));
+      : this.notificationOptions.monotonicNow() + Math.min(SUBAGENT_IDLE_DELAY_MS, Math.max(0, Date.parse(cycle.dueAt) - this.notificationOptions.now())));
     this.clearIdleTimer(id);
     const remaining = Math.max(0, deadline - this.notificationOptions.monotonicNow());
     const timer = this.notificationOptions.schedule(() => { void this.emitIdle(id, cycle.id).catch(() => {
