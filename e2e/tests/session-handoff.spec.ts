@@ -91,7 +91,11 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
         await dialog.getByLabel("Harness").selectOption("shell");
         await dialog.getByRole("button", { name: "Hand off", exact: true }).click();
         const nextName = `${childName} handoff`;
-        await expect(originalRow(page, nextName)).toBeVisible({ timeout: 60_000 });
+        // Hand off opens the new session. On a phone that leaves the Workspace
+        // list, so the sidebar row stays mounted and hidden until that tab is shown.
+        await expect(page.getByRole("region", { name: `Session workspace: ${nextName}` })).toBeVisible({ timeout: 60_000 });
+        if (mobile) await page.getByRole("tab", { name: "Workspace", exact: true }).click();
+        await expect(originalRow(page, nextName)).toBeVisible();
         await expect(originalRow(page, childName)).toHaveCount(0);
         const created = (await listed()).find(session => session.name === nextName);
         expect(created?.id).toBeTruthy();
