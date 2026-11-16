@@ -92,15 +92,17 @@ describe("account ledger channel", () => {
 
   it("every relay token renewal re-reads the ledger after the token is minted; Solo renewals do not", async () => {
     const ledger = fakeLedger(); const refresher = vi.fn(async () => "fresh-token");
-    renderHook(() => useCentrifugo(jwt, "wss://relay.test", accountId, { securityRuntime: runtime, ledger, tokenRefresher: refresher }));
+    const nearExpiry = `a.${btoa(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 300 }))}.c`;
+    renderHook(() => useCentrifugo(nearExpiry, "wss://relay.test", accountId, { securityRuntime: runtime, ledger, tokenRefresher: refresher }));
     expect(ledger.refresh).not.toHaveBeenCalled();
     await expect(mocks.getToken[0]()).resolves.toBe("fresh-token");
     expect(refresher).toHaveBeenCalledOnce(); expect(ledger.refresh).toHaveBeenCalledOnce();
     refresher.mockRejectedValueOnce(new Error("unauthorized"));
     await expect(mocks.getToken[0]()).rejects.toThrow("unauthorized"); expect(ledger.refresh).toHaveBeenCalledOnce();
     const soloRefresher = vi.fn(async () => "solo-token");
-    renderHook(() => useCentrifugo(jwt, "ws://lan.test", "solo", { securityRuntime: runtime, tokenRefresher: soloRefresher }));
-    expect(mocks.getToken[1]).toBe(soloRefresher);
+    renderHook(() => useCentrifugo(nearExpiry, "ws://lan.test", "solo", { securityRuntime: runtime, tokenRefresher: soloRefresher }));
+    await expect(mocks.getToken[1]()).resolves.toBe("solo-token");
+    expect(soloRefresher).toHaveBeenCalledOnce(); expect(ledger.refresh).toHaveBeenCalledOnce();
   });
 
   it("a failing ledger client never breaks the connection", async () => {

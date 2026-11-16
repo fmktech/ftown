@@ -12,6 +12,7 @@ import { SecureMessageClient } from "@/lib/secure-message-client";
 import type { SecureEndpointRuntime } from "@/lib/secure-endpoint-runtime";
 import { HybridTerminalTransport } from "@/lib/direct-transport/hybrid-terminal-transport";
 import { clearConnectionHistory, recordConnectionEvent } from "@/lib/connection-history";
+import { createCentrifugoTokenProvider } from "@/lib/centrifugo-token-provider";
 import {
   DirectCommandMessage,
   TerminalTransportApi,
@@ -142,7 +143,7 @@ interface UseCentrifugoOptions {
   /**
    * Account mode only (Solo/local never pass it): the page's ledger client. The connection subscribes to
    * `bridges:ledger#<userId>` and feeds the account's own publications to it; every (re)subscribe and every relay token renewal
-   * (hourly) refreshes, so the browser re-reads the ledger even when no push arrives.
+   * refreshes, so the browser re-reads the ledger even when no push arrives.
    */
   ledger?: LedgerFeed;
   /**
@@ -208,13 +209,14 @@ export function useCentrifugo(
     const initialToken = isTokenExpired(token) ? "" : token;
 
     const mint = tokenRefresher ?? fetchCentrifugoToken;
+    const getToken = createCentrifugoTokenProvider(initialToken, ledger ? async () => {
+      const renewed = await mint();
+      void ledger.refresh().catch(() => {});
+      return renewed;
+    } : mint);
     const client = new Centrifuge(centrifugoUrl, {
       token: initialToken,
-      getToken: ledger ? async () => {
-        const renewed = await mint();
-        void ledger.refresh().catch(() => {});
-        return renewed;
-      } : mint,
+      getToken,
     });
 
     client.on("connecting", (ctx) => {
