@@ -1,7 +1,8 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { isAbsolute, join } from 'node:path';
+import { join } from 'node:path';
+import { claudeConfigDir, claudeConfigOverride } from '../config-dirs.js';
 
 import type {
   ProviderQuota,
@@ -15,8 +16,6 @@ import type {
 const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
 const OAUTH_BETA = 'oauth-2025-04-20';
 const KEYCHAIN_SERVICE = 'Claude Code-credentials';
-const CONFIG_DIR_ENV = 'CLAUDE_CONFIG_DIR';
-const CLAUDE_DIR = '.claude';
 const CREDENTIALS_FILE = '.credentials.json';
 const FALLBACK_CLAUDE_VERSION = '2.1.323';
 const VERSION_TIMEOUT_MS = 2000;
@@ -186,20 +185,13 @@ export interface ClaudeCredentialSource {
  *   appending the first 8 hex digits of its SHA-256. Empty and relative values
  *   are ignored because Claude Code refuses them.
  */
-function absoluteConfigDirOverride(value: string | undefined): string | null {
-  // Claude Code refuses empty and relative CLAUDE_CONFIG_DIR values, so those
-  // cannot hold credentials and must not hide the default config dir.
-  if (typeof value !== 'string' || value.trim() === '' || !isAbsolute(value)) return null;
-  return value.normalize('NFC');
-}
-
 export function resolveClaudeCredentialSources(
   homeDir: string,
   env: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
 ): ClaudeCredentialSource[] {
-  const override = absoluteConfigDirOverride(env[CONFIG_DIR_ENV]);
-  const configDir = override ?? join(homeDir, CLAUDE_DIR);
+  const override = claudeConfigOverride(env);
+  const configDir = claudeConfigDir(homeDir, env);
   const filePath = join(configDir, CREDENTIALS_FILE);
   const file: ClaudeCredentialSource = { kind: 'file', location: filePath, label: filePath };
 

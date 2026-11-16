@@ -1,5 +1,6 @@
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
+import { claudeConfigDir } from '../config-dirs.js';
 
 import type { HarnessModel, ModelsFetcher, ProviderModels, QuotaFetchOptions } from './types.js';
 
@@ -12,8 +13,6 @@ import type { HarnessModel, ModelsFetcher, ProviderModels, QuotaFetchOptions } f
  * present, otherwise from the catalogue's own default for the `cc` surface.
  */
 
-const CATALOGUE_DIR = ['.claude', 'cache', 'model-catalog'];
-const SETTINGS_PATH = ['.claude', 'settings.json'];
 const CATALOGUE_FILE_PATTERN = /^published-.*\.json$/;
 const CC_CATALOGUE_PATTERN = /^.+-cc\.json$/;
 const SURFACE = 'cc';
@@ -327,7 +326,7 @@ export function claudeCatalogExpiry(fileJson: unknown): string | null {
 
 async function readSettingsModel(homeDir: string): Promise<string | null> {
   try {
-    const parsed: unknown = JSON.parse(await readFile(join(homeDir, ...SETTINGS_PATH), 'utf8'));
+    const parsed: unknown = JSON.parse(await readFile(join(claudeConfigDir(homeDir), 'settings.json'), 'utf8'));
     if (!isRecord(parsed)) return null;
     return typeof parsed.model === 'string' && parsed.model.trim() !== '' ? parsed.model : null;
   } catch {
@@ -360,7 +359,7 @@ function unavailable(observedAt: string): ProviderModels {
 export const fetchClaudeModels: ModelsFetcher = async (options: QuotaFetchOptions) => {
   const nowIso = new Date(options.now().getTime()).toISOString();
   try {
-    const dir = join(options.homeDir, ...CATALOGUE_DIR);
+    const dir = join(claudeConfigDir(options.homeDir), 'cache', 'model-catalog');
     let names: string[];
     try {
       names = await readdir(dir);
