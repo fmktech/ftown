@@ -208,6 +208,13 @@ docker restart ftown-solo
   `172.17.0.2`), which isn't reachable from your browser — substitute the
   Docker host's real LAN IP (or `localhost` if browsing from the same
   machine) and keep the key from the banner.
+- Under **WSL2**, the startup banner points you at `http://localhost:<port>`
+  (the WSL VM's port is forwarded to the Windows host automatically). The VM's
+  own LAN address isn't reachable from other devices on your network, so it is
+  not printed. To open Solo from another device, forward the port on Windows,
+  for example `netsh interface portproxy add v4tov4 listenport=<port> listenaddress=0.0.0.0 connectport=<port> connectaddress=<wsl-ip>`
+  and allow it through the firewall — or run Solo in Docker on the Windows
+  host instead.
 
 ## Managed hub security version
 
