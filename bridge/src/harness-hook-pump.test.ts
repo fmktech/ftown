@@ -74,11 +74,13 @@ async function runPump(hook: Record<string, unknown>, extraEnv: Record<string, s
     console.error = previousError;
     globalThis.fetch = previousFetch;
     if (stdinDescriptor) Object.defineProperty(process, 'stdin', stdinDescriptor);
+    // Remove the counter while the test env is still active: pumpCountPath()
+    // derives its location from TMPDIR, which is about to be restored.
+    rmSync(pumpCountPath(sessionId), { force: true });
     for (const key of Object.keys(process.env)) delete process.env[key];
     Object.assign(process.env, savedEnv);
     await secure?.security.close();
     rmSync(home, { recursive: true, force: true });
-    rmSync(pumpCountPath(sessionId), { force: true });
   }
 }
 
