@@ -1718,3 +1718,51 @@ describe('createFtownSession — shellType alias, rejection, and canonical stora
     assert.strictEqual(harness.runs.length, 0);
   });
 });
+
+describe('WSL2 /mnt workdir warning (injected probe)', () => {
+  const sessionAt = (workingDir: string): Session => ({ ...fakeSession('wsl'), workingDir });
+
+  it('warns on retry when WSL2 is detected and the workdir is under /mnt/', async () => {
+    const warnings: string[] = [];
+    const harness = fakeDeps();
+    const deps: CreateFtownSessionDeps = {
+      ...harness.deps,
+      isWsl2: () => true,
+      warn: (message) => { warnings.push(message); },
+    };
+
+    await relaunchFtownSession(deps, sessionAt('/mnt/c/Users/me/project'), 'retry');
+
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /WSL2/);
+    assert.match(warnings[0], /\/mnt\/c\/Users\/me\/project/);
+  });
+
+  it('stays silent for a Linux-filesystem workdir even under WSL2', async () => {
+    const warnings: string[] = [];
+    const harness = fakeDeps();
+    const deps: CreateFtownSessionDeps = {
+      ...harness.deps,
+      isWsl2: () => true,
+      warn: (message) => { warnings.push(message); },
+    };
+
+    await relaunchFtownSession(deps, sessionAt('/home/me/project'), 'retry');
+
+    assert.equal(warnings.length, 0);
+  });
+
+  it('stays silent for a /mnt workdir when the probe says this is not WSL2', async () => {
+    const warnings: string[] = [];
+    const harness = fakeDeps();
+    const deps: CreateFtownSessionDeps = {
+      ...harness.deps,
+      isWsl2: () => false,
+      warn: (message) => { warnings.push(message); },
+    };
+
+    await relaunchFtownSession(deps, sessionAt('/mnt/c/Users/me/project'), 'retry');
+
+    assert.equal(warnings.length, 0);
+  });
+});
