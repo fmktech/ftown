@@ -47,6 +47,7 @@ import { SessionResurrection, shouldResurrectStoredSession } from './session-res
 import { createTerminalOutput } from './terminal-output.js';
 import { SessionFailureMonitor } from './session-block.js';
 import { handoffSession, type HandoffRequest } from './session-handoff.js';
+import { hasTmuxSession, killTmuxSession } from './tmux.js';
 import { collectSessionUsage } from './usage-collector.js';
 import { AgentSessionIdPersister } from './session-ids.js';
 import { HookUsagePersister } from './hook-usage.js';
@@ -1046,11 +1047,29 @@ program
 
     let ready = false;
     const modelRouting = createRealModelRoutingService(homedir());
+    const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+    const stopHandoffSession = async (id: string): Promise<void> => {
+      runner.stop(id);
+      const deadline = Date.now() + 6500;
+      while (runner.isRunning(id) && Date.now() < deadline) await wait(50);
+      if (runner.isRunning(id)) throw new Error(`could not stop old session ${id} before handoff`);
+      for (let attempt = 0; attempt < 3; attempt++) {
+        await killTmuxSession(id);
+        if (!hasTmuxSession(id)) return;
+        await wait(50);
+      }
+      throw new Error(`old tmux session ${id} is still running; handoff was not started`);
+    };
     const runHandoff = (sessionId: string, request: HandoffRequest) => handoffSession({
       loadSession: (id) => store.loadSession(id),
       saveSession: (session) => store.saveSession(session),
       publishSession: (session) => centrifugo.publishSessionUpdate(userId, session),
       createSession: (input) => createFtownSession(sessionFactoryDeps, input),
+      stopSession: stopHandoffSession,
+      isSessionHealthy: async (id) => {
+        const session = await store.loadSession(id);
+        return session?.status === 'running' && runner.isRunning(id);
+      },
       archiveSession: async (id) => {
         const result = await sessionController.remove(id, undefined, 'keep');
         if (!result.removed) throw new Error(`could not archive session ${id}`);

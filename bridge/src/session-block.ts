@@ -40,7 +40,7 @@ export interface SessionFailureDeps {
   withSessionWrite(id: string, task: () => Promise<void>): Promise<void>;
   loadTerminalLog?(id: string): Promise<string>;
   listMail?(sessionId: string): Promise<Array<{ from: string; type: string }>>;
-  acceptMail(parent: Session, body: { from: string; fromName?: string; type: 'escalation'; body: string }): Promise<{ ok: boolean; error?: string }>;
+  acceptMail(parent: Session, body: { from: string; fromName?: string; type: 'escalation'; idempotencyKey: string; body: string }): Promise<{ ok: boolean; error?: string }>;
   recordAttention(sessionId: string, input: { title: string; message: string; notificationId: string }): Promise<boolean>;
   now?: () => Date;
   debounceMs?: number;
@@ -272,6 +272,12 @@ export class SessionFailureMonitor {
       if (session.status === 'error' && decision.errorReason) session.errorReason = decision.errorReason;
 
       if (decision.notify && !this.backingOff(sessionId)) {
+        // The transition key is durable before the external write. If the
+        // bridge dies after mail append but before the notifiedAt save, retry
+        // with the same idempotency key and the inbox will collapse it.
+        session.updatedAt = this.now().toISOString();
+        await this.deps.saveSession(session);
+        await this.deps.publishSession(session);
         const sent = await this.notify(session, decision.block, decision.lastError);
         if (sent) session.block.notifiedAt = this.now().toISOString();
         else this.backoffUntil.set(sessionId, this.now().getTime() + BACKOFF_MS);
@@ -326,6 +332,7 @@ export class SessionFailureMonitor {
           from: session.id,
           fromName: session.name,
           type: 'escalation',
+          idempotencyKey: `session-block:${session.id}:${block.transitionKey}`,
           body,
         });
         return accepted.ok;

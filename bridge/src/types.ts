@@ -118,6 +118,8 @@ export interface MailMessage {
   to: string;            // recipient ftown session id
   type: 'message' | 'task' | 'result' | 'escalation' | 'fyi';
   threadId?: string;
+  /** Stable producer key used to deduplicate retries after a lost response. */
+  idempotencyKey?: string;
   body: string;          // plain text, capped at 64KB
   deliveredAt?: string;  // ISO, set when handed to the session (not for peek)
   nudgedAt?: string;     // ISO, set once when a nudge/wake covered this message (nudge-once)

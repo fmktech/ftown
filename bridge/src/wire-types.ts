@@ -84,6 +84,7 @@ export interface MailMessage {
   to: string;
   type: MailType;
   threadId?: string;
+  idempotencyKey?: string;
   body: string;
   deliveredAt?: string;
   deliveredVia?: string;

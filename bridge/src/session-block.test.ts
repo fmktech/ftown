@@ -4,7 +4,7 @@ import { SessionFailureMonitor } from './session-block.js';
 import type { Session } from './types.js';
 import { AUTOMATION_REMOVED_MESSAGE } from './wire-types.js';
 
-interface SentMail { to: string; from: string; type: string; body: string }
+interface SentMail { to: string; from: string; type: string; body: string; idempotencyKey?: string }
 interface Attention { sessionId: string; title: string; message: string; notificationId: string }
 
 function session(partial: Partial<Session> & Pick<Session, 'id'>): Session {
@@ -27,7 +27,7 @@ function harness() {
   let now = new Date('2026-01-01T12:00:00.000Z');
   let mailOk = true;
   let mailCalls = 0;
-  const monitor = new SessionFailureMonitor({
+  const deps = {
     loadSession: async (id) => {
       const found = sessions.get(id);
       return found ? structuredClone(found) : null;
@@ -39,7 +39,9 @@ function harness() {
     acceptMail: async (parent, body) => {
       mailCalls += 1;
       if (!mailOk) return { ok: false, error: 'down' };
-      mail.push({ to: parent.id, from: body.from, type: body.type, body: body.body });
+      if (!mail.some((existing) => existing.to === parent.id && existing.idempotencyKey === body.idempotencyKey)) {
+        mail.push({ to: parent.id, from: body.from, type: body.type, body: body.body, idempotencyKey: body.idempotencyKey });
+      }
       return { ok: true };
     },
     recordAttention: async (sessionId, input) => {
@@ -48,12 +50,14 @@ function harness() {
     },
     now: () => now,
     debounceMs: 60_000,
-  });
+  };
+  const monitor = new SessionFailureMonitor(deps);
   return {
     sessions,
     mail,
     attention,
     monitor,
+    deps,
     mailCalls: () => mailCalls,
     setNow(next: Date) { now = next; },
     setMailOk(ok: boolean) { mailOk = ok; },
@@ -96,6 +100,34 @@ test('a running usage limit mails the parent once and keeps the session running'
   assert.match(h.mail[0].body, /planItem: p2 Ship the limit notice/);
   assert.match(h.mail[0].body, /Usage limit reached/);
   assert.equal(h.mailCalls(), 1);
+  assert.equal(h.mail[0].idempotencyKey, `session-block:child:${child.block?.transitionKey}`);
+});
+
+test('a restart after durable mail append retries with the same transition key and does not duplicate escalation', async () => {
+  const h = harness();
+  h.sessions.set('parent', session({ id: 'parent' }));
+  h.sessions.set('child', session({ id: 'child', parentSessionId: 'parent' }));
+  h.deps.loadTerminalLog = async () => 'Usage limit reached\nresets at 9:00 PM\n';
+
+  const save = h.deps.saveSession;
+  let crashAfterSend = true;
+  h.deps.saveSession = async (next) => {
+    if (crashAfterSend && next.block?.notifiedAt) {
+      crashAfterSend = false;
+      throw new Error('simulated crash after mail append');
+    }
+    await save(next);
+  };
+  h.monitor.observe('child', 'Usage limit reached\nresets at 9:00 PM\n');
+  await assert.rejects(() => h.monitor.flush('child'), /simulated crash after mail append/);
+  assert.equal(h.mail.length, 1);
+  assert.equal(h.sessions.get('child')?.block?.notifiedAt, undefined);
+
+  const restarted = new SessionFailureMonitor(h.deps);
+  await restarted.flush('child');
+  assert.equal(h.mail.length, 1);
+  assert.equal(h.mailCalls(), 2);
+  assert.ok(h.sessions.get('child')?.block?.notifiedAt);
 });
 
 test('a tmux capability sequence before a limit phrase still blocks', async () => {

@@ -3,8 +3,8 @@
  * directory, and move the plan item and pull request onto it.
  */
 import { execFile } from 'node:child_process';
-import { existsSync, realpathSync } from 'node:fs';
-import { isAbsolute, join, resolve } from 'node:path';
+import { existsSync, realpathSync, statSync } from 'node:fs';
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import type { PlanItem, SessionPlan } from './coordination/contract-c.js';
 import type { CreateFtownSessionInput } from './create-ftown-session.js';
@@ -41,6 +41,10 @@ export interface SessionHandoffDeps {
   saveSession(session: Session): Promise<void>;
   publishSession(session: Session): Promise<void>;
   createSession(input: CreateFtownSessionInput): Promise<Session>;
+  /** Stop the old agent and fence its worktree before staging or replacement launch. */
+  stopSession(sessionId: string): Promise<void>;
+  /** True only when the replacement is persisted as running and its process is live. */
+  isSessionHealthy(sessionId: string): Promise<boolean>;
   archiveSession(id: string): Promise<void>;
   plan?: {
     get(parentId: string): Promise<SessionPlan | null>;
@@ -49,6 +53,7 @@ export interface SessionHandoffDeps {
   loadTerminalLog(id: string): Promise<string>;
   routing?: HandoffRouting;
   git?: (cwd: string, args: string[]) => Promise<GitResult>;
+  scanStagedSecrets?: (cwd: string) => Promise<GitResult | undefined>;
   now?: () => Date;
 }
 
@@ -97,10 +102,80 @@ function absoluteGitPath(cwd: string, value: string): string {
   try { return realpathSync(absolute); } catch { return absolute; }
 }
 
-interface CommitOutcome { committed: boolean; note: string; sha?: string }
+interface CommitOutcome { committed: boolean; note: string; sha?: string; skippedFiles?: string[] }
 
-async function commitWork(session: Session, git: SessionHandoffDeps['git'], id: string): Promise<CommitOutcome> {
-  const run = git ?? defaultGit;
+const MAX_HANDOFF_FILE_BYTES = 1024 * 1024;
+
+function secretLikePath(path: string): boolean {
+  const name = basename(path).toLowerCase();
+  return name.startsWith('.env') || name.endsWith('.pem') || name.endsWith('.key')
+    || name.startsWith('id_') || name.startsWith('credentials') || name.endsWith('.p12');
+}
+
+function insideRoot(root: string, path: string): boolean {
+  const rel = relative(root, path);
+  return rel === '' || (!isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${sep}`));
+}
+
+function safeUntrackedFile(root: string, relPath: string): { safe: true } | { safe: false; reason: string } {
+  if (!relPath || isAbsolute(relPath) || relPath.split(/[\\/]/).includes('..')) {
+    return { safe: false, reason: 'outside worktree' };
+  }
+  const candidate = resolve(root, relPath);
+  if (!insideRoot(root, candidate)) return { safe: false, reason: 'outside worktree' };
+  try {
+    const target = realpathSync(candidate);
+    if (!insideRoot(root, target)) return { safe: false, reason: 'outside worktree' };
+    if (secretLikePath(relPath)) return { safe: false, reason: 'secret-like name' };
+    if (statSync(candidate).size > MAX_HANDOFF_FILE_BYTES) return { safe: false, reason: 'larger than 1 MiB' };
+  } catch {
+    return { safe: false, reason: 'unavailable during handoff' };
+  }
+  return { safe: true };
+}
+
+async function defaultStagedSecretScan(cwd: string): Promise<GitResult | undefined> {
+  try {
+    const result = await execFileAsync('gitleaks', [
+      'git', '--staged', '--report-format', 'json', '--report-path', '-', '--redact', '--no-banner',
+    ], { cwd, timeout: 30_000, maxBuffer: 2_000_000 });
+    return { code: 0, stdout: String(result.stdout), stderr: String(result.stderr) };
+  } catch (err) {
+    const failure = err as { code?: number | string; stdout?: string; stderr?: string };
+    if (failure.code === 'ENOENT') return undefined;
+    return {
+      code: typeof failure.code === 'number' ? failure.code : 1,
+      stdout: String(failure.stdout ?? ''),
+      stderr: String(failure.stderr ?? ''),
+    };
+  }
+}
+
+function pathsFromGitleaks(output: string): string[] {
+  try {
+    const findings: unknown = JSON.parse(output);
+    if (!Array.isArray(findings)) return [];
+    return findings.flatMap((finding) => {
+      if (!finding || typeof finding !== 'object') return [];
+      const record = finding as { File?: unknown; file?: unknown };
+      const path = record.File ?? record.file;
+      return typeof path === 'string' && path ? [path] : [];
+    });
+  } catch {
+    return [];
+  }
+}
+
+function uniquePaths(paths: string[]): string[] {
+  return [...new Set(paths)].sort();
+}
+
+function displayPath(path: string): string {
+  return path.replace(/[\u0000-\u001f\u007f]/g, (char) => `\\x${char.charCodeAt(0).toString(16).padStart(2, '0')}`);
+}
+
+async function commitWork(session: Session, deps: SessionHandoffDeps, id: string): Promise<CommitOutcome> {
+  const run = deps.git ?? defaultGit;
   const dir = session.worktree?.path ?? session.workingDir;
   if (!dir) return { committed: false, note: 'no commit: session has no working directory' };
   const inside = await run(dir, ['rev-parse', '--is-inside-work-tree']);
@@ -121,21 +196,73 @@ async function commitWork(session: Session, git: SessionHandoffDeps['git'], id: 
   if (!bridgeOwned && !linked && !ownRoot) {
     return { committed: false, note: 'no commit: working directory is not a dedicated worktree' };
   }
-  const status = await run(dir, ['status', '--porcelain']);
+  const gitCwd = toplevel;
+  const status = await run(gitCwd, ['status', '--porcelain']);
   if (status.code !== 0) {
     return { committed: false, note: `no commit: ${status.stderr.trim() || 'git status failed'}` };
   }
   if (!status.stdout.trim()) return { committed: false, note: 'no commit: working tree clean' };
-  const added = await run(dir, ['add', '-A']);
-  if (added.code !== 0) {
-    throw new Error(`git add failed: ${added.stderr.trim() || added.stdout.trim() || 'unknown git error'}`);
+  // Preserve the caller's index so a rejected scan can leave its staged set
+  // exactly as it was. Unresolved index entries cannot be safely auto-committed.
+  const savedIndex = await run(gitCwd, ['write-tree']);
+  if (savedIndex.code !== 0 || !savedIndex.stdout.trim()) {
+    return { committed: false, note: `no commit: cannot safely snapshot the index (${savedIndex.stderr.trim() || 'git write-tree failed'})` };
   }
-  const committed = await run(dir, ['-c', 'user.name=ftown', '-c', 'user.email=ftown@localhost', 'commit', '-m', `wip: handoff from ${id}`]);
+  const headFiles = await run(gitCwd, ['ls-tree', '-r', '--name-only', '-z', 'HEAD']);
+  const indexedFiles = await run(gitCwd, ['ls-files', '--cached', '-z']);
+  const eligibleOthers = await run(gitCwd, ['ls-files', '--others', '--exclude-standard', '-z']);
+  if ([headFiles, indexedFiles, eligibleOthers].some((result) => result.code !== 0)) {
+    return { committed: false, note: 'no commit: could not inventory worktree files safely' };
+  }
+  const splitNul = (value: string) => value.split('\0').filter(Boolean);
+  const tracked = new Set(splitNul(headFiles.stdout));
+  const cachedUntracked = new Set(splitNul(indexedFiles.stdout).filter((path) => !tracked.has(path)));
+  const eligible = new Set(splitNul(eligibleOthers.stdout));
+  const untracked = uniquePaths([...cachedUntracked, ...eligible]);
+  const skippedFiles: string[] = [];
+  const safeFiles: string[] = [];
+  for (const path of untracked) {
+    const safety = safeUntrackedFile(toplevel, path);
+    if (!safety.safe) skippedFiles.push(`${displayPath(path)} (${safety.reason})`);
+    else safeFiles.push(path);
+  }
+
+  // Start from HEAD, then add only tracked modifications and explicitly
+  // approved untracked paths. This also removes unsafe files staged earlier.
+  const reset = await run(gitCwd, ['read-tree', 'HEAD']);
+  if (reset.code !== 0) {
+    return { committed: false, note: `no commit: could not prepare a safe index (${reset.stderr.trim() || 'git read-tree failed'})`, skippedFiles };
+  }
+  const addedTracked = await run(gitCwd, ['add', '-u', '--', '.']);
+  if (addedTracked.code !== 0) {
+    await run(gitCwd, ['read-tree', savedIndex.stdout.trim()]);
+    return { committed: false, note: `no commit: tracked changes could not be staged (${addedTracked.stderr.trim() || addedTracked.stdout.trim() || 'git add failed'})`, skippedFiles };
+  }
+  for (const path of safeFiles) {
+    const added = await run(gitCwd, ['--literal-pathspecs', 'add', '--', path]);
+    if (added.code !== 0) {
+      await run(gitCwd, ['read-tree', savedIndex.stdout.trim()]);
+      return { committed: false, note: `no commit: safe untracked file could not be staged (${added.stderr.trim() || added.stdout.trim() || 'git add failed'})`, skippedFiles: uniquePaths([...skippedFiles, ...safeFiles]) };
+    }
+  }
+
+  const scan = await (deps.scanStagedSecrets ?? defaultStagedSecretScan)(gitCwd);
+  if (scan && scan.code !== 0) {
+    await run(gitCwd, ['read-tree', savedIndex.stdout.trim()]);
+    const reportPaths = pathsFromGitleaks(scan.stdout).map(displayPath);
+    const reason = scan.code === 1 ? 'gitleaks flagged staged content' : 'gitleaks scan failed';
+    return {
+      committed: false,
+      note: `no commit: ${reason}; staged files were restored to their previous state`,
+      skippedFiles: uniquePaths([...skippedFiles, ...safeFiles, ...reportPaths]),
+    };
+  }
+  const committed = await run(gitCwd, ['-c', 'user.name=ftown', '-c', 'user.email=ftown@localhost', 'commit', '-m', `wip: handoff from ${id}`]);
   if (committed.code !== 0) {
     throw new Error(`git commit failed: ${committed.stderr.trim() || committed.stdout.trim() || 'unknown git error'}`);
   }
-  const sha = await run(dir, ['rev-parse', '--short', 'HEAD']);
-  return { committed: true, note: `wip commit ${sha.stdout.trim() || 'created'}`, sha: sha.stdout.trim() || undefined };
+  const sha = await run(gitCwd, ['rev-parse', '--short', 'HEAD']);
+  return { committed: true, note: `wip commit ${sha.stdout.trim() || 'created'}`, sha: sha.stdout.trim() || undefined, skippedFiles };
 }
 
 async function gitText(run: NonNullable<SessionHandoffDeps['git']>, dir: string | undefined, args: string[]): Promise<string> {
@@ -152,6 +279,7 @@ export function buildHandoffBrief(input: {
   logText: string;
   diffText: string;
   planItem?: PlanItem;
+  skippedFiles?: string[];
 }): string {
   const { session } = input;
   const screen = screenTail(input.screen, SCREEN_LINES, 12_000);
@@ -168,6 +296,7 @@ export function buildHandoffBrief(input: {
     '',
     'Git:',
     input.commitNote,
+    ...(input.skippedFiles?.length ? [`left uncommitted:\n${input.skippedFiles.join('\n')}`] : []),
     input.logText ? `log:\n${input.logText}` : '',
     input.diffText ? `diff stat:\n${input.diffText}` : '',
     '',
@@ -221,7 +350,8 @@ export async function handoffSession(deps: SessionHandoffDeps, sessionId: string
   const session = await deps.loadSession(sessionId);
   if (!session) throw new Error(`Session not found: ${sessionId}`);
   const target = await resolveTarget(session, request, deps.routing);
-  const commit = await commitWork(session, deps.git, session.id);
+  await deps.stopSession(session.id);
+  const commit = await commitWork(session, deps, session.id);
   let screen = '';
   try { screen = await deps.loadTerminalLog(sessionId); } catch { screen = ''; }
   const dir = session.worktree?.path ?? session.workingDir;
@@ -234,7 +364,7 @@ export async function handoffSession(deps: SessionHandoffDeps, sessionId: string
     const plan = await deps.plan.get(session.parentSessionId);
     planItem = plan?.items.find((item) => item.sessionId === session.id && item.state === 'started');
   }
-  const brief = buildHandoffBrief({ session, screen, commitNote: commit.note, logText, diffText, planItem });
+  const brief = buildHandoffBrief({ session, screen, commitNote: commit.note, logText, diffText, planItem, skippedFiles: commit.skippedFiles });
   const created = await deps.createSession({
     name: target.name,
     prompt: brief,
@@ -246,6 +376,9 @@ export async function handoffSession(deps: SessionHandoffDeps, sessionId: string
   });
 
   try {
+    if (!(await deps.isSessionHealthy(created.id))) {
+      throw new Error(`replacement session ${created.id} is not healthy`);
+    }
     if (planItem && session.parentSessionId && deps.plan) {
       const plan = await deps.plan.get(session.parentSessionId);
       const linked = plan?.items.filter((item) => item.sessionId === session.id && item.state === 'started') ?? [];

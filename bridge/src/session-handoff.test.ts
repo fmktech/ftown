@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -36,10 +36,18 @@ function item(sessionId: string): PlanItem {
   };
 }
 
-function harness(options: { git?: SessionHandoffDeps['git']; routing?: SessionHandoffDeps['routing']; archive?: (id: string) => Promise<void> } = {}) {
+function harness(options: {
+  git?: SessionHandoffDeps['git'];
+  scanStagedSecrets?: SessionHandoffDeps['scanStagedSecrets'];
+  routing?: SessionHandoffDeps['routing'];
+  archive?: (id: string) => Promise<void>;
+  stop?: (id: string) => Promise<void>;
+  healthy?: (id: string) => Promise<boolean>;
+} = {}) {
   const sessions = new Map<string, Session>();
   const created: CreateFtownSessionInput[] = [];
   const archived: string[] = [];
+  const events: string[] = [];
   let routingCalls = 0;
   const planItems = [item('old')];
   const deps: SessionHandoffDeps = {
@@ -50,6 +58,7 @@ function harness(options: { git?: SessionHandoffDeps['git']; routing?: SessionHa
     saveSession: async (next) => { sessions.set(next.id, structuredClone(next)); },
     publishSession: async () => {},
     createSession: async (input) => {
+      events.push('create');
       created.push(input);
       const next = session({
         id: 'new-session',
@@ -61,16 +70,20 @@ function harness(options: { git?: SessionHandoffDeps['git']; routing?: SessionHa
         model: input.model,
         parentSessionId: input.parentSessionId,
         ...(input.requireGreenPr ? { requireGreenPr: true } : {}),
-        status: 'pending',
+        status: 'running',
       });
       sessions.set(next.id, structuredClone(next));
       return structuredClone(next);
     },
+    stopSession: async (id) => { events.push('stop'); await options.stop?.(id); },
+    isSessionHealthy: async (id) => { events.push('healthy'); return options.healthy ? options.healthy(id) : sessions.get(id)?.status === 'running'; },
     archiveSession: async (id) => {
+      events.push('archive');
       archived.push(id);
       if (options.archive) await options.archive(id);
       else sessions.delete(id);
     },
+    scanStagedSecrets: options.scanStagedSecrets,
     plan: {
       get: async () => ({ seq: 2, items: planItems.map((entry) => structuredClone(entry)) }),
       patch: async (_parent, itemId, input) => {
@@ -89,7 +102,7 @@ function harness(options: { git?: SessionHandoffDeps['git']; routing?: SessionHa
     },
     git: options.git,
   };
-  return { sessions, created, archived, planItems, deps, routingCalls: () => routingCalls };
+  return { sessions, created, archived, planItems, events, deps, routingCalls: () => routingCalls };
 }
 
 test('pickAvailableRouting skips exhausted and broken providers', () => {
@@ -156,6 +169,103 @@ test('handoff commits a dirty linked worktree, moves the plan and pull request, 
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('handoff commits tracked edits and safe small untracked files only', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ftown-handoff-filter-'));
+  const repo = join(root, 'repo');
+  const wt = join(root, 'wt');
+  const outside = join(root, 'outside.txt');
+  try {
+    mkdirSync(repo);
+    const git = (cwd: string, args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8' });
+    git(repo, ['init', '-b', 'main']);
+    writeFileSync(join(repo, 'tracked.txt'), 'before\n');
+    git(repo, ['-c', 'user.email=ftown@localhost', '-c', 'user.name=ftown', 'add', '-A']);
+    git(repo, ['-c', 'user.email=ftown@localhost', '-c', 'user.name=ftown', 'commit', '-m', 'init']);
+    git(repo, ['worktree', 'add', '-b', 'feature', wt]);
+    writeFileSync(join(wt, 'tracked.txt'), 'after\n');
+    writeFileSync(join(wt, '.env'), 'not-for-commit\n');
+    writeFileSync(join(wt, 'fake.key'), 'not-a-real-private-key\n');
+    writeFileSync(join(wt, 'fake.pem'), 'not-a-real-certificate\n');
+    writeFileSync(join(wt, 'id_test'), 'not-a-real-key\n');
+    writeFileSync(join(wt, 'credentials.json'), '{}\n');
+    writeFileSync(join(wt, 'bundle.p12'), 'not-a-real-container\n');
+    writeFileSync(join(wt, 'large.dat'), Buffer.alloc(1024 * 1024 + 1, 0x78));
+    writeFileSync(join(wt, 'safe.txt'), 'safe small handoff file\n');
+    writeFileSync(outside, 'outside the worktree\n');
+    symlinkSync(outside, join(wt, 'outside-link.txt'));
+
+    const h = harness({ scanStagedSecrets: async () => ({ code: 0, stdout: '[]', stderr: '' }) });
+    h.sessions.set('old', session({
+      id: 'old',
+      workingDir: wt,
+      worktree: { repoRoot: repo, path: wt, branch: 'feature', base: 'main', createdByBridge: true },
+    }));
+    const result = await handoffSession(h.deps, 'old', { shellType: 'shell' });
+    const committed = git(wt, ['diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD']).trim().split('\n').sort();
+    assert.deepEqual(committed, ['safe.txt', 'tracked.txt']);
+    assert.equal(result.committed, true);
+    assert.match(h.created[0].prompt ?? '', /left uncommitted:/);
+    assert.match(h.created[0].prompt ?? '', /\.env \(secret-like name\)/);
+    assert.match(h.created[0].prompt ?? '', /fake\.key \(secret-like name\)/);
+    assert.match(h.created[0].prompt ?? '', /fake\.pem \(secret-like name\)/);
+    assert.match(h.created[0].prompt ?? '', /id_test \(secret-like name\)/);
+    assert.match(h.created[0].prompt ?? '', /credentials\.json \(secret-like name\)/);
+    assert.match(h.created[0].prompt ?? '', /bundle\.p12 \(secret-like name\)/);
+    assert.match(h.created[0].prompt ?? '', /large\.dat \(larger than 1 MiB\)/);
+    assert.match(h.created[0].prompt ?? '', /outside-link\.txt \(outside worktree\)/);
+    assert.equal(git(wt, ['status', '--porcelain']).includes('large.dat'), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a gitleaks finding aborts the wip commit and is listed in the handoff brief', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ftown-handoff-gitleaks-'));
+  const repo = join(root, 'repo');
+  const wt = join(root, 'wt');
+  try {
+    mkdirSync(repo);
+    const git = (cwd: string, args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8' });
+    git(repo, ['init', '-b', 'main']);
+    writeFileSync(join(repo, 'tracked.txt'), 'before\n');
+    git(repo, ['-c', 'user.email=ftown@localhost', '-c', 'user.name=ftown', 'add', '-A']);
+    git(repo, ['-c', 'user.email=ftown@localhost', '-c', 'user.name=ftown', 'commit', '-m', 'init']);
+    git(repo, ['worktree', 'add', '-b', 'feature', wt]);
+    writeFileSync(join(wt, 'tracked.txt'), 'changed\n');
+    writeFileSync(join(wt, 'safe.txt'), 'has a leak according to the scanner\n');
+    const h = harness({
+      scanStagedSecrets: async () => ({ code: 1, stdout: '[{"File":"safe.txt"}]', stderr: '' }),
+    });
+    h.sessions.set('old', session({
+      id: 'old',
+      workingDir: wt,
+      worktree: { repoRoot: repo, path: wt, branch: 'feature', base: 'main', createdByBridge: true },
+    }));
+    const result = await handoffSession(h.deps, 'old', { shellType: 'shell' });
+    assert.equal(result.committed, false);
+    assert.equal(git(wt, ['log', '-1', '--format=%s']).trim(), 'init');
+    assert.equal(git(wt, ['diff', '--cached', '--name-only']).trim(), '');
+    assert.match(h.created[0].prompt ?? '', /gitleaks flagged staged content/);
+    assert.match(h.created[0].prompt ?? '', /safe\.txt/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('handoff stops the old writer before creating and waits for replacement health before archive', async () => {
+  const h = harness();
+  h.sessions.set('old', session({ id: 'old', workingDir: undefined }));
+  await handoffSession(h.deps, 'old', { shellType: 'shell' });
+  assert.deepEqual(h.events, ['stop', 'create', 'healthy', 'archive']);
+});
+
+test('an unhealthy replacement leaves the old session unarchived', async () => {
+  const h = harness({ healthy: async () => false });
+  h.sessions.set('old', session({ id: 'old' }));
+  await assert.rejects(() => handoffSession(h.deps, 'old', { shellType: 'shell' }), /replacement session new-session is not healthy/);
+  assert.deepEqual(h.archived, []);
 });
 
 test('a subdirectory of the checkout is not committed', async () => {
