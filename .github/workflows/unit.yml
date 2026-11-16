@@ -32,7 +32,6 @@ jobs:
   unit-minimal:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
         with:
@@ -59,8 +58,13 @@ jobs:
               exit 1
             fi
           done
+      # Informational until P1.1/P1.3 land: the suite fails here without
+      # jq/tmux/zsh by design. Step-level continue-on-error keeps the job (and
+      # the PR rollup) green while the failing assertions stay in the log;
+      # remove it when this job becomes required.
       - name: Bridge unit tests
         working-directory: bridge
+        continue-on-error: true
         run: |
           npm ci
           npm test
