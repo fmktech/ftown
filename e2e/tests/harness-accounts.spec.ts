@@ -35,6 +35,7 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
       await writeFile(join(bridge.home, ".ftown", "accounts.json"), JSON.stringify({ version: 1, accounts: [{ id: "coding", harness: "codex", label: "Coding subscription", configDir: accountDir }] }), { mode: 0o600 });
       await login(page);
       await approvePairLink(page, prompt.link, prompt.code);
+      await bridge.waitReady();
       await expect.poll(() => tryReadBridgePointer(bridge!.home)?.bridgeId, { timeout: 30_000 }).toBe(bridgeId);
       await page.goto("/dashboard");
       if (viewport.name === "mobile") await page.getByRole("tab", { name: "Workspace", exact: true }).click();

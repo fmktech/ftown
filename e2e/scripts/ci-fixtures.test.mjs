@@ -171,6 +171,23 @@ test('parsePairingOutput returns the last link+code pair, else null', () => {
   assert.equal(parsePairingOutput(`${link(1)}\nType this code on the page to confirm it is this computer: 12345\n`), null);
 });
 
+test('isolated bridge readiness waits for the marker and reports timeout or exit', async () => {
+  const { waitForBridgeReady } = helper('e2e/helpers/ledger-bridge.ts', {
+    'node:child_process': {}, 'node:fs': {}, 'node:fs/promises': {}, 'node:path': path,
+    'node:util': { promisify: fn => fn },
+    './config': { E2E_DIR: e2e, UI_BASE_URL: 'http://localhost:3001' },
+  }, { process: { env: {}, getuid: () => 501 }, setTimeout });
+  let output = 'pairing complete';
+  let pending = true;
+  const ready = waitForBridgeReady(() => output, { timeoutMs: 500, alive: () => true }).then(() => { pending = false; });
+  await Promise.resolve();
+  assert.equal(pending, true);
+  output += '\n[Bridge] Ready and listening for commands\n';
+  await ready;
+  await assert.rejects(waitForBridgeReady(() => '', { timeoutMs: 1, alive: () => true }), /did not reach command readiness in time/);
+  await assert.rejects(waitForBridgeReady(() => '', { alive: () => false }), /exited before command readiness/);
+});
+
 test('replacement bridge keeps the exact entrypoint, no removed flags, isolated env and waits for the NEW pid', async () => {
   const home = path.join(e2e, '.bridge-home');
   const tmuxDir = '/tmp/ftpk-Zz9Yy8';
