@@ -180,7 +180,7 @@ describe('muse-session-start end to end', () => {
   it('reports an unimplemented kind on stderr without posting', async () => {
     const spy = recorder(okPost);
     const stderr: string[] = [];
-    const code = await runHookCommand({ args: ['antigravity'], input, env, post: spy.post, err: (m) => stderr.push(m) });
+    const code = await runHookCommand({ args: ['grok'], input, env, post: spy.post, err: (m) => stderr.push(m) });
     assert.equal(code, 0);
     assert.deepEqual(spy.payloads, []);
     assert.match(stderr[0], /not implemented yet/);
