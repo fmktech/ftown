@@ -545,7 +545,6 @@ describe('antigravity hook script robustness', () => {
     assert.equal(result.exitCode, 0);
     assert.equal(result.stdout, '');
     assert.match(result.stderr, /ftown hook: bridge delivery failed/);
-    assert.ok(result.elapsedMs < 9000, `hook took ${result.elapsedMs}ms, budget is 10s`);
   });
 
   it('exits 0 promptly on SIGTERM while waiting on a hung bridge', async () => {

@@ -927,13 +927,17 @@ describe('never throws', () => {
 });
 
 describe('bounded work and error cap', () => {
-  it('reports exactly one error for a 1,000,000-entry tiers array, quickly', () => {
-    const tiers = new Array<unknown>(1_000_000).fill(tier());
-    const started = performance.now();
+  it('reports exactly one error for a 1,000,000-entry tiers array without iterating it', () => {
+    // A proxy that throws on any indexed read proves the length guard runs
+    // before the parser walks the array — no wall-clock timing needed.
+    const tiers = new Proxy(new Array<unknown>(1_000_000), {
+      get(target, key, receiver) {
+        if (typeof key === 'string' && /^\d+$/.test(key)) throw new Error('oversized tiers were iterated');
+        return Reflect.get(target, key, receiver);
+      },
+    });
     const result = parseModelRoutingConfig(input(tiers));
-    const elapsed = performance.now() - started;
     assert.deepEqual(result, { ok: false, errors: ['tiers has 1000000 entries; the limit is 12'] });
-    assert.ok(elapsed < 200, `took ${elapsed} ms`);
   });
 
   it('reports one error for picks over the limit without iterating them', () => {

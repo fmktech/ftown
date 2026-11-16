@@ -597,7 +597,9 @@ describe('account write budget (admitAccountWrite)', () => {
     expect(row(base.accountId).head).toBe(longest.head);
   });
 
-  it('an over-limit sticky set is rejected before the budget is consulted', async () => {
+  // 8192-entry sticky sets and passkey crypto are slow under parallel CI load;
+  // the generous timeout only guards against a hang, not a wall-clock budget.
+  it('an over-limit sticky set is rejected before the budget is consulted', { timeout: 30_000 }, async () => {
     const { passkey, base, d1 } = await registered();
     db.rows.set(base.accountId, await sealed(base, { deviceIds: STICKY_FLOOD_8192, bridgeIds: [] }, row(base.accountId).version));
     const before = row(base.accountId);
@@ -1131,7 +1133,7 @@ describe('sticky revocations', () => {
     expect(admitAccountWrite).not.toHaveBeenCalled();
   });
 
-  it('a sticky set at its limit: no write, still 409 diverged, logged once', async () => {
+  it('a sticky set at its limit: no write, still 409 diverged, logged once', { timeout: 30_000 }, async () => {
     const { passkey, base, d1 } = await registered();
     const { chain: stored } = await addDevice(base, passkey, 'S1');
     expect((await offer(stored.ledger)).decision).toBe('adopt');
@@ -1579,7 +1581,7 @@ describe('concurrency', () => {
 });
 
 describe('write safety', () => {
-  it('an over-limit sticky set is rejected before any write, also when the removal carried by an owner-chosen history pushes it over', async () => {
+  it('an over-limit sticky set is rejected before any write, also when the removal carried by an owner-chosen history pushes it over', { timeout: 30_000 }, async () => {
     const { passkey, base, d1 } = await registered();
     const revoked = await append(base, passkey, { type: 'revoke_device', endpointId: d1.endpoint.id });
     expect((await offer(revoked.ledger)).decision).toBe('adopt');
