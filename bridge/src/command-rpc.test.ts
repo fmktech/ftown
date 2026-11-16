@@ -164,10 +164,62 @@ test('answer_session_attention delivers via waiter, hook, or mail and maps error
 
   const before = responses.length;
   await handler({ type: 'answer_session_attention', requestId: 'foreign', payload: { bridgeId: 'foreign', sessionId: 'session', eventId: 'x', answers: [] } });
-  assert.equal(responses.length, before);
+  assert.equal(responses.length, before + 1); assert.equal(code(), 'wrong_bridge');
   for (const bad of [{ extra: 1 }, { answers: 'x' }, { eventId: '../x' }, { sessionId: 'missing' }]) {
     await send(invalidEvent.id, bad); assert.equal(responses.at(-1)?.success, false);
   }
+});
+
+test('answer_session_attention always answers with exactly one typed error', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'attention-answer-typed-'));
+  await mkdir(join(dir, 'session'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const attentionStore = new AttentionStore(id => join(dir, id));
+  const question = { question: 'Pick', options: [{ label: 'A' }, { label: 'B' }], multiSelect: false, allowText: false };
+  const notice = (await attentionStore.record('session', 'Notification', { notification_type: 'agent_needs_input', title: 'Work complete', message: 'Review the result and checks.' }))!;
+  const asked = (await attentionStore.record('session', 'Notification', { notification_type: 'agent_needs_input', message: 'Q' }, { prompt: { channel: 'mail', questions: [question] } }))!;
+  const responses: CommandResponse[] = [];
+  const live = new Set(['session']);
+  const handler = createCommandHandler({ bridgeId: 'owner', attentionStore,
+    sessionController: { get: async (id: string) => live.has(id) ? { id, bridgeId: 'owner' } : null } as unknown as SessionController,
+    publishCommandResponse: async response => { responses.push(response); } });
+  const send = async (payload: Record<string, unknown>): Promise<CommandResponse[]> => {
+    responses.length = 0;
+    await handler({ type: 'answer_session_attention', requestId: 'r', payload });
+    return responses;
+  };
+  const code = (list: CommandResponse[]): string | undefined => (list[0]?.data as { code?: string } | undefined)?.code;
+
+  // A notice with no question: one typed error, never silence.
+  let answers = await send({ bridgeId: 'owner', sessionId: 'session', eventId: notice.id, answers: [{ selected: [0] }] });
+  assert.equal(answers.length, 1);
+  assert.equal(answers[0]?.success, false);
+  assert.equal(code(answers), 'attention_not_answerable');
+
+  // A retired child: one typed error, never silence and never a bare string.
+  live.delete('session');
+  answers = await send({ bridgeId: 'owner', sessionId: 'session', eventId: asked.id, answers: [{ selected: [0] }] });
+  assert.equal(answers.length, 1);
+  assert.equal(answers[0]?.success, false);
+  assert.equal(code(answers), 'session_unavailable');
+  live.add('session');
+
+  // A command addressed to another bridge still gets one typed answer.
+  answers = await send({ bridgeId: 'other', sessionId: 'session', eventId: asked.id, answers: [{ selected: [0] }] });
+  assert.equal(answers.length, 1);
+  assert.equal(answers[0]?.success, false);
+  assert.equal(code(answers), 'wrong_bridge');
+
+  // A malformed request gets one typed error.
+  answers = await send({ bridgeId: 'owner', sessionId: 'session', eventId: asked.id, answers: [], extra: 1 });
+  assert.equal(answers.length, 1);
+  assert.equal(answers[0]?.success, false);
+  assert.equal(code(answers), 'invalid_attention_request');
+
+  // Other commands keep the silent drop: a bridge must not answer for another bridge.
+  responses.length = 0;
+  await handler({ type: 'get_session_attention', requestId: 'foreign', payload: { bridgeId: 'other', sessionId: 'session' } });
+  assert.equal(responses.length, 0);
 });
 
 test('answer_session_attention: live waiter on mail channel skips mail; missing mail dep reports mail_failed but stores the answer', async t => {

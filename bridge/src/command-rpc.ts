@@ -165,7 +165,10 @@ async function handleGetSessionBoard(
 /**
  * Centrifugo commands:rpc adapter: a thin wire-marshaling switch around the
  * transport-agnostic session controller. Commands addressed to another
- * bridge (payload.bridgeId mismatch) are ignored without a response.
+ * bridge (payload.bridgeId mismatch) are ignored without a response, except
+ * for answer_session_attention: an answer request always gets one typed
+ * answer, because a silent drop leaves the dashboard waiting out its RPC
+ * deadline and reporting a transport timeout instead of a reason.
  */
 export function createCommandHandler(deps: CommandRpcDeps): (command: Command, verified?: VerifiedApplication) => Promise<void> {
   const { bridgeId, sessionController } = deps;
@@ -176,6 +179,14 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
     const payloadBridgeId = command.payload && typeof command.payload === 'object' && !Array.isArray(command.payload)
       ? (command.payload as Record<string, unknown>).bridgeId as string | undefined : undefined;
     if (payloadBridgeId && payloadBridgeId !== bridgeId) {
+      if (command.type === 'answer_session_attention') {
+        try {
+          await deps.publishCommandResponse({ requestId: command.requestId, success: false,
+            error: 'This attention item belongs to another computer.', data: { code: 'wrong_bridge' } }, verified);
+        } catch (err) {
+          console.error('[Bridge] Failed to publish the wrong-bridge answer:', err instanceof Error ? err.message : err);
+        }
+      }
       return;
     }
 
@@ -393,10 +404,10 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
           const payload = command.payload as Record<string, unknown>;
           const allowed = command.type === 'resolve_session_attention' ? ['bridgeId', 'sessionId', 'eventId'] : ['bridgeId', 'sessionId'];
           if (payload.bridgeId !== bridgeId || typeof payload.sessionId !== 'string' || !/^[A-Za-z0-9_-]+$/.test(payload.sessionId)
-            || Object.keys(payload).some(key => !allowed.includes(key))) throw new Error('Invalid attention target');
-          if (command.type === 'resolve_session_attention' && (typeof payload.eventId !== 'string' || !/^[A-Za-z0-9_-]+$/.test(payload.eventId))) throw new Error('Invalid attention eventId');
+            || Object.keys(payload).some(key => !allowed.includes(key))) throw new AttentionError('invalid_attention_request', 'Invalid attention target', 400);
+          if (command.type === 'resolve_session_attention' && (typeof payload.eventId !== 'string' || !/^[A-Za-z0-9_-]+$/.test(payload.eventId))) throw new AttentionError('invalid_attention_request', 'Invalid attention eventId', 400);
           const session = await sessionController.get(payload.sessionId);
-          if (!session || session.bridgeId !== bridgeId) throw new Error('Unknown session');
+          if (!session || session.bridgeId !== bridgeId) throw new AttentionError('session_unavailable', 'This session is no longer available', 404);
           if (!deps.attentionStore) throw new AttentionError('attention_not_ready', 'Attention store is not ready', 503);
           const snapshot = command.type === 'get_session_attention'
             ? await deps.attentionStore.explicitSnapshot(payload.sessionId)
@@ -411,9 +422,9 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
           const payload = command.payload as Record<string, unknown>;
           if (!payload || typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).sort().join(',') !== 'answers,bridgeId,eventId,sessionId'
             || payload.bridgeId !== bridgeId || typeof payload.sessionId !== 'string' || !/^[A-Za-z0-9_-]+$/.test(payload.sessionId)
-            || typeof payload.eventId !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(payload.eventId) || !Array.isArray(payload.answers)) throw new Error('Invalid attention answer');
+            || typeof payload.eventId !== 'string' || !/^[A-Za-z0-9_-]{1,100}$/.test(payload.eventId) || !Array.isArray(payload.answers)) throw new AttentionError('invalid_attention_request', 'Invalid attention answer', 400);
           const session = await sessionController.get(payload.sessionId);
-          if (!session || session.bridgeId !== bridgeId) throw new Error('Unknown session');
+          if (!session || session.bridgeId !== bridgeId) throw new AttentionError('session_unavailable', 'This session is no longer available', 404);
           if (!deps.attentionStore) throw new AttentionError('attention_not_ready', 'Attention store is not ready', 503);
           const { item, snapshot, waiterLive } = await deps.attentionStore.answer(payload.sessionId, payload.eventId, payload.answers, undefined, { kind: 'human' });
           let delivery: AttentionAnswerDelivery;
