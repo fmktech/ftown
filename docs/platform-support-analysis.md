@@ -1,9 +1,16 @@
 # Platform support analysis: Linux, WSL2 and native Windows
 
-Status: analysis only, no code changed. Audited at `ac8c8b5` (main, 2026-11-15).
+Status: historical audit at `ac8c8b5` (main, 2026-11-15). The findings and
+roadmap below describe that snapshot and may be stale. Linux and WSL2 are now
+supported; see the [README](../README.md#bridge-platforms) for current setup.
 
-ftown is developed and run on macOS. This document records what works elsewhere today,
-what is broken, and a roadmap of small tasks to close the gaps.
+Phase 1 implementation completed for P1.1–P1.9 and P1.12 (session shells,
+preflight, Node hooks, PATH setup, config paths, temporary paths, Grok quota,
+Claude credentials, WSL2 detection and session-list RPC). P1.13 documents the
+supported platforms. Phase 1 exit criteria still include the listed CI and WSL2
+manual checks; implementation status alone does not establish that gate.
+
+The original audit records the platform findings and proposed roadmap at that revision.
 
 ## How to read this
 
@@ -396,7 +403,7 @@ job must be stable under repeated runs before it becomes required (flakes are fa
 | P1.7 | Grok quota refresh on Linux: use util-linux `script -qc` and PATH lookup instead of absolute BSD paths, then lift the darwin gate. | M | unit with a fake `script`; manual check on Linux |
 | P1.8 | Verify and document the claude credentials file on Linux; make the "not signed in" message name the path looked at. | S | unit; manual check |
 | P1.9 | WSL2 detection (`/proc/version` contains `microsoft`): correct the Solo LAN banner, and warn when the workdir is under `/mnt/`. | S | unit with injected probe |
-| P1.10 | Docker Solo: add `jq`/`curl` until P1.3 lands, fix the image tag mismatch, document uid mapping, add a `linux/amd64,linux/arm64` buildx check. | M | new `docker-solo` job builds both arches and boots to healthy |
+| P1.10 | Docker Solo: build the checked-out bridge source, keep the Compose image tag aligned with `bridge/package.json`, document uid mapping, and verify linux/amd64 + linux/arm64 with buildx. | M | `docker-solo` asserts the installed bridge package and Compose tag versions, builds both arches, and boots amd64 to healthy |
 | P1.11 | UI: accept Ctrl+Enter in `NewSessionModal`, show the right hint. | S | vitest component test |
 | P1.12 | Replace the UI's `python3` heredoc snippets with a bridge RPC that lists sessions in Node. Removes the python3 prerequisite and a Windows blocker. One task per picker (2 × M). | M each | bridge unit + existing e2e picker specs |
 | P1.13 | Document Linux and WSL2 as supported in the README with prerequisites. Depends on P1.1–P1.3. | S | docs review |
@@ -441,7 +448,7 @@ phase 3 with the harness list narrowed to those that exist natively.
 | Job | Now | After phase 0 | After phase 1 | After phase 3 |
 |---|---|---|---|---|
 | unit, ubuntu (zsh+tmux+jq) | required, launch proof skipped | required, nothing skipped | required | required |
-| unit-minimal, ubuntu (bash only) | — | informational | required | required |
+| unit-minimal, ubuntu (bash only) | required | required | required | required |
 | unit, macos | — | required | required | required |
 | e2e, ubuntu (3 shards) | required | required | required | required |
 | docker-solo, amd64+arm64 | — | — | required | required |

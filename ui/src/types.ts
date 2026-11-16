@@ -167,6 +167,7 @@ export type CommandType =
   | 'get_session_attention' | 'resolve_session_attention' | 'answer_session_attention' | 'get_session_board' | 'send_message'
   | 'create_session' | 'stop_session' | 'list_sessions' | 'get_history'
   | 'retry_session' | 'handoff_session' | 'rename_session' | 'remove_session' | 'bridge_exec'
+  | 'list_native_sessions'
   | 'update_session_parent'
   | 'get_session_usage' | 'get_sessions_usage';
 

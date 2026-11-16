@@ -3,7 +3,8 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { ShellType } from "@/types";
 import { BridgeInfo } from "@/hooks/useBridges";
-import { BridgeExecResponse, CreateSessionBridgeError, CreateSessionOptions } from "@/hooks/useSessions";
+import { CreateSessionBridgeError, CreateSessionOptions } from "@/hooks/useSessions";
+import type { Command, CommandResponse } from "@/types";
 import { ClaudeSessionPicker } from "./ClaudeSessionPicker";
 import { CursorSessionPicker } from "./CursorSessionPicker";
 import EnvVarsEditor, { getStoredEnvVars } from "./EnvVarsEditor";
@@ -21,7 +22,7 @@ interface NewSessionModalProps {
   onSubmit: (prompt: string, options: CreateSessionOptions) => void | Promise<void>;
   bridges: BridgeInfo[];
   defaults?: SessionDefaults;
-  bridgeExec: (command: string, workingDir: string, bridgeId: string) => Promise<BridgeExecResponse>;
+  sendCommand: (command: Command) => Promise<CommandResponse>;
 }
 
 const FIREWORKS_MODELS_KEY = "ftown:fireworksModels";
@@ -319,7 +320,7 @@ function ProviderTokenHint({ provider, envVar, flavor }: { provider: string; env
   );
 }
 
-export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, bridgeExec }: NewSessionModalProps) {
+export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, sendCommand }: NewSessionModalProps) {
   const [name, setName] = useState("");
   const [workingDir, setWorkingDir] = useState("");
   const [topShell, setTopShell] = useState<TopShell>("claude");
@@ -940,7 +941,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
                   setSelectedCursorSessionId(sid);
                   setSelectedCursorSummary(summary);
                 }}
-                bridgeExec={bridgeExec}
+                sendCommand={sendCommand}
               />
             )
           )}
@@ -967,7 +968,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
                   setSelectedClaudeSessionId(sid);
                   setSelectedClaudeSummary(summary);
                 }}
-                bridgeExec={bridgeExec}
+                sendCommand={sendCommand}
               />
             )
           )}

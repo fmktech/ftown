@@ -7,6 +7,8 @@ import { appendFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
+import { listNativeSessions } from './native-session-list.js';
+import type { NativeSessionHarness, NativeSessionSummary } from './native-session-list.js';
 
 import { prReviewGeneration, toWireSession } from './session-wire.js';
 import { normalizePullRequestUrl } from './pull-request-url.js';
@@ -86,6 +88,8 @@ export interface CommandRpcDeps {
   updateEffects?: UpdateEffects;
   /** The bridge's long-lived model-routing service (get_model_routing / set_model_routing); resolved only when one of those commands runs. */
   modelRouting?: () => ModelRoutingService;
+  /** Native harness session listing; injectable for command boundary tests. */
+  listNativeSessions?: (harness: NativeSessionHarness, workingDir: string) => Promise<NativeSessionSummary[]>;
   /** Read-only board snapshot for `get_session_board`. Absent → unavailable. */
   sessionBoard?: SessionBoardSource;
   /** One-step replacement of a session in its current directory. */
@@ -611,6 +615,20 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
             const execErr = err as ExecError;
             response = { requestId: command.requestId, success: true, data: { stdout: execErr.stdout, stderr: execErr.stderr, exitCode: execErr.code } };
           }
+          break;
+        }
+
+        case 'list_native_sessions': {
+          const payload = command.payload as Record<string, unknown>;
+          if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+            || Object.keys(payload).some(key => !['bridgeId', 'workingDir', 'harness'].includes(key))
+            || payload.bridgeId !== bridgeId || typeof payload.workingDir !== 'string' || !payload.workingDir.trim()
+            || (payload.harness !== 'claude' && payload.harness !== 'cursor')) {
+            response = { requestId: command.requestId, success: false, error: 'Invalid native session list request', data: { code: 'invalid' } };
+            break;
+          }
+          const sessions = await (deps.listNativeSessions ?? listNativeSessions)(payload.harness, payload.workingDir);
+          response = { requestId: command.requestId, success: true, data: { sessions } };
           break;
         }
 
