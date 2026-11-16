@@ -4,6 +4,12 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
+import {
+  resolveSessionShell,
+  sessionShellCommandLine,
+  type ResolveSessionShell,
+} from './session-shell.js';
+
 const execFileAsync = promisify(execFile);
 
 /** Dedicated tmux server socket so ftown never touches the user's tmux. */
@@ -15,6 +21,17 @@ const SESSION_PREFIX = 'ftown-';
 const MIN_TMUX_VERSION = 3.02;
 
 let tmuxAvailable: boolean | undefined;
+
+/** Test seam: inject a resolved shell so launch tests can pin a specific shell. */
+let resolveSessionShellForTest: ResolveSessionShell = resolveSessionShell;
+
+export function __setSessionShellResolverForTest(resolve: ResolveSessionShell): void {
+  resolveSessionShellForTest = resolve;
+}
+
+export function __resetSessionShellResolverForTest(): void {
+  resolveSessionShellForTest = resolveSessionShell;
+}
 
 export function isTmuxAvailable(): boolean {
   if (tmuxAvailable === undefined) {
@@ -143,8 +160,10 @@ export async function createTmuxSession(options: CreateTmuxSessionOptions): Prom
     '-x', String(options.cols),
     '-y', String(options.rows),
   ];
-  // Single-string shell-command keeps compatibility across tmux versions.
-  args.push(`/bin/zsh -l -c ${shellQuote(inner)}`);
+  // Single-string shell-command keeps compatibility across tmux versions. The
+  // outer string is parsed by POSIX sh; the resolved login shell receives the
+  // script as one literal `-c` argument.
+  args.push(sessionShellCommandLine(resolveSessionShellForTest(), inner));
 
   await execFileAsync('tmux', args, { env: options.env });
   invalidateTmuxSessionCache(options.sessionId);
