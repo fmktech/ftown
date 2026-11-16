@@ -1,7 +1,19 @@
+import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { parseClaudeCredentials, parseClaudeUsageResponse, safeReason } from './claude.js';
+import {
+  claudeNotSignedInMessage,
+  fetchClaudeQuota,
+  loadClaudeCredentials,
+  parseClaudeCredentials,
+  parseClaudeUsageResponse,
+  resolveClaudeCredentialSources,
+  safeReason,
+} from './claude.js';
 import type { QuotaWindow } from './types.js';
 
 const OBSERVED = '2026-11-13T10:00:00.000Z';
@@ -356,5 +368,149 @@ describe('parseClaudeUsageResponse scopedLimits', () => {
       OBSERVED,
     );
     assert.equal(quota.scopedLimits?.[0]?.usedPercent, null);
+  });
+});
+
+const FIXTURE_TOKEN = 'sk-ant-oat01-fixture-token';
+const FIXTURE_EXPIRES = 1999999999000;
+
+function credsDocument(token = FIXTURE_TOKEN): string {
+  return credsJson({ accessToken: token, expiresAt: FIXTURE_EXPIRES, subscriptionType: 'max' });
+}
+
+async function fixtureHome(t: { after: (fn: () => Promise<void>) => void }): Promise<string> {
+  const home = await mkdtemp(join(tmpdir(), 'claude-creds-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  return home;
+}
+
+describe('resolveClaudeCredentialSources', () => {
+  it('Linux: only the credentials file under the fixture home', async (t) => {
+    const home = await fixtureHome(t);
+    const expected = join(home, '.claude', '.credentials.json');
+    assert.deepEqual(resolveClaudeCredentialSources(home, {}, 'linux'), [
+      { kind: 'file', location: expected, label: expected },
+    ]);
+  });
+
+  it('Linux: CLAUDE_CONFIG_DIR replaces the config directory', async (t) => {
+    const home = await fixtureHome(t);
+    const configDir = join(home, 'account-two', 'claude');
+    assert.deepEqual(
+      resolveClaudeCredentialSources(home, { CLAUDE_CONFIG_DIR: configDir }, 'linux').map((s) => s.location),
+      [join(configDir, '.credentials.json')],
+    );
+  });
+
+  it('Linux: empty and relative CLAUDE_CONFIG_DIR values are ignored', async (t) => {
+    const home = await fixtureHome(t);
+    const expected = join(home, '.claude', '.credentials.json');
+    for (const value of ['', '   ', '.claude-work', '~/.claude-work']) {
+      assert.equal(resolveClaudeCredentialSources(home, { CLAUDE_CONFIG_DIR: value }, 'linux')[0]?.location, expected);
+    }
+  });
+
+  it('macOS: keychain entry first, then the file fallback', async (t) => {
+    const home = await fixtureHome(t);
+    const sources = resolveClaudeCredentialSources(home, {}, 'darwin');
+    assert.deepEqual(sources.map((s) => s.kind), ['keychain', 'file']);
+    assert.equal(sources[0]?.location, 'Claude Code-credentials');
+    assert.equal(sources[1]?.location, join(home, '.claude', '.credentials.json'));
+  });
+
+  it('macOS: CLAUDE_CONFIG_DIR keys the keychain service by config-dir hash', async (t) => {
+    const home = await fixtureHome(t);
+    const configDir = join(home, 'account-two', 'claude');
+    const hash = createHash('sha256').update(configDir).digest('hex').slice(0, 8);
+    const sources = resolveClaudeCredentialSources(home, { CLAUDE_CONFIG_DIR: configDir }, 'darwin');
+    assert.equal(sources[0]?.location, `Claude Code-credentials-${hash}`);
+    assert.equal(sources[1]?.location, join(configDir, '.credentials.json'));
+  });
+
+  it('the not-signed-in message names every location looked at', async (t) => {
+    const home = await fixtureHome(t);
+    const configDir = join(home, 'work', 'claude');
+    const linux = resolveClaudeCredentialSources(home, { CLAUDE_CONFIG_DIR: configDir }, 'linux');
+    assert.equal(
+      claudeNotSignedInMessage(linux),
+      `not signed in: run \`claude\` and log in (looked at ${join(configDir, '.credentials.json')})`,
+    );
+    const mac = claudeNotSignedInMessage(resolveClaudeCredentialSources(home, {}, 'darwin'));
+    assert.ok(mac.includes('Claude Code-credentials'));
+    assert.ok(mac.includes(join(home, '.claude', '.credentials.json')));
+  });
+});
+
+describe('loadClaudeCredentials with fixture homes', () => {
+  it('Linux: reads the fixture-home file and never calls the keychain', async (t) => {
+    const home = await fixtureHome(t);
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await writeFile(join(home, '.claude', '.credentials.json'), credsDocument());
+    const keychainServices: string[] = [];
+    const loaded = await loadClaudeCredentials(resolveClaudeCredentialSources(home, {}, 'linux'), 1000, {
+      readKeychain: async (service) => {
+        keychainServices.push(service);
+        return null;
+      },
+    });
+    assert.deepEqual(loaded, { accessToken: FIXTURE_TOKEN, expiresAt: FIXTURE_EXPIRES, plan: 'max' });
+    assert.deepEqual(keychainServices, []);
+  });
+
+  it('Linux: reads CLAUDE_CONFIG_DIR credentials, not the default home file', async (t) => {
+    const home = await fixtureHome(t);
+    const configDir = join(home, 'work', 'claude');
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await writeFile(join(home, '.claude', '.credentials.json'), credsDocument('default-file-token'));
+    await mkdir(configDir, { recursive: true });
+    await writeFile(join(configDir, '.credentials.json'), credsDocument('override-file-token'));
+    const loaded = await loadClaudeCredentials(
+      resolveClaudeCredentialSources(home, { CLAUDE_CONFIG_DIR: configDir }, 'linux'),
+      1000,
+    );
+    assert.equal(loaded?.accessToken, 'override-file-token');
+  });
+
+  it('macOS: falls back to the fixture-home file when the keychain has no entry', async (t) => {
+    const home = await fixtureHome(t);
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await writeFile(join(home, '.claude', '.credentials.json'), credsDocument());
+    const asked: string[] = [];
+    const loaded = await loadClaudeCredentials(resolveClaudeCredentialSources(home, {}, 'darwin'), 1000, {
+      readKeychain: async (service) => {
+        asked.push(service);
+        return null;
+      },
+    });
+    assert.equal(loaded?.accessToken, FIXTURE_TOKEN);
+    assert.deepEqual(asked, ['Claude Code-credentials']);
+  });
+
+  it('macOS: prefers the keychain entry over the file', async (t) => {
+    const home = await fixtureHome(t);
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await writeFile(join(home, '.claude', '.credentials.json'), credsDocument('file-token'));
+    const loaded = await loadClaudeCredentials(resolveClaudeCredentialSources(home, {}, 'darwin'), 1000, {
+      readKeychain: async () => credsDocument('keychain-token'),
+    });
+    assert.equal(loaded?.accessToken, 'keychain-token');
+  });
+
+  it('returns null when no source holds a valid token', async (t) => {
+    const home = await fixtureHome(t);
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await writeFile(join(home, '.claude', '.credentials.json'), '{not json');
+    const loaded = await loadClaudeCredentials(resolveClaudeCredentialSources(home, {}, 'darwin'), 1000, {
+      readKeychain: async () => credsDocument().replace('accessToken', 'wrongField'),
+    });
+    assert.equal(loaded, null);
+  });
+
+  it('the quota fetcher names the looked-at file when no credentials exist', async (t) => {
+    if (process.platform === 'darwin') return t.skip('a real keychain may hold a credential on macOS runners');
+    const home = await fixtureHome(t);
+    const quota = await fetchClaudeQuota({ timeoutMs: 500, now: () => new Date(OBSERVED), homeDir: home });
+    assert.equal(quota.status, 'auth');
+    assert.equal(quota.message, claudeNotSignedInMessage(resolveClaudeCredentialSources(home)));
   });
 });

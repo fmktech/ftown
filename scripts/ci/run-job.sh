@@ -39,8 +39,8 @@ case "$job" in
     # checkout with core.autocrlf=true.
     bash scripts/ci/check-eol.sh
     node --test scripts/ci/check-eol.test.mjs
-    # The opencode child-launch proof starts `/bin/zsh -l -c` inside tmux.
-    # A hosted runner without both never runs that regression.
+    # The opencode child-launch proof starts the resolved login shell inside
+    # tmux. A hosted runner without tmux never runs that regression.
     sudo apt-get update
     sudo apt-get install -y zsh tmux
     # Runner images ship group-writable completion dirs. compaudit then blocks a login zsh.
