@@ -8,6 +8,7 @@ import { join, resolve } from 'node:path';
 import { Command, CommanderError } from 'commander';
 import { api, loadPointer, bridgePointerPath, listSessions, resolveSessionId, fetchInbox, sendMail } from './cli-client.js';
 import { runAskHookCli, runningUnderGrokHook } from './ask-question-hook.js';
+import { runHookCli } from './hook-cli.js';
 import { cleanTerminalLine, formatLogLines, isDisplayableLine } from './harness-format.js';
 import {
   MAIL_TYPES,
@@ -549,6 +550,7 @@ async function cmdHookPump(): Promise<void> {
 }
 
 export async function runHarness(argv: string[]): Promise<number> {
+let hookExitCode: number | undefined;
 const program = new Command();
 program.exitOverride();
 program
@@ -685,6 +687,13 @@ mail
   });
 
 program
+  .command('hook [args...]')
+  .description('Shared hook entry point: ftown-harness hook <kind> (reads native hook JSON from stdin)')
+  .action(async (args: string[]) => {
+    hookExitCode = await runHookCli(args);
+  });
+
+program
   .command('hook-pump')
   .description('Claude Code hook: deliver pending mail (reads hook JSON from stdin)')
   .action(async () => {
@@ -700,7 +709,7 @@ program
 
 try {
   await program.parseAsync(argv, { from: 'user' });
-  return 0;
+  return hookExitCode ?? 0;
 } catch (error) {
   if (error instanceof CommanderError) return error.exitCode;
   console.error(`ftown harness: ${error instanceof Error ? error.message : String(error)}`);
