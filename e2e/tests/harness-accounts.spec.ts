@@ -19,7 +19,7 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
     const accountDiagnostics: string[] = [];
     page.on("console", message => {
       const text = message.text();
-      if (/^\[get_accounts\] (?:response:[a-z0-9_]{1,64}|send:(?:timeout|rejected))$/.test(text)) accountDiagnostics.push(text);
+      if (/^\[get_accounts\] bridge:(?:[0-9a-f-]{36}|unknown) request:[0-9a-f-]{36} (?:attempt|response:[a-z0-9_]{1,64}|send:(?:timeout|rejected))$/i.test(text)) accountDiagnostics.push(text);
     });
     try {
       bridge = await startIsolatedBridge();

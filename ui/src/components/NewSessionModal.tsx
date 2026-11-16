@@ -426,12 +426,16 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
     if (!isOpen || !effectiveBridgeId) return;
     let cancelled = false;
     setAccountsView({ bridgeId: effectiveBridgeId, status: "loading", accounts: [] });
-    void sendCommandRef.current({ type: "get_accounts", payload: { bridgeId: effectiveBridgeId }, requestId: crypto.randomUUID() })
+    const requestId = crypto.randomUUID();
+    const diagnosticBridgeId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(effectiveBridgeId) ? effectiveBridgeId : "unknown";
+    const diagnosticContext = `bridge:${diagnosticBridgeId} request:${requestId}`;
+    console.warn(`[get_accounts] ${diagnosticContext} attempt`);
+    void sendCommandRef.current({ type: "get_accounts", payload: { bridgeId: effectiveBridgeId }, requestId })
       .then(response => {
         if (cancelled) return;
         if (!response.success) {
           const code = response.data && typeof response.data === "object" && "code" in response.data ? response.data.code : undefined;
-          console.warn(`[get_accounts] response:${typeof code === "string" && /^[a-z0-9_]{1,64}$/.test(code) ? code : "unknown"}`);
+          console.warn(`[get_accounts] ${diagnosticContext} response:${typeof code === "string" && /^[a-z0-9_]{1,64}$/.test(code) ? code : "unknown"}`);
           const unsupported = response.error === "Unknown command type: get_accounts";
           setAccountsView({ bridgeId: effectiveBridgeId, status: unsupported ? "unsupported" : "error", accounts: [], error: unsupported
             ? "Update this computer's bridge to choose registered accounts." : "Could not load accounts from this computer." });
@@ -443,7 +447,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
           : { bridgeId: effectiveBridgeId, status: "ready", accounts });
       }).catch(error => {
         if (!cancelled) {
-          console.warn(`[get_accounts] send:${error instanceof Error && error.message === "get_accounts timed out" ? "timeout" : "rejected"}`);
+          console.warn(`[get_accounts] ${diagnosticContext} send:${error instanceof Error && error.message === "get_accounts timed out" ? "timeout" : "rejected"}`);
           setAccountsView({ bridgeId: effectiveBridgeId, status: "error", accounts: [], error: "Could not load accounts from this computer." });
         }
       });
