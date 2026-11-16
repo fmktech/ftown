@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdtempSync, mkdirSync, lstatSync, readFileSync, symlinkSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { chmodSync, mkdtempSync, mkdirSync, lstatSync, readFileSync, symlinkSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,6 +12,7 @@ import { classifyAttentionHook } from './attention-events.js';
 const execFileAsync = promisify(execFile);
 
 const BUNDLE_DIR = fileURLToPath(new URL('../muse-plugin', import.meta.url));
+const HOOK_CLI = fileURLToPath(new URL('../src/hook-cli.ts', import.meta.url));
 const SESSION_START_SCRIPT = join(BUNDLE_DIR, 'hooks', 'ftown-session-start.sh');
 const USER_PROMPT_SCRIPT = join(BUNDLE_DIR, 'hooks', 'ftown-user-prompt-submit.sh');
 const PRE_TOOL_SCRIPT = join(BUNDLE_DIR, 'hooks', 'ftown-pre-tool-use.sh');
@@ -57,6 +58,7 @@ interface StubBridge {
 }
 
 const openStubs: StubBridge[] = [];
+const cleanups: Array<() => void> = [];
 
 async function startStubBridge(): Promise<StubBridge> {
   const requests: RecordedRequest[] = [];
@@ -105,7 +107,38 @@ afterEach(async () => {
   while (openStubs.length > 0) {
     await openStubs.pop()?.close();
   }
+  while (cleanups.length > 0) cleanups.pop()?.();
 });
+
+/**
+ * Stand-in for the installed `ftown-harness` CLI. The Muse helper is now a thin
+ * exec wrapper, so it dispatches the real Node hook entry point via tsx. The
+ * hook's PATH can then be reduced to just `sh` (no jq, no curl) and delivery
+ * still works. Absolute paths are generated at test time.
+ */
+function makeHarnessBin(): { bin: string; harness: string } {
+  const bin = mkdtempSync(join(tmpdir(), 'muse-harness-bin-'));
+  cleanups.push(() => rmSync(bin, { recursive: true, force: true }));
+  const entry = join(bin, 'hook-entry.mjs');
+  writeFileSync(
+    entry,
+    `import { runHookCli } from ${JSON.stringify(HOOK_CLI)};\nprocess.exit(await runHookCli(process.argv.slice(3)));\n`,
+  );
+  const harness = join(bin, 'ftown-harness');
+  writeFileSync(
+    harness,
+    [
+      '#!/bin/bash',
+      '# Answer the wrapper capability probe without paying tsx startup twice.',
+      'if [ "${1:-}" = hook ] && [ "${2:-}" = "--help" ]; then echo "hook help"; exit 0; fi',
+      `exec ${process.execPath} --import tsx ${JSON.stringify(entry)} "$@"`,
+      '',
+    ].join('\n'),
+    { mode: 0o755 },
+  );
+  chmodSync(harness, 0o755);
+  return { bin, harness };
+}
 
 interface ScriptResult {
   exitCode: number;
@@ -152,7 +185,8 @@ function scriptEnv(stub: StubBridge, extra: Record<string, string | undefined> =
   writeFileSync(response, JSON.stringify({ status: 200, body: stub.inboxPayload }));
   // Mock only the local CLI dependency. Production shell sends its request exclusively over stdin.
   writeFileSync(join(bin, 'ftown'), '#!/bin/sh\n[ "$1" = security ] && [ "$2" = proxy ] || exit 1\ncat > "$FTOWN_TEST_PROXY_REQUEST"\ncat "$FTOWN_TEST_PROXY_RESPONSE"\n', { mode: 0o700 });
-  return { HOME: home, MUSE_PLUGIN_ROOT: BUNDLE_DIR, FTOWN_SESSION_ID: 'ftown-sid-1', FTOWN_HOOK_PORT: String(stub.port),
+  return { HOME: home, MUSE_PLUGIN_ROOT: BUNDLE_DIR, FTOWN_HARNESS: makeHarnessBin().harness,
+    FTOWN_SESSION_ID: 'ftown-sid-1', FTOWN_HOOK_PORT: String(stub.port),
     FTOWN_HOOK_TOKEN: 'test-token', FTOWN_TEST_PROXY_REQUEST: request, FTOWN_TEST_PROXY_RESPONSE: response, ...extra };
 }
 
@@ -343,9 +377,10 @@ describe('muse hook scripts', () => {
     assert.ok(Date.now() - started < 9000, 'hook must respect the 5s budget');
   });
 
-  it('exits 0 when curl/jq are unavailable', async () => {
+  it('still delivers with jq and curl absent from PATH', async () => {
     const stub = await startStubBridge();
     const binDir = mkdtempSync(join(tmpdir(), 'ftown-muse-bin-'));
+    cleanups.push(() => rmSync(binDir, { recursive: true, force: true }));
     symlinkSync('/bin/sh', join(binDir, 'sh'));
     const result = await runScript(
       SESSION_START_SCRIPT,
@@ -355,22 +390,24 @@ describe('muse hook scripts', () => {
 
     assert.equal(result.exitCode, 0);
     assert.equal(result.stdout, '');
-    assert.equal(stub.requests.length, 0);
-  });
-
-  it('still posts (empty session fields) when stdin is malformed', async () => {
-    const stub = await startStubBridge();
-    const result = await runScript(SESSION_START_SCRIPT, 'not-json{{{', scriptEnv(stub));
-
-    assert.equal(result.exitCode, 0);
+    assert.equal(result.stderr, '');
     assert.equal(stub.requests.length, 1);
     assert.deepEqual(JSON.parse(stub.requests[0].body), {
       ftown_session_id: 'ftown-sid-1',
       ftown_session_source: 'env',
       hook_event_name: 'SessionStart',
-      session_id: '',
-      cwd: '',
+      session_id: '01a0d03f-c337-7b60-92c8-0c4278a7360b',
+      cwd: '/private/tmp/muse-hook-probe2/proj',
     });
+  });
+
+  it('reports malformed stdin on stderr without posting', async () => {
+    const stub = await startStubBridge();
+    const result = await runScript(SESSION_START_SCRIPT, 'not-json{{{', scriptEnv(stub));
+
+    assert.equal(result.exitCode, 0);
+    assert.equal(stub.requests.length, 0);
+    assert.match(result.stderr, /not valid JSON/);
   });
 
   it('maps prompt and tool hooks onto board activity and leaves mail on Stop', async () => {
@@ -418,5 +455,41 @@ describe('muse hook scripts', () => {
     assert.equal(classifyAttentionHook('SessionStart', {}).activity, undefined);
     assert.deepEqual(bodies.map((body) => classifyAttentionHook(String(body.hook_event_name), body).activity), ['thinking', 'tool_use', 'thinking', 'thinking']);
     assert.equal(stub.requests.some((request) => request.method === 'GET'), false);
+  });
+
+  it('logs one visible line and exits 0 when ftown-harness is missing', async () => {
+    const stub = await startStubBridge();
+    const { bin } = makeHarnessBin();
+    const result = await runScript(SESSION_START_SCRIPT, SESSION_START_STDIN, scriptEnv(stub, {
+      FTOWN_HARNESS: join(bin, 'missing-ftown-harness'),
+    }));
+
+    assert.equal(result.exitCode, 0);
+    assert.equal(stub.requests.length, 0);
+    assert.match(result.stderr, /ftown-harness is missing/);
+    assert.match(result.stderr, /SessionStart event not delivered/);
+    assert.equal(result.stderr.trimEnd().split('\n').length, 1);
+  });
+
+  it('logs one visible line and exits 0 when ftown-harness is too old to have a hook command', async () => {
+    const stub = await startStubBridge();
+    const { bin } = makeHarnessBin();
+    const old = join(bin, 'old-ftown-harness');
+    writeFileSync(
+      old,
+      '#!/bin/bash\nif [ "${1:-}" = hook ] && [ "${2:-}" = "--help" ]; then echo "error: unknown command \'hook\'" >&2; exit 1; fi\nexit 0\n',
+      { mode: 0o755 },
+    );
+    chmodSync(old, 0o755);
+
+    const result = await runScript(SESSION_START_SCRIPT, SESSION_START_STDIN, scriptEnv(stub, {
+      FTOWN_HARNESS: old,
+    }));
+
+    assert.equal(result.exitCode, 0);
+    assert.equal(stub.requests.length, 0);
+    assert.match(result.stderr, /no 'hook' command/);
+    assert.match(result.stderr, /SessionStart event not delivered/);
+    assert.equal(result.stderr.trimEnd().split('\n').length, 1);
   });
 });
