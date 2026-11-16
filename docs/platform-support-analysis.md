@@ -238,7 +238,7 @@ CLI is a `.cmd` shim, which Node will not spawn without a shell.
 |---|---|---|---|
 | claude | `<configDir>/.credentials.json` on every platform; macOS also tries the keychain first (`quota/claude.ts`, `resolveClaudeCredentialSources`); HTTP usage endpoint (`:14`) | works: Linux writes `~/.claude/.credentials.json` (mode 0600); `CLAUDE_CONFIG_DIR` moves it | works: `%USERPROFILE%\.claude\.credentials.json` |
 | codex | `codex app-server` over stdio (`quota/codex.ts:290`); fallback `~/.codex/sessions` (`:402`) | works | caveat: `.cmd` spawn |
-| grok | `~/.grok/logs/unified.jsonl` (`quota/grok.ts:556`); refresh darwin-only (`:630`) using `/usr/bin/script`, `/usr/bin/pgrep`, `/bin/ps` (`:46-48`) with BSD `script` syntax (`:345`) | caveat: stale data, log-only | caveat: log-only; `~/.grok/bin/grok` has no `.exe` candidate (`:557`) |
+| grok | `~/.grok/logs/unified.jsonl`; refresh on darwin + linux via PATH-resolved `script`/`pgrep`/`ps`, with util-linux `script -qc` on linux and BSD `script -q /dev/null` on darwin (`quota/grok.ts`) | works on darwin + linux when grok is installed (live quota after a refresh) | caveat: log-only; `~/.grok/bin/grok` has no `.exe` candidate |
 | muse | `muse usage --json` (`quota/muse.ts:195`) | works | unknown |
 | agy | `~/.local/bin/agy` or PATH, no `.exe` (`quota/agy.ts:26-27`) | works | broken: binary never found |
 | opencode | CLI API call (`quota/opencode.ts:19`); catalogue `~/.cache/opencode/models.json` (`quota/models-opencode.ts:34`) | works; `XDG_CACHE_HOME` ignored | caveat: no `.exe` candidate (`models-opencode.ts:28`, `:276`) |
