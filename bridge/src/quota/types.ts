@@ -50,6 +50,8 @@ export type QuotaStatus = 'ok' | 'no_data' | 'auth' | 'unavailable' | 'error';
 
 export interface ProviderQuota {
   provider: QuotaProviderId;
+  /** Account used for this reading; omitted by legacy/default callers. */
+  account?: string;
   status: QuotaStatus;
   /** Plan / tier name as reported by the provider, or null. */
   plan: string | null;
@@ -90,6 +92,10 @@ export interface QuotaFetchOptions {
   now: () => Date;
   /** Home directory to resolve provider state under (os.homedir() in prod). */
   homeDir: string;
+  /** Account-specific harness environment. */
+  env?: NodeJS.ProcessEnv;
+  /** Stable account id used to isolate cached readings. */
+  account?: string;
 }
 
 /**
@@ -117,6 +123,7 @@ export type QuotaAvailability = 'available' | 'low' | 'exhausted' | 'unknown';
 
 export interface ProviderRouting {
   provider: QuotaProviderId;
+  account?: string;
   availability: QuotaAvailability;
   /**
    * Percent LEFT (0-100) in the binding window: the window with the least
@@ -193,6 +200,7 @@ export interface HarnessModel {
 
 export interface ProviderModels {
   provider: QuotaProviderId;
+  account?: string;
   /** ok = list read; unavailable = no source on this machine; error = unexpected failure. */
   status: 'ok' | 'unavailable' | 'error';
   /** Models a user can select (hidden/internal ones excluded). Empty unless status is ok. */
@@ -244,6 +252,8 @@ export const ROUTING_TIER_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]*$/;
 export interface RoutingPick {
   /** Harness CLI. */
   provider: QuotaProviderId;
+  /** Optional harness account; absent means that harness's default account. */
+  account?: string;
   /** Model id exactly as that harness's model list gives it. */
   model: string;
   /** Reasoning effort to request, or null to use the harness default. */

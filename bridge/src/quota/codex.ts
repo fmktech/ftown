@@ -284,11 +284,11 @@ function rpcErrorFrom(error: unknown): CodexLiveError {
  * Runs the JSON-RPC handshake against `codex app-server` and resolves with the
  * `account/rateLimits/read` result. Always kills the child before settling.
  */
-function requestLiveRateLimits(timeoutMs: number): Promise<unknown> {
+function requestLiveRateLimits(timeoutMs: number, env: NodeJS.ProcessEnv = process.env): Promise<unknown> {
   return new Promise<unknown>((resolve, reject) => {
     let child: ChildProcessByStdio<Writable, Readable, null>;
     try {
-      child = spawn('codex', ['app-server', '--listen', 'stdio://'], { stdio: ['pipe', 'pipe', 'ignore'] });
+      child = spawn('codex', ['app-server', '--listen', 'stdio://'], { stdio: ['pipe', 'pipe', 'ignore'], env: { ...process.env, ...env } });
     } catch {
       reject(new CodexLiveError('failed', 'codex app-server request failed'));
       return;
@@ -393,14 +393,14 @@ export const fetchCodexQuota: QuotaFetcher = async (options) => {
   let primary: CodexLiveError;
 
   try {
-    const result = await requestLiveRateLimits(options.timeoutMs);
+    const result = await requestLiveRateLimits(options.timeoutMs, options.env);
     const rateLimits = isRecord(result) ? result.rateLimits : undefined;
     return parseCodexRateLimits(rateLimits, 'live', now.toISOString(), now);
   } catch (error) {
     primary = error instanceof CodexLiveError ? error : new CodexLiveError('failed', 'codex app-server request failed');
   }
 
-  const hit = await readLatestCodexRateLimits(join(codexHome(options.homeDir), 'sessions'));
+  const hit = await readLatestCodexRateLimits(join(codexHome(options.homeDir, options.env), 'sessions'));
   if (hit) return parseCodexRateLimits(hit.rateLimits, 'cached', hit.observedAt, now);
 
   return {

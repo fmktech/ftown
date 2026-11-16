@@ -8,6 +8,18 @@ import { readConfigText, parseCodexConfigDefaults, parseCodexModels } from './mo
 
 const OBSERVED = '2026-11-13T10:00:00.000Z';
 
+it('reads config defaults from the selected CODEX_HOME account', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codex-model-accounts-'));
+  try {
+    const dirs = [join(root, 'a'), join(root, 'b')];
+    await Promise.all(dirs.map((dir, index) => mkdir(dir, { recursive: true }).then(() => writeFile(join(dir, 'config.toml'), `model = "model-${index}"\n`))));
+    const values = await Promise.all(dirs.map((dir) => readConfigText(root, { CODEX_HOME: dir })));
+    assert.deepEqual(values, ['model = "model-0"\n', 'model = "model-1"\n']);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 /** One entry in the verified `codex debug models` shape. */
 function catalogueEntry(
   slug: string,

@@ -324,9 +324,9 @@ export function claudeCatalogExpiry(fileJson: unknown): string | null {
   return Number.isNaN(ms) ? null : new Date(ms).toISOString();
 }
 
-async function readSettingsModel(homeDir: string): Promise<string | null> {
+async function readSettingsModel(homeDir: string, env: NodeJS.ProcessEnv = process.env): Promise<string | null> {
   try {
-    const parsed: unknown = JSON.parse(await readFile(join(claudeConfigDir(homeDir), 'settings.json'), 'utf8'));
+    const parsed: unknown = JSON.parse(await readFile(join(claudeConfigDir(homeDir, env), 'settings.json'), 'utf8'));
     if (!isRecord(parsed)) return null;
     return typeof parsed.model === 'string' && parsed.model.trim() !== '' ? parsed.model : null;
   } catch {
@@ -359,7 +359,7 @@ function unavailable(observedAt: string): ProviderModels {
 export const fetchClaudeModels: ModelsFetcher = async (options: QuotaFetchOptions) => {
   const nowIso = new Date(options.now().getTime()).toISOString();
   try {
-    const dir = join(claudeConfigDir(options.homeDir), 'cache', 'model-catalog');
+    const dir = join(claudeConfigDir(options.homeDir, options.env), 'cache', 'model-catalog');
     let names: string[];
     try {
       names = await readdir(dir);
@@ -383,7 +383,7 @@ export const fetchClaudeModels: ModelsFetcher = async (options: QuotaFetchOption
       return unavailable(nowIso);
     }
 
-    const settingsModel = await readSettingsModel(options.homeDir);
+    const settingsModel = await readSettingsModel(options.homeDir, options.env);
 
     for (const candidate of ccCandidates) {
       const fileJson = candidate.fileJson ?? (await readCatalogueJson(candidate.path));

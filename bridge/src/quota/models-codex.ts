@@ -271,9 +271,9 @@ export function parseCodexConfigDefaults(tomlText: string): {
   return { model, effort };
 }
 
-export async function readConfigText(homeDir: string): Promise<string> {
+export async function readConfigText(homeDir: string, env: NodeJS.ProcessEnv = process.env): Promise<string> {
   try {
-    return await readFile(join(codexHome(homeDir), 'config.toml'), 'utf8');
+    return await readFile(join(codexHome(homeDir, env), 'config.toml'), 'utf8');
   } catch {
     return '';
   }
@@ -284,13 +284,13 @@ type ListingResult =
   | { ok: false; status: 'unavailable' | 'error'; message: string };
 
 /** One execution of `codex debug models`. Never rejects; execFile reaps the child on every path. */
-function runCodexDebugModels(timeoutMs: number): Promise<ListingResult> {
+function runCodexDebugModels(timeoutMs: number, env: NodeJS.ProcessEnv = process.env): Promise<ListingResult> {
   return new Promise<ListingResult>((resolve) => {
     try {
       execFile(
         'codex',
         ['debug', 'models'],
-        { timeout: timeoutMs, encoding: 'utf8', maxBuffer: MAX_BUFFER_BYTES, windowsHide: true },
+        { timeout: timeoutMs, encoding: 'utf8', maxBuffer: MAX_BUFFER_BYTES, windowsHide: true, env: { ...process.env, ...env } },
         (error, stdout) => {
           if (!error) {
             resolve({ ok: true, stdout: String(stdout) });
@@ -324,8 +324,8 @@ function runCodexDebugModels(timeoutMs: number): Promise<ListingResult> {
 export const fetchCodexModels: ModelsFetcher = async (options) => {
   const observedAt = options.now().toISOString();
   try {
-    const defaults = parseCodexConfigDefaults(await readConfigText(options.homeDir));
-    const listing = await runCodexDebugModels(options.timeoutMs);
+    const defaults = parseCodexConfigDefaults(await readConfigText(options.homeDir, options.env));
+    const listing = await runCodexDebugModels(options.timeoutMs, options.env);
     if (!listing.ok) return failure(listing.status, listing.message, observedAt);
 
     let parsed: unknown;

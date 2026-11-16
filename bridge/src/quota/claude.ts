@@ -314,7 +314,7 @@ export const fetchClaudeQuota: QuotaFetcher = async (options) => {
   let plan: string | null = null;
   let secret: string | null = null;
   try {
-    const sources = resolveClaudeCredentialSources(options.homeDir);
+    const sources = resolveClaudeCredentialSources(options.homeDir, options.env);
     const credentials = await loadClaudeCredentials(sources, remaining());
     if (!credentials) {
       return failure(options, 'auth', null, claudeNotSignedInMessage(sources));
