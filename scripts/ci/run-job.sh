@@ -51,6 +51,7 @@ case "$job" in
     (cd e2e && npm ci)
     (cd ui && npm ci && npm test && node --test ../e2e/scripts/ci-fixtures.test.mjs)
     (cd bridge && npm ci && npm run build && npm test && node --test ../scripts/release/*.test.mjs)
+    node bridge/scripts/structured-launch-smoke.mjs
     ;;
   e2e)
     # A shard runs one slice of the Playwright suite on its own stack.

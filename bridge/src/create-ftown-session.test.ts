@@ -57,6 +57,20 @@ describe('account-aware session creation', () => {
       assert.deepEqual(child.allowedAccounts, ['personal']);
       assert.deepEqual(childHarness.runs[0].env, { CLAUDE_CONFIG_DIR: join(home, 'claude-personal') });
 
+      // Account comes from the resolved parent; both policies restrict children.
+      const alias = { ...fakeSession('alias'), parentSessionId: 'parent', shellType: 'claude' as const, account: 'other', allowedAccounts: ['personal', 'other'] };
+      const aliased = fakeDeps([{ ...parent, allowedAccounts: ['personal'] }, alias]);
+      const sibling = await createFtownSession(aliased.deps, { parentSessionId: 'alias', workingDir: work });
+      assert.equal(sibling.parentSessionId, 'parent');
+      assert.equal(sibling.account, 'personal');
+      assert.deepEqual(sibling.allowedAccounts, ['personal']);
+      const restricted = fakeDeps([{ ...parent, allowedAccounts: ['personal'] }, alias]);
+      await assert.rejects(createFtownSession(restricted.deps, { parentSessionId: 'alias', account: 'other', workingDir: work }),
+        (error: unknown) => error instanceof AccountSelectionError && error.code === 'account_not_allowed');
+      const grandchild = fakeDeps([{ ...parent, allowedAccounts: ['personal', 'default'] }, { ...alias, allowedAccounts: ['personal'] }]);
+      await assert.rejects(createFtownSession(grandchild.deps, { parentSessionId: 'alias', account: 'default', workingDir: work }),
+        (error: unknown) => error instanceof AccountSelectionError && error.code === 'account_not_allowed');
+
       const rejected = fakeDeps([{ ...parent, allowedAccounts: ['personal'] }]);
       await assert.rejects(createFtownSession(rejected.deps, { parentSessionId: 'parent', account: 'other', workingDir: work }),
         (error: unknown) => error instanceof AccountSelectionError && error.code === 'account_not_allowed');
@@ -906,6 +920,18 @@ describe('createFtownSession — Pi launch', () => {
 // retry_session RPC, and restart resurrection — must hand the runner the same
 // invocation. This is the lock on "how is a session launched has one answer".
 describe('relaunchFtownSession — retained terminal geometry', () => {
+  it('retains account policy and launch environment through retry and resume', async () => {
+    const h = fakeDeps();
+    const session = { ...fakeSession('account-relaunch'), status: 'error' as const, account: 'work',
+      allowedAccounts: ['work', 'default'], env: { CLAUDE_CONFIG_DIR: join(tmpdir(), 'ftown-work') } };
+    await relaunchFtownSession(h.deps, session, 'retry');
+    await relaunchFtownSession(h.deps, session, 'resume');
+    for (const saved of h.saved) {
+      assert.equal(saved.account, 'work');
+      assert.deepEqual(saved.allowedAccounts, ['work', 'default']);
+    }
+    assert.deepEqual(h.runs.map(run => run.env), [session.env, session.env]);
+  });
   it('uses current manager dimensions for retry and resume, including later resizes', async () => {
     const h = fakeDeps();
     const manager = new TerminalManager();

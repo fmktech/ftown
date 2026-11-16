@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute, join } from 'node:path';
+import { isAbsolute, join, normalize } from 'node:path';
 
 export type AccountHarness = 'claude' | 'codex';
 export interface HarnessAccount { id: string; harness: AccountHarness; label?: string; configDir: string }
@@ -11,7 +11,7 @@ const ID = /^[a-z0-9-]{1,32}$/;
 export function validateAccount(account: HarnessAccount): HarnessAccount {
   if (!account || !ID.test(account.id) || account.id === 'default') throw new Error('Account id must match [a-z0-9-]{1,32}; default is reserved');
   if (account.harness !== 'claude' && account.harness !== 'codex') throw new Error('harness must be claude or codex');
-  if (typeof account.configDir !== 'string' || !isAbsolute(account.configDir) || account.configDir.startsWith('~') || account.configDir !== account.configDir.normalize('NFC') || account.configDir.endsWith('/') || account.configDir.endsWith('\\')) throw new Error('configDir must be an absolute NFC path without a trailing slash or ~');
+  if (typeof account.configDir !== 'string' || !isAbsolute(account.configDir) || account.configDir.startsWith('~') || account.configDir !== account.configDir.normalize('NFC') || account.configDir !== normalize(account.configDir) || account.configDir.endsWith('/') || account.configDir.endsWith('\\')) throw new Error('configDir must be a normalized absolute NFC path without a trailing slash or ~');
   if (account.label !== undefined && typeof account.label !== 'string') throw new Error('label must be a string');
   return account;
 }

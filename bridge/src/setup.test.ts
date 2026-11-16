@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { test } from 'node:test';
 import { opencodeSkillsDir } from './install-ftown-skill.js';
-import { performSetup, type SetupDependencies } from './setup.js';
+import { defaultDependencies, packageRoot, performSetup, type SetupDependencies } from './setup.js';
 import { setupAccountTargets } from './setup.js';
 import { saveAccounts } from './accounts.js';
 import { readSetupState, REQUIRED_SETUP_ASSETS } from './setup-state.js';
@@ -103,4 +103,35 @@ test('setup targets the default and every distinct registered account config und
   assert.deepEqual(setupAccountTargets().map(account => account?.configDir ?? 'default'), [
     'default', join(home, 'claude-personal'), join(home, 'codex-lab'),
   ]);
+}));
+
+test('real setup installers write each harness only to its own account directory', async () => fixture(async (home) => {
+  const previous = { PATH: process.env.PATH, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR, CODEX_HOME: process.env.CODEX_HOME };
+  const bin = join(home, 'bin'); mkdirSync(bin);
+  const codex = join(bin, 'codex'); writeFileSync(codex, '#!/bin/sh\nexit 0\n'); chmodSync(codex, 0o755);
+  const claudeDefault = join(home, 'claude-default'); const codexDefault = join(home, 'codex-default');
+  const claudeAccount = join(home, 'claude-account'); const codexAccount = join(home, 'codex-account');
+  process.env.PATH = `${bin}:/bin:/usr/bin`;
+  process.env.CLAUDE_CONFIG_DIR = claudeDefault; process.env.CODEX_HOME = codexDefault;
+  try {
+    saveAccounts({ version: 1, accounts: [
+      { id: 'claude-work', harness: 'claude', configDir: claudeAccount },
+      { id: 'codex-work', harness: 'codex', configDir: codexAccount },
+    ] });
+    const deps = defaultDependencies();
+    await deps.integrations(packageRoot());
+    deps.skillAndPath(packageRoot());
+    for (const dir of [claudeDefault, claudeAccount]) assert.ok(existsSync(join(dir, 'settings.json')));
+    for (const dir of [codexDefault, codexAccount]) assert.ok(existsSync(join(dir, 'hooks.json')));
+    assert.ok(existsSync(join(claudeAccount, 'skills', 'ftown', 'SKILL.md')));
+    assert.equal(existsSync(join(codexAccount, 'settings.json')), false);
+    assert.equal(existsSync(join(codexAccount, 'skills', 'ftown')), false);
+    assert.equal(existsSync(join(claudeAccount, 'hooks.json')), false);
+    assert.equal(process.env.CLAUDE_CONFIG_DIR, claudeDefault);
+    assert.equal(process.env.CODEX_HOME, codexDefault);
+  } finally {
+    for (const key of ['PATH', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME'] as const) {
+      if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key];
+    }
+  }
 }));

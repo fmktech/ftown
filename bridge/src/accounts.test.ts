@@ -18,6 +18,8 @@ test('account registry validates, atomically persists mode 0600, and resolves la
     assert.deepEqual(accountEnv({ id: 'codex-lab', harness: 'codex', configDir: join(home, 'codex-lab') }), { CODEX_HOME: join(home, 'codex-lab') });
     assert.throws(() => validateAccount({ id: 'default', harness: 'claude', configDir: '/tmp/work' }), /reserved/);
     assert.throws(() => validateAccount({ id: 'bad', harness: 'claude', configDir: '~/work' }), /absolute/);
+    assert.throws(() => validateAccount({ id: 'bad', harness: 'claude', configDir: '/a/../b' }), /normalized/);
+    assert.throws(() => validateAccount({ id: 'bad', harness: 'claude', configDir: '//a' }), /normalized/);
     assert.equal(JSON.parse(readFileSync(join(home, '.ftown', 'accounts.json'), 'utf8')).version, 1);
   } finally {
     if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;

@@ -71,11 +71,12 @@ async function installIntegrations(root: string): Promise<IntegrationResult[]> {
   return results;
 }
 
-function defaultDependencies(): SetupDependencies {
+export function defaultDependencies(): SetupDependencies {
   const withAccountEnv = async <T>(account: HarnessAccount | undefined, task: () => T | Promise<T>): Promise<T> => {
     if (!account) return await task();
     const oldClaude = process.env.CLAUDE_CONFIG_DIR; const oldCodex = process.env.CODEX_HOME;
-    process.env.CLAUDE_CONFIG_DIR = account.configDir; process.env.CODEX_HOME = account.configDir;
+    if (account.harness === 'claude') process.env.CLAUDE_CONFIG_DIR = account.configDir;
+    else process.env.CODEX_HOME = account.configDir;
     try { return await task(); }
     finally {
       if (oldClaude === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = oldClaude;
@@ -111,7 +112,8 @@ export function setupAccountTargets(): Array<HarnessAccount | undefined> {
 
 function withAccountEnvSync<T>(account: HarnessAccount, task: () => T): T {
   const oldClaude = process.env.CLAUDE_CONFIG_DIR; const oldCodex = process.env.CODEX_HOME;
-  process.env.CLAUDE_CONFIG_DIR = account.configDir; process.env.CODEX_HOME = account.configDir;
+  if (account.harness === 'claude') process.env.CLAUDE_CONFIG_DIR = account.configDir;
+  else process.env.CODEX_HOME = account.configDir;
   try { return task(); }
   finally {
     if (oldClaude === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = oldClaude;

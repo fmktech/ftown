@@ -32,6 +32,20 @@ describe('SessionStore session snapshot persistence', () => {
     assert.equal((await reloaded.listSessions()).find((item) => item.id === session.id)?.pullRequestUrl, undefined);
   });
 
+  it('persists account and child policy across a new store instance', async () => {
+    const store = new SessionStore(dir);
+    const session: Session = { id: 'account-restart', name: 'account worker', command: 'claude', status: 'running',
+      bridgeId: 'bridge-1', createdAt: '', updatedAt: '', account: 'work', allowedAccounts: ['work', 'default'] };
+    await store.saveSession(session);
+    const afterRestart = new SessionStore(dir);
+    const restored = await afterRestart.loadSession(session.id);
+    assert.equal(restored?.account, 'work');
+    assert.deepEqual(restored?.allowedAccounts, ['work', 'default']);
+    const listed = (await afterRestart.listSessions()).find(item => item.id === session.id);
+    assert.equal(listed?.account, 'work');
+    assert.deepEqual(listed?.allowedAccounts, ['work', 'default']);
+  });
+
   it('normalizes legacy shellType agy to canonical antigravity on loadSession and listSessions', async () => {
     const store = new SessionStore(dir);
     const sessionDir = join(dir, 'sessions', 'legacy-agy');

@@ -11,7 +11,11 @@ import type { AttentionItem } from './attention-events.js';
 
 import type { CommandRpcDeps } from './command-rpc.js';
 import { createCommandHandler } from './command-rpc.js';
-import type { SessionController } from './session-controller.js';
+import { SessionController } from './session-controller.js';
+import { SessionStore } from './session-store.js';
+import { saveAccounts } from './accounts.js';
+import type { ProcessRunner } from './claude-runner.js';
+import type { CentrifugoClient } from './centrifugo-client.js';
 import type { Command, CommandResponse, Session } from './types.js';
 import { UpdateAdmission, UpdateResponseTicket } from './update-admission.js';
 import { UpdateEffects } from './update-effects.js';
@@ -393,6 +397,58 @@ test('create_session forwards account policy and returns typed account selection
   await handler({ type: 'create_session', requestId: 'account-policy', payload: { prompt: 'p', account: 'other', allowedAccounts: ['personal'] } } as unknown as Command);
   assert.equal(received?.account, 'other'); assert.deepEqual(received?.allowedAccounts, ['personal']);
   assert.equal(responses.at(-1)?.data?.code, 'account_not_allowed');
+});
+
+test('create_session enforces account inheritance and policy through the real controller', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'account-rpc-'));
+  const previousHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    saveAccounts({ version: 1, accounts: [
+      { id: 'personal', harness: 'claude', configDir: join(home, 'personal') },
+      { id: 'other', harness: 'claude', configDir: join(home, 'other') },
+    ] });
+    const store = new SessionStore(join(home, 'data'));
+    const launches: Array<Record<string, string> | undefined> = [];
+    const runner = { getPreferredRuntime: () => 'direct', run: (_id: string, _command: string, opts: { env?: Record<string, string> }) => launches.push(opts.env), stop: () => false } as unknown as ProcessRunner;
+    const centrifugo = { publishSessionUpdate: async () => {} } as unknown as CentrifugoClient;
+    const sessionFactory = { store, runner, centrifugo, userId: 'user', bridgeId: 'owner', hookPort: 1, hookToken: 'token', notifyScriptPath: '/tmp/notify.sh', wireTerminalInput: () => {} };
+    const controller = new SessionController({ store, runner, sessionFactory, publishSessionUpdate: async () => {}, removeSession: async () => null });
+    await store.saveSession({ id: 'parent', name: 'parent', command: 'claude', shellType: 'claude', status: 'running', bridgeId: 'owner', createdAt: '', updatedAt: '', account: 'personal', allowedAccounts: ['personal', 'default'] });
+    const responses: CommandResponse[] = [];
+    const handler = createCommandHandler({ bridgeId: 'owner', sessionController: controller, publishCommandResponse: async response => { responses.push(response); } });
+    const send = async (requestId: string, payload: Record<string, unknown>) => {
+      await handler({ type: 'create_session', requestId, payload: { workingDir: home, ...payload } } as unknown as Command);
+      return responses.at(-1)!;
+    };
+    const inherited = await send('inherited', { parentSessionId: 'parent', allowedAccounts: ['personal', 'other'] });
+    assert.equal(inherited.success, true);
+    const child = inherited.data!.session as Session;
+    assert.equal(child.account, 'personal');
+    assert.deepEqual(child.allowedAccounts, ['personal']);
+    assert.deepEqual(launches.at(-1), { CLAUDE_CONFIG_DIR: join(home, 'personal') });
+    assert.deepEqual((await store.loadSession(child.id))?.allowedAccounts, ['personal']);
+    const explicit = await send('explicit', { shellType: 'claude', account: 'other' });
+    assert.equal(explicit.success, true);
+    const explicitSession = explicit.data!.session as Session;
+    assert.equal(explicitSession.account, 'other');
+    assert.equal((await store.loadSession(explicitSession.id))?.account, 'other');
+    assert.deepEqual(launches.at(-1), { CLAUDE_CONFIG_DIR: join(home, 'other') });
+    const narrowedDenied = await send('narrowed-denied', { parentSessionId: child.id, account: 'default' });
+    assert.equal(narrowedDenied.success, false); assert.equal(narrowedDenied.data?.code, 'account_not_allowed');
+    const defaultAccount = await send('default', { parentSessionId: 'parent', account: 'default' });
+    assert.equal(defaultAccount.success, true);
+    assert.equal((defaultAccount.data!.session as Session).account, 'default');
+    assert.equal(launches.at(-1), undefined);
+    const denied = await send('denied', { parentSessionId: 'parent', account: 'other' });
+    assert.equal(denied.success, false); assert.equal(denied.data?.code, 'account_not_allowed');
+    const unknown = await send('unknown', { account: 'missing', shellType: 'claude' });
+    assert.equal(unknown.success, false); assert.equal(unknown.data?.code, 'unknown_account');
+    assert.equal(launches.length, 3);
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
+    await rm(home, { recursive: true, force: true });
+  }
 });
 
 test('create_session forwards the grok and antigravity native session ids to the controller', async () => {

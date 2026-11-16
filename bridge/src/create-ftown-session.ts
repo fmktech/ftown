@@ -506,14 +506,15 @@ async function createFtownSessionImpl(
   let parentName: string | undefined;
   let parentWorkingDir: string | undefined;
   let parentSession: Session | null = null;
+  let resolvedParentSession: Session | null = null;
   const requestedParentId = input.parentSessionId;
   if (input.parentSessionId) {
     parentSession = await deps.store.loadSession(input.parentSessionId);
     parentSessionId = await resolveParentSessionId(deps.store, input.parentSessionId);
     if (parentSessionId) {
-      const parentSession = await deps.store.loadSession(parentSessionId);
-      parentName = parentSession?.name ?? parentSessionId.slice(0, 8);
-      parentWorkingDir = parentSession?.workingDir;
+      resolvedParentSession = await deps.store.loadSession(parentSessionId);
+      parentName = resolvedParentSession?.name ?? parentSessionId.slice(0, 8);
+      parentWorkingDir = resolvedParentSession?.workingDir;
     }
   }
 
@@ -522,13 +523,18 @@ async function createFtownSessionImpl(
   const registeredAccounts = loadAccounts().accounts;
   const registeredIds = new Set(registeredAccounts.map(entry => entry.id));
   if (input.allowedAccounts?.some(id => id !== 'default' && (!/^[a-z0-9-]{1,32}$/.test(id) || !registeredIds.has(id)))) throw new AccountSelectionError('unknown_account', 'allowedAccounts contains an unknown account id');
-  let account = input.account ?? parentSession?.account;
-  if (parentSession?.allowedAccounts) {
+  let account = input.account ?? resolvedParentSession?.account;
+  const resolvedPolicy = resolvedParentSession?.allowedAccounts;
+  const directPolicy = parentSession?.allowedAccounts;
+  const parentPolicy = resolvedPolicy && directPolicy
+    ? resolvedPolicy.filter(id => directPolicy.includes(id))
+    : resolvedPolicy ?? directPolicy;
+  if (parentPolicy) {
     const inheritedOrRequestedAccount = account ?? 'default';
-    if (!parentSession.allowedAccounts.includes(inheritedOrRequestedAccount)) throw new AccountSelectionError('account_not_allowed', `Account ${inheritedOrRequestedAccount} is not allowed by parent session`);
+    if (!parentPolicy.includes(inheritedOrRequestedAccount)) throw new AccountSelectionError('account_not_allowed', `Account ${inheritedOrRequestedAccount} is not allowed by parent session`);
   }
-  const allowedAccounts = parentSession?.allowedAccounts
-    ? input.allowedAccounts ? [...new Set(input.allowedAccounts.filter(id => parentSession!.allowedAccounts!.includes(id)))] : parentSession.allowedAccounts
+  const allowedAccounts = parentPolicy
+    ? input.allowedAccounts ? [...new Set(input.allowedAccounts.filter(id => parentPolicy.includes(id)))] : parentPolicy
     : input.allowedAccounts;
   if (allowedAccounts && allowedAccounts.some(id => typeof id !== 'string' || !/^(default|[a-z0-9-]{1,32})$/.test(id))) throw new AccountSelectionError('unknown_account', 'allowedAccounts must contain registered account ids');
 
