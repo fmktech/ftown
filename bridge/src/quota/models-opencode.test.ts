@@ -1,6 +1,6 @@
 import { afterEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, rm, truncate, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, mkdtemp, rm, truncate, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 
@@ -516,13 +516,13 @@ describe('fetchOpencodeModels', () => {
     });
 
     it('reports timed out without spawning when timeoutMs is zero', async () => {
-      const homeDir = await fakeHome('exec sleep 5');
-      const startedAt = Date.now();
+      // The fake binary leaves a marker if it is ever executed. Checking the
+      // marker proves no child was spawned, without measuring wall-clock time.
+      const homeDir = await fakeHome('d=$(/usr/bin/dirname "$0"); : > "$d/spawned.txt"; exec sleep 5');
       const models = await fetchOpencodeModels({ timeoutMs: 0, now: () => NOW, homeDir });
-      const elapsedMs = Date.now() - startedAt;
       assert.equal(models.status, 'error');
       assert.equal(models.message, '`opencode models` timed out');
-      assert.ok(elapsedMs < 500, `elapsed ${elapsedMs}ms`);
+      await assert.rejects(access(join(homeDir, '.opencode', 'bin', 'spawned.txt')), { code: 'ENOENT' });
     });
 
     it('reports "unexpected output" when the call prints no ids', async () => {

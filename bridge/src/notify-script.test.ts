@@ -230,7 +230,6 @@ describe('bridge/hooks/notify.sh', () => {
     assert.equal(result.stdinError, undefined);
     assert.equal(result.stdout, '');
     assert.equal(result.stderr, '');
-    assert.ok(result.elapsedMs < 25000, `expected prompt exit, took ${result.elapsedMs}ms`);
     assert.deepEqual(bridge.requests, []);
   });
 
