@@ -129,7 +129,7 @@ export type CommandType =
   | 'get_bridge_update' | 'update_bridge' | 'get_pull_request_statuses' | 'get_pull_request_review' | 'get_pull_request_review_chunk'
   | 'get_model_routing' | 'set_model_routing'
   | 'get_session_attention' | 'resolve_session_attention' | 'answer_session_attention' | 'get_session_board' | 'send_message'
-  | 'create_session' | 'stop_session' | 'list_sessions' | 'get_history'
+  | 'create_session' | 'stop_session' | 'list_sessions' | 'list_native_sessions' | 'get_history'
   | 'retry_session' | 'rename_session' | 'remove_session' | 'bridge_exec'
   | 'update_session_parent'
   | 'get_session_usage' | 'get_sessions_usage';
