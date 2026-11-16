@@ -7,11 +7,11 @@ beforeEach(() => { vi.stubEnv('CENTRIFUGO_TOKEN_SECRET', SECRET); });
 afterEach(() => { vi.unstubAllEnvs(); });
 
 describe('signRelayToken', () => {
-  it('signs HS256 with sub, audience and a lifetime of exactly 3600 s', () => {
+  it('signs HS256 with sub, audience and a lifetime of exactly 43200 s', () => {
     const { token, expiresAt } = signRelayToken({ accountId: 'acct' });
     const claims = jwt.verify(token, SECRET, { audience: 'ftown:centrifugo', algorithms: ['HS256'] }) as jwt.JwtPayload;
     expect(claims.sub).toBe('acct');
-    expect(claims.exp! - claims.iat!).toBe(3600);
+    expect(claims.exp! - claims.iat!).toBe(43_200);
     expect(expiresAt).toBe(claims.exp! * 1000);
     expect(claims.info).toBeUndefined();
   });
