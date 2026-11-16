@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { describe, it } from 'node:test';
@@ -79,39 +79,39 @@ async function pollUntil<T>(label: string, read: () => Promise<T | undefined>): 
   throw new Error(`${label} timed out: ${last}`);
 }
 
-/** The tmux wrapper is `/bin/zsh -l -c`. Local runs skip when it cannot start. CI must have both. */
-function launchRuntimeAction(input: { tmux: boolean; zsh: boolean; ci: boolean }): 'run' | 'skip' | 'fail' {
-  if (input.tmux && input.zsh) return 'run';
+/**
+ * tmux is required for this proof; the login shell is resolved per session
+ * (zsh on macOS, bash on the CI runner), so no shell-specific gate is needed.
+ * Local runs skip without tmux; CI must have it.
+ */
+function launchRuntimeAction(input: { tmux: boolean; ci: boolean }): 'run' | 'skip' | 'fail' {
+  if (input.tmux) return 'run';
   return input.ci ? 'fail' : 'skip';
 }
 
 function currentLaunchRuntimeAction(): 'run' | 'skip' | 'fail' {
   return launchRuntimeAction({
     tmux: isTmuxAvailable(),
-    zsh: existsSync('/bin/zsh'),
     ci: process.env.CI === 'true',
   });
 }
 
 describe('opencode child launch', { concurrency: 1 }, () => {
-  it('fails in CI when tmux or zsh is missing and skips locally', () => {
-    assert.equal(launchRuntimeAction({ tmux: true, zsh: true, ci: true }), 'run');
-    assert.equal(launchRuntimeAction({ tmux: true, zsh: true, ci: false }), 'run');
-    assert.equal(launchRuntimeAction({ tmux: false, zsh: true, ci: false }), 'skip');
-    assert.equal(launchRuntimeAction({ tmux: true, zsh: false, ci: false }), 'skip');
-    assert.equal(launchRuntimeAction({ tmux: false, zsh: false, ci: true }), 'fail');
-    assert.equal(launchRuntimeAction({ tmux: false, zsh: true, ci: true }), 'fail');
-    assert.equal(launchRuntimeAction({ tmux: true, zsh: false, ci: true }), 'fail');
+  it('fails in CI when tmux is missing and skips locally', () => {
+    assert.equal(launchRuntimeAction({ tmux: true, ci: true }), 'run');
+    assert.equal(launchRuntimeAction({ tmux: true, ci: false }), 'run');
+    assert.equal(launchRuntimeAction({ tmux: false, ci: false }), 'skip');
+    assert.equal(launchRuntimeAction({ tmux: false, ci: true }), 'fail');
   });
 
   it('stays up, receives the prompt, reaches idle, and records a failed launch', async (t) => {
     const action = currentLaunchRuntimeAction();
     if (action === 'skip') {
-      t.skip('tmux or /bin/zsh is not installed');
+      t.skip('tmux is not installed');
       return;
     }
     if (action === 'fail') {
-      assert.fail('tmux and /bin/zsh are required when CI=true');
+      assert.fail('tmux is required when CI=true');
     }
     const root = mkdtempSync(join(tmpdir(), 'oc-launch-'));
     const fakeDir = join(root, 'bin');
