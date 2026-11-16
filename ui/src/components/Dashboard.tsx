@@ -1438,7 +1438,7 @@ PY`;
         onSubmit={handleCreateSession}
         bridges={readyBridges}
         defaults={sessionDefaults}
-        bridgeExec={bridgeExec}
+        sendCommand={rpc.sendCommand}
       />
       {/* Portals to document.body, but React events still bubble through this tree: keep it a direct child of the root, which has no handlers. */}
       <TerminalCopySheet open={copySheetText !== null} text={copySheetText ?? ""} onClose={handleCopySheetClose} />
