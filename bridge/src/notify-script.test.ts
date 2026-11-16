@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,6 +8,7 @@ import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 const NOTIFY_SCRIPT = fileURLToPath(new URL('../hooks/notify.sh', import.meta.url));
+const HOOK_CLI = fileURLToPath(new URL('../src/hook-cli.ts', import.meta.url));
 const SESSION_ID = 'ftown-session-notify-test';
 const HOOK_TOKEN = 'notify-test-token';
 
@@ -100,18 +101,45 @@ async function startFakeBridge(): Promise<FakeBridge> {
   return { port: address.port, requests };
 }
 
+/**
+ * Stand-in for the installed `ftown-harness` CLI. It dispatches the real Node
+ * hook entry point via tsx. Absolute paths are generated at test time, and the
+ * hook's PATH is limited to this directory, proving notify.sh needs no jq,
+ * curl or any other external tool to deliver an event.
+ */
+function makeHarnessBin(): { bin: string; harness: string } {
+  const bin = mkdtempSync(join(tmpdir(), 'notify-harness-bin-'));
+  cleanups.push(() => rmSync(bin, { recursive: true, force: true }));
+  // Minimal entry imports only the hook CLI, not the whole bridge command graph.
+  const entry = join(bin, 'hook-entry.mjs');
+  writeFileSync(
+    entry,
+    `import { runHookCli } from ${JSON.stringify(HOOK_CLI)};\nprocess.exit(await runHookCli(process.argv.slice(3)));\n`,
+  );
+  const harness = join(bin, 'ftown-harness');
+  writeFileSync(
+    harness,
+    `#!/bin/bash\nexec ${process.execPath} --import tsx ${JSON.stringify(entry)} "$@"\n`,
+    { mode: 0o755 },
+  );
+  chmodSync(harness, 0o755);
+  return { bin, harness };
+}
+
 function runNotify(home: string, env: Record<string, string>, stdin: string): Promise<RunResult> {
   return new Promise((resolve, reject) => {
     const started = Date.now();
+    const { bin, harness } = makeHarnessBin();
     // Environment is built from scratch so a real FTOWN_* bridge in the parent env cannot leak in.
+    // PATH contains only the fake harness directory: jq and curl are unreachable.
     const child = spawn('/bin/bash', [NOTIFY_SCRIPT], {
-      env: { HOME: home, PATH: '/usr/bin:/bin', ...env },
+      env: { HOME: home, PATH: bin, FTOWN_HARNESS: harness, ...env },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     let stdout = '';
     let stderr = '';
     let stdinError: NodeJS.ErrnoException | undefined;
-    const killTimer = setTimeout(() => child.kill('SIGKILL'), 10000);
+    const killTimer = setTimeout(() => child.kill('SIGKILL'), 30000);
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => { stdout += chunk; });
@@ -196,7 +224,7 @@ describe('bridge/hooks/notify.sh', () => {
     assert.equal(result.stdinError, undefined);
     assert.equal(result.stdout, '');
     assert.equal(result.stderr, '');
-    assert.ok(result.elapsedMs < 5000, `expected prompt exit, took ${result.elapsedMs}ms`);
+    assert.ok(result.elapsedMs < 25000, `expected prompt exit, took ${result.elapsedMs}ms`);
     assert.deepEqual(bridge.requests, []);
   });
 
