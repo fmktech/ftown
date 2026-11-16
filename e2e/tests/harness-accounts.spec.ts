@@ -16,6 +16,11 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     let bridge: IsolatedBridge | null = null;
     let bridgeId: string | null = null;
+    const accountDiagnostics: string[] = [];
+    page.on("console", message => {
+      const text = message.text();
+      if (/^\[get_accounts\] (?:response:[a-z0-9_]{1,64}|send:(?:timeout|rejected))$/.test(text)) accountDiagnostics.push(text);
+    });
     try {
       bridge = await startIsolatedBridge();
       const prompt = await bridge.pairing();
@@ -63,6 +68,7 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
       await testInfo.attach(`account-sidebar-${viewport.name}`, { body: await page.screenshot({ fullPage: true }), contentType: "image/png" });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     } catch (error) {
+      await testInfo.attach("account-lookup-diagnostics.txt", { body: accountDiagnostics.join("\n") || "No account lookup failure diagnostic captured.", contentType: "text/plain" });
       if (bridge) await testInfo.attach("account-test-bridge.log", { body: bridge.output(), contentType: "text/plain" });
       throw error;
     } finally {

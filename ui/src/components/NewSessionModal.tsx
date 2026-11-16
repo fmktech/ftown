@@ -430,6 +430,8 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
       .then(response => {
         if (cancelled) return;
         if (!response.success) {
+          const code = response.data?.code;
+          console.warn(`[get_accounts] response:${typeof code === "string" && /^[a-z0-9_]{1,64}$/.test(code) ? code : "unknown"}`);
           const unsupported = response.error === "Unknown command type: get_accounts";
           setAccountsView({ bridgeId: effectiveBridgeId, status: unsupported ? "unsupported" : "error", accounts: [], error: unsupported
             ? "Update this computer's bridge to choose registered accounts." : "Could not load accounts from this computer." });
@@ -439,8 +441,11 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
         setAccountsView(accounts === null
           ? { bridgeId: effectiveBridgeId, status: "error", accounts: [], error: "Could not read the accounts returned by this computer." }
           : { bridgeId: effectiveBridgeId, status: "ready", accounts });
-      }).catch(() => {
-        if (!cancelled) setAccountsView({ bridgeId: effectiveBridgeId, status: "error", accounts: [], error: "Could not load accounts from this computer." });
+      }).catch(error => {
+        if (!cancelled) {
+          console.warn(`[get_accounts] send:${error instanceof Error && error.message === "get_accounts timed out" ? "timeout" : "rejected"}`);
+          setAccountsView({ bridgeId: effectiveBridgeId, status: "error", accounts: [], error: "Could not load accounts from this computer." });
+        }
       });
     return () => { cancelled = true; };
   }, [isOpen, effectiveBridgeId, accountsReload]);

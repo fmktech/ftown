@@ -69,3 +69,11 @@ Return one explicit default row per harness (`id: 'default', isDefault: true`) a
 | Consume explicit defaults in the modal | Tier 1 / `gpt-6.1-terra` / `medium` | `ui/src/types.ts`, `ui/src/components/NewSessionModal.tsx`, `ui/src/components/NewSessionModal.test.tsx` | Strictly parse `isDefault`; accept exactly one default per harness and allow duplicate `default` IDs across harnesses only; use the selected harness's explicit default row (do not synthesize a second one); preserve existing visible default label and parent-policy filtering. Update fixtures/tests and run focused modal tests. |
 
 Root owns integration, full focused UI tests, E2E, screenshots, commits, push and PR. Workers must not change E2E spec, run E2E, install dependencies or perform Git operations; root already installed UI/bridge/E2E dependencies once.
+
+## PR #270 CI diagnostic repair
+
+Head `5b0e1f3bf29f04ab0e9740d408a890df8407c7fb` failed desktop/mobile picker cases in direct-transport-e2e shard 1. CI trace shows the isolated bridge selected, but its log has no `get_accounts` handler invocation. The UI presents the same generic error for a failed response and a rejected/timed-out send, so current evidence does not identify the exact cause. Preserve the authenticated read policy until a concrete code is captured.
+
+| Task | Tier / model / effort | Exclusive writable files | Acceptance |
+| --- | --- | --- | --- |
+| Capture sanitized get_accounts failure diagnostics | Tier 1 / `gpt-6.1-terra` / `medium` | `ui/src/components/NewSessionModal.tsx`, `e2e/tests/harness-accounts.spec.ts` | Distinguish an RPC failure response from a local send rejection/timeout; capture only a bounded code matching `[a-z0-9_]{1,64}` or generic error category in test failure artifacts. Do not change user-facing copy, auth, account contract, or test stack. Add focused component coverage if appropriate. Run targeted UI component tests and E2E TypeScript check only. Worker must not run E2E/browser/server/stack, CI, or Git operations. Root integrates and uses the new evidence to determine the code fix. |
