@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { describe, it } from 'node:test';
-import { runHarness } from './harness-commands.js';
+import { pumpCountPath, runHarness } from './harness-commands.js';
 import { secureFixture } from './security/bridge/fixtures.test.js';
 import type { MailMessage } from './wire-types.js';
 
@@ -78,7 +78,7 @@ async function runPump(hook: Record<string, unknown>, extraEnv: Record<string, s
     Object.assign(process.env, savedEnv);
     await secure?.security.close();
     rmSync(home, { recursive: true, force: true });
-    rmSync(`/tmp/ftown-mail-pump-${sessionId}.count`, { force: true });
+    rmSync(pumpCountPath(sessionId), { force: true });
   }
 }
 
@@ -149,4 +149,27 @@ describe('hook-pump outside Grok', () => {
       });
     }
   }
+});
+
+describe('mail pump counter path', () => {
+  it('honours TMPDIR instead of a hardcoded /tmp', () => {
+    const previousTmpdir = process.env.TMPDIR;
+    const customTmp = mkdtempSync(join(tmpdir(), 'ftown-pump-tmpdir-'));
+    try {
+      process.env.TMPDIR = customTmp;
+      assert.equal(
+        pumpCountPath('abc'),
+        join(customTmp, 'ftown-mail-pump-abc.count'),
+      );
+      process.env.TMPDIR = join(customTmp, 'nested');
+      assert.equal(
+        pumpCountPath('abc'),
+        join(customTmp, 'nested', 'ftown-mail-pump-abc.count'),
+      );
+    } finally {
+      if (previousTmpdir === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = previousTmpdir;
+      rmSync(customTmp, { recursive: true, force: true });
+    }
+  });
 });
