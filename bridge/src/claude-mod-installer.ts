@@ -35,7 +35,7 @@ export function claudeModLaunchPath(options: { home?: string; probeVersion?: () 
   const destination = join(home, '.ftown', 'claude-plugin');
   if (!CLAUDE_MOD_FILES.every((file) => existsSync(join(destination, file)))) return undefined;
   const key = `${home}\0${process.env.PATH ?? ''}`;
-  const now = options.now?.() ?? Date.now();
+  const now = options.now?.() ?? performance.now();
   let compatible: boolean;
   if (!options.probeVersion && cached?.key === key && now < cached.expires) compatible = cached.compatible;
   else {

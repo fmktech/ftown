@@ -79,7 +79,9 @@ export interface AskHookDeps {
   env: Record<string, string | undefined>;
   /** Local bridge API. Rejects when the bridge is unreachable. */
   request: (method: 'GET' | 'POST', path: string, body?: unknown, signal?: AbortSignal) => Promise<AskHookResponse>;
+  /** Unused wall-clock seam retained for compatibility; elapsed gates use monotonicNow. */
   now: () => number;
+  monotonicNow?: () => number;
   sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
   writeStdout: (text: string) => void;
   writeStderr: (text: string) => void;
@@ -116,6 +118,7 @@ function ok(response: AskHookResponse): boolean {
 /** Always resolves 0. Writes stdout only when there is an answer to hand back. */
 export async function runAskHook(deps: AskHookDeps): Promise<0> {
   const { signal } = deps;
+  const monotonicNow = deps.monotonicNow ?? (() => performance.now());
   const aborted = (): boolean => signal?.aborted === true;
   // stdin is read at most once; the Grok check below may read it early.
   let stdin: Promise<string> | undefined;
@@ -155,10 +158,10 @@ export async function runAskHook(deps: AskHookDeps): Promise<0> {
     if (!ok(asked) || !isRecord(asked.body) || !isRecord(asked.body.event) || typeof asked.body.event.id !== 'string') return 0;
     const itemPath = `${base}/attention/${encodeURIComponent(asked.body.event.id)}`;
 
-    const deadlineAt = deps.now() + (deps.deadlineMs ?? ASK_HOOK_DEADLINE_MS);
-    let lastSuccess = deps.now();
+    const deadlineAt = monotonicNow() + (deps.deadlineMs ?? ASK_HOOK_DEADLINE_MS);
+    let lastSuccess = monotonicNow();
     while (!aborted()) {
-      const remaining = deadlineAt - deps.now();
+      const remaining = deadlineAt - monotonicNow();
       if (remaining <= 0) return 0;
       const waitSeconds = Math.max(1, Math.min(ATTENTION_ITEM_WAIT_MAX_SECONDS, Math.ceil(remaining / 1000)));
       let response: AskHookResponse | undefined;
@@ -169,7 +172,7 @@ export async function runAskHook(deps: AskHookDeps): Promise<0> {
       }
       if (response && response.status === 404) return 0;
       if (response && ok(response) && isRecord(response.body) && isRecord(response.body.event)) {
-        lastSuccess = deps.now();
+        lastSuccess = monotonicNow();
         const item = response.body.event;
         if (item.resolution === 'answered' && isRecord(item.answer) && Array.isArray(item.answer.answers)) {
           const output = buildAskUserQuestionHookOutput(toolInput, item.answer.answers as AttentionAnswerEntry[]);
@@ -179,7 +182,7 @@ export async function runAskHook(deps: AskHookDeps): Promise<0> {
         if (item.resolution !== undefined || item.resolvedAt !== undefined) return 0;
         continue;
       }
-      if (deps.now() - lastSuccess > OUTAGE_LIMIT_MS) return 0;
+      if (monotonicNow() - lastSuccess > OUTAGE_LIMIT_MS) return 0;
       await deps.sleep(RETRY_DELAY_MS, signal);
     }
     return 0;
@@ -226,6 +229,7 @@ export async function runAskHookCli(): Promise<number> {
         return { status: result.status, body: result.body };
       },
       now: () => Date.now(),
+      monotonicNow: () => performance.now(),
       sleep: abortableSleep,
       writeStdout: (text) => { process.stdout.write(text); },
       writeStderr: (text) => { process.stderr.write(text); },

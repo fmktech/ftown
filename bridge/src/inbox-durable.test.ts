@@ -111,7 +111,7 @@ async function fixture(t: { after: (fn: () => void | Promise<void>) => void }) {
   const clock = new FakeClock();
   const runner = new FakeRunner();
   runner.running.add('s1');
-  const mail = new MailDeliveryService({ now: clock.now, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, nativeWake: async () => ({ status: 'unsupported' }) });
+  const mail = new MailDeliveryService({ now: clock.now, monotonicNow: clock.now, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, nativeWake: async () => ({ status: 'unsupported' }) });
   const server = new LocalApiServer();
   (server as unknown as { mail: MailDeliveryService }).mail = mail;
   const token = 'inbox-durable-token';
@@ -341,7 +341,7 @@ describe('injected prefix sources (plugin self-submits)', () => {
     const captured: string[] = [];
     const nativeId = '12345678-1234-4234-8234-123456789abc';
     await f.store.saveSession(makeSession('s1', { shellType: 'codex', codexSessionId: nativeId }));
-    const service = new MailDeliveryService({ now: f.clock.now, setTimeout: f.clock.setTimeout, clearTimeout: f.clock.clearTimeout, nativeWake: async (_s: Session, text: string) => { captured.push(text); return { status: 'accepted' }; } });
+    const service = new MailDeliveryService({ now: f.clock.now, monotonicNow: f.clock.now, setTimeout: f.clock.setTimeout, clearTimeout: f.clock.clearTimeout, nativeWake: async (_s: Session, text: string) => { captured.push(text); return { status: 'accepted' }; } });
     service.setStore(f.store);
     service.setMailStore(f.mailStore);
     service.setRunner(f.runner);
@@ -420,7 +420,7 @@ describe('injected prefix sources (plugin self-submits)', () => {
     let release!: (v: { status: 'accepted' }) => void;
     const gate = new Promise<{ status: 'accepted' }>((resolve) => { release = resolve; });
     const captured: string[] = [];
-    const service = new MailDeliveryService({ now: f.clock.now, setTimeout: f.clock.setTimeout, clearTimeout: f.clock.clearTimeout, nativeWake: async (_s: Session, text: string) => { captured.push(text); return gate; } });
+    const service = new MailDeliveryService({ now: f.clock.now, monotonicNow: f.clock.now, setTimeout: f.clock.setTimeout, clearTimeout: f.clock.clearTimeout, nativeWake: async (_s: Session, text: string) => { captured.push(text); return gate; } });
     service.setStore(f.store);
     service.setMailStore(f.mailStore);
     service.setRunner(f.runner);

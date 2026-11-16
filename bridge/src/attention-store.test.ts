@@ -112,7 +112,8 @@ test('pagination never skips omitted events; pruning and ledger reset are visibl
 });
 
 test('wait wakes only on eligible creation, survives the read/listener race and cleans up cancellation', async (t) => {
-  const { store } = await fixture(t);
+  const f = await fixture(t); const time = clock();
+  const store = new AttentionStore(f.resolve, 500, undefined, time.options);
   const initial = await store.list('s1');
   const waiting = store.wait('s1', { cursor: initial.cursor }, 1);
   await store.record('s1', 'Notification', notice());
@@ -120,7 +121,6 @@ test('wait wakes only on eligible creation, survives the read/listener race and 
   assert.equal(page.events.length, 1);
   // Freeze the wait deadline while exercising unrelated persisted operations.
   const realSetTimeout = setTimeout, realClearTimeout = clearTimeout;
-  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: Date.now() });
   const controller = new AbortController(), positiveController = new AbortController();
   let completed = false;
   const next = store.wait('s1', { cursor: page.cursor }, 1, controller.signal).finally(() => { completed = true; });
@@ -159,7 +159,6 @@ test('wait wakes only on eligible creation, survives the read/listener race and 
     controller.abort(); positiveController.abort();
     if (guard) realClearTimeout(guard);
     await Promise.allSettled([next, ...(positive ? [positive] : [])]);
-    t.mock.timers.reset();
   }
 });
 
@@ -236,11 +235,13 @@ test('record returns its own committed public event through concurrent requests 
 
 function clock() {
   let now = Date.parse('2026-10-18T12:00:00.000Z');
+  let mono = now;
   const tasks = new Map<ReturnType<typeof setTimeout>, { at: number; fn: () => void }>();
-  const options = { now: () => now, schedule: (fn: () => void, ms: number) => {
-    const token = { unref() {} } as ReturnType<typeof setTimeout>; tasks.set(token, { at: now + ms, fn }); return token;
+  let onSchedule: (() => void) | undefined;
+  const options = { now: () => now, monotonicNow: () => mono, schedule: (fn: () => void, ms: number) => {
+    const token = { unref() {} } as ReturnType<typeof setTimeout>; tasks.set(token, { at: mono + ms, fn }); onSchedule?.(); onSchedule = undefined; return token;
   }, cancel: (token: ReturnType<typeof setTimeout>) => { tasks.delete(token); } };
-  return { options, tasks, advance(ms: number) { now += ms; for (const [token, task] of [...tasks]) if (task.at <= now) { tasks.delete(token); task.fn(); } } };
+  return { options, tasks, nextSchedule() { return new Promise<void>(resolve => { onSchedule = resolve; }); }, stepWall(ms: number) { now += ms; }, fireEarly() { const entry = tasks.entries().next().value; assert.ok(entry); tasks.delete(entry[0]); entry[1].fn(); }, advance(ms: number) { now += ms; mono += ms; for (const [token, task] of [...tasks]) if (task.at <= mono) { tasks.delete(token); task.fn(); } } };
 }
 async function notifications(t: Parameters<typeof fixture>[0], extra: AttentionNotificationOptions = {}) {
   const f = await fixture(t); const time = clock();
@@ -325,6 +326,35 @@ test('overdue restored cycles attempt once, while inactive and corrupt sessions 
     assert.equal(!!(await f.ledger()).idleCycle, active); await assert.rejects(stat(join(f.dir, 'missing')), { code: 'ENOENT' });
   }
 });
+for (const { name, wallStep, expectedDelay } of [
+  { name: 'future dueAt after backward step', wallStep: -600_000, expectedDelay: IDLE_NOTIFICATION_DELAY_MS },
+  { name: 'past dueAt after forward step', wallStep: 600_000, expectedDelay: 0 },
+  { name: 'normal remaining delay', wallStep: 0, expectedDelay: IDLE_NOTIFICATION_DELAY_MS - 30_000 },
+]) {
+  test(`restored idle cycle bounds remaining delay: ${name}`, async t => {
+    const f = await notifications(t);
+    await becomeIdle(f.store);
+    f.store.stopNotifications();
+    f.time.advance(30_000);
+    f.time.stepWall(wallStep);
+    const restored = new AttentionStore(f.resolve, 500, undefined, f.options);
+    t.after(() => restored.stopNotifications());
+    await restored.restoreIdleNotifications(['s1']);
+    assert.equal(f.time.tasks.size, 1);
+    const task = [...f.time.tasks.values()][0];
+    assert.equal(task.at - f.time.options.monotonicNow(), expectedDelay);
+    if (expectedDelay > 0) {
+      f.time.advance(expectedDelay - 1); await restored.list('s1');
+      assert.equal(f.signals.length, 0);
+      f.time.advance(1);
+    } else f.time.advance(0);
+    await restored.list('s1');
+    assert.equal(f.signals.length, 1);
+    f.time.advance(IDLE_NOTIFICATION_DELAY_MS); await restored.list('s1');
+    assert.equal(f.signals.length, 1, 'recovery attempts once');
+  });
+}
+
 test('resuming activity fences a callback blocked on asynchronous target lookup', async (t) => {
   let release!: () => void; let entered!: () => void; let sent = 0;
   const checking = new Promise<void>(resolve => { entered = resolve; });
@@ -682,26 +712,32 @@ test('waitForItem abort rejects as cancelled and clears liveness when no waits r
   await assert.rejects(f.store.waitForItem('s1', item.id, 5000, AbortSignal.abort()), /cancelled/);
 });
 
-test('liveness lasts ATTENTION_WAITER_TTL_MS after the latest poll started', async t => {
-  const f = await fixture(t);
-  let now = Date.parse('2026-10-18T12:00:00.000Z');
-  const store = new AttentionStore(f.resolve, 500, undefined, { now: () => now });
+test('liveness lasts ATTENTION_WAITER_TTL_MS after the latest poll started', { timeout: 10_000 }, async t => {
+  const f = await fixture(t); const time = clock();
+  const store = new AttentionStore(f.resolve, 500, undefined, time.options);
+  const runPoll = async (id: string) => {
+    const poll = store.waitForItem('s1', id, 30);
+    for (let attempts = 0; !time.tasks.size; attempts++) {
+      if (attempts >= 10_000) assert.fail('poll did not schedule its timer');
+      await new Promise<void>(resolve => setImmediate(resolve));
+    }
+    time.advance(30); await poll;
+  };
   const item = (await store.record('s1', 'Notification', needsInput('Q'), { prompt: mailPrompt() }))!;
   assert.equal(store.hasLiveWaiter(item.id), false);
   await store.waitForItem('s1', item.id, 0);
-  assert.equal(store.hasLiveWaiter(item.id), false, 'a zero-wait read is not a waiter');
-  await store.waitForItem('s1', item.id, 30);
-  assert.equal(store.hasLiveWaiter(item.id), true);
+  assert.equal(store.hasLiveWaiter(item.id), false);
+  await runPoll(item.id);
+  let now = time.options.now();
   assert.equal(store.hasLiveWaiter(item.id, now + ATTENTION_WAITER_TTL_MS), true);
   assert.equal(store.hasLiveWaiter(item.id, now + ATTENTION_WAITER_TTL_MS + 1), false);
-  now += 30_000;
-  await store.waitForItem('s1', item.id, 30);
+  time.advance(30_000); await runPoll(item.id); now = time.options.now();
   assert.equal(store.hasLiveWaiter(item.id, now + ATTENTION_WAITER_TTL_MS), true);
-  now += ATTENTION_WAITER_TTL_MS + 1;
+  time.advance(ATTENTION_WAITER_TTL_MS + 1);
   assert.equal(store.hasLiveWaiter(item.id), false);
   const hook = (await store.record('s1', 'PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'ttl', tool_input: askInput }))!;
   await assert.rejects(store.answer('s1', hook.id, [{ selected: [0] }]), /no longer waiting/);
-  await store.waitForItem('s1', hook.id, 30);
+  await runPoll(hook.id);
   assert.equal((await store.answer('s1', hook.id, [{ selected: [0] }])).waiterLive, true);
 });
 
@@ -714,28 +750,26 @@ test('ledgers written before prompts existed still load', async t => {
   assert.equal(page.events[0].id, 'e1'); assert.equal(page.events[0].prompt, undefined);
 });
 
-test('liveness TTL runs from the end of the latest poll, not its start', async t => {
-  const f = await fixture(t);
-  let now = Date.parse('2026-10-18T12:00:00.000Z');
-  const store = new AttentionStore(f.resolve, 500, undefined, { now: () => now });
-  const hook = (await store.record('s1', 'PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'end', tool_input: askInput }))!;
-  // waitForItem's window is measured with Date.now()/setTimeout; fake both so a slow fs read cannot expire the
-  // window before the poll registers (the old real-time 50 ms window made this flaky on loaded CI).
-  t.mock.timers.enable({ apis: ['Date', 'setTimeout'] });
+test('liveness TTL runs from the end of the latest poll, not its start', { timeout: 10_000 }, async t => {
+  const f = await fixture(t); const time = clock();
+  const store = new AttentionStore(f.resolve, 500, undefined, time.options);
   const runPoll = async (eventId: string) => {
-    const poll = store.waitForItem('s1', eventId, 50);
-    while (!store.hasLiveWaiter(eventId)) await new Promise<void>(resolve => setImmediate(resolve)); // poller registered
-    now += 25_000; // the long-poll ran its full window
-    t.mock.timers.tick(50);
-    await poll;
+    const poll = store.waitForItem('s1', eventId, 25_000);
+    for (let attempts = 0; !time.tasks.size; attempts++) {
+      if (attempts >= 10_000) assert.fail('poll did not schedule its timer');
+      await new Promise<void>(resolve => setImmediate(resolve));
+    }
+    time.advance(25_000); await poll;
   };
+  const hook = (await store.record('s1', 'PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'end', tool_input: askInput }))!;
   await runPoll(hook.id);
-  const result = await store.answer('s1', hook.id, [{ selected: [0] }]);
-  assert.equal(result.waiterLive, true);
-
+  assert.equal((await store.answer('s1', hook.id, [{ selected: [0] }])).waiterLive, true);
   const second = (await store.record('s1', 'PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'end2', tool_input: askInput }))!;
   await runPoll(second.id);
-  now += ATTENTION_WAITER_TTL_MS + 1;
+  assert.equal(store.hasLiveWaiter(second.id), true, '25s poll exceeds TTL from its start');
+  time.advance(ATTENTION_WAITER_TTL_MS);
+  assert.equal(store.hasLiveWaiter(second.id), true, 'TTL includes the exact boundary');
+  time.advance(1);
   await assert.rejects(store.answer('s1', second.id, [{ selected: [0] }]), (e) => e instanceof AttentionError && e.code === 'answer_waiter_gone');
 });
 
@@ -900,4 +934,60 @@ test('public items expose only the allowlist; an extra stored field never leaves
   assert.deepEqual(answered.item.answeredBy, { kind: 'human' });
   assert.ok(Object.keys(answered.item).every((key) => allowed.includes(key)), Object.keys(answered.item).join(','));
   assert.equal(Object.hasOwn(answered.item, 'extraInternalField'), false);
+});
+
+test('idle deadlines survive wall steps, restore and early rechecks', async t => {
+  for (const jump of [-600_000, 600_000]) {
+    const f = await notifications(t);
+    await becomeIdle(f.store); f.time.stepWall(jump);
+    f.time.fireEarly(); await f.store.list('s1');
+    await f.advance(119_999); assert.equal(f.signals.length, 0);
+    await f.advance(1); assert.equal(f.signals.length, 1);
+    await becomeIdle(f.store); f.store.stopNotifications();
+    const recovered = new AttentionStore(f.resolve, 500, undefined, f.options);
+    t.after(() => recovered.stopNotifications());
+    await recovered.restoreIdleNotifications(['s1']); f.time.stepWall(-jump);
+    f.time.fireEarly();
+    await recovered.list('s1'); await recovered.restoreIdleNotifications(['s1']);
+    await f.advance(119_999); assert.equal(f.signals.length, 1);
+    await f.advance(1); await recovered.list('s1'); assert.equal(f.signals.length, 2);
+  }
+});
+
+test('poll deadlines and waiter expiry use elapsed time across wall steps', { timeout: 10_000 }, async t => {
+  for (const jump of [-600_000, 600_000]) {
+    const f = await fixture(t); const time = clock();
+    const store = new AttentionStore(f.resolve, 500, undefined, time.options);
+    const item = (await store.record('s1', 'Notification', needsInput('Q'), { prompt: mailPrompt() }))!;
+    let scheduled = time.nextSchedule();
+    let settled = false;
+    const poll = store.waitForItem('s1', item.id, 1000).then(value => { settled = true; return value; });
+    await scheduled; time.stepWall(jump); scheduled = time.nextSchedule(); time.fireEarly();
+    assert.equal(await Promise.race([poll.then(() => 'settled'), scheduled.then(() => 'scheduled')]), 'scheduled');
+    assert.equal(settled, false, 'wall step and early wake cannot end item poll');
+    time.advance(999); await store.list('s1'); assert.equal(settled, false);
+    assert.equal(store.hasLiveWaiter(item.id), true);
+    scheduled = time.nextSchedule(); time.advance(1);
+    assert.equal(await Promise.race([poll.then(() => 'settled'), scheduled.then(() => 'scheduled')]), 'settled');
+    assert.equal(settled, true, 'item poll ends at elapsed deadline');
+    const endedWall = time.options.now(); time.advance(ATTENTION_WAITER_TTL_MS);
+    assert.equal(store.hasLiveWaiter(item.id), true);
+    assert.equal(store.hasLiveWaiter(item.id, endedWall + ATTENTION_WAITER_TTL_MS), true);
+    time.advance(1); assert.equal(store.hasLiveWaiter(item.id), false);
+    assert.equal(store.hasLiveWaiter(item.id, endedWall + ATTENTION_WAITER_TTL_MS + 1), false);
+    const other = (await store.record('s1', 'Notification', needsInput('Other'), { prompt: mailPrompt() }))!;
+    scheduled = time.nextSchedule(); const otherPoll = store.waitForItem('s1', other.id, 1000); await scheduled;
+    assert.equal(store.hasLiveWaiter(item.id, endedWall), false);
+    time.advance(1000); await otherPoll;
+    const empty = await store.list('s1'); settled = false; scheduled = time.nextSchedule();
+    const wait = store.wait('s1', { cursor: empty.cursor }, 1).then(value => { settled = true; return value; });
+    await scheduled; time.stepWall(-jump); scheduled = time.nextSchedule(); time.fireEarly();
+    assert.equal(await Promise.race([wait.then(() => 'settled'), scheduled.then(() => 'scheduled')]), 'scheduled');
+    assert.equal(settled, false, 'wall step and early wake cannot end page wait');
+    time.advance(999); await store.list('s1'); assert.equal(settled, false);
+    scheduled = time.nextSchedule(); time.advance(1);
+    assert.equal(await Promise.race([wait.then(() => 'settled'), scheduled.then(() => 'scheduled')]), 'settled');
+    assert.equal(settled, true, 'page wait ends at elapsed deadline');
+    assert.equal((await wait).events.length, 0);
+  }
 });

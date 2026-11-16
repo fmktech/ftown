@@ -25,7 +25,10 @@ export type CoordinationApiFn = (method: string, path: string, body?: unknown) =
 
 export interface CoordinationCliDeps {
   api: CoordinationApiFn;
+  /** Wall time for formatted board timestamps. */
   now: () => number;
+  /** Elapsed-time clock for wait budgets. */
+  monotonicNow?: () => number;
   env: NodeJS.ProcessEnv;
   log: (text: string) => void;
   errorLog: (text: string) => void;
@@ -84,6 +87,7 @@ function resolveDeps(partial?: Partial<CoordinationCliDeps>): CoordinationCliDep
   return {
     api: partial?.api ?? defaultApi,
     now: partial?.now ?? (() => Date.now()),
+    monotonicNow: partial?.monotonicNow ?? (() => performance.now()),
     env: partial?.env ?? process.env,
     log: partial?.log ?? ((text: string) => console.log(text)),
     errorLog: partial?.errorLog ?? ((text: string) => console.error(text)),
@@ -435,7 +439,7 @@ async function waitForBoard(
   const start = await fetchBoard(deps, sessionId, {});
   let cursor = start.cursor;
   const timeoutMs = timeoutSeconds * 1000;
-  const deadline = deps.now() + timeoutMs;
+  const deadline = (deps.monotonicNow?.() ?? performance.now()) + timeoutMs;
   let remainingMs = timeoutMs;
   const eventsSinceStart: TreeEvent[] = [];
   while (remainingMs > 0) {
@@ -449,10 +453,10 @@ async function waitForBoard(
         printBoard(deps, await fetchBoard(deps, sessionId, query), json);
         return;
       }
-      remainingMs = Math.min(remainingMs, deadline - deps.now());
+      remainingMs = Math.min(remainingMs, deadline - (deps.monotonicNow?.() ?? performance.now()));
     } else {
       remainingMs -= waitSeconds * 1000;
-      const wallRemaining = deadline - deps.now();
+      const wallRemaining = deadline - (deps.monotonicNow?.() ?? performance.now());
       if (wallRemaining < remainingMs) remainingMs = wallRemaining;
     }
   }
@@ -525,7 +529,7 @@ async function waitForEvents(
   // Without --since, wait only for events from the current head (board cursor).
   let cursor = since ?? (await fetchBoard(deps, sessionId, {})).cursor;
   const timeoutMs = timeoutSeconds * 1000;
-  const deadline = deps.now() + timeoutMs;
+  const deadline = (deps.monotonicNow?.() ?? performance.now()) + timeoutMs;
   let remainingMs = timeoutMs;
   let lastPage: TreeEventPage = { events: [], cursor };
   while (remainingMs > 0) {
@@ -538,7 +542,7 @@ async function waitForEvents(
       return;
     }
     remainingMs -= waitSeconds * 1000;
-    const wallRemaining = deadline - deps.now();
+    const wallRemaining = deadline - (deps.monotonicNow?.() ?? performance.now());
     if (wallRemaining < remainingMs) remainingMs = wallRemaining;
   }
   printEvents(deps, lastPage, json);

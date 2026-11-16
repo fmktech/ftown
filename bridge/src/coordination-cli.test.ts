@@ -39,6 +39,7 @@ function harness(handler: Handler): {
       return handler(call);
     },
     now: () => NOW,
+    monotonicNow: () => NOW,
     env: { FTOWN_SESSION_ID: SELF },
     log: (text: string) => out.push(text),
     errorLog: (text: string) => err.push(text),
@@ -553,4 +554,22 @@ test('events HTTP errors exit 1 with the server message', async () => {
   });
   assert.equal(await runEvents([], deps), 1);
   assert.match(err.join('\n'), /boom/);
+});
+
+test('board and events wait budgets ignore wall-clock jumps', async () => {
+  for (const jump of [-600_000, 600_000]) {
+    let wall = NOW; let mono = 0; let polls = 0;
+    const h = harness(call => {
+      if (call.path.includes('/events')) { if (++polls > 6) throw new Error('poll sentinel'); wall += jump; mono += 1000; return { events: [makeEvent(polls)], cursor: polls }; }
+      return makeBoard([childCard('kid', 'working')]);
+    });
+    h.deps.now = () => wall; h.deps.monotonicNow = () => mono;
+    assert.equal(await runBoard(['--wait', '--until', 'any-done', '--timeout', '3'], h.deps), 3);
+    assert.equal(polls, 3);
+    wall = NOW; mono = 0; polls = 0;
+    const e = harness(() => { polls++; wall += jump; mono += 1000; return { events: [], cursor: 1 }; });
+    e.deps.now = () => wall; e.deps.monotonicNow = () => mono;
+    assert.equal(await runEvents(['--wait', '--since', '1', '--timeout', '3'], e.deps), 3);
+    assert.equal(polls, 1);
+  }
 });

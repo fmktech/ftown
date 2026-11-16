@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 
 import {
   AGENT_BUSY_STALE_MS,
+  HOOKED_BUSY_STALE_MS,
+  NATIVE_WAKE_LEASE_MS,
   MAIL_NUDGE_BUSY_RECHECK_MS,
   MAIL_NUDGE_DELAY_HOOKED_MS,
   MAIL_NUDGE_DELAY_MS,
@@ -38,6 +40,7 @@ interface FakeTimer extends MailTimerHandle {
 
 class FakeClock {
   private time: number;
+  private wallOffset = 0;
   private seq = 0;
   private timers = new Map<number, { at: number; fn: () => void }>();
 
@@ -45,7 +48,9 @@ class FakeClock {
     this.time = startTime;
   }
 
-  now = (): number => this.time;
+  now = (): number => this.time + this.wallOffset;
+  monotonicNow = (): number => this.time;
+  jumpWall(ms: number): void { this.wallOffset += ms; }
 
   setTimeout = (fn: () => void, ms: number): MailTimerHandle => {
     const id = ++this.seq;
@@ -208,6 +213,7 @@ function setup(startTime?: number, nativeWake?: NativeMailWaker) {
     mailStore,
     runner,
     now: clock.now,
+    monotonicNow: clock.monotonicNow,
     setTimeout: clock.setTimeout,
     clearTimeout: clock.clearTimeout,
     nativeWake: nativeWake ?? (async () => ({ status: 'unsupported' })),
@@ -243,7 +249,7 @@ describe('MailDeliveryService receiver recovery', () => {
     await service.acceptMail(session, { body: 'private payload', from: 'alice', fromName: 'Alice' });
     service.stop();
     runner.running.add(session.id);
-    const restarted = new MailDeliveryService({ store, runner, mailStore, now: clock.now,
+    const restarted = new MailDeliveryService({ store, runner, mailStore, now: clock.now, monotonicNow: clock.monotonicNow,
       setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout });
     await restarted.recoverPendingMail(session.id);
     await clock.advance(6_200);
@@ -452,7 +458,125 @@ describe('MailDeliveryService long poll', () => {
 // (b) Nudge debounce/coalesce + rate limit
 // ---------------------------------------------------------------------------
 
+describe('Monotonic mail gates', () => {
+  for (const jump of [-600_000, 600_000]) {
+    for (const [event, window] of [['PreToolUse', AGENT_BUSY_STALE_MS], ['PostToolUse', HOOKED_BUSY_STALE_MS]] as const) {
+      it(`busy ${event} ignores wall jump ${jump}`, async () => {
+        const { clock, service } = setup();
+        const session = makeSession('busy', { shellType: 'claude' });
+        service.markAgentBusy(session.id, event);
+        clock.jumpWall(jump);
+        await clock.advance(window - 1);
+        assert.equal(service.isAgentRecentlyBusy(session.id, session), true);
+        await clock.advance(1);
+        assert.equal(service.isAgentRecentlyBusy(session.id, session), false);
+        service.stop();
+      });
+    }
+    it(`injection age ignores wall jump ${jump} while exposing wall time`, async () => {
+      const { clock, service } = setup();
+      const wall = clock.now();
+      await service.notePluginHandoff('injection');
+      assert.equal(service.lastPromptInjection('injection')?.at, wall);
+      clock.jumpWall(jump);
+      await clock.advance(14_999);
+      assert.equal(service.isInjectedPrompt('injection', {}), true);
+      await service.notePluginHandoff('injection-expired');
+      clock.jumpWall(-jump);
+      await clock.advance(15_000);
+      assert.equal(service.isInjectedPrompt('injection-expired', {}), false);
+      service.stop();
+    });
+    it(`recovery legacy deadline ignores wall jump ${jump}`, async () => {
+      const { clock, store, runner, service, mailStore } = setup();
+      const session = makeSession('recovery', { shellType: 'muse', museSessionId: 'native' });
+      store.add(session);
+      await service.acceptMail(session, { body: 'mail', from: 'alice' });
+      service.stop(); runner.running.add(session.id);
+      const restarted = new MailDeliveryService({ store, runner, mailStore, now: clock.now,
+        monotonicNow: clock.monotonicNow, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
+        nativeWake: async () => ({ status: 'unsupported' }) });
+      await restarted.recoverPendingMail(session.id);
+      clock.jumpWall(jump);
+      await clock.advance(MAIL_NUDGE_DELAY_HOOKED_MS - 1);
+      assert.equal(runner.nudgeLines().length, 0);
+      await clock.advance(1);
+      assert.equal(runner.nudgeLines().length, 1);
+      restarted.stop();
+    });
+    it(`native lease ignores wall jump ${jump}`, async () => {
+      const { clock, store, runner, service } = setup();
+      const session = makeSession('lease', { shellType: 'claude', claudeSessionId: 'native' });
+      store.add(session); runner.running.add(session.id);
+      await service.acceptMail(session, { body: 'mail', from: 'alice' });
+      await clock.advance(50_000);
+      service.registerNativeWake(session, { adapter: 'claude-mod', nativeSessionId: 'native' });
+      clock.jumpWall(jump);
+      await clock.advance(NATIVE_WAKE_LEASE_MS - 1);
+      assert.equal(runner.nudgeLines().length, 0);
+      await clock.advance(1);
+      assert.equal(runner.nudgeLines().length, 1);
+      service.stop();
+    });
+    for (const running of [true, false]) {
+      it(`codex ${running ? 'rejected' : 'not running'} retry ignores wall jump ${jump}`, async () => {
+        let attempts = 0;
+        const { clock, store, runner, service, mailStore } = setup(undefined, async () => { attempts++; return { status: 'rejected' }; });
+        const session = makeSession('codex-retry', { shellType: 'codex', codexSessionId: 'native' });
+        store.add(session);
+        if (running) runner.running.add(session.id);
+        await service.acceptMail(session, { body: 'mail', from: 'alice' });
+        await clock.advance(5_000);
+        assert.equal(attempts, running ? 1 : 0);
+        clock.jumpWall(jump);
+        // A recovery wake fires early and must respect the original retry deadline.
+        runner.running.add(session.id);
+        service.setRunner({ isRunning: id => runner.isRunning(id), write: (id, data) => runner.write(id, data) });
+        await service.recoverPendingMail(session.id);
+        await clock.advance(0);
+        assert.equal(attempts, running ? 1 : 0);
+        await clock.advance(MAIL_NUDGE_BUSY_RECHECK_MS - 1);
+        assert.equal(attempts, running ? 1 : 0);
+        await clock.advance(1);
+        assert.equal(attempts, running ? 2 : 1);
+        assert.equal((await mailStore.listUnnudgedWaking(session.id)).length, 1);
+        service.stop();
+      });
+    }
+  }
+});
+
 describe('MailDeliveryService nudges', () => {
+  for (const jump of [-600_000, 600_000]) {
+    it(`legacy deadline ignores wall jump ${jump}`, async () => {
+      const { clock, store, runner, service } = setup();
+      const session = makeSession('legacy', { shellType: 'muse', museSessionId: 'native' });
+      store.add(session); runner.running.add(session.id);
+      await service.acceptMail(session, { body: 'first', from: 'alice' });
+      clock.jumpWall(jump);
+      await clock.advance(MAIL_NUDGE_DELAY_HOOKED_MS - 1);
+      assert.equal(runner.nudgeLines().length, 0);
+      await clock.advance(1);
+      assert.equal(runner.nudgeLines().length, 1);
+      service.stop();
+    });
+
+    it(`rate limit ignores wall jump ${jump}`, async () => {
+      const { clock, store, runner, service } = setup();
+      const session = makeSession('rate', { shellType: 'grok' });
+      store.add(session); runner.running.add(session.id);
+      await service.acceptMail(session, { body: 'first', from: 'alice' });
+      await clock.advance(6_200);
+      await service.acceptMail(session, { body: 'second', from: 'bob' });
+      clock.jumpWall(jump);
+      await clock.advance(29_999);
+      assert.equal(runner.nudgeLines().length, 1);
+      await clock.advance(1);
+      assert.equal(runner.nudgeLines().length, 2);
+      service.stop();
+    });
+  }
+
   it('never injects a PTY nudge for Pi when its native listener is between polls', async () => {
     const { clock, store, mailStore, runner, service } = setup();
     const session = makeSession('pi-1', { shellType: 'pi' });

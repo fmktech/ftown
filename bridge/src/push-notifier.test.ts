@@ -83,3 +83,65 @@ test('terminal sessions cannot hand off a queued notice', async () => {
     now:Date.now,schedule:setTimeout,cancel:clearTimeout,fetch:async()=>{calls++;return new Response(null,{status:202});},
   });notifier.notify('a',notice);await tick();assert.equal(calls,0);notifier.stop();
 });
+
+test('retry and expiry follow elapsed time through wall steps', async () => {
+  const original = Date.now;
+  try {
+    for (const jump of [-600_000, 600_000]) {
+      let wall=1_000_000, elapsed=0, calls=0; Date.now=()=>wall;
+      const tasks=new Map<ReturnType<typeof setTimeout>,{fn:()=>void;ms:number}>();
+      const notifier=new BridgePushNotifier({apiUrl:'https://example.test',bridgeId:'b',getToken:()=> 'token',getSession:async()=>({name:'Agent'})}, {
+        now:()=>elapsed, schedule:(fn,ms)=>{const token={} as ReturnType<typeof setTimeout>;tasks.set(token,{fn,ms});return token;},
+        cancel:token=>{tasks.delete(token);}, fetch:async()=>{calls++;return new Response(null,{status:503});},
+      });
+      notifier.notify('a',notice); await tick(); assert.equal(calls,1);
+      wall+=jump; let retry=[...tasks.values()][0]; assert.equal(retry.ms,5000);
+      elapsed=4999; retry.fn(); await tick(); assert.equal(calls,1);
+      retry=[...tasks.values()].at(-1)!; assert.equal(retry.ms,1);
+      elapsed=5000; retry.fn(); await tick(); assert.equal(calls,2);
+      elapsed=300_000; [...tasks.values()].at(-1)!.fn(); await tick(); assert.equal(calls,2);
+      notifier.stop();
+    }
+  } finally { Date.now=original; }
+});
+
+test('default clock keeps retry and expiry deadlines across wall steps', async () => {
+  const originalDateNow = Date.now, originalFetch = globalThis.fetch;
+  const originalSetTimeout = globalThis.setTimeout, originalClearTimeout = globalThis.clearTimeout;
+  const originalPerformanceNow = Object.getOwnPropertyDescriptor(performance, 'now');
+  let wall = 1_000_000, elapsed = 0, calls = 0;
+  const tasks = new Map<ReturnType<typeof setTimeout>, { fn: () => void; ms: number }>();
+  Date.now = () => wall;
+  Object.defineProperty(performance, 'now', { configurable: true, value: () => elapsed });
+  globalThis.setTimeout = ((fn: () => void, ms: number) => {
+    const token = {} as ReturnType<typeof setTimeout>; tasks.set(token, { fn, ms }); return token;
+  }) as typeof setTimeout;
+  globalThis.clearTimeout = ((token: ReturnType<typeof setTimeout>) => { tasks.delete(token); }) as typeof clearTimeout;
+  globalThis.fetch = async () => { calls++; return new Response(null, { status: 503 }); };
+  try {
+    // A fresh module captures the mocked Date.now in the old implementation.
+    const modulePath = './push-notifier.js?default-clock-regression';
+    const { BridgePushNotifier: DefaultNotifier } = await import(modulePath) as typeof import('./push-notifier.js');
+    for (const jump of [-600_000, 600_000]) {
+      wall = 1_000_000; elapsed = 0; calls = 0; tasks.clear();
+      const notifier = new DefaultNotifier({ apiUrl: 'https://example.test', bridgeId: 'b',
+        getToken: () => 'token', getSession: async () => ({ name: 'Agent' }) });
+      notifier.notify('a', notice); await tick(); assert.equal(calls, 1);
+      wall += jump;
+      let [token, retry] = [...tasks.entries()][0]; assert.equal(retry.ms, 5000);
+      tasks.delete(token); elapsed = 4999; retry.fn(); await tick(); assert.equal(calls, 1);
+      [token, retry] = [...tasks.entries()][0]; assert.equal(retry.ms, 1);
+      tasks.delete(token); elapsed = 5000; retry.fn(); await tick(); assert.equal(calls, 2);
+      [token, retry] = [...tasks.entries()][0]; tasks.delete(token);
+      elapsed = 299_999; retry.fn(); await tick(); assert.equal(calls, 3);
+      [token, retry] = [...tasks.entries()][0]; assert.equal(retry.ms, 1); tasks.delete(token);
+      elapsed = 300_000; retry.fn(); await tick(); assert.equal(calls, 3);
+      notifier.stop();
+    }
+  } finally {
+    Date.now = originalDateNow; globalThis.fetch = originalFetch;
+    globalThis.setTimeout = originalSetTimeout; globalThis.clearTimeout = originalClearTimeout;
+    if (originalPerformanceNow) Object.defineProperty(performance, 'now', originalPerformanceNow);
+    else delete (performance as { now?: () => number }).now;
+  }
+});
