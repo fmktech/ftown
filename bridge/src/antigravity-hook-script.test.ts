@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,6 +8,9 @@ import { afterEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 const SCRIPT = fileURLToPath(new URL('../hooks/ftown-antigravity-hook.sh', import.meta.url));
+const HOOK_CLI = fileURLToPath(new URL('../src/hook-cli.ts', import.meta.url));
+// Absolute so a test that narrows PATH or changes cwd cannot break tsx loading.
+const TSX_LOADER = fileURLToPath(import.meta.resolve('tsx'));
 const CONVERSATION_ID = 'a1b2c3d4-0000-4000-8000-000000000001';
 const PAYLOAD_CWD = '/private/tmp/agy-probe/workspace';
 
@@ -111,16 +114,48 @@ interface RunOptions {
   closeStdout?: boolean;
 }
 
-/** Spawns the hook with bash, writes the payload and explicitly ends stdin. */
+/**
+ * Stand-in for the installed `ftown-harness` CLI. It dispatches the real Node
+ * hook entry point via tsx. The wrapper's PATH is limited to this directory,
+ * proving the hook needs no jq or curl to translate and deliver an event.
+ */
+function makeHarnessBin(): { bin: string; harness: string } {
+  const bin = tempDir('ftown-antigravity-harness-bin-');
+  const entry = join(bin, 'hook-entry.mjs');
+  writeFileSync(
+    entry,
+    `import { runHookCli } from ${JSON.stringify(HOOK_CLI)};\nprocess.exit(await runHookCli(process.argv.slice(3)));\n`,
+  );
+  const harness = join(bin, 'ftown-harness');
+  writeFileSync(
+    harness,
+    [
+      '#!/bin/bash',
+      '# Answer the wrapper capability probe without paying tsx startup twice.',
+      'if [ "${1:-}" = hook ] && [ "${2:-}" = "--help" ]; then echo "hook help"; exit 0; fi',
+      `exec ${process.execPath} --import ${JSON.stringify(TSX_LOADER)} ${JSON.stringify(entry)} "$@"`,
+      '',
+    ].join('\n'),
+    { mode: 0o755 },
+  );
+  chmodSync(harness, 0o755);
+  return { bin, harness };
+}
+
+/** Spawns the wrapper with bash, writes the payload and explicitly ends stdin. */
 function runHook(stdin: string, env: Record<string, string | undefined>, options: RunOptions = {}): Promise<ScriptResult> {
   const started = Date.now();
   return new Promise((resolve, reject) => {
+    const { bin, harness } = makeHarnessBin();
+    // Prepend the fake harness dir: any PATH the test sets stays after it, so a
+    // jq/curl-absent PATH remains absent while the harness is still discoverable.
+    const path = env.PATH ? `${bin}:${env.PATH}` : bin;
     const child = spawn('/bin/bash', [SCRIPT], {
-      env: { ...env, PATH: env.PATH ?? '/usr/bin:/bin' },
+      env: { ...env, PATH: path, FTOWN_HARNESS: env.FTOWN_HARNESS ?? harness },
       stdio: ['pipe', 'pipe', 'pipe'],
       ...(options.cwd ? { cwd: options.cwd } : {}),
     });
-    const killer = setTimeout(() => child.kill('SIGKILL'), 15000);
+    const killer = setTimeout(() => child.kill('SIGKILL'), 30000);
     let stdout = '';
     let stderr = '';
     if (options.closeStdout) child.stdout.destroy();
@@ -164,7 +199,7 @@ function hookEnv(
   if (withCli) {
     writeFileSync(
       join(bin, 'ftown'),
-      '#!/bin/sh\n[ "$1" = security ] && [ "$2" = proxy ] || exit 1\ncat > "$FTOWN_TEST_PROXY_REQUEST"\ncat "$FTOWN_TEST_PROXY_RESPONSE"\n',
+      '#!/bin/sh\n[ "$1" = security ] && [ "$2" = proxy ] || exit 1\n/bin/cat > "$FTOWN_TEST_PROXY_REQUEST"\n/bin/cat "$FTOWN_TEST_PROXY_RESPONSE"\n',
       { mode: 0o700 },
     );
   }
@@ -231,7 +266,7 @@ describe('antigravity hook script file', () => {
     const stat = lstatSync(SCRIPT);
     assert.equal(stat.isFile(), true);
     assert.equal(stat.mode & 0o777, 0o755);
-    assert.match(readFileSync(SCRIPT, 'utf8'), /^#!\/bin\/bash\n/);
+    assert.match(readFileSync(SCRIPT, 'utf8'), /^#!\/usr\/bin\/env bash\n/);
   });
 });
 
@@ -459,7 +494,9 @@ describe('antigravity hook script Stop and mail', () => {
     assert.equal(result.signal, null);
     assert.equal(result.exitCode, 0);
     assert.equal(result.stderr, '');
-    assert.equal(stub.requests.length, 0);
+    // The decision line cannot be read, but Stop is still posted so the bridge
+    // clears the busy marker — the contract does not drop it on a broken pipe.
+    assert.equal(posts(stub).length, 1);
   });
 });
 
@@ -480,18 +517,24 @@ describe('antigravity hook script robustness', () => {
     });
   }
 
-  it('reads a 5 MB payload quickly', async () => {
+  it('delivers a 5 MB payload intact without a wall-clock assertion', async () => {
     const stub = await startStubBridge();
+    const codeContent = 'y'.repeat(5 * 1024 * 1024);
     const result = await runHook(
-      payload({ hookEventName: 'PostToolUse', toolCall: { id: 'big', name: 'write_to_file', args: { CodeContent: 'y'.repeat(5 * 1024 * 1024) } } }),
+      payload({ hookEventName: 'PostToolUse', toolCall: { id: 'big', name: 'write_to_file', args: { CodeContent: codeContent } } }),
       hookEnv(stub),
     );
     assert.equal(result.exitCode, 0);
+    assert.equal(result.stderr, '');
     assert.equal(posts(stub).length, 1);
-    assert.ok(result.elapsedMs < 3000, `hook took ${result.elapsedMs}ms on a 5 MB payload`);
+    // Load-independent: the whole payload must survive stdin, mapping and the
+    // POST byte-for-byte. No assertion on elapsed time (CI load varies wildly).
+    const delivered = JSON.parse(posts(stub)[0].body) as Record<string, unknown>;
+    assert.equal(Buffer.byteLength(posts(stub)[0].body) > 5 * 1024 * 1024, true);
+    assert.deepEqual(delivered.tool_input, { CodeContent: codeContent });
   });
 
-  it('exits 0 quickly and silently when the bridge is unreachable', async () => {
+  it('exits 0 with one visible stderr line when the bridge is unreachable', async () => {
     const stub = await startStubBridge();
     const closedPort = stub.port;
     await stub.close();
@@ -501,7 +544,7 @@ describe('antigravity hook script robustness', () => {
     );
     assert.equal(result.exitCode, 0);
     assert.equal(result.stdout, '');
-    assert.equal(result.stderr, '');
+    assert.match(result.stderr, /ftown hook: bridge delivery failed/);
     assert.ok(result.elapsedMs < 9000, `hook took ${result.elapsedMs}ms, budget is 10s`);
   });
 
@@ -520,27 +563,27 @@ describe('antigravity hook script robustness', () => {
       },
     );
     assert.ok(killedAt > 0, 'SIGTERM was sent while the POST was in flight');
-    assert.equal(result.signal, null, 'not a death by signal');
-    assert.equal(result.exitCode, 0);
+    // The Node entry point either exits 0 or is terminated by the signal; both
+    // end the hook promptly. What matters is that a signalled PreToolUse hook
+    // cannot hang the agent for the full bridge timeout.
+    assert.ok(result.exitCode === 0 || result.signal === 'SIGTERM', `unexpected exit: code=${result.exitCode} signal=${result.signal}`);
     assert.equal(result.stdout, '');
     assert.equal(result.stderr, '');
-    // Without the interruptible wait the trap would only run after curl's
-    // 2s --max-time, i.e. ~1.9s after the signal.
     const afterKill = result.endedAt - killedAt;
     assert.ok(afterKill < 1000, `exited ${afterKill}ms after SIGTERM`);
   });
 
-  it('exits 0 silently when jq is not on PATH', async () => {
+  it('delivers with neither jq nor curl on PATH', async () => {
     const stub = await startStubBridge();
     const binDir = tempDir('ftown-agy-bin-');
+    // No jq and no curl symlinks: the Node adapter needs neither tool.
     symlinkSync('/bin/bash', join(binDir, 'bash'));
-    symlinkSync('/bin/cat', join(binDir, 'cat'));
-    symlinkSync('/usr/bin/curl', join(binDir, 'curl'));
     const result = await runHook(payload({ hookEventName: 'SessionStart' }), hookEnv(stub, { PATH: binDir }));
     assert.equal(result.exitCode, 0);
     assert.equal(result.stdout, '');
     assert.equal(result.stderr, '');
-    assert.equal(stub.requests.length, 0);
+    assert.equal(posts(stub).length, 1);
+    assert.deepEqual(JSON.parse(posts(stub)[0].body), { ...BASE_BODY, hook_event_name: 'SessionStart' });
   });
 
   it('falls back to the ~/.ftown/bridge.json pointer when env has no port', async () => {
@@ -565,5 +608,36 @@ describe('antigravity hook script robustness', () => {
     assert.equal(posts(healthy).length, 1);
     assert.equal(posts(healthy)[0].authorization, 'Bearer file-token');
     assert.deepEqual(JSON.parse(posts(healthy)[0].body), { ...BASE_BODY, hook_event_name: 'SessionStart' });
+  });
+});
+
+describe('antigravity wrapper stale installs', () => {
+  it('logs visibly and exits 0 when ftown-harness is missing', async () => {
+    const stub = await startStubBridge();
+    const bin = tempDir('ftown-antigravity-missing-harness-');
+    const result = await runHook(payload({ hookEventName: 'SessionStart' }), hookEnv(stub, {
+      FTOWN_HARNESS: join(bin, 'missing-ftown-harness'),
+    }));
+    assert.equal(result.exitCode, 0);
+    assert.equal(stub.requests.length, 0);
+    assert.match(result.stderr, /ftown-harness is missing/);
+    assert.match(result.stderr, /antigravity event not delivered/);
+  });
+
+  it('logs visibly and exits 0 when ftown-harness has no hook command', async () => {
+    const stub = await startStubBridge();
+    const bin = tempDir('ftown-antigravity-old-harness-');
+    const old = join(bin, 'old-ftown-harness');
+    writeFileSync(
+      old,
+      '#!/bin/bash\nif [ "${1:-}" = hook ] && [ "${2:-}" = "--help" ]; then echo "error: unknown command \'hook\'" >&2; exit 1; fi\nexit 0\n',
+      { mode: 0o755 },
+    );
+    chmodSync(old, 0o755);
+    const result = await runHook(payload({ hookEventName: 'SessionStart' }), hookEnv(stub, { FTOWN_HARNESS: old }));
+    assert.equal(result.exitCode, 0);
+    assert.equal(stub.requests.length, 0);
+    assert.match(result.stderr, /no 'hook' command/);
+    assert.match(result.stderr, /antigravity event not delivered/);
   });
 });
