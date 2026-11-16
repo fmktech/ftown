@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { isCodexAuthError, parseCodexRateLimits, readLatestCodexRateLimits } from './codex.js';
+import { fetchCodexQuota, isCodexAuthError, parseCodexRateLimits, readLatestCodexRateLimits } from './codex.js';
 
 const NOW = new Date('2026-11-13T12:00:00.000Z');
 const OBSERVED = '2026-11-13T11:59:00.000Z';
@@ -319,4 +319,45 @@ describe('readLatestCodexRateLimits', () => {
     );
     assert.equal(await readLatestCodexRateLimits(sessions), null);
   });
+});
+
+it('uses CODEX_HOME for cached quota and defaults when blank', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'codex-quota-config-'));
+  const previousHome = process.env.CODEX_HOME;
+  const previousPath = process.env.PATH;
+  try {
+    const custom = join(home, 'custom');
+    const dir = join(custom, 'sessions', '2026', '11', '13');
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'rollout-test.jsonl'), JSON.stringify({ timestamp: OBSERVED, type: 'event_msg', payload: { type: 'token_count', rate_limits: { primary: { used_percent: 3, window_minutes: 300, resets_at: FUTURE_SECONDS } } } }));
+    process.env.CODEX_HOME = custom;
+    process.env.PATH = '';
+    const options = { homeDir: home, timeoutMs: 1000, now: () => NOW };
+    assert.equal((await fetchCodexQuota(options)).source, 'cached');
+    process.env.CODEX_HOME = '';
+    assert.notEqual((await fetchCodexQuota(options)).source, 'cached');
+  } finally {
+    if (previousHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousHome;
+    if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath;
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+// Tests in this module own temporary homes and must not access inherited harness paths.
+const inheritedPathOverrides: NodeJS.ProcessEnv = {};
+const pathOverrideNames = [
+  'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME',
+  'OPENCODE_CONFIG_DIR', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME',
+] as const;
+before(() => {
+  for (const name of pathOverrideNames) {
+    inheritedPathOverrides[name] = process.env[name];
+    delete process.env[name];
+  }
+});
+after(() => {
+  for (const name of pathOverrideNames) {
+    const value = inheritedPathOverrides[name];
+    if (value === undefined) delete process.env[name]; else process.env[name] = value;
+  }
 });

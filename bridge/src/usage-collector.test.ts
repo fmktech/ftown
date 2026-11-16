@@ -1037,3 +1037,76 @@ describe('collectSessionUsage — incremental folding across polls', () => {
     assert.deepEqual(second?.models, ['anthropic/claude-sonnet-4', 'openai/gpt-5']);
   });
 });
+
+it('uses configured Claude, Codex and Muse transcript directories', async () => {
+  const claude = join(root, 'override-claude');
+  const codex = join(root, 'override-codex');
+  const data = join(root, 'override-data');
+  const homeKey = process.platform === 'win32' ? 'USERPROFILE' : 'HOME';
+  const previousHome = process.env[homeKey];
+  const previousClaude = process.env.CLAUDE_CONFIG_DIR;
+  const previousCodex = process.env.CODEX_HOME;
+  const previousData = process.env.XDG_DATA_HOME;
+  const workdir = '/tmp/override-project';
+  const id = 'override-session';
+  try {
+    process.env[homeKey] = root;
+    process.env.CLAUDE_CONFIG_DIR = claude;
+    process.env.CODEX_HOME = codex;
+    process.env.XDG_DATA_HOME = data;
+    const project = join(claude, 'projects', claudeProjectSlug(workdir));
+    await mkdir(project, { recursive: true });
+    await writeFile(join(project, `${id}.jsonl`), claudeLine('message', 'model', { input_tokens: 9, output_tokens: 1 }));
+    assert.equal((await collectSessionUsage({ shellType: 'claude', claudeSessionId: id, workingDir: workdir }, {}))?.inputTokens, 9);
+    const codexDir = join(codex, 'sessions', '2026', '07', '01');
+    await mkdir(codexDir, { recursive: true });
+    await writeFile(join(codexDir, `rollout-2026-07-01T10-00-00-${id}.jsonl`), JSON.stringify({ type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 5, cached_input_tokens: 0, output_tokens: 1, total_tokens: 6 } } } }));
+    assert.equal((await collectSessionUsage({ shellType: 'codex', codexSessionId: id }, {}))?.inputTokens, 5);
+    await writeMuseSession(join(data, 'muse', 'sessions'), id, [museCompletedLine('model', { input_tokens: 7, output_tokens: 2 }, museUs('2026-09-20T12:00:05.000Z'))]);
+    assert.equal((await collectSessionUsage({ shellType: 'muse', museSessionId: id }, {}))?.inputTokens, 7);
+    const testEnv = { HOME: join(root, 'decoy-home'), CLAUDE_CONFIG_DIR: join(root, 'decoy-claude'), CODEX_HOME: join(root, 'decoy-codex'), XDG_DATA_HOME: join(root, 'decoy-data') };
+    assert.equal((await collectSessionUsage({ shellType: 'claude', claudeSessionId: id, workingDir: workdir, env: { CLAUDE_CONFIG_DIR: claude } }, { env: testEnv }))?.inputTokens, 9);
+    assert.equal((await collectSessionUsage({ shellType: 'codex', codexSessionId: id, env: { CODEX_HOME: codex } }, { env: testEnv }))?.inputTokens, 5);
+    assert.equal((await collectSessionUsage({ shellType: 'muse', museSessionId: id, env: { XDG_DATA_HOME: data } }, { env: testEnv }))?.inputTokens, 7);
+    const defaultHome = join(root, 'session-home');
+    const defaultProject = join(defaultHome, '.claude', 'projects', claudeProjectSlug(workdir));
+    await mkdir(defaultProject, { recursive: true });
+    await writeFile(join(defaultProject, `${id}.jsonl`), claudeLine('default', 'model', { input_tokens: 13, output_tokens: 1 }));
+    assert.equal((await collectSessionUsage({ shellType: 'claude', claudeSessionId: id, workingDir: workdir, env: { HOME: defaultHome, CLAUDE_CONFIG_DIR: '' } }, { env: testEnv }))?.inputTokens, 13);
+    assert.equal(await collectSessionUsage({ shellType: 'codex', codexSessionId: id, env: { HOME: defaultHome, CODEX_HOME: '' } }, { env: testEnv }), null);
+    assert.equal(await collectSessionUsage({ shellType: 'muse', museSessionId: id, env: { HOME: defaultHome, XDG_DATA_HOME: '' } }, { env: testEnv }), null);
+    assert.equal((await collectSessionUsage({ shellType: 'claude', claudeSessionId: id, workingDir: workdir }, { env: { HOME: defaultHome, CLAUDE_CONFIG_DIR: '' } }))?.inputTokens, 13);
+
+    assert.equal(await collectSessionUsage({ shellType: 'claude', claudeSessionId: id, workingDir: workdir }, { claudeProjectsDir: join(root, 'missing') }), null);
+    process.env.CLAUDE_CONFIG_DIR = '';
+    process.env.CODEX_HOME = '';
+    process.env.XDG_DATA_HOME = '';
+    assert.equal(await collectSessionUsage({ shellType: 'claude', claudeSessionId: id, workingDir: workdir }, {}), null);
+    assert.equal(await collectSessionUsage({ shellType: 'codex', codexSessionId: id }, {}), null);
+    assert.equal(await collectSessionUsage({ shellType: 'muse', museSessionId: id }, {}), null);
+  } finally {
+    if (previousHome === undefined) delete process.env[homeKey]; else process.env[homeKey] = previousHome;
+    if (previousClaude === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previousClaude;
+    if (previousCodex === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousCodex;
+    if (previousData === undefined) delete process.env.XDG_DATA_HOME; else process.env.XDG_DATA_HOME = previousData;
+  }
+});
+
+// Tests in this module own temporary homes and must not access inherited harness paths.
+const inheritedPathOverrides: NodeJS.ProcessEnv = {};
+const pathOverrideNames = [
+  'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME',
+  'OPENCODE_CONFIG_DIR', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME',
+] as const;
+before(() => {
+  for (const name of pathOverrideNames) {
+    inheritedPathOverrides[name] = process.env[name];
+    delete process.env[name];
+  }
+});
+after(() => {
+  for (const name of pathOverrideNames) {
+    const value = inheritedPathOverrides[name];
+    if (value === undefined) delete process.env[name]; else process.env[name] = value;
+  }
+});

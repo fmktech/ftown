@@ -1,4 +1,4 @@
-import { describe, it } from 'node:test';
+import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -392,6 +392,27 @@ describe('fetchClaudeModels', () => {
     await utimes(path, mtime, mtime);
   }
 
+  it('reads the catalogue and selection from CLAUDE_CONFIG_DIR', async () => {
+    await withHome(async (home) => {
+      const previous = process.env.CLAUDE_CONFIG_DIR;
+      const config = join(home, 'custom');
+      try {
+        process.env.CLAUDE_CONFIG_DIR = config;
+        await mkdir(join(config, 'cache', 'model-catalog'), { recursive: true });
+        await writeFile(join(config, 'cache', 'model-catalog', 'published-a.json'), JSON.stringify(fileFor(catalogue([entry('choice')]))));
+        await writeFile(join(config, 'settings.json'), JSON.stringify({ model: 'choice' }));
+        const found = await fetchClaudeModels(optionsFor(home));
+        assert.equal(found.status, 'ok');
+        assert.equal(found.models[0].id, 'choice');
+        assert.equal(found.models[0].isDefault, true);
+        process.env.CLAUDE_CONFIG_DIR = '';
+        assert.equal((await fetchClaudeModels(optionsFor(home))).status, 'unavailable');
+      } finally {
+        if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previous;
+      }
+    });
+  });
+
   it('reports unavailable when the catalogue directory is missing', async () => {
     await withHome(async (home) => {
       const result = await fetchClaudeModels(optionsFor(home));
@@ -733,4 +754,23 @@ describe('claudeCatalogExpiry', () => {
     assert.equal(claudeCatalogExpiry({ documentBytes: '@@' }), null);
     assert.equal(claudeCatalogExpiry(null), null);
   });
+});
+
+// Tests in this module own temporary homes and must not access inherited harness paths.
+const inheritedPathOverrides: NodeJS.ProcessEnv = {};
+const pathOverrideNames = [
+  'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME',
+  'OPENCODE_CONFIG_DIR', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME',
+] as const;
+before(() => {
+  for (const name of pathOverrideNames) {
+    inheritedPathOverrides[name] = process.env[name];
+    delete process.env[name];
+  }
+});
+after(() => {
+  for (const name of pathOverrideNames) {
+    const value = inheritedPathOverrides[name];
+    if (value === undefined) delete process.env[name]; else process.env[name] = value;
+  }
 });

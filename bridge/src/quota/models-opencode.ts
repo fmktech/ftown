@@ -3,6 +3,7 @@ import { constants } from 'node:fs';
 import { access, open, stat } from 'node:fs/promises';
 import { delimiter, isAbsolute, join } from 'node:path';
 
+import { xdgCacheHome } from '../config-dirs.js';
 import type { HarnessModel, ModelPricing, ModelsFetcher, ProviderModels, QuotaFetchOptions } from './types.js';
 
 /**
@@ -11,9 +12,9 @@ import type { HarnessModel, ModelPricing, ModelsFetcher, ProviderModels, QuotaFe
  * Ids come from plain `opencode models` (no arguments): one `provider/model`
  * per line for every connected provider. Details (name, context, cost,
  * reasoning efforts) are joined from opencode's own catalogue cache,
- * `<home>/.cache/opencode/models.json`, keyed by provider id then model id. A
- * missing or unreadable catalogue only drops the details; the ids are still
- * listed.
+ * `$XDG_CACHE_HOME/opencode/models.json` (or `<home>/.cache/...`), keyed by
+ * provider id then model id. A missing or unreadable catalogue only drops the
+ * details; the ids are still listed.
  *
  * Returned: every model of the selected subscription providers, then every
  * zero-priced ('free') model of any other listed provider.
@@ -31,7 +32,6 @@ const MODEL_FLAG = '-m <id>';
 const EFFORT_FLAG = '-m <id>#<level>';
 const MAX_BUFFER_BYTES = 16 * 1024 * 1024;
 const MAX_CATALOGUE_BYTES = 64 * 1024 * 1024;
-const CATALOGUE_RELATIVE_PATH = join('.cache', 'opencode', 'models.json');
 const UNEXPECTED_OUTPUT_MESSAGE = 'unexpected output from `opencode models`';
 const NOT_FOUND_MESSAGE = 'opencode CLI not found';
 const FAILED_MESSAGE = '`opencode models` failed';
@@ -286,15 +286,23 @@ export async function resolveOpencodeBinary(
 }
 
 /**
- * Reads and parses `<homeDir>/.cache/opencode/models.json`. Returns null when
- * homeDir is empty, or the file is missing, not a regular file, larger than the
- * size bound, or not valid JSON. Never throws.
+ * Absolute path of opencode's model catalogue cache: `$XDG_CACHE_HOME/opencode/models.json`
+ * or `<homeDir>/.cache/opencode/models.json`.
  */
-export async function readOpencodeCatalogue(homeDir: string): Promise<unknown> {
+export function opencodeCataloguePath(homeDir: string, env: NodeJS.ProcessEnv = process.env): string {
+  return join(xdgCacheHome(homeDir, env), 'opencode', 'models.json');
+}
+
+/**
+ * Reads and parses opencode's catalogue cache (see {@link opencodeCataloguePath}).
+ * Returns null when homeDir is empty, or the file is missing, not a regular
+ * file, larger than the size bound, or not valid JSON. Never throws.
+ */
+export async function readOpencodeCatalogue(homeDir: string, env: NodeJS.ProcessEnv = process.env): Promise<unknown> {
   if (homeDir.length === 0) return null;
   let handle: Awaited<ReturnType<typeof open>> | null = null;
   try {
-    handle = await open(join(homeDir, CATALOGUE_RELATIVE_PATH), 'r');
+    handle = await open(opencodeCataloguePath(homeDir, env), 'r');
     const info = await handle.stat();
     if (!info.isFile() || info.size > MAX_CATALOGUE_BYTES) return null;
     const buffer = Buffer.alloc(info.size);

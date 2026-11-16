@@ -4,6 +4,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
+import { xdgConfigHome } from './config-dirs.js';
+
 const execAsync = promisify(exec);
 
 /** True when the `opencode` binary is reachable on PATH (cheap probe). */
@@ -18,15 +20,22 @@ export async function opencodeBinaryAvailable(): Promise<boolean> {
 
 /**
  * Install the bundled ftown opencode plugin into opencode's global plugin
- * directory (~/.config/opencode/plugins/), where it is auto-loaded by every
- * opencode instance. The plugin is inert unless FTOWN_SESSION_ID is set, so
- * manual `opencode` runs are unaffected.
+ * directory, where it is auto-loaded by every opencode instance. The directory
+ * uses `XDG_CONFIG_HOME/opencode`, falling back to `~/.config/opencode`.
+ * `OPENCODE_CONFIG_DIR` is an additional discovery directory and does not
+ * replace the global plugin directory.
+ * The plugin is inert unless FTOWN_SESSION_ID is set, so manual `opencode`
+ * runs are unaffected.
  *
  * Unlike the Pi extension (loaded per-launch via --extension), a global-dir
  * install cannot be scoped per session — so explicit setup updates it to keep the deployed copy in sync with the bundled one.
  */
-export function installOpencodePlugin(bundledPath: string, home: string = homedir()): string {
-  const destination = join(home, '.config', 'opencode', 'plugins', 'ftown.js');
+export function installOpencodePlugin(
+  bundledPath: string,
+  home: string = homedir(),
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const destination = join(xdgConfigHome(home, env), 'opencode', 'plugins', 'ftown.js');
   mkdirSync(dirname(destination), { recursive: true, mode: 0o755 });
   // Repair drift: skip the write when contents already match to avoid churn,
   // so opencode's plugin watcher does not reload an identical file.

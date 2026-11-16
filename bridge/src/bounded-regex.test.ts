@@ -8,7 +8,8 @@ import {
 } from './bounded-regex.js';
 
 test('boundedMatchIndexes returns matching line indexes case-insensitively', async () => {
-  assert.deepEqual(await boundedMatchIndexes('foo', ['a foo b', 'bar', 'FOO']), [0, 2]);
+  assert.deepEqual(await boundedMatchIndexes('foo', ['a foo b', 'bar', 'FOO']), { status: 'completed', indexes: [0, 2] });
+  assert.deepEqual(await boundedMatchIndexes('foo', ['bar']), { status: 'completed', indexes: [] });
 });
 
 test('boundedMatchIndexes rejects on an invalid pattern', async () => {
@@ -16,17 +17,13 @@ test('boundedMatchIndexes rejects on an invalid pattern', async () => {
 });
 
 test('boundedMatchIndexes bounds catastrophic backtracking instead of stalling', async () => {
-  // A valid pattern only yields `null` when the worker hit its time budget and
-  // was terminated, so this result is itself the proof that backtracking was
-  // bounded. No wall-clock assertion: under load the worker may take longer to
-  // spin up and exit, but the outcome is deterministic.
   const result = await boundedMatchIndexes('(.|..)+X$', ['ordinary terminal output without suffix!'], 300);
-  assert.equal(result, null);
+  assert.deepEqual(result, { status: 'timeout', phase: 'match' });
 });
 
 test('boundedMatchIndexes bounds overlap-alternative backtracking', async () => {
   const result = await boundedMatchIndexes('(a|aa)+$', ['a'.repeat(40) + '!'], 300);
-  assert.equal(result, null);
+  assert.deepEqual(result, { status: 'timeout', phase: 'match' });
 });
 
 test('boundedMatchIndexes rejects overload once the worker pool and queue are saturated', async () => {

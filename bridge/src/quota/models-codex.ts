@@ -1,3 +1,4 @@
+import { codexHome } from '../config-dirs.js';
 import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -270,9 +271,9 @@ export function parseCodexConfigDefaults(tomlText: string): {
   return { model, effort };
 }
 
-async function readConfigText(homeDir: string): Promise<string> {
+export async function readConfigText(homeDir: string): Promise<string> {
   try {
-    return await readFile(join(homeDir, '.codex', 'config.toml'), 'utf8');
+    return await readFile(join(codexHome(homeDir), 'config.toml'), 'utf8');
   } catch {
     return '';
   }

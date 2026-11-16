@@ -1,4 +1,4 @@
-import { afterEach, describe, it } from 'node:test';
+import { afterEach, describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { access, chmod, mkdir, mkdtemp, rm, truncate, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -10,6 +10,7 @@ import {
   isOpencodePlanProvider,
   opencodeSubscriptionProviders,
   parseOpencodeModelIds,
+  opencodeCataloguePath,
   parseOpencodeModels,
   readOpencodeCatalogue,
   resolveOpencodeBinary,
@@ -376,7 +377,37 @@ describe('parseOpencodeModels', () => {
   });
 });
 
+describe('opencodeCataloguePath', () => {
+  it('defaults to <homeDir>/.cache/opencode/models.json when XDG_CACHE_HOME is unset', () => {
+    const homeDir = '/fake/home';
+    assert.equal(opencodeCataloguePath(homeDir, {}), join(homeDir, '.cache', 'opencode', 'models.json'));
+  });
+
+  it('uses $XDG_CACHE_HOME/opencode/models.json when set, ignoring a blank value', () => {
+    const homeDir = '/fake/home';
+    assert.equal(
+      opencodeCataloguePath(homeDir, { XDG_CACHE_HOME: '/custom/cache' }),
+      join('/custom/cache', 'opencode', 'models.json'),
+    );
+    assert.equal(
+      opencodeCataloguePath(homeDir, { XDG_CACHE_HOME: '   ' }),
+      join(homeDir, '.cache', 'opencode', 'models.json'),
+    );
+  });
+});
+
 describe('readOpencodeCatalogue', () => {
+  it('reads the catalogue from $XDG_CACHE_HOME when set', async () => {
+    const homeDir = await tempDir();
+    const cacheHome = await tempDir();
+    await mkdir(join(cacheHome, 'opencode'), { recursive: true });
+    await writeFile(join(cacheHome, 'opencode', 'models.json'), JSON.stringify(CATALOGUE));
+
+    assert.deepEqual(await readOpencodeCatalogue(homeDir, { XDG_CACHE_HOME: cacheHome }), CATALOGUE);
+    // The default location has no file, so the override is what made this work.
+    assert.equal(await readOpencodeCatalogue(homeDir, {}), null);
+  });
+
   it('returns null when the file is missing, malformed, or homeDir is empty', async () => {
     const homeDir = await tempDir();
     assert.equal(await readOpencodeCatalogue(homeDir), null);
@@ -607,4 +638,23 @@ describe('resolveOpencodeBinary', () => {
       process.chdir(previous);
     }
   });
+});
+
+// Tests in this module own temporary homes and must not access inherited harness paths.
+const inheritedPathOverrides: NodeJS.ProcessEnv = {};
+const pathOverrideNames = [
+  'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME',
+  'OPENCODE_CONFIG_DIR', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME',
+] as const;
+before(() => {
+  for (const name of pathOverrideNames) {
+    inheritedPathOverrides[name] = process.env[name];
+    delete process.env[name];
+  }
+});
+after(() => {
+  for (const name of pathOverrideNames) {
+    const value = inheritedPathOverrides[name];
+    if (value === undefined) delete process.env[name]; else process.env[name] = value;
+  }
 });
