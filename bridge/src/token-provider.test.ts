@@ -19,9 +19,10 @@ function make(opts: { fetchToken: () => Promise<ProvidedToken>; random?: () => n
 }
 
 describe('tokenLifetimeMs', () => {
-  it('reads exp − iat from the JWT payload, capped at two hours', () => {
+  it('reads exp − iat from the JWT payload, capped at twelve hours', () => {
     assert.equal(tokenLifetimeMs(hour('a').token), 3_600_000);
-    assert.equal(tokenLifetimeMs(jwt('b', { iat: 0, exp: 86_400 }).token), 7_200_000);
+    assert.equal(tokenLifetimeMs(jwt('b', { iat: 1_000, exp: 44_200 }).token), 43_200_000);
+    assert.equal(tokenLifetimeMs(jwt('c', { iat: 0, exp: 86_400 }).token), 43_200_000);
   });
 
   it('is null for anything that is not a JWT with a positive numeric lifetime', () => {
@@ -54,9 +55,9 @@ describe('createTokenProvider', () => {
   describe('token reuse (timed from arrival and exp − iat, never the absolute expiresAt)', () => {
     it('reuses a token until a minute before its lifetime ends after arrival, then exchanges again', async () => {
       let calls = 0;
-      const { clock, provider } = make({ fetchToken: async () => { calls++; clock.t += 5_000; return hour(`t${calls}`); } });
+      const { clock, provider } = make({ fetchToken: async () => { calls++; clock.t += 5_000; return jwt(`t${calls}`, { iat: 1_000, exp: 44_200 }); } });
       const first = await provider.getToken();
-      clock.t += 3_540_000 - 1;
+      clock.t += 43_140_000 - 1;
       assert.equal(await provider.getToken(), first);
       assert.equal(calls, 1);
       clock.t += 1;
