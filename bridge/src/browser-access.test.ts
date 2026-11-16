@@ -44,6 +44,26 @@ test('browser answer_session_attention validates the exact payload shape', async
     assert.equal(commands.length, 1);
   } finally { await f.close(); }
 });
+
+test('authenticated loopback transport dispatches get_accounts without exposing account paths', async () => {
+  const commands: Command[] = [];
+  const accounts = [{ id: 'coding', harness: 'claude', label: 'Coding subscription', isDefault: false }];
+  const f = await fixture(async command => {
+    commands.push(command);
+    return { requestId: command.requestId, success: true, data: { accounts } };
+  });
+  try {
+    const p = await f.pair();
+    const body = { requestId: 'accounts', type: 'get_accounts', payload: { bridgeId: 'bridge-1' } };
+    assert.equal((await f.call('commands', 'POST', body)).status, 401);
+    const response = await f.call('commands', 'POST', body, p.token);
+    assert.equal(response.status, 200);
+    assert.deepEqual(commands, [{ ...body }]);
+    assert.deepEqual(response.body.data.accounts, accounts);
+    assert.equal(JSON.stringify(response.body).includes('configDir'), false);
+  } finally { await f.close(); }
+});
+
 async function fixture(execute: (c: Command) => Promise<CommandResponse> = async c => ({ requestId: c.requestId, success: true }), cloudNonce?: string) {
   const dataDir = mkdtempSync(join(tmpdir(), 'browser-access-'));
   let revoked = 0;
