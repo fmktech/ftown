@@ -7,7 +7,7 @@ import { sharedAccountId, signIn } from "./passkey";
 export { sharedAccountId };
 
 /** The transient command failures shown by the dashboard while a new browser or bridge is being admitted. */
-export const TRANSIENT_CREATE_SESSION_REFUSAL = /^(?:Encrypted request rejected|Bridge is starting)$/;
+export const TRANSIENT_CREATE_SESSION_REFUSAL = /^Encrypted request rejected$/;
 
 /**
  * Sign `page` in to the shared account A with its synced passkey and land on

@@ -429,18 +429,21 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     let wakeRetry: (() => void) | undefined;
     setAccountsView({ bridgeId: effectiveBridgeId, status: "loading", accounts: [] });
-    const requestId = crypto.randomUUID();
     const diagnosticBridgeId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(effectiveBridgeId) ? effectiveBridgeId : "unknown";
-    const diagnosticContext = `bridge:${diagnosticBridgeId} request:${requestId}`;
+    let diagnosticContext = `bridge:${diagnosticBridgeId}`;
     console.warn(`[get_accounts] ${diagnosticContext} attempt`);
     void (async () => {
       try {
         let response: CommandResponse | undefined;
         for (let attempt = 0; attempt <= ACCOUNT_STARTING_RETRY_DELAYS_MS.length; attempt++) {
+          const requestId = crypto.randomUUID();
+          diagnosticContext = `bridge:${diagnosticBridgeId} request:${requestId}`;
           response = await sendCommandRef.current({ type: "get_accounts", payload: { bridgeId: effectiveBridgeId }, requestId }, { retryBridgeStarting: false });
           const code = response.data && typeof response.data === "object" && "code" in response.data ? response.data.code : undefined;
+          const retryable = response.data && typeof response.data === "object" && "retryable" in response.data && response.data.retryable === true;
           if (cancelled) return;
-          if (response.success || code !== "bridge_starting" || attempt === ACCOUNT_STARTING_RETRY_DELAYS_MS.length) break;
+          if (response.success || code !== "bridge_starting" || response.error !== "Bridge is starting"
+            || !retryable || attempt === ACCOUNT_STARTING_RETRY_DELAYS_MS.length) break;
           console.warn(`[get_accounts] ${diagnosticContext} response:bridge_starting`);
           await new Promise<void>(resolve => {
             wakeRetry = resolve;

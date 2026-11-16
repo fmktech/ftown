@@ -118,7 +118,7 @@ it("retries the account read briefly when the bridge reports it is starting", as
   await act(async () => { await vi.runAllTimersAsync(); });
   expect(sendCommand).toHaveBeenCalledTimes(5);
   expect(sendCommand).toHaveBeenNthCalledWith(1, expect.objectContaining({ type: "get_accounts", requestId: expect.any(String) }), { retryBridgeStarting: false });
-  expect(sendCommand.mock.calls[0][0].requestId).toBe(sendCommand.mock.calls[1][0].requestId);
+  expect(new Set(sendCommand.mock.calls.map(([command]) => command.requestId)).size).toBe(5);
   expect(sendCommand.mock.calls[0][1]).toEqual({ retryBridgeStarting: false });
   expect((screen.getByLabelText("Account") as HTMLSelectElement).disabled).toBe(false);
   expect(screen.getByRole("option", { name: "Work (work)" })).toBeTruthy();

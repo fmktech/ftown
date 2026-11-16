@@ -101,38 +101,42 @@ export function createRpcCore(publish: (command: Command, options?: MessagePubli
       let retryTimer: ReturnType<typeof setTimeout> | undefined;
       let retryIndex = 0;
       let settled = false;
+      let activeCommand = command;
       let timeout: ReturnType<typeof setTimeout>;
       const onError = (error: unknown) => {
         if (settled) return;
         settled = true; clearTimeout(timeout); if (retryTimer !== undefined) clearTimeout(retryTimer);
-        cancellation.abort(); pendingCallbacks.delete(command.requestId); reject(error);
+        cancellation.abort(); pendingCallbacks.delete(activeCommand.requestId); reject(error);
       };
       const onResponse = (response: CommandResponse) => {
         const data = response.data && typeof response.data === "object" && !Array.isArray(response.data)
           ? response.data as Record<string, unknown> : undefined;
         const code = data?.code;
         const delay = BRIDGE_STARTING_RETRY_DELAYS_MS[retryIndex];
-        if (options.retryBridgeStarting !== false && !response.success && code === "bridge_starting" && delay !== undefined && deadline - Date.now() > delay) {
+        const retryable = data?.retryable === true && response.error === "Bridge is starting";
+        if (options.retryBridgeStarting !== false && !response.success && code === "bridge_starting" && retryable && delay !== undefined && deadline - Date.now() > delay) {
           retryIndex++;
           retryTimer = setTimeout(() => {
             retryTimer = undefined;
             if (settled) return;
-            pendingCallbacks.set(command.requestId, onResponse);
-            publishSafely(command, { deadline, signal: cancellation.signal }, onError);
+            pendingCallbacks.delete(activeCommand.requestId);
+            activeCommand = { ...command, requestId: uuidv4() };
+            pendingCallbacks.set(activeCommand.requestId, onResponse);
+            publishSafely(activeCommand, { deadline, signal: cancellation.signal }, onError);
           }, delay);
           return;
         }
-        settled = true; clearTimeout(timeout); cancellation.abort(); resolve(response);
+        settled = true; clearTimeout(timeout); cancellation.abort(); resolve({ ...response, requestId: command.requestId });
       };
       timeout = setTimeout(() => {
         settled = true; if (retryTimer !== undefined) clearTimeout(retryTimer);
         cancellation.abort();
-        pendingCallbacks.delete(command.requestId);
+        pendingCallbacks.delete(activeCommand.requestId);
         reject(new Error(`${command.type} timed out`));
       }, timeoutMs);
 
-      pendingCallbacks.set(command.requestId, onResponse);
-      publishSafely(command, { deadline, signal: cancellation.signal }, onError);
+      pendingCallbacks.set(activeCommand.requestId, onResponse);
+      publishSafely(activeCommand, { deadline, signal: cancellation.signal }, onError);
     });
   };
 
