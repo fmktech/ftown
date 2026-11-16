@@ -1,10 +1,15 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildManagedBlock, ensureFtownOnPath, upsertManagedBlock } from './ensure-ftown-path.js';
+import {
+  buildFishManagedBlock,
+  buildManagedBlock,
+  ensureFtownOnPath,
+  upsertManagedBlock,
+} from './ensure-ftown-path.js';
 
 const BEGIN = '# >>> ftown (managed by ftown-bridge) >>>';
 const END = '# <<< ftown (managed by ftown-bridge) <<<';
@@ -15,6 +20,19 @@ describe('buildManagedBlock', () => {
       buildManagedBlock(),
       [BEGIN, 'export PATH="$HOME/.ftown:$PATH"', END].join('\n'),
     );
+  });
+});
+
+describe('buildFishManagedBlock', () => {
+  it('uses fish `set -gx` syntax under the same markers', () => {
+    assert.equal(
+      buildFishManagedBlock(),
+      [BEGIN, 'set -gx PATH "$HOME/.ftown" $PATH', END].join('\n'),
+    );
+  });
+
+  it('does not use POSIX `export` (invalid in fish)', () => {
+    assert.ok(!buildFishManagedBlock().includes('export '));
   });
 });
 
@@ -58,6 +76,16 @@ describe('upsertManagedBlock', () => {
     assert.ok(content.includes('line before\n'), 'preceding line preserved');
     assert.ok(content.includes('\nline after\n'), 'trailing line preserved');
   });
+
+  it('upserts the fish block without duplicating it', () => {
+    const block = buildFishManagedBlock();
+    const first = upsertManagedBlock('# fish config\n', block);
+    assert.equal(first.changed, true);
+    const second = upsertManagedBlock(first.content, block);
+    assert.equal(second.changed, false);
+    assert.equal(second.content, first.content);
+    assert.equal(second.content.split(BEGIN).length - 1, 1, 'exactly one managed block');
+  });
 });
 
 describe('ensureFtownOnPath', () => {
@@ -74,7 +102,7 @@ describe('ensureFtownOnPath', () => {
   it('creates ~/.zshenv with the managed block', () => {
     const result = ensureFtownOnPath({ home, env: {} });
     assert.equal(result.skipped, false);
-    assert.deepEqual(result.updated, [join(home, '.zshenv')]);
+    assert.ok(result.updated.includes(join(home, '.zshenv')));
     assert.ok(readFileSync(join(home, '.zshenv'), 'utf8').includes(buildManagedBlock()));
   });
 
@@ -83,6 +111,21 @@ describe('ensureFtownOnPath', () => {
     const second = ensureFtownOnPath({ home, env: {} });
     assert.equal(second.skipped, false);
     assert.deepEqual(second.updated, []);
+  });
+
+  it('never duplicates the managed block across repeated calls', () => {
+    ensureFtownOnPath({ home, env: {} });
+    ensureFtownOnPath({ home, env: {} });
+    ensureFtownOnPath({ home, env: {} });
+    for (const file of [
+      join(home, '.zshenv'),
+      join(home, '.profile'),
+      join(home, '.config', 'fish', 'conf.d', 'ftown.fish'),
+    ]) {
+      const content = readFileSync(file, 'utf8');
+      assert.equal(content.split(BEGIN).length - 1, 1, `${file}: one BEGIN marker`);
+      assert.equal(content.split(END).length - 1, 1, `${file}: one END marker`);
+    }
   });
 
   it('respects FTOWN_SKIP_PATH_SETUP via opts.env (skips and writes nothing)', () => {
@@ -119,5 +162,59 @@ describe('ensureFtownOnPath', () => {
     const after = readFileSync(bashrc, 'utf8');
     assert.ok(after.includes('# my bashrc'));
     assert.ok(after.includes(buildManagedBlock()));
+    assert.equal(existsSync(join(home, '.profile')), false, 'no login file needed with .bashrc');
+  });
+
+  it('writes ~/.profile when there is no ~/.bashrc', () => {
+    const result = ensureFtownOnPath({ home, env: {} });
+    const profile = join(home, '.profile');
+    assert.ok(result.updated.includes(profile));
+    assert.ok(readFileSync(profile, 'utf8').includes(buildManagedBlock()));
+    assert.equal(existsSync(join(home, '.bashrc')), false);
+  });
+
+  it('preserves existing ~/.profile content and is idempotent', () => {
+    const profile = join(home, '.profile');
+    writeFileSync(profile, '# my login profile\n');
+    ensureFtownOnPath({ home, env: {} });
+    const after = readFileSync(profile, 'utf8');
+    assert.ok(after.includes('# my login profile'));
+    assert.ok(after.includes(buildManagedBlock()));
+    const second = ensureFtownOnPath({ home, env: {} });
+    assert.ok(!second.updated.includes(profile));
+    assert.equal(readFileSync(profile, 'utf8'), after);
+  });
+
+  it('prefers ~/.bash_profile over ~/.profile for bash login shells', () => {
+    const bashProfile = join(home, '.bash_profile');
+    writeFileSync(bashProfile, '# my bash profile\n');
+    const result = ensureFtownOnPath({ home, env: {} });
+    assert.ok(result.updated.includes(bashProfile));
+    assert.ok(readFileSync(bashProfile, 'utf8').includes(buildManagedBlock()));
+    assert.equal(existsSync(join(home, '.profile')), false, 'must not create ignored .profile');
+  });
+
+  it('creates fish conf.d/ftown.fish with fish syntax, making parent dirs', () => {
+    const fishConf = join(home, '.config', 'fish', 'conf.d', 'ftown.fish');
+    assert.equal(existsSync(fishConf), false);
+    const result = ensureFtownOnPath({ home, env: {} });
+    assert.ok(result.updated.includes(fishConf));
+    const after = readFileSync(fishConf, 'utf8');
+    assert.ok(after.includes(buildFishManagedBlock()));
+    assert.ok(!after.includes('export PATH'), 'fish config must not use export');
+    const second = ensureFtownOnPath({ home, env: {} });
+    assert.ok(!second.updated.includes(fishConf));
+  });
+
+  it('updates an existing fish conf.d file without clobbering other config', () => {
+    const fishConf = join(home, '.config', 'fish', 'conf.d', 'ftown.fish');
+    mkdirSync(join(home, '.config', 'fish', 'conf.d'), { recursive: true });
+    writeFileSync(fishConf, 'set -gx EDITOR vim\n');
+    const result = ensureFtownOnPath({ home, env: {} });
+    assert.ok(result.updated.includes(fishConf));
+    const after = readFileSync(fishConf, 'utf8');
+    assert.ok(after.includes('set -gx EDITOR vim'));
+    assert.ok(after.includes(buildFishManagedBlock()));
+    assert.equal(after.split(BEGIN).length - 1, 1, 'exactly one fish managed block');
   });
 });
