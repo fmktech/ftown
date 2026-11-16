@@ -84,6 +84,28 @@ test('targeted update commands validate payloads and bind an accepted ticket to 
   await handler({ type: 'update_bridge', requestId: 'unauthenticated', payload }); assert.equal(responses.at(-1)?.success, false); assert.equal(requests, 1);
 });
 
+test('list_native_sessions requires authenticated dispatch, validates input, returns summaries, and reports read errors', async () => {
+  const responses: CommandResponse[] = [];
+  const security = { revalidate: async () => {} } as unknown as BridgeSecurityService;
+  const verified = { envelope: { messageId: 'list-ok' }, principal: {}, application: { route: { kind: 'command', requestId: 'list-ok', command: 'list_native_sessions', sessionId: null }, data: {} } } as unknown as VerifiedApplication;
+  let fail = false;
+  const handler = createCommandHandler({ bridgeId: 'bridge', security, sessionController: {} as SessionController,
+    listNativeSessions: async (harness, workingDir) => {
+      if (fail) throw new Error('storage unavailable');
+      return [{ sessionId: `${harness}-1`, timestamp: '2026-01-01T00:00:00Z', summary: workingDir }];
+    }, publishCommandResponse: async response => { responses.push(response); } });
+  const payload = { bridgeId: 'bridge', workingDir: '/work', harness: 'claude' };
+  await handler({ type: 'list_native_sessions', requestId: 'unauthenticated', payload });
+  assert.equal(responses.at(-1)?.success, false); assert.equal(responses.at(-1)?.error, 'approval_required');
+  await handler({ type: 'list_native_sessions', requestId: 'invalid', payload: { ...payload, harness: 'unknown' } }, verified);
+  assert.deepEqual(responses.at(-1), { requestId: 'invalid', success: false, error: 'Invalid native session list request', data: { code: 'invalid' } });
+  await handler({ type: 'list_native_sessions', requestId: 'ok', payload }, verified);
+  assert.deepEqual(responses.at(-1), { requestId: 'ok', success: true, data: { sessions: [{ sessionId: 'claude-1', timestamp: '2026-01-01T00:00:00Z', summary: '/work' }] } });
+  fail = true;
+  await handler({ type: 'list_native_sessions', requestId: 'error', payload }, verified);
+  assert.equal(responses.at(-1)?.success, false); assert.match(responses.at(-1)?.error ?? '', /storage unavailable/);
+});
+
 test('attention RPC requires owner targeting and persists read/resolve results', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'attention-rpc-'));
   await mkdir(join(dir, 'session'));

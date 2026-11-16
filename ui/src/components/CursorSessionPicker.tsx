@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { BridgeExecResponse } from "@/hooks/useSessions";
+import { v4 as uuidv4 } from "uuid";
+import type { CommandResponse } from "@/types";
 import { relativeTime } from "@/lib/relative-time";
 
 interface CursorSession {
@@ -14,28 +15,10 @@ interface CursorSessionPickerProps {
   bridgeId: string;
   workingDir: string;
   onSelect: (cursorSessionId: string, summary: string) => void;
-  bridgeExec: (command: string, workingDir: string, bridgeId: string) => Promise<BridgeExecResponse>;
+  sendCommand: (command: { type: "list_native_sessions"; payload: { bridgeId: string; workingDir: string; harness: "cursor" }; requestId: string }) => Promise<CommandResponse>;
 }
 
-function parseSessionLines(stdout: string): CursorSession[] {
-  if (!stdout.trim() || stdout.trim() === "[]") return [];
-
-  return stdout
-    .trim()
-    .split("\n")
-    .filter((line) => line.includes("|"))
-    .map((line) => {
-      const [sessionId, timestamp, ...rest] = line.split("|");
-      return {
-        sessionId: sessionId.trim(),
-        timestamp: timestamp.trim(),
-        summary: rest.join("|").trim(),
-      };
-    })
-    .filter((s) => s.sessionId);
-}
-
-export function CursorSessionPicker({ bridgeId, workingDir, onSelect, bridgeExec }: CursorSessionPickerProps) {
+export function CursorSessionPicker({ bridgeId, workingDir, onSelect, sendCommand }: CursorSessionPickerProps) {
   const [sessions, setSessions] = useState<CursorSession[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -46,64 +29,17 @@ export function CursorSessionPicker({ bridgeId, workingDir, onSelect, bridgeExec
     setLoading(true);
     setError(null);
 
-    const escapedDir = workingDir.replace(/'/g, "'\\''");
-    const script = `python3 << 'PYEOF'
-import os, json, sqlite3, hashlib, glob
-wd = os.path.abspath('${escapedDir}')
-wh = hashlib.md5(wd.encode()).hexdigest()
-root = os.path.join(os.path.expanduser("~/.cursor/chats"), wh)
-if not os.path.isdir(root):
-    print("[]")
-    raise SystemExit(0)
-results = []
-for d in glob.glob(os.path.join(root, "*/")):
-    chat_id = os.path.basename(os.path.dirname(d))
-    ts, summary = "", ""
-    meta_json = None
-    try:
-        with open(os.path.join(d, "meta.json")) as f:
-            meta_json = json.load(f)
-    except Exception:
-        meta_json = None
-    if meta_json is not None and meta_json.get("hasConversation") is False:
-        continue
-    if meta_json is not None:
-        summary = (meta_json.get("title") or "").strip()
-        ts = str(meta_json.get("updatedAtMs") or meta_json.get("createdAtMs") or "")
-    if not summary:
-        store = os.path.join(d, "store.db")
-        try:
-            conn = sqlite3.connect(store)
-            row = conn.execute("SELECT value FROM meta WHERE key = '0'").fetchone()
-            conn.close()
-            if row and row[0]:
-                raw = row[0]
-                if isinstance(raw, str) and all(c in "0123456789abcdef" for c in raw[:32].lower()):
-                    raw = bytes.fromhex(raw).decode("utf-8")
-                sqlite_meta = json.loads(raw) if isinstance(raw, str) else {}
-                summary = (sqlite_meta.get("name") or "").strip()
-                if not ts:
-                    ts = str(sqlite_meta.get("createdAt") or sqlite_meta.get("updatedAt") or "")
-        except Exception:
-            pass
-    if summary in ("Agent", "New Agent"):
-        summary = ""
-    results.append((chat_id, ts, summary))
-results.sort(key=lambda x: x[1], reverse=True)
-for sid, ts, summary in results[:20]:
-    print(f"{sid}|{ts}|{summary.replace('|', ' ')}")
-PYEOF`;
-
     try {
-      const result = await bridgeExec(script, workingDir, bridgeId);
-      setSessions(parseSessionLines(result.stdout));
+      const response = await sendCommand({ type: "list_native_sessions", payload: { bridgeId, workingDir, harness: "cursor" }, requestId: uuidv4() });
+      if (!response.success) throw new Error(response.error ?? "Failed to fetch sessions");
+      setSessions((response.data as { sessions: CursorSession[] }).sessions);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to fetch sessions");
       setSessions([]);
     } finally {
       setLoading(false);
     }
-  }, [bridgeId, workingDir, bridgeExec]);
+  }, [bridgeId, workingDir, sendCommand]);
 
   useEffect(() => {
     fetchSessions();

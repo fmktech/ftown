@@ -25,10 +25,8 @@ jobs:
         with:
           job: unit
 
-  # Regression gate for the bash-only Linux path: the hosted image ships
-  # optional tools the bridge must not require. Informational (allowed to
-  # fail) until the session shell resolver (P1.1) and the Node hooks (P1.3)
-  # land, then remove continue-on-error and mark the job required.
+  # Required regression gate for the bash-only Linux path: the hosted image
+  # ships optional tools the bridge must not require.
   unit-minimal:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -58,13 +56,13 @@ jobs:
               exit 1
             fi
           done
-      # Informational until P1.1/P1.3 land: the suite fails here without
-      # jq/tmux/zsh by design. Step-level continue-on-error keeps the job (and
-      # the PR rollup) green while the failing assertions stay in the log;
-      # remove it when this job becomes required.
       - name: Bridge unit tests
         working-directory: bridge
-        continue-on-error: true
+        # The regular unit job verifies the tmux-dependent launch proof. This
+        # job validates the suite without optional tools and lets that one
+        # proof take its existing non-CI skip path.
+        env:
+          CI: 'false'
         run: |
           npm ci
           npm test

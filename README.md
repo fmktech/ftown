@@ -171,6 +171,58 @@ The file travels through the existing encrypted connection and runs in an iframe
 - [Centrifugo](https://centrifugal.dev) v5 server
 - On bridge machines: install and authenticate whichever agent CLIs you plan to run. For Pi: `npm install -g @mariozechner/pi-coding-agent`, then run `pi` and `/login` (or provide a supported provider API key).
 
+### Bridge platforms
+
+The bridge supports macOS, Linux and WSL2. On Windows, run the bridge in WSL2.
+Install Node.js 22+, Git, tmux, Bash and a POSIX shell on the bridge machine,
+then install and authenticate the agent CLIs you want to use. Git enables
+worktrees and PR status; without tmux, sessions use the direct runtime. The
+hooks do not require `jq` or `curl`. Setup currently checks both and may print
+outdated warnings about them.
+
+On Linux or WSL2, install the system tools with the appropriate command:
+
+```sh
+# Debian / Ubuntu
+sudo apt-get update && sudo apt-get install -y git tmux bash
+# Fedora / RHEL
+sudo dnf install -y git tmux bash
+# Arch
+sudo pacman -S --noconfirm git tmux bash
+# Alpine (as root)
+apk add --no-cache git tmux bash
+# openSUSE
+sudo zypper install -y git tmux bash
+```
+
+Install Node.js 22 or newer separately if your distribution's package is older.
+On macOS, install the same bridge prerequisites (for example,
+`brew install node git tmux`); Bash and a POSIX shell are included with macOS.
+
+Sessions use a supported executable shell named by `$SHELL`, then the account
+login shell, then `/bin/bash` or `/bin/sh`. Supported session shells are zsh, bash,
+sh, dash and fish; they run as login shells. Setup adds `~/.ftown` to PATH in
+`~/.zshenv`, an existing `~/.bashrc` or, if absent, an existing
+`~/.bash_profile` or `~/.profile`, and fish's `~/.config/fish/conf.d/ftown.fish`.
+Open a new shell after setup. If your bash login profile does not source an
+existing `.bashrc`, add `export PATH="$HOME/.ftown:$PATH"` to that login profile.
+Set `FTOWN_SKIP_PATH_SETUP=1` to manage PATH yourself.
+
+For OpenCode and Muse, ftown honors `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and
+`XDG_CACHE_HOME` where applicable; `OPENCODE_CONFIG_DIR` overrides the
+OpenCode config directory. `CLAUDE_CONFIG_DIR` overrides Claude's config
+directory when set to an absolute path; `CODEX_HOME` overrides Codex's home
+directory for its configuration and data. On Linux,
+Claude quota reads `~/.claude/.credentials.json`, or `.credentials.json` in
+`CLAUDE_CONFIG_DIR`; sign in with Claude Code in the Linux environment first.
+Grok quota refresh is available on Linux and WSL2 when Grok is installed, with
+`script` (util-linux), `pgrep` and `ps` on PATH.
+
+In WSL2, keep session working directories in the Linux filesystem instead of
+under `/mnt/` for better filesystem performance. For Solo, open the printed
+`localhost` URL in a Windows browser; see the [Solo guide](docs/solo.md) for
+access from other devices.
+
 ## Quick Start
 
 ### 1. Centrifugo

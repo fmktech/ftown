@@ -28,7 +28,7 @@ function renderModal() {
       onClose={vi.fn()}
       onSubmit={onSubmit}
       bridges={[]}
-      bridgeExec={vi.fn(async () => ({ stdout: "", stderr: "", exitCode: 0 }))}
+      sendCommand={vi.fn(async () => ({ requestId: "test", success: true }))}
     />,
   );
   return onSubmit;
