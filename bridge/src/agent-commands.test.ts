@@ -20,8 +20,7 @@ import {
 } from './agent-commands.js';
 
 describe('dashboard-generated Claude launch compatibility', () => {
-  it('adds the compatible Mod to exact defaults/resumes, preserving real custom commands', () => {
-    if (process.platform === 'win32') return;
+  it('adds the compatible Mod to exact defaults/resumes, preserving real custom commands', { skip: process.platform === 'win32' ? 'POSIX #!/bin/sh claude shim' : false }, () => {
     const oldHome = process.env.HOME; const oldPath = process.env.PATH;
     const home = mkdtempSync(join(tmpdir(), 'ftown-ui-mod-'));
     try {
