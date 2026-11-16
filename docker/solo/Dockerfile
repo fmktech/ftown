@@ -41,6 +41,17 @@
 #        installed by this image (not required by the task); Opencode-harness
 #        sessions will fail to spawn until it is added — see README gotchas.
 
+FROM node:22.23.4-bookworm-slim AS bridge-build
+
+WORKDIR /build/bridge
+COPY bridge/package.json bridge/package-lock.json ./
+RUN npm ci
+COPY bridge/ ./
+RUN npm run build \
+    && mkdir -p /out \
+    && npm pack --pack-destination /out \
+    && mv /out/ftown-bridge-*.tgz /out/ftown-bridge.tgz
+
 FROM node:22.23.4-bookworm-slim
 
 # --- OS packages ---
@@ -48,7 +59,6 @@ FROM node:22.23.4-bookworm-slim
 # tmux:            required by bridge/src/tmux.ts and claude-runner.ts (session multiplexing).
 # git:             sessions frequently run git inside cloned repos under /workspace.
 # zsh:             claude-runner.ts:356 spawns '/bin/zsh' for shell-type sessions.
-# jq/curl:         required by the shell hooks until the Node hook ports land.
 # procps:          ps/kill etc. used by tmux/session bookkeeping and general debugging.
 # tini:            correct PID 1 signal handling / zombie reaping (also available via `docker run --init`).
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -56,8 +66,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       tmux \
       git \
       zsh \
-      jq \
-      curl \
       procps \
       tini \
     && update-ca-certificates \
@@ -75,7 +83,7 @@ RUN groupmod --new-name ftown node \
 ENV HOME=/home/ftown
 
 # --- Global npm packages ---
-# ftown-bridge: pinned to 0.19.50 (explicit setup lifecycle).
+# ftown-bridge: built from the checked-out bridge/ source and package version.
 # @anthropic-ai/claude-code: the `claude` CLI that harness-registry.ts:229 spawns
 # for Claude Code sessions. Auth is NOT baked into the image — see README
 # "Agent auth" for the two supported options (ANTHROPIC_API_KEY env var, or a
@@ -84,8 +92,9 @@ ENV HOME=/home/ftown
 # host machine's installed pi version, since the bridge deploys its Pi
 # extension into the container and extension/protocol compatibility depends
 # on the pi version matching — see README "Agent auth".
-# Requires the npm setup release to be published before building this image.
-RUN npm install -g ftown-bridge@0.19.50 @anthropic-ai/claude-code @earendil-works/pi-coding-agent@0.83.0 \
+COPY --from=bridge-build /out/ftown-bridge.tgz /tmp/ftown-bridge.tgz
+RUN npm install -g /tmp/ftown-bridge.tgz @anthropic-ai/claude-code @earendil-works/pi-coding-agent@0.83.0 \
+    && rm /tmp/ftown-bridge.tgz \
     && npm cache clean --force
 
 # --- Volumes ---

@@ -1,0 +1,7 @@
+**
+!bridge
+!bridge/**
+bridge/node_modules
+bridge/node_modules/**
+bridge/dist
+bridge/dist/**

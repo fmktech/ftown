@@ -20,17 +20,35 @@ jobs:
           fetch-depth: 1
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
+      - name: Read bridge package version
+        id: bridge-version
+        run: |
+          version=$(node -p "require('./bridge/package.json').version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Build amd64 image
         uses: docker/build-push-action@v6
         with:
-          context: docker/solo
+          context: .
+          file: docker/solo/Dockerfile
           platforms: linux/amd64
-          tags: ftown-solo:ci
+          tags: ftown-solo:${{ steps.bridge-version.outputs.version }}
           load: true
+      - name: Assert image and Compose versions match bridge package
+        env:
+          IMAGE: ftown-solo:${{ steps.bridge-version.outputs.version }}
+        run: |
+          set -euo pipefail
+          expected=$(node -p "require('./bridge/package.json').version")
+          compose_tag=$(sed -n 's/^[[:space:]]*image: ftown-solo://p' docker/solo/compose.yml | tr -d '[:space:]')
+          installed=$(docker run --rm --entrypoint node "$IMAGE" -p "require('/usr/local/lib/node_modules/ftown-bridge/package.json').version")
+          test "$compose_tag" = "$expected"
+          test "$installed" = "$expected"
+          echo "Compose tag and installed bridge package both match $expected"
+          docker run --rm --entrypoint ftown "$IMAGE" --help >/dev/null
       - name: Boot amd64 image and wait for health
         run: |
           set -euo pipefail
-          container_id=$(docker run -d --platform linux/amd64 -p 8040:8040 ftown-solo:ci)
+          container_id=$(docker run -d --platform linux/amd64 -p 8040:8040 "ftown-solo:${{ steps.bridge-version.outputs.version }}")
           # The function is called indirectly by the EXIT trap below.
           # shellcheck disable=SC2329
           cleanup() {
@@ -59,7 +77,8 @@ jobs:
       - name: Build arm64 image
         uses: docker/build-push-action@v6
         with:
-          context: docker/solo
+          context: .
+          file: docker/solo/Dockerfile
           platforms: linux/arm64
-          tags: ftown-solo:ci-arm64
+          tags: ftown-solo:${{ steps.bridge-version.outputs.version }}-arm64
 

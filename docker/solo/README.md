@@ -28,10 +28,10 @@ trailing argument on `docker run`.
 
 ## Build & run
 
-This image pins `ftown-bridge@0.19.50`, which uses explicit setup
-and in-process CLI commands. Publish that release to npm before building
-the image; the source change alone does not publish it, and builds cannot resolve
-the new pin until it is available. Do not substitute an older bridge version.
+The image builds and installs the bridge package from this checkout's `bridge/`
+directory, so it uses the same bridge source and version as the repository.
+Compose tags the image with the bridge version; the `docker-solo` CI job checks
+that the Compose tag and installed package version match `bridge/package.json`.
 See the [retirement and rollback notes](../../docs/automation-sunset.md).
 
 The image runs explicit setup during its build, before HOME volume initialization.
@@ -48,8 +48,6 @@ docker compose up -d
 
 For explicit repair, append `--repair` to the setup command. A missing/outdated
 setup fails before bridge listeners/auth with matching-version setup guidance.
-The 0.19.50 package must be published before this image can be built; this source
-change does not publish it.
 
 
 ```bash
@@ -60,7 +58,8 @@ docker compose up -d --build
 or with plain Docker:
 
 ```bash
-docker build -t ftown-solo .
+# Run from the repository root.
+docker build -f docker/solo/Dockerfile -t ftown-solo:0.30.22 .
 mkdir -p ./workspace
 docker run -d --init --name ftown-solo \
   -p 8040:8040 \
@@ -144,6 +143,10 @@ environment variables instead (e.g. `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`).
 `opencode` sessions (`bridge/src/harness-registry.ts:154`) are **not**
 supported by this image — the `opencode` binary isn't installed. Add it to
 the Dockerfile if you need Opencode-harness sessions.
+
+Hooks run through the bundled Node entry point (`ftown-harness hook <kind>`);
+the shell hook files are forwarding wrappers. The image does not need `jq` or
+`curl` for hook delivery.
 
 ## Rotating the access key
 
