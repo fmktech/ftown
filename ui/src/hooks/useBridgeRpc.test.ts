@@ -64,15 +64,35 @@ describe("createRpcCore", () => {
       await expect(promise).resolves.toMatchObject({ success: false, error: "boom" });
     });
 
-    it("retries a typed bridge_starting response once and returns the next response", async () => {
+    it("retries bridge_starting with bounded backoff, then resolves the next response", async () => {
       const pending = core.sendCommand(cmd("starting"));
-      core.handleResponse(resp("starting", { success: false, error: "Bridge is starting", data: { code: "bridge_starting", retryable: true } }));
-      expect(published).toHaveLength(1);
-      await vi.advanceTimersByTimeAsync(100);
-      expect(published).toHaveLength(2);
-      expect(published[1]).toEqual(published[0]);
+      for (const [index, delay] of [250, 500, 1000, 2000].entries()) {
+        core.handleResponse(resp("starting", { success: false, error: "Bridge is starting", data: { code: "bridge_starting", retryable: true } }));
+        await vi.advanceTimersByTimeAsync(delay);
+        expect(published).toHaveLength(index + 2);
+        expect(published.at(-1)).toEqual(published[0]);
+      }
       core.handleResponse(resp("starting", { data: { ready: true } }));
       await expect(pending).resolves.toMatchObject({ success: true, data: { ready: true } });
+    });
+
+    it("returns bridge_starting after the bounded retry window", async () => {
+      const pending = core.sendCommand(cmd("exhausted"));
+      for (const delay of [250, 500, 1000, 2000]) {
+        core.handleResponse(resp("exhausted", { success: false, error: "Bridge is starting", data: { code: "bridge_starting", retryable: true } }));
+        await vi.advanceTimersByTimeAsync(delay);
+      }
+      core.handleResponse(resp("exhausted", { success: false, error: "Bridge is starting", data: { code: "bridge_starting", retryable: true } }));
+      await expect(pending).resolves.toMatchObject({ success: false, data: { code: "bridge_starting" } });
+      expect(published).toHaveLength(5);
+    });
+
+    it("can disable shared retries for callers with their own retry policy", async () => {
+      const pending = core.sendCommand(cmd("starting"), { retryBridgeStarting: false });
+      core.handleResponse(resp("starting", { success: false, error: "Bridge is starting", data: { code: "bridge_starting", retryable: true } }));
+      await expect(pending).resolves.toMatchObject({ success: false, data: { code: "bridge_starting" } });
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(published).toHaveLength(1);
     });
 
     it("does not retry other typed command failures", async () => {

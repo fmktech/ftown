@@ -11,6 +11,7 @@ vi.mock("./EnvVarsEditor", () => ({ default: () => null, getStoredEnvVars: () =>
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.useRealTimers();
   localStorage.clear();
 });
 
@@ -95,7 +96,7 @@ it("lists default first, filters accounts by harness, and submits the selected a
   const picker = screen.getByLabelText("Account") as HTMLSelectElement;
   await waitFor(() => expect(picker.disabled).toBe(false));
   expect(Array.from(picker.options).map(option => option.value)).toEqual(["default", "spare", "work"]);
-  expect(sendCommand).toHaveBeenCalledWith(expect.objectContaining({ type: "get_accounts", payload: { bridgeId: "a" } }));
+  expect(sendCommand).toHaveBeenCalledWith(expect.objectContaining({ type: "get_accounts", payload: { bridgeId: "a" } }), { retryBridgeStarting: false });
   fireEvent.change(picker, { target: { value: "work" } });
   fireEvent.click(screen.getByLabelText("Restrict accounts for child sessions"));
   const childPolicy = screen.getByRole("group", { name: "Allowed accounts for children" });
@@ -106,15 +107,30 @@ it("lists default first, filters accounts by harness, and submits the selected a
 });
 
 it("retries the account read briefly when the bridge reports it is starting", async () => {
+  vi.useFakeTimers();
   const sendCommand = vi.fn()
+    .mockResolvedValueOnce({ requestId: "starting", success: false, error: "Bridge is starting", data: { code: "bridge_starting", retryable: true } })
+    .mockResolvedValueOnce({ requestId: "starting", success: false, error: "Bridge is starting", data: { code: "bridge_starting", retryable: true } })
+    .mockResolvedValueOnce({ requestId: "starting", success: false, error: "Bridge is starting", data: { code: "bridge_starting", retryable: true } })
     .mockResolvedValueOnce({ requestId: "starting", success: false, error: "Bridge is starting", data: { code: "bridge_starting", retryable: true } })
     .mockResolvedValueOnce({ requestId: "ready", success: true, data: { accounts } });
   accountsModal({ sendCommand });
-  await waitFor(() => expect((screen.getByLabelText("Account") as HTMLSelectElement).disabled).toBe(false));
-  expect(sendCommand).toHaveBeenCalledTimes(2);
-  expect(sendCommand).toHaveBeenNthCalledWith(1, expect.objectContaining({ type: "get_accounts", requestId: expect.any(String) }));
+  await act(async () => { await vi.runAllTimersAsync(); });
+  expect(sendCommand).toHaveBeenCalledTimes(5);
+  expect(sendCommand).toHaveBeenNthCalledWith(1, expect.objectContaining({ type: "get_accounts", requestId: expect.any(String) }), { retryBridgeStarting: false });
   expect(sendCommand.mock.calls[0][0].requestId).toBe(sendCommand.mock.calls[1][0].requestId);
+  expect(sendCommand.mock.calls[0][1]).toEqual({ retryBridgeStarting: false });
+  expect((screen.getByLabelText("Account") as HTMLSelectElement).disabled).toBe(false);
   expect(screen.getByRole("option", { name: "Work (work)" })).toBeTruthy();
+});
+
+it("shows the typed starting message after the picker exhausts its bounded backoff", async () => {
+  vi.useFakeTimers();
+  const sendCommand = vi.fn(async () => ({ requestId: "starting", success: false, error: "Bridge is starting", data: { code: "bridge_starting", retryable: true } }));
+  accountsModal({ sendCommand });
+  await act(async () => { await vi.runAllTimersAsync(); });
+  expect(sendCommand).toHaveBeenCalledTimes(5);
+  expect(screen.getByRole("status").textContent).toContain("This computer is still starting");
 });
 
 it.each([

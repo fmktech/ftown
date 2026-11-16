@@ -25,12 +25,12 @@ interface NewSessionModalProps {
   onSubmit: (prompt: string, options: CreateSessionOptions) => void | Promise<void>;
   bridges: BridgeInfo[];
   defaults?: SessionDefaults;
-  sendCommand: (command: Command) => Promise<CommandResponse>;
+  sendCommand: (command: Command, options?: { retryBridgeStarting?: boolean }) => Promise<CommandResponse>;
   sessions?: Session[];
 }
 
 const EMPTY_SESSIONS: Session[] = [];
-const ACCOUNT_STARTING_RETRY_DELAYS_MS = [250];
+const ACCOUNT_STARTING_RETRY_DELAYS_MS = [250, 500, 1000, 2000];
 const ACCOUNT_ID = /^[a-z0-9-]{1,32}$/;
 type AccountsView = { bridgeId: string; status: "loading" | "ready" | "error" | "unsupported"; accounts: HarnessAccountSummary[]; error?: string };
 
@@ -437,7 +437,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
       try {
         let response: CommandResponse | undefined;
         for (let attempt = 0; attempt <= ACCOUNT_STARTING_RETRY_DELAYS_MS.length; attempt++) {
-          response = await sendCommandRef.current({ type: "get_accounts", payload: { bridgeId: effectiveBridgeId }, requestId });
+          response = await sendCommandRef.current({ type: "get_accounts", payload: { bridgeId: effectiveBridgeId }, requestId }, { retryBridgeStarting: false });
           const code = response.data && typeof response.data === "object" && "code" in response.data ? response.data.code : undefined;
           if (cancelled) return;
           if (response.success || code !== "bridge_starting" || attempt === ACCOUNT_STARTING_RETRY_DELAYS_MS.length) break;
@@ -453,8 +453,10 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
           const code = response.data && typeof response.data === "object" && "code" in response.data ? response.data.code : undefined;
           console.warn(`[get_accounts] ${diagnosticContext} response:${typeof code === "string" && /^[a-z0-9_]{1,64}$/.test(code) ? code : "unknown"}`);
           const unsupported = response.error === "Unknown command type: get_accounts";
+          const starting = code === "bridge_starting";
           setAccountsView({ bridgeId: effectiveBridgeId, status: unsupported ? "unsupported" : "error", accounts: [], error: unsupported
-            ? "Update this computer's bridge to choose registered accounts." : "Could not load accounts from this computer." });
+            ? "Update this computer's bridge to choose registered accounts."
+            : starting ? "This computer is still starting. Try again shortly." : "Could not load accounts from this computer." });
           return;
         }
         const accounts = parseAccounts(response.data);

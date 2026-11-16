@@ -8,7 +8,7 @@ import { accountChannel } from "@security/ledger/channels";
 
 /** How long a request/response RPC waits before rejecting. */
 const RPC_TIMEOUT_MS = 30_000;
-const BRIDGE_STARTING_RETRY_DELAYS_MS = [100];
+const BRIDGE_STARTING_RETRY_DELAYS_MS = [250, 500, 1000, 2000];
 
 /** Matches centrifuge's SubscriptionState.Subscribed without importing centrifuge. */
 const SUBSCRIBED_STATE = "subscribed";
@@ -63,7 +63,7 @@ export interface CentrifugoClientLike {
  */
 export interface RpcCore {
   handleResponse(response: CommandResponse): void;
-  sendCommand(command: Command): Promise<CommandResponse>;
+  sendCommand(command: Command, options?: { retryBridgeStarting?: boolean }): Promise<CommandResponse>;
   sendCommandCollect(command: Command, windowMs?: number): Promise<CommandResponse[]>;
   bridgeExec(command: string, workingDir: string, bridgeId: string): Promise<BridgeExecResponse>;
 }
@@ -95,7 +95,7 @@ export function createRpcCore(publish: (command: Command, options?: MessagePubli
     if (collector) collector(response);
   };
 
-  const sendCommand = (command: Command): Promise<CommandResponse> => {
+  const sendCommand = (command: Command, options: { retryBridgeStarting?: boolean } = {}): Promise<CommandResponse> => {
     return new Promise((resolve, reject) => {
       const cancellation = new AbortController(); const deadline = Date.now() + timeoutMs;
       let retryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -112,7 +112,7 @@ export function createRpcCore(publish: (command: Command, options?: MessagePubli
           ? response.data as Record<string, unknown> : undefined;
         const code = data?.code;
         const delay = BRIDGE_STARTING_RETRY_DELAYS_MS[retryIndex];
-        if (!response.success && code === "bridge_starting" && delay !== undefined && deadline - Date.now() > delay) {
+        if (options.retryBridgeStarting !== false && !response.success && code === "bridge_starting" && delay !== undefined && deadline - Date.now() > delay) {
           retryIndex++;
           retryTimer = setTimeout(() => {
             retryTimer = undefined;
@@ -195,7 +195,7 @@ export interface BridgeRpc {
   /** Fire-and-forget publish on the commands channel (no-op when not connected). */
   publishCommand: (command: Command) => void;
   /** Request/response RPC: first matching response wins; 30s timeout. */
-  sendCommand: (command: Command) => Promise<CommandResponse>;
+  sendCommand: (command: Command, options?: { retryBridgeStarting?: boolean }) => Promise<CommandResponse>;
   /** Broadcast RPC: collects every response within windowMs (default 1500ms). */
   sendCommandCollect: (command: Command, windowMs?: number) => Promise<CommandResponse[]>;
   /** Run a shell command on a specific bridge. */
@@ -300,9 +300,9 @@ export function useBridgeRpc(client: CentrifugoClientLike | null, userId: string
   }, [core]);
 
   const sendCommand = useCallback(
-    (command: Command): Promise<CommandResponse> => {
+    (command: Command, options?: { retryBridgeStarting?: boolean }): Promise<CommandResponse> => {
       if (!commandsSubRef.current) return Promise.reject(new Error("Not connected"));
-      return core.sendCommand(command);
+      return core.sendCommand(command, options);
     },
     [core]
   );
