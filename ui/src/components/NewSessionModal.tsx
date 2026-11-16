@@ -430,7 +430,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
       .then(response => {
         if (cancelled) return;
         if (!response.success) {
-          const code = response.data?.code;
+          const code = response.data && typeof response.data === "object" && "code" in response.data ? response.data.code : undefined;
           console.warn(`[get_accounts] response:${typeof code === "string" && /^[a-z0-9_]{1,64}$/.test(code) ? code : "unknown"}`);
           const unsupported = response.error === "Unknown command type: get_accounts";
           setAccountsView({ bridgeId: effectiveBridgeId, status: unsupported ? "unsupported" : "error", accounts: [], error: unsupported
