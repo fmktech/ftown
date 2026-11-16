@@ -6,9 +6,9 @@
  * clearly-fenced block in the user's shell profiles, never touching content
  * outside its BEGIN..END markers, and runs only during explicit ftown setup.
  */
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 const BEGIN = '# >>> ftown (managed by ftown-bridge) >>>';
 const END = '# <<< ftown (managed by ftown-bridge) <<<';
@@ -16,6 +16,15 @@ const END = '# <<< ftown (managed by ftown-bridge) <<<';
 /** The exact managed block: BEGIN marker, the PATH export, END marker. */
 export function buildManagedBlock(): string {
   return `${BEGIN}\nexport PATH="$HOME/.ftown:$PATH"\n${END}`;
+}
+
+/**
+ * Fish-flavoured managed block. The BEGIN/END markers are `#` comments in fish
+ * too, so the same upsert logic applies; only the PATH assignment differs
+ * (fish uses `set -gx`, not `export`).
+ */
+export function buildFishManagedBlock(): string {
+  return `${BEGIN}\nset -gx PATH "$HOME/.ftown" $PATH\n${END}`;
 }
 
 /**
@@ -50,7 +59,10 @@ export function upsertManagedBlock(
 function writeIfChanged(path: string, block: string): boolean {
   const existing = existsSync(path) ? readFileSync(path, 'utf8') : '';
   const { content, changed } = upsertManagedBlock(existing, block);
-  if (changed) writeFileSync(path, content, { mode: 0o644 });
+  if (changed) {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, content, { mode: 0o644 });
+  }
   return changed;
 }
 
@@ -63,11 +75,20 @@ function isTruthyFlag(value: string | undefined): boolean {
 /**
  * Ensure ~/.ftown is on PATH via the user's shell profiles.
  *
- * Always targets ~/.zshenv (created if missing). Also targets ~/.bashrc, but
- * ONLY when it already exists (never creates bash config). Honors
- * `FTOWN_SKIP_PATH_SETUP` as a boolean kill-switch (unset or one of
+ * Targets, all created if missing and all idempotent across calls:
+ * - ~/.zshenv (zsh, read by both login and non-login shells).
+ * - Bash: ~/.bashrc when it exists (interactive non-login shells, which most
+ *   login profiles source). When it does NOT exist, a login shell instead
+ *   reads the first of ~/.bash_profile, ~/.bash_login or ~/.profile, so we
+ *   target ~/.bash_profile if present and otherwise ~/.profile. This keeps
+ *   login semantics correct: writing only ~/.profile would be ignored when a
+ *   ~/.bash_profile exists.
+ * - ~/.config/fish/conf.d/ftown.fish (sourced by every fish shell), using fish
+ *   syntax rather than `export`.
+ *
+ * Honors `FTOWN_SKIP_PATH_SETUP` as a boolean kill-switch (unset or one of
  * 0/false/no/off -> not skipped; any other value -> no-op). Returns the
- * profiles actually written; idempotent across calls.
+ * profiles actually written.
  */
 export function ensureFtownOnPath(opts?: {
   home?: string;
@@ -84,7 +105,19 @@ export function ensureFtownOnPath(opts?: {
   if (writeIfChanged(zshenv, block)) updated.push(zshenv);
 
   const bashrc = join(home, '.bashrc');
-  if (existsSync(bashrc) && writeIfChanged(bashrc, block)) updated.push(bashrc);
+  const bashProfile = join(home, '.bash_profile');
+  const profile = join(home, '.profile');
+  if (existsSync(bashrc)) {
+    if (writeIfChanged(bashrc, block)) updated.push(bashrc);
+  } else {
+    // No .bashrc: the only way a bash shell sees us is via a login file, and
+    // bash reads .bash_profile in preference to .profile.
+    const loginProfile = existsSync(bashProfile) ? bashProfile : profile;
+    if (writeIfChanged(loginProfile, block)) updated.push(loginProfile);
+  }
+
+  const fishConf = join(home, '.config', 'fish', 'conf.d', 'ftown.fish');
+  if (writeIfChanged(fishConf, buildFishManagedBlock())) updated.push(fishConf);
 
   return { updated, skipped: false };
 }
