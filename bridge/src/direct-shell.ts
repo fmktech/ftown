@@ -1,10 +1,16 @@
 import { win32 } from 'node:path';
+import {
+  resolveSessionShell,
+  sessionShellArgs,
+  type ResolveSessionShell,
+} from './session-shell.js';
 
 /** Select the platform shell without bypassing policy or encoding command text. */
 export function directShellCommand(
   command: string,
   platform: NodeJS.Platform = process.platform,
   env: NodeJS.ProcessEnv = process.env,
+  resolve: ResolveSessionShell = resolveSessionShell,
 ): { file: string; args: string[] } {
   if (platform === 'win32') {
     const root = env.SystemRoot || env.SYSTEMROOT || 'C:\\Windows';
@@ -14,5 +20,6 @@ export function directShellCommand(
         `$ErrorActionPreference = 'Stop'\n${command}\nexit $LASTEXITCODE`],
     };
   }
-  return { file: '/bin/zsh', args: ['-l', '-c', command] };
+  const shell = resolve({ env });
+  return { file: shell.file, args: sessionShellArgs(shell, command) };
 }
