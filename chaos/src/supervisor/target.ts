@@ -30,6 +30,8 @@ export interface ExecOut {
   code: number;
   stdout: string;
   stderr: string;
+  /** True when the runner's timeout killed the process. */
+  timedOut: boolean;
 }
 
 /** Runs a command with a bounded timeout. Never throws. */
@@ -44,7 +46,7 @@ export function exec(file: string, args: readonly string[], opts: { timeoutMs: n
       if (done) return;
       done = true;
       clearTimeout(timer);
-      resolve({ code: timedOut ? 124 : code, stdout, stderr });
+      resolve({ code: timedOut ? 124 : code, stdout, stderr, timedOut });
     };
     const timer = setTimeout(() => {
       timedOut = true;

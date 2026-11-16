@@ -12,6 +12,7 @@ const BRIDGE_FAULT_KINDS = new Set<FaultKind>([
 ]);
 
 type Checkpoint = Extract<Rec, { k: 'checkpoint' }>;
+type CheckpointState = 'good' | 'exempt' | 'dead' | 'unresponsive';
 
 interface BridgeInterval {
   id: string;
@@ -29,7 +30,7 @@ const r2: Property = {
   id: 'R2',
   kind: 'unreachable',
   source: 'bridge/src/solo/hub-manager.ts (hub health wait); bridge/src/index.ts solo start',
-  title: 'bridge down while no bridge fault is active',
+  title: 'bridge dead, or unresponsive at two consecutive checkpoints, while no bridge fault is active',
   check(log: readonly Rec[]): PropResult {
     const intervals: BridgeInterval[] = [];
     const openById = new Map<string, BridgeInterval>();
@@ -78,28 +79,44 @@ const r2: Property = {
     const firstAliveIdx = checkpoints.findIndex((c) => c.snap.bridgeAlive);
     if (firstAliveIdx !== -1) {
       const evaluatedCheckpoints = checkpoints.slice(firstAliveIdx);
-      for (const c of evaluatedCheckpoints) {
-        if (c.snap.bridgeAlive && c.snap.bridgeResponsive) continue;
-
+      const states: CheckpointState[] = evaluatedCheckpoints.map((c) => {
+        if (c.snap.bridgeAlive && c.snap.bridgeResponsive) return 'good';
         // A checkpoint's t is stamped before its responsiveness probe runs (up to PROBE_WINDOW_MS).
         // When alive=true and responsive=false, exempt if [c.t, c.t + PROBE_WINDOW_MS] overlaps a granted
         // fault interval; when alive=false, use c.t alone.
         const inside = c.snap.bridgeAlive
           ? intervals.some((inv) => c.t <= inv.endT && inv.startT <= c.t + PROBE_WINDOW_MS)
           : intervals.some((inv) => c.t >= inv.startT && c.t <= inv.endT);
-        if (inside) continue;
+        if (inside) return 'exempt';
+        return c.snap.bridgeAlive ? 'unresponsive' : 'dead';
+      });
 
+      const lastHealAt = (t: number): BridgeHeal | null => {
         let lastHeal: BridgeHeal | null = null;
         for (const h of heals) {
-          if (h.doneT <= c.t && (lastHeal === null || h.doneT >= lastHeal.doneT)) {
-            lastHeal = h;
-          }
+          if (h.doneT <= t && (lastHeal === null || h.doneT >= lastHeal.doneT)) lastHeal = h;
         }
-        const lastId = lastHeal ? lastHeal.id : 'none';
-        const lastDoneT = lastHeal ? String(lastHeal.doneT) : 'none';
-        evidence.push(
-          `bridge down at ${c.name} t=${c.t} last bridge fault ${lastId} healed doneT=${lastDoneT}`,
-        );
+        return lastHeal;
+      };
+      const healTailAt = (t: number): string => {
+        const lastHeal = lastHealAt(t);
+        return `last bridge fault ${lastHeal ? lastHeal.id : 'none'} healed doneT=${lastHeal ? lastHeal.doneT : 'none'}`;
+      };
+
+      for (let i = 0; i < evaluatedCheckpoints.length; i += 1) {
+        const c = evaluatedCheckpoints[i];
+        const state = states[i];
+        if (state === 'dead') {
+          evidence.push(`bridge dead at ${c.name} t=${c.t} ${healTailAt(c.t)}`);
+          continue;
+        }
+        const next = evaluatedCheckpoints[i + 1];
+        if (state === 'unresponsive' && next !== undefined &&
+          (states[i + 1] === 'dead' || states[i + 1] === 'unresponsive')) {
+          evidence.push(
+            `bridge alive but unresponsive at ${c.name} t=${c.t} and ${next.name} t=${next.t} ${healTailAt(c.t)}`,
+          );
+        }
       }
     }
 
