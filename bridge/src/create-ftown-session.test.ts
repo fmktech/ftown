@@ -5,11 +5,13 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 import { buildSessionCommand } from './agent-commands.js';
+import { saveAccounts } from './accounts.js';
 import { HOOKED_SHELL_TYPES } from './harness-registry.js';
 import { TerminalManager } from './terminal-manager.js';
 import type { PlanItem, PlanState, SessionPlan } from './coordination/contract-c.js';
 import {
   assertProviderAuthAvailable,
+  AccountSelectionError,
   buildChildBriefing,
   canResumeStoredSession,
   createFtownSession,
@@ -30,6 +32,66 @@ import {
 import type { CreatePlanStoreDep, CreateFtownSessionDeps } from './create-ftown-session.js';
 import type { SessionWorktree, WorktreeCreateRequest } from './coordination/contract-b.js';
 import type { Session } from './types.js';
+
+describe('account-aware session creation', () => {
+  it('injects account configuration only into process env and inherits/narrows child policy', async () => {
+    const previousHome = process.env.HOME;
+    const home = mkdtempSync(join(tmpdir(), 'ftown-account-create-'));
+    process.env.HOME = home;
+    try {
+      const work = join(home, 'work'); mkdirSync(work);
+      saveAccounts({ version: 1, accounts: [
+        { id: 'personal', harness: 'claude', configDir: join(home, 'claude-personal') },
+        { id: 'other', harness: 'claude', configDir: join(home, 'claude-other') },
+        { id: 'codex-lab', harness: 'codex', configDir: join(home, 'codex-lab') },
+      ] }, home);
+      const { deps, runs, saved } = fakeDeps();
+      const launched = await createFtownSession(deps, { shellType: 'claude', account: 'personal', workingDir: work });
+      assert.deepEqual(runs[0].env, { CLAUDE_CONFIG_DIR: join(home, 'claude-personal') });
+      assert.equal(launched.command.includes(join(home, 'claude-personal')), false);
+      assert.equal(launched.account, 'personal');
+
+      const parent = { ...fakeSession('parent'), shellType: 'claude' as const, account: 'personal', allowedAccounts: ['personal', 'other'] };
+      const childHarness = fakeDeps([parent]);
+      const child = await createFtownSession(childHarness.deps, { parentSessionId: 'parent', workingDir: work, allowedAccounts: ['personal'] });
+      assert.equal(child.account, 'personal');
+      assert.deepEqual(child.allowedAccounts, ['personal']);
+      assert.deepEqual(childHarness.runs[0].env, { CLAUDE_CONFIG_DIR: join(home, 'claude-personal') });
+
+      // Account comes from the resolved parent; both policies restrict children.
+      const alias = { ...fakeSession('alias'), parentSessionId: 'parent', shellType: 'claude' as const, account: 'other', allowedAccounts: ['personal', 'other'] };
+      const aliased = fakeDeps([{ ...parent, allowedAccounts: ['personal'] }, alias]);
+      const sibling = await createFtownSession(aliased.deps, { parentSessionId: 'alias', workingDir: work });
+      assert.equal(sibling.parentSessionId, 'parent');
+      assert.equal(sibling.account, 'personal');
+      assert.deepEqual(sibling.allowedAccounts, ['personal']);
+      const codexParent = { ...fakeSession('codex-parent'), shellType: 'codex' as const, account: 'codex-lab' };
+      const claudeAlias = { ...fakeSession('claude-alias'), parentSessionId: 'codex-parent', shellType: 'claude' as const };
+      const codexAliasHarness = fakeDeps([codexParent, claudeAlias]);
+      const codexChild = await createFtownSession(codexAliasHarness.deps, { parentSessionId: 'claude-alias', workingDir: work });
+      assert.equal(codexChild.shellType, 'codex');
+      assert.equal(codexChild.account, 'codex-lab');
+      assert.deepEqual(codexAliasHarness.runs[0].env, { CODEX_HOME: join(home, 'codex-lab') });
+      const restricted = fakeDeps([{ ...parent, allowedAccounts: ['personal'] }, alias]);
+      await assert.rejects(createFtownSession(restricted.deps, { parentSessionId: 'alias', account: 'other', workingDir: work }),
+        (error: unknown) => error instanceof AccountSelectionError && error.code === 'account_not_allowed');
+      const grandchild = fakeDeps([{ ...parent, allowedAccounts: ['personal', 'default'] }, { ...alias, allowedAccounts: ['personal'] }]);
+      await assert.rejects(createFtownSession(grandchild.deps, { parentSessionId: 'alias', account: 'default', workingDir: work }),
+        (error: unknown) => error instanceof AccountSelectionError && error.code === 'account_not_allowed');
+
+      const rejected = fakeDeps([{ ...parent, allowedAccounts: ['personal'] }]);
+      await assert.rejects(createFtownSession(rejected.deps, { parentSessionId: 'parent', account: 'other', workingDir: work }),
+        (error: unknown) => error instanceof AccountSelectionError && error.code === 'account_not_allowed');
+      const mismatch = fakeDeps();
+      await assert.rejects(createFtownSession(mismatch.deps, { shellType: 'codex', account: 'personal', workingDir: work }),
+        (error: unknown) => error instanceof AccountSelectionError && error.code === 'account_harness_mismatch');
+      assert.equal(saved.length, 1);
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
 
 function restoreHome(realHome: string | undefined): void {
   if (realHome === undefined) delete process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
@@ -866,6 +928,18 @@ describe('createFtownSession — Pi launch', () => {
 // retry_session RPC, and restart resurrection — must hand the runner the same
 // invocation. This is the lock on "how is a session launched has one answer".
 describe('relaunchFtownSession — retained terminal geometry', () => {
+  it('retains account policy and launch environment through retry and resume', async () => {
+    const h = fakeDeps();
+    const session = { ...fakeSession('account-relaunch'), status: 'error' as const, account: 'work',
+      allowedAccounts: ['work', 'default'], env: { CLAUDE_CONFIG_DIR: join(tmpdir(), 'ftown-work') } };
+    await relaunchFtownSession(h.deps, session, 'retry');
+    await relaunchFtownSession(h.deps, session, 'resume');
+    for (const saved of h.saved) {
+      assert.equal(saved.account, 'work');
+      assert.deepEqual(saved.allowedAccounts, ['work', 'default']);
+    }
+    assert.deepEqual(h.runs.map(run => run.env), [session.env, session.env]);
+  });
   it('uses current manager dimensions for retry and resume, including later resizes', async () => {
     const h = fakeDeps();
     const manager = new TerminalManager();

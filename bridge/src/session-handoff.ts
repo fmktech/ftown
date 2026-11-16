@@ -417,6 +417,8 @@ export async function handoffSession(deps: SessionHandoffDeps, sessionId: string
     workingDir: dir,
     shellType: target.shellType,
     model: target.model,
+    ...(session.account !== undefined ? { account: session.account } : {}),
+    ...(session.allowedAccounts !== undefined ? { allowedAccounts: session.allowedAccounts } : {}),
     parentSessionId: session.parentSessionId,
     ...(session.requireGreenPr ? { requireGreenPr: true } : {}),
   });

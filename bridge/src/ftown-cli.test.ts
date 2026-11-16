@@ -64,7 +64,7 @@ describe('in-process canonical commands', () => {
     }
   });
   it('routes quota to the quota CLI with its own help and usage exit codes', async () => {
-    assert.match(usage(), /setup\|start\|sessions\|harness\|env\|security\|quota/);
+    assert.match(usage(), /setup\|start\|sessions\|harness\|env\|accounts\|security\|quota/);
     assert.match(usage(), /quota {6}Subscription quota left, routing advice and model lists per harness \(--json for agents\)/);
     const text = await capture(async () => {
       assert.equal(await runFtown(['quota', '--help']), 0);

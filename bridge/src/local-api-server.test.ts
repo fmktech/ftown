@@ -26,6 +26,7 @@ import {
   workingDirMissingResponse,
 } from './local-api-server.js';
 import { SessionStore } from './session-store.js';
+import { saveAccounts } from './accounts.js';
 import { SessionController } from './session-controller.js';
 import { PreviewChatStore } from './preview-chat.js';
 import type { CentrifugoClient } from './centrifugo-client.js';
@@ -231,6 +232,68 @@ describe('LocalApiServer session harness inheritance', () => {
       assert.match(runs[1].command, /claude/);
     } finally {
       server.stop();
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('LocalApiServer account selection', () => {
+  it('enforces parent policy through the create route and restores account on revive', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'ftw-account-api-'));
+    const previousHome = process.env.HOME;
+    process.env.HOME = home;
+    const server = new LocalApiServer();
+    const token = 'account-token';
+    const store = new SessionStore(join(home, 'data'));
+    const launches: Array<Record<string, string> | undefined> = [];
+    const runner = { getPreferredRuntime: () => 'direct', run: (_id: string, _command: string, opts: { env?: Record<string, string> }) => launches.push(opts.env), stop: () => false, isRunning: () => false, hasTmuxSession: () => false } as unknown as ProcessRunner;
+    const centrifugo = { publishSessionUpdate: async () => {} } as unknown as CentrifugoClient;
+    try {
+      saveAccounts({ version: 1, accounts: [
+        { id: 'personal', harness: 'claude', configDir: join(home, 'personal') },
+        { id: 'other', harness: 'claude', configDir: join(home, 'other') },
+      ] });
+      const parent: Session = { id: 'parent', name: 'parent', command: 'claude', shellType: 'claude', status: 'running', bridgeId: 'bridge-1', createdAt: '', updatedAt: '', account: 'personal', allowedAccounts: ['personal', 'default'] };
+      await store.saveSession(parent);
+      server.setAuthToken(token);
+      server.setDependencies(store, runner, centrifugo, 'user-1');
+      server.setSessionFactory({ store, runner, centrifugo, userId: 'user-1', bridgeId: 'bridge-1', hookPort: 4321, hookToken: 'hook-token', notifyScriptPath: '/tmp/notify.sh', wireTerminalInput: () => {} });
+      const port = await server.start();
+      const create = (body: Record<string, unknown>) => api(port, token, 'POST', '/api/sessions', { workingDir: home, prompt: 'account policy', ...body });
+      const inherited = await create({ parentSessionId: 'parent', allowedAccounts: ['personal', 'other'] });
+      assert.equal(inherited.status, 201);
+      const child = inherited.data.session as Session;
+      assert.equal(child.account, 'personal'); assert.deepEqual(child.allowedAccounts, ['personal']);
+      assert.deepEqual((await store.loadSession(child.id))?.allowedAccounts, ['personal']);
+      assert.deepEqual(launches.at(-1), { CLAUDE_CONFIG_DIR: join(home, 'personal') });
+      const explicitNonDefault = await create({ shellType: 'claude', account: 'other' });
+      assert.equal(explicitNonDefault.status, 201);
+      const explicitSession = explicitNonDefault.data.session as Session;
+      assert.equal(explicitSession.account, 'other');
+      assert.equal((await store.loadSession(explicitSession.id))?.account, 'other');
+      assert.deepEqual(launches.at(-1), { CLAUDE_CONFIG_DIR: join(home, 'other') });
+      const narrowedDenied = await create({ parentSessionId: child.id, account: 'default' });
+      assert.equal(narrowedDenied.status, 400); assert.equal(narrowedDenied.data.code, 'account_not_allowed');
+      const explicit = await create({ parentSessionId: 'parent', account: 'default' });
+      assert.equal(explicit.status, 201); assert.equal((explicit.data.session as Session).account, 'default');
+      assert.equal(launches.at(-1), undefined);
+      const denied = await create({ parentSessionId: 'parent', account: 'other' });
+      assert.equal(denied.status, 400); assert.equal(denied.data.code, 'account_not_allowed');
+      const unknown = await create({ shellType: 'claude', account: 'missing' });
+      assert.equal(unknown.status, 400); assert.equal(unknown.data.code, 'unknown_account');
+      assert.equal(launches.length, 3);
+      // The tombstone is loaded by the real revive route and launched with its stored policy.
+      await store.archiveSession({ ...child, id: 'archived', parentSessionId: undefined, status: 'completed' });
+      const revived = await api(port, token, 'POST', '/api/sessions/archived/revive', {});
+      assert.equal(revived.status, 201);
+      const restored = revived.data.session as Session;
+      assert.equal(restored.account, 'personal'); assert.deepEqual(restored.allowedAccounts, ['personal']);
+      assert.equal((await store.loadSession(restored.id))?.account, 'personal');
+      assert.deepEqual((await store.loadSession(restored.id))?.allowedAccounts, ['personal']);
+      assert.deepEqual(launches.at(-1), { CLAUDE_CONFIG_DIR: join(home, 'personal') });
+    } finally {
+      server.stop();
+      if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
       rmSync(home, { recursive: true, force: true });
     }
   });

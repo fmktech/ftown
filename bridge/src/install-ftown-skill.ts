@@ -33,7 +33,8 @@ export function opencodeSkillsDir(home: string, env: NodeJS.ProcessEnv = process
 }
 
 function skillLinkDirs(home: string, env: NodeJS.ProcessEnv): readonly string[] {
-  return [join(home, '.agents', 'skills'), join(claudeConfigDir(home, env), 'skills'), opencodeSkillsDir(home, env)];
+  return [join(home, '.agents', 'skills'), join(claudeConfigDir(home, env), 'skills'), opencodeSkillsDir(home, env),
+    ...(env.CODEX_HOME ? [join(env.CODEX_HOME, 'skills')] : [])];
 }
 
 /** Relative symlink target from a skill link directory back to the canonical skill. */

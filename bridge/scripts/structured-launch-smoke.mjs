@@ -13,24 +13,27 @@ const exec = promisify(execFile);
 const bridge = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const { copyProductionDependencies } = await import(pathToFileURL(join(bridge, 'dist/production-dependencies.js')).href);
 const { RUNTIME_DIRECTORIES } = await import(pathToFileURL(join(bridge, 'dist/installation-manifest.js')).href);
+const { apiResponse } = await import(pathToFileURL(join(bridge, 'dist/cli-client.js')).href);
 const version = JSON.parse(readFileSync(join(bridge, 'package.json'), 'utf8')).version;
 const temporary = mkdtempSync(join(tmpdir(), 'ftown-structured-launch-'));
-const home = join(temporary, 'home'), work = join(temporary, 'work'), bin = join(temporary, 'bin');
+const home = join(temporary, 'home'), work = join(temporary, 'work'), bin = join(temporary, 'bin'), accountConfig = join(temporary, 'personal-config'), codexConfig = join(temporary, 'codex-config');
 const source = join(temporary, 'cache/node_modules/ftown');
-for (const directory of [home, work, bin, source]) mkdirSync(directory, { recursive: true });
+for (const directory of [home, work, bin, source, accountConfig, codexConfig, join(home, '.ftown')]) mkdirSync(directory, { recursive: true });
+writeFileSync(join(home, '.ftown', 'accounts.json'), JSON.stringify({ version:1, accounts:[{id:'personal',harness:'claude',label:'Personal',configDir:accountConfig},{id:'codex-lab',harness:'codex',configDir:codexConfig}] }), { mode:0o600 });
 for (const [name, file] of [['node', process.execPath], ['bash', '/bin/bash'], ['sh', '/bin/sh']]) symlinkSync(file, join(bin, name));
 const receiptPath = join(temporary, 'launches.jsonl');
 const stub = `#!/usr/bin/env node
 const fs = require('node:fs');
 const args = process.argv.slice(2);
 if (args[0] === '--version') { console.log('2.1.302 (Claude Code)'); process.exit(0); }
-const record = value => fs.appendFileSync(${JSON.stringify(receiptPath)}, JSON.stringify({pid:process.pid,session:process.env.FTOWN_SESSION_ID,...value})+'\\n');
+const record = value => fs.appendFileSync(${JSON.stringify(receiptPath)}, JSON.stringify({pid:process.pid,session:process.env.FTOWN_SESSION_ID,configDir:process.env.CLAUDE_CONFIG_DIR,codexHome:process.env.CODEX_HOME,...value})+'\\n');
 if (process.stdin.isTTY) process.stdin.setRawMode(true);
 process.stdin.on('data', chunk => record({type:'input',text:chunk.toString()}));
 process.stdin.resume();
 record({type:'launch',args,cwd:process.cwd(),setting:process.env.FIXTURE_SETTING});
 `;
 writeFileSync(join(bin, 'claude'), stub, { mode: 0o755 });
+writeFileSync(join(bin, 'codex'), stub, { mode: 0o755 });
 // zsh -l reads /etc/zprofile first; fence its PATH before any fake-agent launch.
 // The test HOME has no user profiles, credentials or real harness executables.
 writeFileSync(join(home, '.zprofile'), `export PATH='${bin}'\n`);
@@ -53,11 +56,8 @@ async function until(check, label, milliseconds = 20_000, diagnostics = () => un
   throw new Error(`${label}: receipts=${JSON.stringify(diagnostics())}; bridge=${output.slice(-4000)}`);
 }
 async function api(method, path, body, expected = 200) {
-  const response = await fetch(`http://127.0.0.1:${pointer.port}${path}`, {
-    method, headers: { Authorization: `Bearer ${pointer.token}`, ...(body ? {'Content-Type':'application/json'} : {}) },
-    body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(10_000),
-  });
-  const data = await response.json(); assert.equal(response.status, expected, JSON.stringify(data)); return data;
+  const response = await apiResponse(pointer, method, path, body);
+  const data = response.body; assert.equal(response.status, expected, JSON.stringify(data)); return data;
 }
 async function create(input) {
   const { session } = await api('POST', '/api/sessions', { name:'structured-fixture', workingDir:work, ...input }, 201);
@@ -93,6 +93,24 @@ try {
   await until(() => output.includes('[Bridge] Ready and listening for commands'), 'bridge readiness');
   const status = await exec(installed, ['harness','--json','status'], { env, cwd:work, timeout:30_000 });
   assert.equal(JSON.parse(status.stdout).bridge, 'up');
+  const accountCreate = await exec(installed, ['sessions','create','--shell','claude','--account','personal','--workdir',work,'--prompt','account environment smoke','--json'], { env, cwd:work, timeout:30_000 });
+  const selected = JSON.parse(accountCreate.stdout).session;
+  owned.add(selected.id);
+  const selectedLaunch = await until(() => receipts(selected.id).find(value => value.type === 'launch'), 'account CLI launch');
+  assert.equal(selected.account, 'personal');
+  assert.equal(selectedLaunch.configDir, accountConfig, 'selected account arrives only as process environment');
+  assert.equal(selected.command.includes(accountConfig), false, 'account path is never embedded in command text');
+  assert.equal(selectedLaunch.codexHome, undefined);
+  await remove(selected.id);
+  const codexCreate = await exec(installed, ['sessions','create','--shell','codex','--account','codex-lab','--workdir',work,'--prompt','account environment smoke','--json'], { env, cwd:work, timeout:30_000 });
+  const codexSelected = JSON.parse(codexCreate.stdout).session;
+  owned.add(codexSelected.id);
+  const codexLaunch = await until(() => receipts(codexSelected.id).find(value => value.type === 'launch'), 'codex account CLI launch');
+  assert.equal(codexSelected.account, 'codex-lab');
+  assert.equal(codexLaunch.codexHome, codexConfig, 'Codex receives selected CODEX_HOME in the actual process');
+  assert.equal(codexLaunch.configDir, undefined);
+  assert.equal(codexSelected.command.includes(codexConfig), false);
+  await remove(codexSelected.id);
   const task = "inspect today's changes; $(literal text)";
   const model = "fixture/model 'quoted'";
   const fresh = await create({ shellType:'claude', prompt:task, model, env:{FIXTURE_SETTING:'preserved'} });
@@ -133,6 +151,7 @@ try {
   await sleep(700); assert.equal(raw(), 'raw input\r', 'caller-owned raw submit remains exactly once');
   await remove(custom.session.id);
   console.log(JSON.stringify({result:'PASS',version,copiedPackage:true,cacheIndependent:true,harnessStatus:true,
+    account:'CLI --account launches received matching CLAUDE_CONFIG_DIR and CODEX_HOME; commands exclude paths',
     standard:'registry model/env/workspace; quoted task once; persisted command has no task',
     resume:'native ID plus one new task; retry without replay',legacy:'custom flags/raw input preserved',realProvider:false,cloud:false,database:false}));
 } finally {

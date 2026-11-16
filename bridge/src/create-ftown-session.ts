@@ -22,6 +22,7 @@ import { GitWorktrees } from './worktrees.js';
 import { WorktreeError, type SessionWorktree, type WorktreeApi } from './coordination/contract-b.js';
 import type { SessionPlan } from './coordination/contract-c.js';
 import { detectWsl2, isUnderWslMnt, wslMntWorkdirWarning, type Wsl2Probe } from './wsl2.js';
+import { accountEnv, loadAccounts } from './accounts.js';
 
 import type { CentrifugoClient } from './centrifugo-client.js';
 import type { ProcessRunner } from './claude-runner.js';
@@ -43,6 +44,10 @@ export class PlanItemError extends Error {
     super(message);
     this.name = 'PlanItemError';
   }
+}
+
+export class AccountSelectionError extends Error {
+  constructor(readonly code: 'unknown_account' | 'account_harness_mismatch' | 'account_not_allowed', message: string) { super(message); }
 }
 
 /** The slice of the plan store the create path needs (see contract-c.ts). */
@@ -92,6 +97,8 @@ export interface CreateFtownSessionInput {
   workingDir?: string;
   shellType?: ShellType;
   model?: string;
+  account?: string;
+  allowedAccounts?: string[];
   claudeSessionId?: string;
   cursorSessionId?: string;
   codexSessionId?: string;
@@ -498,14 +505,39 @@ async function createFtownSessionImpl(
   let parentSessionId: string | undefined;
   let parentName: string | undefined;
   let parentWorkingDir: string | undefined;
+  let parentSession: Session | null = null;
+  let resolvedParentSession: Session | null = null;
+  const requestedParentId = input.parentSessionId;
   if (input.parentSessionId) {
+    parentSession = await deps.store.loadSession(input.parentSessionId);
     parentSessionId = await resolveParentSessionId(deps.store, input.parentSessionId);
     if (parentSessionId) {
-      const parentSession = await deps.store.loadSession(parentSessionId);
-      parentName = parentSession?.name ?? parentSessionId.slice(0, 8);
-      parentWorkingDir = parentSession?.workingDir;
+      resolvedParentSession = await deps.store.loadSession(parentSessionId);
+      parentName = resolvedParentSession?.name ?? parentSessionId.slice(0, 8);
+      parentWorkingDir = resolvedParentSession?.workingDir;
     }
   }
+
+  if (input.account !== undefined && typeof input.account !== 'string') throw new AccountSelectionError('unknown_account', 'account must be a registered account id');
+  if (input.allowedAccounts !== undefined && (!Array.isArray(input.allowedAccounts) || !input.allowedAccounts.every(id => typeof id === 'string'))) throw new AccountSelectionError('unknown_account', 'allowedAccounts must be an array of account ids');
+  const registeredAccounts = loadAccounts().accounts;
+  const registeredIds = new Set(registeredAccounts.map(entry => entry.id));
+  if (input.allowedAccounts?.some(id => id !== 'default' && (!/^[a-z0-9-]{1,32}$/.test(id) || !registeredIds.has(id)))) throw new AccountSelectionError('unknown_account', 'allowedAccounts contains an unknown account id');
+  let account = input.account ?? resolvedParentSession?.account;
+  const resolvedPolicy = resolvedParentSession?.allowedAccounts;
+  const directPolicy = parentSession?.allowedAccounts;
+  // An alias may impose a narrower policy than its resolved parent; preserve both restrictions.
+  const parentPolicy = resolvedPolicy && directPolicy
+    ? resolvedPolicy.filter(id => directPolicy.includes(id))
+    : resolvedPolicy ?? directPolicy;
+  if (parentPolicy) {
+    const inheritedOrRequestedAccount = account ?? 'default';
+    if (!parentPolicy.includes(inheritedOrRequestedAccount)) throw new AccountSelectionError('account_not_allowed', `Account ${inheritedOrRequestedAccount} is not allowed by parent session`);
+  }
+  const allowedAccounts = parentPolicy
+    ? input.allowedAccounts ? [...new Set(input.allowedAccounts.filter(id => parentPolicy.includes(id)))] : parentPolicy
+    : input.allowedAccounts;
+  if (allowedAccounts && allowedAccounts.some(id => typeof id !== 'string' || !/^(default|[a-z0-9-]{1,32})$/.test(id))) throw new AccountSelectionError('unknown_account', 'allowedAccounts must contain registered account ids');
 
   // `--plan-item` binds the new child to a todo item on the parent's plan.
   // Validation happens BEFORE any session record is created; failures are 400s.
@@ -527,7 +559,16 @@ async function createFtownSessionImpl(
     }
   }
 
-  const shellType = input.shellType !== undefined ? normalizeShellType(input.shellType) : undefined;
+  const shellType = input.shellType !== undefined ? normalizeShellType(input.shellType) : resolvedParentSession?.shellType;
+  const harness = shellType === 'codex' ? 'codex' : shellType === 'claude' || shellType === undefined ? 'claude' : undefined;
+  let selectedAccountEnv: Record<string, string> = {};
+  if (account && account !== 'default') {
+    const selected = registeredAccounts.find(entry => entry.id === account);
+    if (!selected) throw new AccountSelectionError('unknown_account', `Unknown account: ${account}`);
+    if (!harness || selected.harness !== harness) throw new AccountSelectionError('account_harness_mismatch', `Account ${account} is for ${selected.harness}, not ${shellType ?? 'claude'}`);
+    selectedAccountEnv = accountEnv(selected);
+  }
+  if (account === 'default' && !harness) throw new AccountSelectionError('account_harness_mismatch', 'Account default requires a Claude or Codex harness');
   const effectiveBaseInput: CreateFtownSessionInput = {
     ...input,
     ...(shellType !== undefined ? { shellType } : {}),
@@ -551,7 +592,7 @@ async function createFtownSessionImpl(
   // here rather than only on the first spawn.
   const launchEnv = shellType === 'opencode' ? opencodeLaunchEnv(input.model) : undefined;
   const shouldSetSessionEnv =
-    Boolean(input.env)
+    Boolean(input.env) || Object.keys(selectedAccountEnv).length > 0
     || Object.keys(providerRuntime).length > 0
     || Object.keys(providerAuth).length > 0
     || launchEnv !== undefined;
@@ -560,6 +601,7 @@ async function createFtownSessionImpl(
       ? {
           ...providerRuntime,
           ...(input.env ?? {}),
+          ...selectedAccountEnv,
           ...providerAuth,
           ...launchEnv,
         }
@@ -614,6 +656,8 @@ async function createFtownSessionImpl(
       workingDir,
       shellType,
       model: input.model,
+      ...(account ? { account } : {}),
+      ...(allowedAccounts ? { allowedAccounts } : {}),
       claudeSessionId: input.claudeSessionId,
       cursorSessionId: input.cursorSessionId,
       codexSessionId: input.codexSessionId,
@@ -651,7 +695,7 @@ async function createFtownSessionImpl(
             childName: session.name,
             childId: sessionId,
             parentName,
-            parentId: parentSessionId,
+            parentId: requestedParentId ?? parentSessionId,
             requireGreenPr: input.requireGreenPr,
           })
         : undefined;
@@ -782,6 +826,8 @@ export function parseCreateSessionBody(
   body: Record<string, unknown>,
   callerSessionId?: string,
 ): CreateFtownSessionInput {
+  if (Object.prototype.hasOwnProperty.call(body, 'account') && typeof body.account !== 'string') throw new AccountSelectionError('unknown_account', 'account must be a registered account id');
+  if (Object.prototype.hasOwnProperty.call(body, 'allowedAccounts') && (!Array.isArray(body.allowedAccounts) || !body.allowedAccounts.every(value => typeof value === 'string'))) throw new AccountSelectionError('unknown_account', 'allowedAccounts must be an array of account ids');
   const shellType = body.shellType !== undefined ? normalizeShellType(body.shellType) : undefined;
   const env = body.env as Record<string, string> | undefined;
 
@@ -798,6 +844,8 @@ export function parseCreateSessionBody(
     workingDir: typeof body.workingDir === 'string' ? body.workingDir : undefined,
     shellType,
     model: typeof body.model === 'string' ? body.model : undefined,
+    account: typeof body.account === 'string' ? body.account : undefined,
+    allowedAccounts: Array.isArray(body.allowedAccounts) && body.allowedAccounts.every(v => typeof v === 'string') ? body.allowedAccounts as string[] : undefined,
     claudeSessionId:
       typeof body.claudeSessionId === 'string' ? body.claudeSessionId : undefined,
     cursorSessionId:

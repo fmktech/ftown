@@ -47,6 +47,8 @@ export interface Session {
   workingDir?: string;
   shellType?: ShellType;
   model?: string;
+  account?: string;
+  allowedAccounts?: string[];
   claudeSessionId?: string;
   cursorSessionId?: string;
   codexSessionId?: string;
@@ -162,6 +164,8 @@ export interface CreateSessionPayload {
   initialInputDelay?: number;
   shellType?: ShellType;
   model?: string;
+  account?: string;
+  allowedAccounts?: string[];
   claudeSessionId?: string;
   cursorSessionId?: string;
   codexSessionId?: string;
