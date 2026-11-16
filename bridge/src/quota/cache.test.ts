@@ -78,7 +78,12 @@ async function harness(
   options: { quota?: QuotaBehavior; models?: ModelsBehavior; graceMs?: number; useRealFormat?: boolean } = {},
 ): Promise<Harness> {
   const homeDir = await mkdtemp(join(tmpdir(), 'quota-cache-'));
-  t.after(() => rm(homeDir, { recursive: true, force: true }));
+  const previousHome = process.env.HOME;
+  process.env.HOME = homeDir;
+  t.after(async () => {
+    if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
+    await rm(homeDir, { recursive: true, force: true });
+  });
   const clock = { t: START.getTime() };
   const quotaCalls: QuotaProviderId[] = [];
   const modelCalls: QuotaProviderId[] = [];

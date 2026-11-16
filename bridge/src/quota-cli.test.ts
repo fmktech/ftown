@@ -1,5 +1,8 @@
-import { describe, it } from 'node:test';
+import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import {
   collectQuotaReport,
@@ -29,6 +32,18 @@ import type {
 } from './quota/types.js';
 
 const NOW = new Date('2026-11-13T12:00:00.000Z');
+
+let isolatedHome = '';
+let previousHome: string | undefined;
+before(async () => {
+  previousHome = process.env.HOME;
+  isolatedHome = await mkdtemp(join(tmpdir(), 'quota-cli-home-'));
+  process.env.HOME = isolatedHome;
+});
+after(async () => {
+  if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
+  if (isolatedHome !== '') await rm(isolatedHome, { recursive: true, force: true });
+});
 
 function okRow(provider: QuotaProviderId): ProviderQuota {
   return {

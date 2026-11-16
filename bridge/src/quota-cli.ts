@@ -421,7 +421,7 @@ export async function collectQuotaReport(input: CollectQuotaInput, deps: QuotaDe
   const sleep = deps.cache?.sleep ?? quotaSleep;
   const nowMs = (): number => deps.now().getTime();
 
-  const accountsFile = await loadAccounts(deps.homeDir);
+  const accountsFile = loadAccounts();
   const targets = providerTargets(input.providers, accountsFile.accounts);
   const quotaByProvider = new Map<string, ProviderQuota>();
   const modelsByProvider = new Map<string, ProviderModels>();
