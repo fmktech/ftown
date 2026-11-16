@@ -37,8 +37,7 @@ const _shellTypeIsRegistryKeys: Equals<ShellType, keyof typeof HARNESSES> = true
 void _shellTypeIsRegistryKeys;
 
 describe('harness registry', () => {
-  it('loads the installed Mod only for compatible Claude executables, including provider aliases', () => {
-    if (process.platform === 'win32') return;
+  it('loads the installed Mod only for compatible Claude executables, including provider aliases', { skip: process.platform === 'win32' ? 'POSIX #!/bin/sh claude shim' : false }, () => {
     const home = process.env.HOME; const path = process.env.PATH;
     const temporary = mkdtempSync(join(tmpdir(), 'ftown-mod-launch-'));
     try {
