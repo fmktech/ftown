@@ -115,35 +115,6 @@ function ledgerBridge(env = {}, uid = 501) {
   }, { process: { env, getuid: () => uid } });
 }
 
-test('isolated bridge selects the installed runtime only when version and built command modules match', () => {
-  const home = '/scratch-home';
-  const source = path.join(root, 'bridge');
-  const installed = path.join(home, '.ftown', 'cli');
-  const files = new Map();
-  for (const directory of [source, installed]) {
-    files.set(path.join(directory, 'package.json'), JSON.stringify({ version: '0.30.29' }));
-    for (const file of ['dist/index.js', 'dist/command-rpc.js', 'dist/security/bridge/permissions.js']) files.set(path.join(directory, file), `content:${file}`);
-  }
-  const { isolatedBridgeRuntime } = helper('e2e/helpers/ledger-bridge.ts', {
-    'node:child_process': {}, 'node:fs': { readFileSync: file => {
-      if (!files.has(file)) throw new Error(`missing file: ${file}`);
-      return files.get(file);
-    } }, 'node:fs/promises': {}, 'node:path': path, 'node:util': { promisify: fn => fn },
-    './config': { E2E_DIR: e2e, UI_BASE_URL: 'http://localhost:3001' },
-  });
-  const runtime = isolatedBridgeRuntime(home);
-  assert.equal(runtime.entry, path.join(installed, 'dist/index.js'));
-  assert.equal(runtime.sourceVersion, '0.30.29');
-  assert.equal(runtime.installedVersion, '0.30.29');
-  files.set(path.join(installed, 'package.json'), JSON.stringify({ version: '0.30.28' }));
-  assert.throws(() => isolatedBridgeRuntime(home), /runtime version mismatch/);
-  files.set(path.join(installed, 'package.json'), JSON.stringify({ version: '0.30.29' }));
-  files.set(path.join(installed, 'dist/command-rpc.js'), 'stale build');
-  assert.throws(() => isolatedBridgeRuntime(home), /runtime does not match checkout: dist\/command-rpc.js/);
-  files.delete(path.join(installed, 'dist/index.js'));
-  assert.throws(() => isolatedBridgeRuntime(home), /missing file/);
-});
-
 test('isolatedBridgeEnv drops inherited FTOWN_*, tmux, and OpenCode config location', () => {
   const { isolatedBridgeEnv } = ledgerBridge({
     HOME: '/unowned', USERPROFILE: '/unowned', FTOWN_DATA_DIR: '/unowned/data', FTOWN_PUBLIC_URL: 'x', FTOWN_ANYTHING: '1',

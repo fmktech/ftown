@@ -10,27 +10,6 @@ const BRIDGE_DIST = join(E2E_DIR, "..", "bridge", "dist");
 const CLI = join(BRIDGE_DIST, "ftown-cli.js");
 const MAX_OUTPUT = 4 * 1024 * 1024;
 
-/** Require setup's installed runtime to match this checkout's freshly built bridge. */
-export function isolatedBridgeRuntime(home: string): { entry: string; sourceVersion: string; installedVersion: string } {
-  const source = join(E2E_DIR, "..", "bridge");
-  const installed = join(home, ".ftown", "cli");
-  const version = (root: string): string => {
-    const value = (JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { version?: unknown }).version;
-    if (typeof value !== "string" || !value) throw new Error("test-owned bridge runtime has no package version");
-    return value;
-  };
-  const sourceVersion = version(source);
-  const installedVersion = version(installed);
-  if (sourceVersion !== installedVersion) throw new Error(`test-owned bridge runtime version mismatch: source ${sourceVersion}, installed ${installedVersion}`);
-  // Version alone cannot distinguish two builds in an unmerged PR.
-  for (const relative of ["dist/index.js", "dist/command-rpc.js", "dist/security/bridge/permissions.js"]) {
-    if (readFileSync(join(source, relative), "utf8") !== readFileSync(join(installed, relative), "utf8")) {
-      throw new Error(`test-owned bridge runtime does not match checkout: ${relative}`);
-    }
-  }
-  return { entry: join(installed, "dist", "index.js"), sourceVersion, installedVersion };
-}
-
 /** What an unpaired bridge prints: the private /pair link and the 6-digit code the owner must TYPE on the page. */
 export interface PairingPrompt {
   link: string;
@@ -170,11 +149,7 @@ export async function startIsolatedBridge(options: { apiUrl?: string } = {}): Pr
   let exited = false;
   const spawnBridge = async () => {
     processOutput = "";
-    const runtime = isolatedBridgeRuntime(home);
-    const diagnostic = `[fixture] bridge entry: ${runtime.entry}; source version: ${runtime.sourceVersion}; installed version: ${runtime.installedVersion}\n`;
-    output += diagnostic;
-    processOutput += diagnostic;
-    const next = spawn(process.execPath, [runtime.entry, "--api-url", options.apiUrl ?? UI_BASE_URL], {
+    const next = spawn(process.execPath, [join(BRIDGE_DIST, "index.js"), "--api-url", options.apiUrl ?? UI_BASE_URL], {
       cwd: home, env, stdio: ["ignore", "pipe", "pipe"],
     });
     if (typeof next.pid !== "number") throw new Error("failed to spawn the test bridge");
