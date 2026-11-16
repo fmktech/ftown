@@ -14,7 +14,7 @@ export type RelayCaller =
 /**
  * Authenticate a bridge by its relay JWT (HS256, audience ftown:centrifugo, sub = accountId, info.bridgeId, info.ownerId === sub) and
  * re-check the bridge against the CURRENT trusted checkpoint (sticky revocations applied; from the MAC-authenticated persisted raw
- * checkpoint, so no chain is verified per request): a 1 h token outlives revocation.
+ * checkpoint, so no chain is verified per request): a 12 h token can outlive revocation by up to 12 hours.
  * Throws UnauthorizedError (status 401) on every failure.
  */
 export async function requireBridge(request: Request): Promise<{ accountId: string; bridgeId: string; trusted: LedgerCheckpoint }> {

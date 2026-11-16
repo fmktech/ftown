@@ -32,10 +32,10 @@ const COOLDOWN_MAX_MS = 600_000;
 const REUSE_MARGIN_MS = 60_000;
 /** A refused key is not retried for this long, unless the local ledger changes. */
 const UNAUTHORIZED_MEMORY_MS = 600_000;
-/** A server that claims a longer lifetime is not believed beyond this. */
-const MAX_LIFETIME_MS = 2 * 3_600_000;
+/** A server that claims a longer lifetime is not believed beyond 12 hours. */
+const MAX_LIFETIME_MS = 12 * 3_600_000;
 
-/** exp − iat of a JWT in ms (capped at 2 h), or null when it is not a JWT with a positive numeric lifetime. */
+/** exp − iat of a JWT in ms (capped at 12 h), or null when it is not a JWT with a positive numeric lifetime. */
 export function tokenLifetimeMs(token: string): number | null {
   const parts = token.split('.');
   if (parts.length !== 3 || parts[1].length === 0) return null;

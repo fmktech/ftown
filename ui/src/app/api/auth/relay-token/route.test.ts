@@ -65,7 +65,7 @@ beforeEach(async () => {
 });
 
 describe('POST /api/auth/relay-token', () => {
-  it('issues a bridge token with the info claim and 1 h lifetime', async () => {
+  it('issues a bridge token with the info claim and 12 h lifetime', async () => {
     const res = await POST(req(await bridgeBody({ localPort: 4242 })));
     expect(res.status).toBe(200);
     expect(res.headers.get('Cache-Control')).toBe('no-store');
@@ -73,7 +73,7 @@ describe('POST /api/auth/relay-token', () => {
     expect(json.ledger).toBeUndefined();
     const claims = jwt.verify(json.token, SECRET, { audience: 'ftown:centrifugo' }) as jwt.JwtPayload;
     expect(claims.sub).toBe(ACCOUNT);
-    expect(claims.exp! - claims.iat!).toBe(3600);
+    expect(claims.exp! - claims.iat!).toBe(43_200);
     expect(json.expiresAt).toBe(claims.exp! * 1000);
     expect(claims.info).toMatchObject({ bridgeId: BRIDGE_ID, ownerId: ACCOUNT, hostname: 'my-host', localPort: 4242 });
     expect(typeof claims.info.connectedAt).toBe('string');
@@ -98,7 +98,7 @@ describe('POST /api/auth/relay-token', () => {
     expect(res.status).toBe(200);
     const claims = jwt.decode((await res.json()).token) as jwt.JwtPayload;
     expect(claims.sub).toBe(ACCOUNT);
-    expect(claims.exp! - claims.iat!).toBe(3600);
+    expect(claims.exp! - claims.iat!).toBe(43_200);
     expect(claims.info).toBeUndefined();
   });
   it('includes the ledger only when the head differs, and reads the chain only then', async () => {

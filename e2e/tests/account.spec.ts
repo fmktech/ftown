@@ -92,7 +92,7 @@ test("a second browser signs in with the synced passkey, re-signs in with its de
   expect(minted.accountId).toBe(account.accountId);
   const claims = JSON.parse(Buffer.from(minted.token.split(".")[1], "base64url").toString()) as { sub: string; aud: string | string[]; exp: number; iat: number };
   expect(claims.sub).toBe(account.accountId);
-  expect(claims.exp - claims.iat).toBe(3600);
+  expect(claims.exp - claims.iat).toBe(43_200);
   const { checkpoint } = await serverLedger();
   const device = checkpoint.devices.find(item => item.endpoint.id === endpointId);
   expect(device?.label).toBe(label);

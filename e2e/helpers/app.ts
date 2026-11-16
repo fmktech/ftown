@@ -17,7 +17,7 @@ export async function login(page: Page, options: { browserLabel?: string } = {})
 
 /**
  * Fetch the relay (Centrifugo) token for whoever `page` is signed in as, from
- * POST /api/auth/token: HS256, aud "ftown:centrifugo", sub = accountId, 1 h —
+ * POST /api/auth/token: HS256, aud "ftown:centrifugo", sub = accountId, 12 h —
  * the token the browser connects with. Uses the page context's session cookie.
  * Throws on non-2xx (e.g. 401 when the page is not signed in).
  */

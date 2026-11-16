@@ -57,7 +57,7 @@ describe("/api/auth/token", () => {
     expect((await POST()).status).toBe(500);
   });
 
-  it("mints a 1 h relay JWT with sub = accountId", async () => {
+  it("mints a 12 h relay JWT with sub = accountId", async () => {
     requireAccount.mockResolvedValue({ accountId: ACCOUNT, endpointId: "e1" });
     const response = await POST();
     expect(response.status).toBe(200);
@@ -68,7 +68,7 @@ describe("/api/auth/token", () => {
     const claims = jwt.verify(body.token, "s".repeat(40), { audience: "ftown:centrifugo" }) as jwt.JwtPayload;
     expect(claims.sub).toBe(ACCOUNT);
     expect(claims.info).toBeUndefined();
-    expect(claims.exp! - claims.iat!).toBe(3600);
+    expect(claims.exp! - claims.iat!).toBe(43_200);
     expect(body.expiresAt).toBe(claims.exp! * 1000);
   });
 });
