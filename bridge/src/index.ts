@@ -76,6 +76,7 @@ import { resolveStableRelease, prepareRelease, discardPreparedRelease } from './
 import { assertUpdateReservationAllowed, readUpdateRestartContext, reportUpdateReady, reserveUpdate,
   prepareHandoff, readUpdateReceipt, writeUpdateReceipt } from './update-handoff.js';
 import type { UpdateRestartContext } from './update-runtime-contract.js';
+import { detectWsl2, soloBannerLines, type Wsl2Probe } from './wsl2.js';
 
 /** Bridge package version — doubles as the default panel bundle version. */
 const BRIDGE_VERSION = JSON.parse(
@@ -129,7 +130,14 @@ export async function finishUpdateRestartAdmission(admission: UpdateAdmission, r
   admission.reopen();
 }
 
-export async function runBridge(argv: string[], commandName = 'ftown-bridge'): Promise<number> {
+/** Runtime dependencies of the bridge entry point, injectable for unit tests. */
+export interface RunBridgeDeps {
+  /** Override the WSL2 probe (defaults to reading the kernel release files). */
+  isWsl2?: Wsl2Probe;
+}
+
+export async function runBridge(argv: string[], commandName = 'ftown-bridge', deps: RunBridgeDeps = {}): Promise<number> {
+const isWsl2 = deps.isWsl2 ?? detectWsl2;
 const program = new Commander();
 program.exitOverride();
 configureUpdateOptions(program);
@@ -259,8 +267,10 @@ program
       const port = opts.port ? Number(opts.port) : DEFAULT_SOLO_PORT;
       console.log('========================================');
       console.log('  ftown SOLO — access key rotated');
-      for (const ip of networkInterfacesForBanner()) {
-        console.log(`  Open:   http://${ip}:${port}/#k=${raw}`);
+      for (const line of soloBannerLines({
+        ips: networkInterfacesForBanner(), port, accessKeyRaw: raw, isWsl2: isWsl2(),
+      })) {
+        console.log(line);
       }
       console.log('========================================');
       process.exit(0);
@@ -405,23 +415,22 @@ program
       });
 
       // One-time banner (S1 exception): full link ONLY when a fresh key was
-      // generated; otherwise print keyless URL + rotation hint.
+      // generated; otherwise print keyless URL + rotation hint. Under WSL2 the
+      // VM IP is not reachable from the LAN, so soloBannerLines points users at
+      // localhost instead and documents port forwarding.
       const bannerIps = networkInterfacesForBanner();
+      const wsl2 = isWsl2();
       console.log('========================================');
       console.log('  ftown SOLO mode');
       console.log(`  Bridge ID: ${bridgeId}`);
-      for (const ip of bannerIps) {
-        const base = `http://${ip}:${front.port}`;
-        if (accessKeyRaw) {
-          console.log(`  Open:   ${base}/#k=${accessKeyRaw}`);
-        } else {
-          console.log(`  URL:    ${base}  (key already paired — --rotate-key reprints)`);
-        }
+      for (const line of soloBannerLines({
+        ips: bannerIps, port: front.port, accessKeyRaw, isWsl2: wsl2,
+      })) {
+        console.log(line);
       }
-      if (!accessKeyRaw) {
-        console.log('  Key not shown: already issued once. --rotate-key regenerates it.');
-      }
-      if (bannerIps.length === 0) {
+      if (wsl2) {
+        console.log('  WARNING: WSL2 VM address is not reachable from the LAN — use localhost (see above).');
+      } else if (bannerIps.length === 0) {
         console.log('  WARNING: no LAN interface detected; loopback only.');
       } else {
         console.log('  WARNING: bound to a non-loopback interface over plain HTTP (S9).');
@@ -839,6 +848,7 @@ program
       wireTerminalInput,
       getTerminalSize: (sid) => terminalManager.getSize(sid),
       planStore: coordination.plan,
+      isWsl2,
     };
     localApiServer.setSessionFactory(sessionFactoryDeps);
 
