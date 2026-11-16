@@ -1,9 +1,11 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { expect, type Page, type TestInfo } from "@playwright/test";
 import { test } from "../helpers/fixtures";
 import { login, waitForBridgeOnline } from "../helpers/app";
-import { bridgeApiFetch } from "../helpers/bridge-api";
+import { bridgeApiFetch, readBridgePointer, type BridgePointer } from "../helpers/bridge-api";
 import { BRIDGE_HOME, E2E_DIR } from "../helpers/config";
 
 const FTOWN_CLI = join(E2E_DIR, "..", "bridge", "dist", "ftown-cli.js");
@@ -87,6 +89,41 @@ async function selectSession(page: Page, name: string): Promise<void> {
   const workspace = page.getByRole("tab", { name: "Workspace", exact: true });
   if (await workspace.isVisible()) await workspace.click();
   await page.locator("#dashboard-sidebar button[draggable='true']").filter({ has: page.getByText(name, { exact: true }) }).getByText(name, { exact: true }).click();
+}
+
+/** The bridge pointer carries the local identity fields the encrypted command path needs. */
+interface CommandPointer extends BridgePointer {
+  dataDir?: string;
+  ownerId?: string;
+  endpoint?: { id: string; kind: string; ownerId: string };
+}
+
+interface CommandOutcome {
+  success: boolean;
+  error?: string;
+  code?: string;
+}
+
+/**
+ * Run one bridge command over the same encrypted local path the dashboard uses
+ * and return its command_response. A command that the bridge cannot answer
+ * resolves with a typed error; a command the bridge never answers would hang
+ * here instead, which is exactly the failure this test guards against.
+ */
+async function bridgeCommand(type: string, payload: Record<string, unknown>): Promise<CommandOutcome> {
+  const pointer = readBridgePointer() as CommandPointer;
+  const { localApplication } = await import(pathToFileURL(join(E2E_DIR, "..", "bridge", "dist", "security", "bridge", "local-client.js")).href) as {
+    localApplication: (pointer: unknown, application: unknown) => Promise<{ response?: { success?: boolean; error?: string; data?: { code?: string } } }>;
+  };
+  const requestId = `e2e-${type}-${randomUUID()}`;
+  const response = await localApplication(pointer, {
+    type: "application",
+    route: { kind: "command", command: type, requestId, sessionId: null },
+    data: { type, requestId, payload: { bridgeId: pointer.bridgeId, ...payload } },
+    mcp: null,
+  });
+  const command = response?.response;
+  return { success: command?.success === true, error: command?.error, code: command?.data?.code };
 }
 
 async function shot(page: Page, testInfo: TestInfo, name: string): Promise<void> {
@@ -186,6 +223,65 @@ test("parent overview lists a child question, opens it, and the child receives t
   } finally {
     waiter?.kill();
     await waiter?.done.catch(() => undefined);
+    if (childId) await bridgeApiFetch("DELETE", `/api/sessions/${childId}`).catch(() => undefined);
+    if (parentId) await bridgeApiFetch("DELETE", `/api/sessions/${parentId}`).catch(() => undefined);
+  }
+});
+
+test("a notice and a retired child's item are answered with a typed error, never a timeout", async ({ page }) => {
+  test.setTimeout(180_000);
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await login(page);
+  await waitForBridgeOnline(page);
+
+  const suffix = Date.now().toString(36);
+  const parentName = `Notice parent ${suffix}`;
+  const childName = `Notice child ${suffix}`;
+  let parentId = "";
+  let childId = "";
+
+  try {
+    parentId = await createSession(parentName, { shellType: "codex", command: runningParentCommand() });
+    await expect.poll(() => sessionStatus(parentId), { timeout: 30_000 }).toBe("running");
+    childId = await createSession(childName, { shellType: "shell", parentSessionId: parentId });
+
+    // The child raises a notice: durable, but with no question to answer.
+    const raised = startWaiter(childId, ["--title", "Work complete", "--message", "Review the result and checks."]);
+    const raisedResult = await finish(raised);
+    expect(raisedResult.code, `${raisedResult.stderr}\n${raisedResult.stdout}`).toBe(0);
+
+    let eventId = "";
+    const deadline = Date.now() + 20_000;
+    let last = "";
+    while (!eventId && Date.now() < deadline) {
+      const events = await openAttention(childId);
+      last = JSON.stringify(events);
+      const open = events.find(event => !event.resolvedAt);
+      if (open?.id) eventId = open.id;
+      else await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    expect(eventId, `notice was not stored within 20s\n${last}`).not.toBe("");
+
+    // The coordinator panel shows the notice without an answer affordance.
+    await selectSession(page, parentName);
+    const overview = page.getByRole("region", { name: `Overview: ${parentName}` });
+    await expect(overview).toBeVisible({ timeout: 30_000 });
+    const panel = overview.getByRole("region", { name: "Child attention requests" });
+    await expect(panel).toContainText(childName);
+    await expect(panel.getByRole("button", { name: "Send answer" })).toHaveCount(0);
+
+    // The bridge answers the notice with a typed error instead of staying silent.
+    const answered = await bridgeCommand("answer_session_attention", { sessionId: childId, eventId, answers: [{ selected: [0] }] });
+    expect(answered.success, `${answered.error}`).toBe(false);
+    expect(answered.code).toBe("attention_not_answerable");
+
+    // Once the child is retired its item is gone with it: a typed error, not silence.
+    const removed = await bridgeApiFetch("DELETE", `/api/sessions/${childId}`);
+    expect(removed.status, JSON.stringify(removed.body)).toBe(200);
+    const retired = await bridgeCommand("answer_session_attention", { sessionId: childId, eventId, answers: [{ selected: [0] }] });
+    expect(retired.success, `${retired.error}`).toBe(false);
+    expect(retired.code).toBe("session_unavailable");
+  } finally {
     if (childId) await bridgeApiFetch("DELETE", `/api/sessions/${childId}`).catch(() => undefined);
     if (parentId) await bridgeApiFetch("DELETE", `/api/sessions/${parentId}`).catch(() => undefined);
   }
