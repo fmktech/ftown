@@ -104,8 +104,9 @@ function defaultDependencies(): SetupDependencies {
 }
 
 /** Default harness configs plus each registered account's config directory. */
-export function setupAccountTargets(home = homedir()): Array<HarnessAccount | undefined> {
-  return [undefined, ...loadAccounts(home).accounts.filter(account => account.configDir !== (account.harness === 'claude' ? claudeConfigDir(home, {}) : codexHome(home, {})))];
+export function setupAccountTargets(): Array<HarnessAccount | undefined> {
+  const home = homedir();
+  return [undefined, ...loadAccounts().accounts.filter(account => account.configDir !== (account.harness === 'claude' ? claudeConfigDir(home, {}) : codexHome(home, {})))];
 }
 
 function withAccountEnvSync<T>(account: HarnessAccount, task: () => T): T {

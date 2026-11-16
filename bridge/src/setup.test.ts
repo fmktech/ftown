@@ -99,8 +99,8 @@ test('setup targets the default and every distinct registered account config und
     { id: 'personal', harness: 'claude', configDir: join(home, 'claude-personal') },
     { id: 'codex-lab', harness: 'codex', configDir: join(home, 'codex-lab') },
     { id: 'default-copy', harness: 'claude', configDir: join(home, '.claude') },
-  ] }, home);
-  assert.deepEqual(setupAccountTargets(home).map(account => account?.configDir ?? 'default'), [
+  ] });
+  assert.deepEqual(setupAccountTargets().map(account => account?.configDir ?? 'default'), [
     'default', join(home, 'claude-personal'), join(home, 'codex-lab'),
   ]);
 }));

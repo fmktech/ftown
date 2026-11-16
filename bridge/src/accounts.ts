@@ -16,10 +16,10 @@ export function validateAccount(account: HarnessAccount): HarnessAccount {
   return account;
 }
 
-export function accountsPath(home = homedir()): string { return join(home, '.ftown', 'accounts.json'); }
-export function loadAccounts(home = homedir()): AccountsFile {
+export function accountsPath(): string { return join(homedir(), '.ftown', 'accounts.json'); }
+export function loadAccounts(): AccountsFile {
   try {
-    const data = JSON.parse(readFileSync(accountsPath(home), 'utf8')) as AccountsFile;
+    const data = JSON.parse(readFileSync(accountsPath(), 'utf8')) as AccountsFile;
     if (data.version !== 1 || !Array.isArray(data.accounts)) throw new Error('Invalid accounts registry');
     const accounts = data.accounts.map(validateAccount);
     if (new Set(accounts.map(a => a.id)).size !== accounts.length) throw new Error('Duplicate account id');
@@ -29,11 +29,11 @@ export function loadAccounts(home = homedir()): AccountsFile {
     throw error;
   }
 }
-export function saveAccounts(file: AccountsFile, home = homedir()): void {
+export function saveAccounts(file: AccountsFile): void {
   if (file.version !== 1 || !Array.isArray(file.accounts)) throw new Error('Invalid accounts registry');
   const accounts = file.accounts.map(validateAccount);
   if (new Set(accounts.map(a => a.id)).size !== accounts.length) throw new Error('Duplicate account id');
-  const path = accountsPath(home); mkdirSync(join(home, '.ftown'), { recursive: true, mode: 0o700 });
+  const path = accountsPath(); const home = homedir(); mkdirSync(join(home, '.ftown'), { recursive: true, mode: 0o700 });
   const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
   writeFileSync(temp, `${JSON.stringify({ version: 1, accounts }, null, 2)}\n`, { mode: 0o600 });
   chmodSync(temp, 0o600); renameSync(temp, path);
