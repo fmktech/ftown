@@ -98,7 +98,7 @@ export type SecurityErrorCode =
   | 'expired' | 'replayed' | 'epoch_changed' | 'permission_denied'
   | 'invitation_invalid' | 'invitation_expired' | 'invitation_consumed'
   | 'capacity_exceeded' | 'audit_unavailable' | 'outcome_unknown'
-  | 'bridge_offline' | 'invalid_cursor' | 'key_unavailable'
+  | 'bridge_offline' | 'bridge_starting' | 'invalid_cursor' | 'key_unavailable'
   /** Account mode: membership is the passkey ledger's; invitations and bridge-side removal of ledger devices are refused. */
   | 'account_managed';
 

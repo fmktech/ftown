@@ -105,6 +105,18 @@ it("lists default first, filters accounts by harness, and submits the selected a
   expect(onSubmit).toHaveBeenCalledWith("", expect.objectContaining({ account: "work", allowedAccounts: ["coding", "work"] }));
 });
 
+it("retries the account read briefly when the bridge reports it is starting", async () => {
+  const sendCommand = vi.fn()
+    .mockResolvedValueOnce({ requestId: "starting", success: false, error: "Bridge is starting", data: { code: "bridge_starting", retryable: true } })
+    .mockResolvedValueOnce({ requestId: "ready", success: true, data: { accounts } });
+  accountsModal({ sendCommand });
+  await waitFor(() => expect((screen.getByLabelText("Account") as HTMLSelectElement).disabled).toBe(false));
+  expect(sendCommand).toHaveBeenCalledTimes(2);
+  expect(sendCommand).toHaveBeenNthCalledWith(1, expect.objectContaining({ type: "get_accounts", requestId: expect.any(String) }));
+  expect(sendCommand.mock.calls[0][0].requestId).toBe(sendCommand.mock.calls[1][0].requestId);
+  expect(screen.getByRole("option", { name: "Work (work)" })).toBeTruthy();
+});
+
 it.each([
   ["missing a default", [defaultAccounts[0]]],
   ["duplicate default for one harness", [...defaultAccounts, defaultAccounts[0]]],

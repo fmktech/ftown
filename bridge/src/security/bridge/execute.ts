@@ -34,7 +34,10 @@ export async function executeSecurePacket(security: BridgeSecurityService, packe
     if (!verified && (!(error instanceof BridgeSecurityError)
       || (!['permission_denied', 'epoch_changed', 'expired', 'replayed', 'capacity_exceeded', 'audit_unavailable', 'invalid_account_trust'].includes(error.code)
         && !error.code.startsWith('account_')))) throw error;
-    const code = error instanceof BridgeSecurityError ? error.code : dispatchStarted ? 'outcome_unknown' : 'permission_denied';
+    const bridgeStarting = error instanceof Error && error.message === 'Bridge is starting';
+    const code = error instanceof BridgeSecurityError ? error.code : bridgeStarting ? 'bridge_starting' : dispatchStarted ? 'outcome_unknown' : 'permission_denied';
+    if (bridgeStarting) return security.sealTo(packet.senderId, { type: 'application', route: { kind: 'response', requestId: packet.messageId },
+      data: { type: 'command_response', response: { requestId: packet.messageId, success: false, error: 'Bridge is starting', data: { code, retryable: true } } }, mcp: null }, route);
     return security.sealTo(packet.senderId, { type: 'application', route: { kind: 'response', requestId: packet.messageId },
       data: { status: dispatchStarted ? 500 : 403, body: { error: code, code, outcomeUnknown: dispatchStarted } }, mcp: null }, route);
   }

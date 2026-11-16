@@ -30,6 +30,7 @@ interface NewSessionModalProps {
 }
 
 const EMPTY_SESSIONS: Session[] = [];
+const ACCOUNT_STARTING_RETRY_DELAYS_MS = [250];
 const ACCOUNT_ID = /^[a-z0-9-]{1,32}$/;
 type AccountsView = { bridgeId: string; status: "loading" | "ready" | "error" | "unsupported"; accounts: HarnessAccountSummary[]; error?: string };
 
@@ -425,14 +426,29 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
   useEffect(() => {
     if (!isOpen || !effectiveBridgeId) return;
     let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let wakeRetry: (() => void) | undefined;
     setAccountsView({ bridgeId: effectiveBridgeId, status: "loading", accounts: [] });
     const requestId = crypto.randomUUID();
     const diagnosticBridgeId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(effectiveBridgeId) ? effectiveBridgeId : "unknown";
     const diagnosticContext = `bridge:${diagnosticBridgeId} request:${requestId}`;
     console.warn(`[get_accounts] ${diagnosticContext} attempt`);
-    void sendCommandRef.current({ type: "get_accounts", payload: { bridgeId: effectiveBridgeId }, requestId })
-      .then(response => {
-        if (cancelled) return;
+    void (async () => {
+      try {
+        let response: CommandResponse | undefined;
+        for (let attempt = 0; attempt <= ACCOUNT_STARTING_RETRY_DELAYS_MS.length; attempt++) {
+          response = await sendCommandRef.current({ type: "get_accounts", payload: { bridgeId: effectiveBridgeId }, requestId });
+          const code = response.data && typeof response.data === "object" && "code" in response.data ? response.data.code : undefined;
+          if (cancelled) return;
+          if (response.success || code !== "bridge_starting" || attempt === ACCOUNT_STARTING_RETRY_DELAYS_MS.length) break;
+          console.warn(`[get_accounts] ${diagnosticContext} response:bridge_starting`);
+          await new Promise<void>(resolve => {
+            wakeRetry = resolve;
+            retryTimer = setTimeout(() => { retryTimer = undefined; wakeRetry = undefined; resolve(); }, ACCOUNT_STARTING_RETRY_DELAYS_MS[attempt]);
+          });
+          if (cancelled) return;
+        }
+        if (cancelled || !response) return;
         if (!response.success) {
           const code = response.data && typeof response.data === "object" && "code" in response.data ? response.data.code : undefined;
           console.warn(`[get_accounts] ${diagnosticContext} response:${typeof code === "string" && /^[a-z0-9_]{1,64}$/.test(code) ? code : "unknown"}`);
@@ -445,13 +461,14 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
         setAccountsView(accounts === null
           ? { bridgeId: effectiveBridgeId, status: "error", accounts: [], error: "Could not read the accounts returned by this computer." }
           : { bridgeId: effectiveBridgeId, status: "ready", accounts });
-      }).catch(error => {
+      } catch (error) {
         if (!cancelled) {
           console.warn(`[get_accounts] ${diagnosticContext} send:${error instanceof Error && error.message === "get_accounts timed out" ? "timeout" : "rejected"}`);
           setAccountsView({ bridgeId: effectiveBridgeId, status: "error", accounts: [], error: "Could not load accounts from this computer." });
         }
-      });
-    return () => { cancelled = true; };
+      }
+    })();
+    return () => { cancelled = true; if (retryTimer !== undefined) clearTimeout(retryTimer); wakeRetry?.(); wakeRetry = undefined; };
   }, [isOpen, effectiveBridgeId, accountsReload]);
 
   useEffect(() => {

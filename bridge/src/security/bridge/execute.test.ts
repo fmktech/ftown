@@ -39,3 +39,21 @@ test('without an observer an asynchronous seal rejection retains original propag
   await assert.rejects(executeSecurePacket(security, packet, route, async () => response(true)), /original seal failure/);
   assert.equal(seals, 1);
 });
+
+test('a Bridge is starting dispatch refusal returns a typed retryable command response', async () => {
+  let sealedApplication: unknown;
+  const security = { acceptApplication: async () => verified, revalidate: async () => {}, revokeSelfWithReceipt: async () => null,
+    sealTo: async (_sender: string, application: unknown) => { sealedApplication = application; return packet; } } as unknown as BridgeSecurityService;
+  await executeSecurePacket(security, packet, route, async () => { throw new Error('Bridge is starting'); });
+  assert.deepEqual(sealedApplication, { type: 'application', route: { kind: 'response', requestId: 'id' },
+    data: { type: 'command_response', response: { requestId: 'id', success: false, error: 'Bridge is starting', data: { code: 'bridge_starting', retryable: true } } }, mcp: null });
+});
+
+test('other post-dispatch exceptions remain outcome_unknown', async () => {
+  let sealedApplication: unknown;
+  const security = { acceptApplication: async () => verified, revalidate: async () => {}, revokeSelfWithReceipt: async () => null,
+    sealTo: async (_sender: string, application: unknown) => { sealedApplication = application; return packet; } } as unknown as BridgeSecurityService;
+  await executeSecurePacket(security, packet, route, async () => { throw new Error('transport interrupted'); });
+  assert.deepEqual(sealedApplication, { type: 'application', route: { kind: 'response', requestId: 'id' },
+    data: { status: 500, body: { error: 'outcome_unknown', code: 'outcome_unknown', outcomeUnknown: true } }, mcp: null });
+});

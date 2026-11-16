@@ -64,6 +64,25 @@ describe("createRpcCore", () => {
       await expect(promise).resolves.toMatchObject({ success: false, error: "boom" });
     });
 
+    it("retries a typed bridge_starting response once and returns the next response", async () => {
+      const pending = core.sendCommand(cmd("starting"));
+      core.handleResponse(resp("starting", { success: false, error: "Bridge is starting", data: { code: "bridge_starting", retryable: true } }));
+      expect(published).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(published).toHaveLength(2);
+      expect(published[1]).toEqual(published[0]);
+      core.handleResponse(resp("starting", { data: { ready: true } }));
+      await expect(pending).resolves.toMatchObject({ success: true, data: { ready: true } });
+    });
+
+    it("does not retry other typed command failures", async () => {
+      const pending = core.sendCommand(cmd("denied"));
+      core.handleResponse(resp("denied", { success: false, data: { code: "permission_denied" } }));
+      await expect(pending).resolves.toMatchObject({ success: false, data: { code: "permission_denied" } });
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(published).toHaveLength(1);
+    });
+
     it("ignores responses for other requestIds", async () => {
       const promise = core.sendCommand(cmd("r1"));
       core.handleResponse(resp("other"));
