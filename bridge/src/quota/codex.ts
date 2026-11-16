@@ -3,6 +3,7 @@ import type { Readable, Writable } from 'node:stream';
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { join } from 'node:path';
+import { codexHome } from '../config-dirs.js';
 
 import type { ProviderQuota, QuotaFetcher, QuotaWindow, QuotaWindowKind } from './types.js';
 
@@ -399,7 +400,7 @@ export const fetchCodexQuota: QuotaFetcher = async (options) => {
     primary = error instanceof CodexLiveError ? error : new CodexLiveError('failed', 'codex app-server request failed');
   }
 
-  const hit = await readLatestCodexRateLimits(join(options.homeDir, '.codex', 'sessions'));
+  const hit = await readLatestCodexRateLimits(join(codexHome(options.homeDir), 'sessions'));
   if (hit) return parseCodexRateLimits(hit.rateLimits, 'cached', hit.observedAt, now);
 
   return {
