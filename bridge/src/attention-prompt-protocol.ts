@@ -100,6 +100,14 @@ export type AttentionAnswerErrorCode =
   | 'attention_not_answerable'
   | 'attention_already_resolved'
   | 'invalid_answer'
-  | 'answer_waiter_gone';
+  | 'answer_waiter_gone'
+  /** The request payload itself was malformed (bad shape, unknown event id). */
+  | 'invalid_attention_request'
+  /** The session the item belongs to is gone or is not served by this bridge. */
+  | 'session_unavailable'
+  /** The command was addressed to another bridge, so this one cannot answer it. */
+  | 'wrong_bridge'
+  /** The attention store could not be reached. */
+  | 'attention_not_ready';
 
 export type AttentionParseResult<T> = { ok: true; value: T } | { ok: false; error: string };

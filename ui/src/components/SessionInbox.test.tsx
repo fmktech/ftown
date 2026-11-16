@@ -155,6 +155,42 @@ it("maps answer outcomes to user messages", () => {
   expect(map({ ok: false, code: "permission_denied", message: "x" }).message).toContain("permission");
   expect(map({ ok: false, code: "weird", message: "Bridge said no" })).toEqual({ ok: false, message: "Bridge said no" });
 });
+it("shows the bridge's typed answer failures instead of a raw transport error", () => {
+  const map = (result: Parameters<typeof attentionAnswerSubmitResult>[1]) => attentionAnswerSubmitResult("Bot", result);
+  expect(map({ ok: false, code: "attention_not_answerable", message: "This attention request has no question to answer" }))
+    .toEqual({ ok: false, message: "This message has no question to answer. Dismiss it or open the session." });
+  expect(map({ ok: false, code: "session_unavailable", message: "This session is no longer available" }))
+    .toEqual({ ok: false, message: "This session is no longer running. Open it to check." });
+  expect(map({ ok: false, code: "wrong_bridge", message: "This attention item belongs to another computer." }))
+    .toEqual({ ok: false, message: "This message belongs to another computer. Open it there." });
+  expect(map({ ok: false, code: "invalid_attention_request", message: "Invalid attention answer" }))
+    .toEqual({ ok: false, message: "The answer request was malformed. Try again." });
+  expect(map({ ok: false, code: "attention_not_ready", message: "Attention store is not ready" }))
+    .toEqual({ ok: false, message: "This computer is not ready to answer. Try again in a moment." });
+});
+it("offers only Dismiss and Open for a tracked item that carries no question and has no session left to reply to", () => {
+  const item = entry("first"); item.notice = { ...item.notice, attentionId: "att-1" }; item.session = session("first", { status: "stopped" });
+  render(<Fixture entries={[item]}/>); fireEvent.click(screen.getByRole("button", { name: /Inbox/ }));
+  expect(screen.getByRole("button", { name: "Open session" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Dismiss" })).toBeTruthy();
+  expect(screen.queryByLabelText("Reply to first")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Send reply" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Send answer" })).toBeNull();
+  expect(screen.getByText("This message has no question to answer. Open the session or dismiss it.")).toBeTruthy();
+});
+it("keeps the reply box for a question-less item whose session is still waiting for input", () => {
+  const item = entry("first"); item.notice = { ...item.notice, attentionId: "att-1" };
+  render(<Fixture entries={[item]}/>); fireEvent.click(screen.getByRole("button", { name: /Inbox/ }));
+  expect(screen.getByLabelText("Reply to first")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Send reply" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Send answer" })).toBeNull();
+});
+it("keeps the reply box for an item the bridge does not track durably", () => {
+  const item = entry("first");
+  render(<Fixture entries={[item]}/>); fireEvent.click(screen.getByRole("button", { name: /Inbox/ }));
+  expect(screen.getByLabelText("Reply to first")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Send reply" })).toBeTruthy();
+});
 it("a new question in the same session shows the new prompt with fresh form state", () => {
   const old = promptEntry("first", "mail", 1); const next = promptEntry("first", "mail", 2);
   next.notice = { ...next.notice, attentionId: "att-2", prompt: { channel: "mail", questions: [{ question: "Which color?", options: [{ label: "Red" }, { label: "Blue" }], multiSelect: false, allowText: false }] } };

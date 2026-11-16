@@ -43,10 +43,14 @@ export function attentionAnswerSubmitResult(name: string, result: AnswerSessionA
   switch (result.code) {
     case "attention_already_resolved": return { ok: false, message: "This question was already answered or dismissed." };
     case "attention_not_found": return { ok: false, message: "This question no longer exists." };
+    case "attention_not_answerable": return { ok: false, message: "This message has no question to answer. Dismiss it or open the session." };
     case "answer_waiter_gone": return { ok: false, message: "The agent stopped waiting here. Open the session to answer in the terminal." };
     case "invalid_answer": return { ok: false, message: `The answer was rejected: ${result.message}` };
+    case "invalid_attention_request": return { ok: false, message: "The answer request was malformed. Try again." };
     case "permission_denied": case "approval_required": return { ok: false, message: "This browser does not have permission to answer this session." };
     case "session_unavailable": return { ok: false, message: "This session is no longer running. Open it to check." };
+    case "wrong_bridge": return { ok: false, message: "This message belongs to another computer. Open it there." };
+    case "attention_not_ready": return { ok: false, message: "This computer is not ready to answer. Try again in a moment." };
     default: return { ok: false, message: result.message };
   }
 }
@@ -104,6 +108,13 @@ export function InboxItemBody({ entry, onOpenSession, onDismiss, onReply, onAnsw
   async function answerInTerminal() { if (await dismiss()) onOpenSession(entry.session.id); }
   const prompt = entry.notice.attentionId ? entry.notice.prompt : undefined;
   const hookPrompt = prompt?.channel === "hook";
+  // An item the bridge tracks durably but that carries no question cannot be
+  // answered (the bridge answers "This attention request has no question to
+  // answer"), so it never offers an answer form. When its session is gone there
+  // is nobody left to receive a reply either: offer only Dismiss/Open.
+  const sessionGone = entry.session.status !== "running";
+  const hasNoQuestion = !!entry.notice.attentionId && !prompt;
+  const trackedWithoutQuestion = hasNoQuestion && sessionGone;
   const normalizeText = (text?: string) => (text ?? "").trim().replace(/\s+/g, " ");
   const messageDuplicatesQuestion = !!prompt && prompt.questions.length === 1 && normalizeText(entry.notice.message) === normalizeText(prompt.questions[0].question);
   const answeredBy = entry.notice.answeredBy?.kind === "session" ? entry.notice.answeredBy : undefined;
@@ -117,11 +128,13 @@ export function InboxItemBody({ entry, onOpenSession, onDismiss, onReply, onAnsw
     {answeredByLabel && <p className="break-words text-xs text-[var(--text-muted)] [overflow-wrap:anywhere]">Answered by {answeredByLabel}</p>}
     {withParent && !expanded ? (
       <div className="flex flex-wrap gap-2">
-        <button type="button" className="btn-ghost min-h-11" onClick={() => setExpanded(true)}>Answer now</button>
+        <button type="button" className="btn-ghost min-h-11" onClick={() => setExpanded(true)}>{hasNoQuestion ? "Show details" : "Answer now"}</button>
       </div>
     ) : <>
     <div className="flex flex-wrap gap-2">{hideOpenSession ? null : <button type="button" className="btn-ghost min-h-11" onClick={() => onOpenSession(entry.session.id)}>Open session</button>}{!hookPrompt && <button type="button" className="btn-ghost min-h-11" disabled={dismissing} onClick={() => void dismiss()}>{dismissing ? "Dismissing…" : "Dismiss"}</button>}</div>
-    {prompt ? <AttentionAnswerForm key={noticeKey(entry.session.id, entry.notice)} prompt={prompt} sessionName={name} disabledReason={entry.replyDisabledReason} onSubmit={answers => onAnswer(entry, answers)} onAnswerInTerminal={hookPrompt ? () => void answerInTerminal() : undefined} /> : <>
+    {prompt ? <AttentionAnswerForm key={noticeKey(entry.session.id, entry.notice)} prompt={prompt} sessionName={name} disabledReason={entry.replyDisabledReason} onSubmit={answers => onAnswer(entry, answers)} onAnswerInTerminal={hookPrompt ? () => void answerInTerminal() : undefined} /> : trackedWithoutQuestion ? <>
+    <p className="text-xs text-[var(--text-muted)]">This message has no question to answer. Open the session or dismiss it.</p>
+    </> : <>
     <label className="flex min-w-0 flex-col gap-1 text-xs text-[var(--text-muted)]">Reply to {name}<textarea className="min-h-20 w-full min-w-0 rounded-md border border-[var(--border-muted)] bg-[var(--bg-surface)] p-2 text-sm text-[var(--text-primary)]" maxLength={65536} value={draft} onChange={event => { setDraft(event.target.value); setMessage(""); setError(""); }} disabled={sending || !!entry.replyDisabledReason} /></label>
     {entry.replyDisabledReason && <p className="text-xs text-[var(--text-muted)]">{entry.replyDisabledReason}</p>}
     <button type="button" className="btn-accent min-h-11" disabled={sending || !!entry.replyDisabledReason || !draft.trim()} onClick={() => void send()}>{sending ? "Sending…" : "Send reply"}</button>

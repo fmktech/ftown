@@ -272,6 +272,14 @@ function resolveShellType(top: TopShell, flavor: ClaudeFlavor): ShellType {
 const INPUT_CLASS =
   "w-full px-3 py-2 rounded-[var(--radius-sm)] bg-[var(--bg-base)] border border-[var(--border-default)] text-[var(--text-primary)] placeholder:text-[var(--text-faint)] outline-none focus-visible:border-[var(--accent)] focus-visible:shadow-[var(--focus-ring)] font-mono";
 
+function getSubmitModifier(): "metaKey" | "ctrlKey" {
+  const navigatorWithUserAgentData = navigator as Navigator & {
+    userAgentData?: { platform?: string };
+  };
+  const platform = navigatorWithUserAgentData.userAgentData?.platform || navigator.platform;
+  return /mac/i.test(platform) ? "metaKey" : "ctrlKey";
+}
+
 function ProviderTokenHint({ provider, envVar, flavor }: { provider: string; envVar: string; flavor: string }) {
   const [copied, setCopied] = useState(false);
   const command = `ftown env set ${flavor} <token>`;
@@ -552,7 +560,9 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
       if (e.key === "Escape") {
         onClose();
       }
-      if (e.key === "Enter" && e.metaKey) {
+      if (e.key === "Enter" && e[getSubmitModifier()]) {
+        e.preventDefault();
+        e.stopPropagation();
         void handleSubmit();
       }
     },
@@ -1007,7 +1017,9 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
         </div>
 
         <div className="sticky bottom-0 z-10 bg-[var(--bg-surface)] px-5 py-4 border-t border-[var(--border-muted)] flex items-center justify-between gap-2">
-          <p className="text-xs text-[var(--text-faint)]">Cmd+Enter to submit</p>
+          <p className="text-xs text-[var(--text-faint)]">
+            {getSubmitModifier() === "metaKey" ? "Cmd+Enter" : "Ctrl+Enter"} to submit
+          </p>
           <div className="flex gap-2">
             <button
               type="button"
