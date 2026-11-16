@@ -119,7 +119,7 @@ test('violated when dead 31 s after heal doneT', () => {
   const r = get('R2').check(log);
   assert.equal(r.status, 'violated');
   assert.deepEqual(r.evidence, [
-    'bridge down at cp139 t=139000 last bridge fault f1 healed doneT=108000',
+    'bridge dead at cp139 t=139000 last bridge fault f1 healed doneT=108000',
   ]);
 });
 
@@ -131,20 +131,18 @@ test('violated when dead with no bridge fault at all', () => {
   const r = get('R2').check(log);
   assert.equal(r.status, 'violated');
   assert.deepEqual(r.evidence, [
-    'bridge down at cp20 t=20000 last bridge fault none healed doneT=none',
+    'bridge dead at cp20 t=20000 last bridge fault none healed doneT=none',
   ]);
 });
 
-test('violated when bridge is alive but not responsive outside grace', () => {
+test('isolated unresponsive checkpoint between good checkpoints passes', () => {
   const log: Rec[] = [
     cp(10_000, true),
     cp(20_000, true, 'cp20', false, false),
+    cp(30_000, true, 'cp30'),
   ];
   const r = get('R2').check(log);
-  assert.equal(r.status, 'violated');
-  assert.deepEqual(r.evidence, [
-    'bridge down at cp20 t=20000 last bridge fault none healed doneT=none',
-  ]);
+  assert.deepEqual(r, { status: 'pass', evidence: [] });
 });
 
 test('alive-but-unresponsive at 75000 with bridge fault starting at 75980 passes (probe window)', () => {
@@ -160,17 +158,61 @@ test('alive-but-unresponsive at 75000 with bridge fault starting at 75980 passes
   assert.deepEqual(r.evidence, []);
 });
 
-test('alive-but-unresponsive with no bridge fault within 20 s violates', () => {
+test('two consecutive unresponsive checkpoints violate with exact pair evidence', () => {
   const log: Rec[] = [
     cp(60_000, true, 'cp60'),
     cp(75_000, true, 'cp75', false, false),
-    faultStart(95_001, 'f1', 'bridge_kill9', true, 95_001),
-    faultHeal(97_000, 'f1', 'bridge_kill9', true, 120_000),
+    cp(90_000, true, 'cp90', false, false),
   ];
   const r = get('R2').check(log);
   assert.equal(r.status, 'violated');
   assert.deepEqual(r.evidence, [
-    'bridge down at cp75 t=75000 last bridge fault none healed doneT=none',
+    'bridge alive but unresponsive at cp75 t=75000 and cp90 t=90000 last bridge fault none healed doneT=none',
+  ]);
+});
+
+test('unresponsive followed by dead emits pair evidence and a dead-checkpoint line', () => {
+  const r = get('R2').check([
+    cp(10_000, true, 'cp10'),
+    cp(20_000, true, 'cp20', false, false),
+    cp(30_000, false, 'cp30'),
+  ]);
+  assert.equal(r.status, 'violated');
+  assert.deepEqual(r.evidence, [
+    'bridge alive but unresponsive at cp20 t=20000 and cp30 t=30000 last bridge fault none healed doneT=none',
+    'bridge dead at cp30 t=30000 last bridge fault none healed doneT=none',
+  ]);
+});
+
+test('unresponsive followed by an exempt checkpoint passes', () => {
+  const r = get('R2').check([
+    cp(10_000, true, 'cp10'),
+    cp(20_000, true, 'cp20', false, false),
+    faultStart(45_000, 'f1'),
+    cp(45_000, true, 'cp45', false, false),
+  ]);
+  assert.deepEqual(r, { status: 'pass', evidence: [] });
+});
+
+test('last unresponsive checkpoint passes because R1 covers the final probe', () => {
+  const r = get('R2').check([
+    cp(10_000, true, 'cp10'),
+    cp(20_000, true, 'cp20', true, false),
+  ]);
+  assert.deepEqual(r, { status: 'pass', evidence: [] });
+});
+
+test('three consecutive unresponsive checkpoints emit one line per adjacent pair', () => {
+  const r = get('R2').check([
+    cp(10_000, true, 'cp10'),
+    cp(20_000, true, 'cp20', false, false),
+    cp(30_000, true, 'cp30', false, false),
+    cp(40_000, true, 'cp40', false, false),
+  ]);
+  assert.equal(r.status, 'violated');
+  assert.deepEqual(r.evidence, [
+    'bridge alive but unresponsive at cp20 t=20000 and cp30 t=30000 last bridge fault none healed doneT=none',
+    'bridge alive but unresponsive at cp30 t=30000 and cp40 t=40000 last bridge fault none healed doneT=none',
   ]);
 });
 
@@ -184,7 +226,7 @@ test('dead at c.t with a bridge fault starting 1 s later violates', () => {
   const r = get('R2').check(log);
   assert.equal(r.status, 'violated');
   assert.deepEqual(r.evidence, [
-    'bridge down at cp75 t=75000 last bridge fault none healed doneT=none',
+    'bridge dead at cp75 t=75000 last bridge fault none healed doneT=none',
   ]);
 });
 
@@ -198,7 +240,7 @@ test('ok=false start grants no grace', () => {
   const r = get('R2').check(log);
   assert.equal(r.status, 'violated');
   assert.deepEqual(r.evidence, [
-    'bridge down at cp90 t=90000 last bridge fault none healed doneT=none',
+    'bridge dead at cp90 t=90000 last bridge fault none healed doneT=none',
   ]);
 });
 
@@ -257,7 +299,7 @@ test('a start without heal covers up to start.doneT + GRACE_MS', () => {
   const r = get('R2').check(log);
   assert.equal(r.status, 'violated');
   assert.deepEqual(r.evidence, [
-    'bridge down at cpAfter t=50501 last bridge fault none healed doneT=none',
+    'bridge dead at cpAfter t=50501 last bridge fault none healed doneT=none',
   ]);
 });
 
@@ -270,8 +312,8 @@ test('evidence text exact: multiple violating checkpoints sorted', () => {
   const r = get('R2').check(log);
   assert.equal(r.status, 'violated');
   assert.deepEqual(r.evidence, [
-    'bridge down at cpA t=15000 last bridge fault none healed doneT=none',
-    'bridge down at cpB t=20000 last bridge fault none healed doneT=none',
+    'bridge dead at cpA t=15000 last bridge fault none healed doneT=none',
+    'bridge dead at cpB t=20000 last bridge fault none healed doneT=none',
   ]);
 });
 
@@ -288,7 +330,7 @@ test('evidence references the latest healed fault before the checkpoint', () => 
   const r = get('R2').check(log);
   assert.equal(r.status, 'violated');
   assert.deepEqual(r.evidence, [
-    'bridge down at cp128 t=128500 last bridge fault f2 healed doneT=61000',
+    'bridge dead at cp128 t=128500 last bridge fault f2 healed doneT=61000',
   ]);
 });
 
@@ -302,7 +344,7 @@ test('final heal record with ok=true is ignored for intervals', () => {
   const r = get('R2').check(log);
   assert.equal(r.status, 'violated');
   assert.deepEqual(r.evidence, [
-    'bridge down at cp80 t=80000 last bridge fault none healed doneT=none',
+    'bridge dead at cp80 t=80000 last bridge fault none healed doneT=none',
   ]);
 });
 
@@ -316,7 +358,7 @@ test('non-bridge faults are ignored', () => {
   const r = get('R2').check(log);
   assert.equal(r.status, 'violated');
   assert.deepEqual(r.evidence, [
-    'bridge down at cp70 t=70000 last bridge fault none healed doneT=none',
+    'bridge dead at cp70 t=70000 last bridge fault none healed doneT=none',
   ]);
 
   // A non-bridge heal with ok=false is ignored by clause (1).

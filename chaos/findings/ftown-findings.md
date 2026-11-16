@@ -21,10 +21,13 @@ Findings with a security angle are not listed here or anywhere in the repository
 | 2026-11-14 | v6 | soak / high | 1 | 2 | yes | none in the pair; F1 found in an earlier run of this seed with clock faults |
 | 2026-11-14/15 | v9 | short / low | 1–40 | 2 | yes (40 of 40) | A2 on seeds 9 and 36 (F2) |
 | 2026-11-15 | v9 | soak / high | 1–10 | 2 | yes (10 of 10) | M5 on seeds 6 and 10 (F3) |
+| 2026-11-16 | v9 | soak / high | 11–40 | 2 | yes (30 of 30) | none (seed 17 reported R2; harness problem, see below) |
 
 The 2026-11-14/15 contract v9 short/low campaign ran on the bridge before the F2 fix (`39f03f5`).
 
 The 2026-11-15 soak / high row is the campaign that found F3. The same-build counterfactual dropping only `clock_jump_back` passes M5 and all always/unreachable properties on both seeds (exit 0; `H_run` prefixes `0c83ac100058` and `bcec72f7af52`).
+
+The 2026-11-16 campaign ran on bridge 0.30.4. Seeds 12, 22 and 32 first ended as infrastructure errors (one watchdog expiry under host load, two out-of-memory kills of the emulator while other work shared the container host) and were clean, identical pairs when re-run on a quiet host (`H_run` prefixes `18186da1c157`, `f1d02a5af19c`, `2fd69412159a`). Seed 17's pair was identical (`H_run` prefix `313459c6e7a2`) and reported R2.
 
 A short run takes about 3.7 minutes of wall time on a lightly loaded host.
 
@@ -112,9 +115,11 @@ the same shapes are recognised quickly next time.
 | A1, M2, M4 after an agent kill -9 | The bridge respawned the agent and the fake agent replayed its script, reusing tags | Fake agent persists its position and tag counter |
 | M5 with no faults | Fake agents looked busy for the whole run, so every nudge was deferred | Scripts run in turns; M5 only judges mail and recipients settled for 75 s |
 | M4 "nudge excess" | A mail stored without sender acknowledgement (O1) was not counted | M4 counts mail seen in the inbox or received |
+| R2 "bridge down" with the bridge alive (seed 17, soak / high) | One 20 s responsiveness probe timed out from guest CPU load; a run with no faults before that checkpoint shows the same timeout, and neighbouring probes took up to 17 s | Contract v10: R2 needs the bridge dead, or unresponsive at two consecutive checkpoints; probe results are logged to `side-probes.jsonl` |
 
 ## Open harness limits that affect findings
 
+- CLI calls are slow in the guest (a `sessions list` takes about 3 s idle and up to 20 s under load), so agent hooks and operator calls can time out with no fault active. Runs stay deterministic, but properties must not read a single slow call as a bridge failure.
 - The soak clock race in the emulator is fixed (emulator patch, PR #234). Soak pairs in the
   2026-11-15 contract v9 soak / high campaign were identical, 10 of 10. Short runs have been
   identical in every pair so far, including under heavy host load.
