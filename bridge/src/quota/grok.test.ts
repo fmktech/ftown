@@ -1,15 +1,19 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFile, mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 
 import {
+  buildScriptArgs,
+  createGrokSys,
   fetchGrokQuota,
   fetchGrokQuotaWith,
   isOwnGrokProcess,
   parseGrokBillingLog,
   handleInterrupt,
+  platformSupportsRefresh,
+  refreshAllowed,
   refreshGrokBilling,
   signalSafely,
   stopGrokProcesses,
@@ -678,5 +682,141 @@ describe('fetchGrokQuota', () => {
     assert.equal(quota.status, 'ok');
     assert.equal(quota.source, 'cached');
     assert.equal(quota.windows[0].usedPercent, 21);
+  });
+});
+
+describe('buildScriptArgs', () => {
+  const grok = '/Users/me/.grok/bin/grok';
+  const scratch = '/var/folders/xx/T/ftown-quota-grok-abc';
+
+  it('uses BSD syntax on darwin: -q /dev/null then the command as trailing argv', () => {
+    assert.deepEqual(buildScriptArgs(grok, scratch, 'darwin'), [
+      '-q',
+      '/dev/null',
+      grok,
+      '--cwd',
+      scratch,
+    ]);
+  });
+
+  it('uses util-linux syntax on linux: -qc with one quoted command, then /dev/null', () => {
+    assert.deepEqual(buildScriptArgs(grok, scratch, 'linux'), [
+      '-qc',
+      `'${grok}' --cwd '${scratch}'`,
+      '/dev/null',
+    ]);
+  });
+
+  it('POSIX-quotes spaces and apostrophes in the linux -c payload', () => {
+    const spacedGrok = '/home/a b/.grok/bin/grok';
+    const quotedScratch = "/tmp/it's-a-scratch";
+    assert.deepEqual(buildScriptArgs(spacedGrok, quotedScratch, 'linux'), [
+      '-qc',
+      "'/home/a b/.grok/bin/grok' --cwd '/tmp/it'\\''s-a-scratch'",
+      '/dev/null',
+    ]);
+  });
+});
+
+/** Waits for the fake script to record a complete, newline-terminated argv. */
+async function waitForScriptArgs(outFile: string, timeoutMs = 5000): Promise<string[]> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const text = await readFile(outFile, 'utf8');
+      if (text.length > 0 && text.endsWith('\n')) {
+        return text.trimEnd().split('\n');
+      }
+    } catch {
+      // Not written yet.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`fake script did not record its arguments in ${outFile}`);
+}
+
+describe('spawnTui with a fake script on PATH', () => {
+  const cases: Array<{
+    platform: NodeJS.Platform;
+    expected: (grokBinary: string, scratchDir: string) => string[];
+  }> = [
+    {
+      platform: 'darwin',
+      expected: (grokBinary, scratchDir) => ['-q', '/dev/null', grokBinary, '--cwd', scratchDir],
+    },
+    {
+      platform: 'linux',
+      expected: (grokBinary, scratchDir) => ['-qc', `'${grokBinary}' --cwd '${scratchDir}'`, '/dev/null'],
+    },
+  ];
+
+  for (const { platform, expected } of cases) {
+    it(`finds script through PATH and passes the ${platform} dialect argv`, async () => {
+      const binDir = join(root, `fake-script-${platform}`);
+      const outFile = join(binDir, 'args.txt');
+      await mkdir(binDir, { recursive: true });
+      const fake = join(binDir, 'script');
+      await writeFile(fake, `#!/bin/sh\nprintf '%s\\n' "$@" > "$FAKE_SCRIPT_OUT"\n`, { mode: 0o755 });
+
+      // Spaces in both paths prove the util-linux -c payload is shell-quoted.
+      const grokBinary = join(root, 'home with space', '.grok', 'bin', 'grok');
+      const scratchDir = join(root, `scratch ${platform}`);
+
+      const originalPath = process.env.PATH;
+      const originalOut = process.env.FAKE_SCRIPT_OUT;
+      process.env.PATH = `${binDir}${delimiter}${originalPath ?? ''}`;
+      process.env.FAKE_SCRIPT_OUT = outFile;
+      try {
+        const tui = createGrokSys(platform).spawnTui(grokBinary, scratchDir);
+        assert.notEqual(tui.pid, undefined, 'a script child was spawned');
+        assert.deepEqual(await waitForScriptArgs(outFile), expected(grokBinary, scratchDir));
+      } finally {
+        if (originalPath === undefined) delete process.env.PATH;
+        else process.env.PATH = originalPath;
+        if (originalOut === undefined) delete process.env.FAKE_SCRIPT_OUT;
+        else process.env.FAKE_SCRIPT_OUT = originalOut;
+        await rm(binDir, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+describe('refresh platform gate', () => {
+  it('supports macOS and Linux (WSL2), but not Windows', () => {
+    assert.equal(platformSupportsRefresh('darwin'), true);
+    assert.equal(platformSupportsRefresh('linux'), true);
+    assert.equal(platformSupportsRefresh('win32'), false);
+    assert.equal(platformSupportsRefresh('freebsd'), false);
+  });
+
+  it('allows the refresh on linux when grok is installed under homeDir', async () => {
+    const home = join(root, 'gate-home');
+    await mkdir(join(home, '.grok', 'bin'), { recursive: true });
+    await writeFile(join(home, '.grok', 'bin', 'grok'), '#!/bin/sh\n', { mode: 0o755 });
+
+    const original = process.env.FTOWN_QUOTA_GROK_NO_REFRESH;
+    delete process.env.FTOWN_QUOTA_GROK_NO_REFRESH;
+    try {
+      assert.equal(await refreshAllowed(home, 'linux'), true);
+      assert.equal(await refreshAllowed(home, 'darwin'), true);
+      assert.equal(await refreshAllowed(home, 'win32'), false);
+    } finally {
+      if (original !== undefined) process.env.FTOWN_QUOTA_GROK_NO_REFRESH = original;
+    }
+  });
+
+  it('honours FTOWN_QUOTA_GROK_NO_REFRESH on a supported platform', async () => {
+    const home = join(root, 'gate-home-disabled');
+    await mkdir(join(home, '.grok', 'bin'), { recursive: true });
+    await writeFile(join(home, '.grok', 'bin', 'grok'), '#!/bin/sh\n', { mode: 0o755 });
+
+    const original = process.env.FTOWN_QUOTA_GROK_NO_REFRESH;
+    process.env.FTOWN_QUOTA_GROK_NO_REFRESH = '1';
+    try {
+      assert.equal(await refreshAllowed(home, 'linux'), false);
+    } finally {
+      if (original === undefined) delete process.env.FTOWN_QUOTA_GROK_NO_REFRESH;
+      else process.env.FTOWN_QUOTA_GROK_NO_REFRESH = original;
+    }
   });
 });
