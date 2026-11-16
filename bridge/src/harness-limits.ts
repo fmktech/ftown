@@ -13,8 +13,23 @@ export interface LimitHit {
   line: string;
 }
 
+// Terminal output carries more than colour codes: tmux and capable terminals
+// emit two- and three-byte escapes such as `ESC ( B`, `ESC =`, `ESC >` and
+// device-attribute replies. A leftover `(B` glues onto the next word, so it
+// must be stripped with the same pass as CSI/OSC or a limit phrase stops
+// looking like one. Order matters: multi-byte sequences precede the generic
+// escape so their payloads are consumed whole.
 const ANSI_ESCAPE = new RegExp(
-  '\\x1b\\[[0-9;?]*[ -/]*[@-~]|\\x1b\\][^\\x07\\x1b]*(?:\\x07|\\x1b\\\\)?|\\x1b[@-_]?',
+  [
+    // CSI: ESC [ params intermediates final
+    '\\x1b\\[[0-?]*[ -/]*[@-~]',
+    // OSC: ESC ] … BEL or ST
+    '\\x1b\\][^\\x07\\x1b]*(?:\\x07|\\x1b\\\\)?',
+    // DCS/SOS/PM/APC strings: ESC P|X|^|_ … ST
+    '\\x1b[PX^_][^\\x1b]*\\x1b\\\\',
+    // Any other escape: ESC intermediates final (Fe/Fs/Fp, e.g. ESC =, ESC ( B)
+    '\\x1b[ -/]*[0-~]',
+  ].join('|'),
   'g',
 );
 

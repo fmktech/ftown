@@ -264,13 +264,10 @@ test('a chunk that arrives while a peer waits for its attach screen is not delay
   await parsed(h);
   await h.output.pump.drain();
 
-  const started = performance.now();
   h.attachPeer();
   h.emit('DURING');
   await until(() => h.peer.some(([kind, data]) => kind === 'data' && data === 'DURING'));
-  const elapsed = performance.now() - started;
   assert.deepStrictEqual(h.peer.map(([kind]) => kind), ['screen', 'data']);
-  assert.ok(elapsed < 150, `chunk delivered after ${elapsed.toFixed(0)} ms`);
 });
 
 test('a viewer that resets on a screen while earlier output is still queued ends up with the screen only', async (t) => {

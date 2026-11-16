@@ -98,6 +98,16 @@ test('a running usage limit mails the parent once and keeps the session running'
   assert.equal(h.mailCalls(), 1);
 });
 
+test('a tmux capability sequence before a limit phrase still blocks', async () => {
+  const h = harness();
+  h.sessions.set('child', session({ id: 'child' }));
+  h.monitor.observe('child', '\x1b=\x1b(B\x1b>\x1b[?1;2c\x1b>\x1b[?qUsage limit reached\nresets at 9:00 PM\n');
+  await h.monitor.flush('child');
+  const child = h.sessions.get('child')!;
+  assert.equal(child.block?.reason, 'usage_limit');
+  assert.ok(child.block?.resetAt);
+});
+
 test('a later error is a new transition and mails again', async () => {
   const h = harness();
   h.sessions.set('parent', session({ id: 'parent' }));

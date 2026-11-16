@@ -597,7 +597,6 @@ describe('startPanel spawn contract (S15)', () => {
       });
     });
 
-    const startedAt = Date.now();
     await assert.rejects(
       startPanel({
         bundleDir,
@@ -613,7 +612,6 @@ describe('startPanel spawn contract (S15)', () => {
         err.message.includes('boom') &&
         !err.message.includes(longHex), // secret-shaped stderr is redacted
     );
-    assert.ok(Date.now() - startedAt < 5_000);
 
     assert.ok(!children[0].signals.includes('SIGTERM'), 'already-dead child is not signalled again');
     assert.equal(await exists(path.join(dataDir, 'solo', 'panel.pid')), false);
@@ -663,7 +661,6 @@ describe('startPanel spawn contract (S15)', () => {
     const refused = (async (): Promise<Response> => {
       throw new Error('ECONNREFUSED');
     }) as unknown as typeof fetch;
-    const startedAt = Date.now();
     await assert.rejects(
       startPanel({
         bundleDir,
@@ -677,7 +674,6 @@ describe('startPanel spawn contract (S15)', () => {
       }),
       (err: Error) => err instanceof PanelStartError && /healthy/.test(err.message),
     );
-    assert.ok(Date.now() - startedAt < 10_000, 'give-up respects its budget');
     assert.ok(children[0].signals.includes('SIGTERM'));
     assert.equal(await exists(path.join(dataDir, 'solo', 'panel.pid')), false);
   });

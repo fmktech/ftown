@@ -1,12 +1,20 @@
 import assert from 'node:assert/strict';
+import * as pty from 'node-pty';
 import { it } from 'node:test';
 import { directShellCommand } from './direct-shell.js';
 import { shellQuote } from './harness-registry.js';
 import { ProcessRunner } from './claude-runner.js';
+import type { SessionShell } from './session-shell.js';
 
-it('keeps the Unix login shell launch', () => {
-  assert.deepEqual(directShellCommand('echo hello', 'darwin'), {
+const zsh: SessionShell = { file: '/bin/zsh', kind: 'zsh' };
+const bash: SessionShell = { file: '/bin/bash', kind: 'bash' };
+
+it('launches the resolved login shell on Unix', () => {
+  assert.deepEqual(directShellCommand('echo hello', 'darwin', {}, () => zsh), {
     file: '/bin/zsh', args: ['-l', '-c', 'echo hello'],
+  });
+  assert.deepEqual(directShellCommand('echo hello', 'linux', {}, () => bash), {
+    file: '/bin/bash', args: ['-l', '-c', 'echo hello'],
   });
 });
 
@@ -48,4 +56,22 @@ it('reports native nonzero exits', { skip: process.platform !== 'win32' }, async
 it('reports missing commands instead of success', { skip: process.platform !== 'win32' }, async () => {
   const result = await run('ftown_nonexistent_test_command');
   assert.ok(result.error);
+});
+
+it('runs a real direct PTY launch under bash', { skip: process.platform === 'win32' }, async () => {
+  const shell = directShellCommand('echo FTOWN_BASH_DIRECT_OK', 'linux', {}, () => bash);
+  assert.deepEqual(shell, { file: '/bin/bash', args: ['-l', '-c', 'echo FTOWN_BASH_DIRECT_OK'] });
+  const output = await new Promise<string>((resolve, reject) => {
+    let text = '';
+    const proc = pty.spawn(shell.file, shell.args, {
+      cwd: process.cwd(),
+      cols: 80,
+      rows: 24,
+      env: { ...process.env, TERM: 'xterm-256color' },
+    });
+    const timer = setTimeout(() => { proc.kill(); reject(new Error('direct launch timed out')); }, 15000);
+    proc.onData((data) => { text += data; });
+    proc.onExit(() => { clearTimeout(timer); resolve(text); });
+  });
+  assert.match(output, /FTOWN_BASH_DIRECT_OK/);
 });

@@ -1,80 +1,33 @@
-#!/bin/bash
-INPUT=$(cat)
-# Grok runs Claude-compatible hooks too; ~/.ftown/grok-hook.sh is its channel. Stand down only
-# when GROK_HOOK_EVENT is set and is not "notification" (the Grok script does not forward that
-# event) AND the payload has a string hookEventName (Grok always sends it; Claude, Codex and
-# Cursor do not, so an inherited variable does not silence them).
-if [ -n "${GROK_HOOK_EVENT:-}" ] && [ "${GROK_HOOK_EVENT}" != "notification" ] \
-  && printf '%s' "$INPUT" | jq -e '(.hookEventName | type) == "string" and (.hookEventName | length) > 0' >/dev/null 2>&1; then
-  exit 0
-fi
+#!/usr/bin/env bash
+# Compatibility shim for the installed notify hook. The real hook is the typed
+# Node entry point `ftown-harness hook notify`; this file only locates it and
+# execs it. No jq, curl, session lookup or network logic lives here.
+set -u
 
-PORT="${FTOWN_HOOK_PORT:-}"
-SESSION_ID="${FTOWN_SESSION_ID:-}"
-TOKEN="${FTOWN_HOOK_TOKEN:-}"
-SOURCE=""
-
-BRIDGE_JSON="${FTOWN_BRIDGE_POINTER:-${HOME}/.ftown/bridge.json}"
-REGISTRY="${HOME}/.ftown/session-registry.json"
-
-if [ -z "$PORT" ] && [ -f "$BRIDGE_JSON" ]; then
-  PORT=$(jq -r '.port // empty' "$BRIDGE_JSON" 2>/dev/null)
-  if [ -z "$TOKEN" ]; then
-    TOKEN=$(jq -r '.token // empty' "$BRIDGE_JSON" 2>/dev/null)
-  fi
-fi
-
-if [ -n "$SESSION_ID" ]; then
-  SOURCE="env"
-elif [ -n "$INPUT" ]; then
-  CONV=$(echo "$INPUT" | jq -r '.conversation_id // empty' 2>/dev/null)
-  WS=$(echo "$INPUT" | jq -r '.workspace_roots[0] // empty' 2>/dev/null)
-  if [ -f "$REGISTRY" ]; then
-    if [ -n "$CONV" ]; then
-      SESSION_ID=$(jq -r --arg c "$CONV" '.byConversation[$c] // empty' "$REGISTRY" 2>/dev/null)
-      if [ -n "$SESSION_ID" ]; then
-        SOURCE="conversation"
-      fi
-    fi
-    if [ -z "$SESSION_ID" ] && [ -n "$WS" ]; then
-      SESSION_ID=$(jq -r --arg w "$WS" '.byWorkspace[$w] // empty' "$REGISTRY" 2>/dev/null)
-      if [ -n "$SESSION_ID" ]; then
-        SOURCE="workspace"
-      fi
-    fi
-  fi
-fi
-
-if [ -z "$PORT" ] || [ -z "$SESSION_ID" ]; then
-  exit 0
-fi
-
-PAYLOAD=$(echo "$INPUT" | jq -c --arg sid "$SESSION_ID" --arg src "$SOURCE" \
-  '. + {ftown_session_id: $sid, ftown_session_source: $src}' 2>/dev/null)
-if [ -z "$PAYLOAD" ]; then
-  PAYLOAD=$(jq -nc --arg sid "$SESSION_ID" --arg src "$SOURCE" --arg ev "${HOOK_EVENT_NAME:-hook}" \
-    '{ftown_session_id: $sid, ftown_session_source: $src, hook_event_name: $ev}')
-fi
-
-post_hook() {
-  local port="$1" token="$2"
-  local auth=()
-  if [ -n "$token" ]; then
-    auth=(-H "Authorization: Bearer ${token}")
-  fi
-  curl -sf -X POST "http://localhost:${port}/hook" \
-    -H "Content-Type: application/json" \
-    "${auth[@]}" \
-    -d "$PAYLOAD" > /dev/null 2>&1
+# A stale install must never block its agent: report the drop on stderr and
+# exit 0. Stderr is visible in the harness hook log; the event is simply lost.
+stale() {
+  printf '%s\n' "ftown notify hook: $1 (notify event not delivered)" >&2
 }
 
-if ! post_hook "$PORT" "$TOKEN" && [ -f "$BRIDGE_JSON" ]; then
-  # Env vars are stale inside tmux sessions that outlive their bridge; the
-  # current bridge rewrites bridge.json with the live port/token on startup.
-  BPORT=$(jq -r '.port // empty' "$BRIDGE_JSON" 2>/dev/null)
-  BTOKEN=$(jq -r '.token // empty' "$BRIDGE_JSON" 2>/dev/null)
-  if [ -n "$BPORT" ] && { [ "$BPORT" != "$PORT" ] || [ "$BTOKEN" != "$TOKEN" ]; }; then
-    post_hook "$BPORT" "$BTOKEN"
-  fi
+harness="${FTOWN_HARNESS:-}"
+if [ -z "$harness" ] && [ -n "${HOME:-}" ] && [ -x "${HOME}/.ftown/bin/ftown-harness" ]; then
+  harness="${HOME}/.ftown/bin/ftown-harness"
 fi
-exit 0
+if [ -z "$harness" ]; then
+  harness="$(command -v ftown-harness 2>/dev/null || true)"
+fi
+
+if [ -z "$harness" ] || [ ! -x "$harness" ]; then
+  stale "ftown-harness is missing"
+  exit 0
+fi
+# Older ftown-harness builds have no 'hook' command; their CLI would print an
+# "unknown command" error and exit non-zero. Probe first so an old install
+# still exits 0 and leaves a clear, visible reason in the hook log.
+if ! "$harness" hook --help >/dev/null 2>&1; then
+  stale "installed ftown-harness has no 'hook' command; upgrade ftown"
+  exit 0
+fi
+
+exec "$harness" hook notify "$@"

@@ -1,142 +1,52 @@
 #!/bin/sh
 # ftown shared Muse hook helper (POSIX sh — invoked by the per-event hook
-# wrappers with argv, never symlinked).
+# wrappers with argv, never symlinked). It is a compatibility shim only: the
+# real hook is the typed Node entry point `ftown-harness hook <kind>`. No jq,
+# curl, session lookup, POST or mail logic lives here.
+#
 # Usage: ftown-hook.sh session-start|user-prompt-submit|pre-tool-use|post-tool-use|stop
 #        (hook JSON payload on stdin)
-#
-# SessionStart: POST the native session_id + cwd + ftown ids to bridge /hook
-# (same route/shape as the pi/opencode hook posts). SessionStart is not an
-# activity event. UserPromptSubmit / PreToolUse / PostToolUse are posted under
-# those names so the board can classify thinking / tool_use / thinking.
-# PreToolUse and PostToolUse send only ftown_session_id, hook_event_name,
-# tool_name, and tool_use_id. Tool arguments and results stay off the wire.
-# PostToolUseFailure uses the same PostToolUse post: the failed call is over
-# and the turn continues. Stop: POST the hook, then drain the inbox; pending
-# mail is emitted as hookSpecificOutput.additionalContext JSON (never a
-# decision object). Mail delivery stays on Stop only.
-#
-# Always exits 0 and stays silent unless there is mail to deliver: hooks must
-# be fast fire-and-forget (5s budget) and never break the agent session.
 
-EVENT="${1:-}"
-case "$EVENT" in
-  session-start) HOOK_EVENT="SessionStart" ;;
-  user-prompt-submit) HOOK_EVENT="UserPromptSubmit" ;;
-  pre-tool-use) HOOK_EVENT="PreToolUse" ;;
+set -u
+
+case "${1:-}" in
+  session-start)        EVENT='SessionStart'; KIND='muse-session-start' ;;
+  user-prompt-submit)   EVENT='UserPromptSubmit'; KIND='muse-user-prompt-submit' ;;
+  pre-tool-use)         EVENT='PreToolUse'; KIND='muse-pre-tool-use' ;;
   # Success and failure both mean the tool call is finished and the turn goes
-  # on. PostToolUse classifies as thinking; postToolUseFailure would go idle.
-  post-tool-use) HOOK_EVENT="PostToolUse" ;;
-  stop) HOOK_EVENT="Stop" ;;
+  # on; PostToolUse classifies as thinking, postToolUseFailure would go idle.
+  post-tool-use)        EVENT='PostToolUse'; KIND='muse-post-tool-use' ;;
+  stop)                 EVENT='Stop'; KIND='muse-stop' ;;
   *) exit 0 ;;
 esac
 
 # Inert unless spawned by ftown.
 [ -n "${FTOWN_SESSION_ID:-}" ] || exit 0
-command -v curl >/dev/null 2>&1 || exit 0
-command -v jq >/dev/null 2>&1 || exit 0
 
-INPUT=$(cat)
-NATIVE_SID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
-NATIVE_CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null)
-
-# Endpoint candidates, mirroring the pi/opencode precedent: explicit env first,
-# then the bridge pointer the current bridge rewrites on every startup (a
-# resurrected session may hold a stale env port).
-CANDIDATES=""
-add_candidate() {
-  case "$1" in ''|*[!0-9]*) return 0 ;; esac
-  [ "$1" -gt 0 ] 2>/dev/null || return 0
-  CANDIDATES="${CANDIDATES}$1 $2
-"
+# A stale install must never block its agent: report the drop on stderr and
+# exit 0. Stderr is visible in the harness hook log; the event is simply lost.
+stale() {
+  printf '%s\n' "ftown muse hook: $1 ($EVENT event not delivered)" >&2
 }
-ENV_PORT="${FTOWN_HOOK_PORT:-}"
-ENV_TOKEN="${FTOWN_HOOK_TOKEN:-}"
-add_candidate "$ENV_PORT" "$ENV_TOKEN"
-BRIDGE_JSON="${FTOWN_BRIDGE_POINTER:-${HOME:-}/.ftown/bridge.json}"
-if [ -n "${HOME:-}" ] && [ -f "$BRIDGE_JSON" ]; then
-  BPORT=$(jq -r '.port // empty' "$BRIDGE_JSON" 2>/dev/null)
-  BTOKEN=$(jq -r '.token // empty' "$BRIDGE_JSON" 2>/dev/null)
-  if [ -n "$BPORT" ] && { [ "$BPORT" != "$ENV_PORT" ] || [ "$BTOKEN" != "$ENV_TOKEN" ]; }; then
-    add_candidate "$BPORT" "$BTOKEN"
-  fi
+
+harness="${FTOWN_HARNESS:-}"
+if [ -z "$harness" ] && [ -n "${HOME:-}" ] && [ -x "${HOME}/.ftown/bin/ftown-harness" ]; then
+  harness="${HOME}/.ftown/bin/ftown-harness"
 fi
-[ -n "$CANDIDATES" ] || exit 0
+if [ -z "$harness" ]; then
+  harness="$(command -v ftown-harness 2>/dev/null || true)"
+fi
 
-# POST the hook payload; first 2xx wins. Fire-and-forget: failures are silent.
-post_hook() {
-  _body="$1"
-  while IFS=' ' read -r _port _token _rest; do
-    [ -n "${_port:-}" ] || continue
-    if [ -n "${_token:-}" ]; then
-      _code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:${_port}/hook" \
-        -H 'Content-Type: application/json' -H "Authorization: Bearer ${_token}" \
-        --connect-timeout 1 --max-time 2 -d "$_body" 2>/dev/null)
-    else
-      _code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:${_port}/hook" \
-        -H 'Content-Type: application/json' \
-        --connect-timeout 1 --max-time 2 -d "$_body" 2>/dev/null)
-    fi
-    case "${_code:-}" in
-      2*) return 0 ;;
-    esac
-  done <<CANDIDATES_EOF
-$CANDIDATES
-CANDIDATES_EOF
-  return 1
-}
-
-# Tool posts are an allowlist: identity plus the tool name and call id.
-# Arguments, results, errors, cwd, and the native session id are not forwarded.
-if [ "$HOOK_EVENT" = "PreToolUse" ] || [ "$HOOK_EVENT" = "PostToolUse" ]; then
-  PAYLOAD=$(printf '%s' "$INPUT" | jq -c \
-    --arg sid "$FTOWN_SESSION_ID" \
-    --arg ev "$HOOK_EVENT" \
-    '{ftown_session_id: $sid, hook_event_name: $ev}
-     + (if (.tool_name | type) == "string" then {tool_name: .tool_name} else {} end)
-     + (if (.tool_use_id | type) == "string" then {tool_use_id: .tool_use_id} else {} end)' \
-    2>/dev/null) || PAYLOAD=$(jq -n -c --arg sid "$FTOWN_SESSION_ID" --arg ev "$HOOK_EVENT" \
-    '{ftown_session_id: $sid, hook_event_name: $ev}')
-  [ -n "$PAYLOAD" ] || exit 0
-  post_hook "$PAYLOAD"
+if [ -z "$harness" ] || [ ! -x "$harness" ]; then
+  stale 'ftown-harness is missing'
+  exit 0
+fi
+# Older ftown-harness builds have no 'hook' command; their CLI would print an
+# "unknown command" error and exit non-zero. Probe first so an old install
+# still exits 0 and leaves a clear, visible reason in the hook log.
+if ! "$harness" hook --help >/dev/null 2>&1; then
+  stale "installed ftown-harness has no 'hook' command; upgrade ftown"
   exit 0
 fi
 
-# SessionStart, UserPromptSubmit, and Stop keep the original envelope.
-# Mail drain stays on Stop only.
-EXTRA=$(printf '%s' "$INPUT" | jq -c --arg ev "$HOOK_EVENT" '
-  if $ev == "UserPromptSubmit" then
-    if (.prompt | type) == "string" then {prompt: .prompt} else {} end
-  else {} end
-' 2>/dev/null) || true
-[ -n "${EXTRA:-}" ] || EXTRA='{}'
-PAYLOAD=$(jq -n -c \
-  --arg sid "$FTOWN_SESSION_ID" \
-  --arg ev "$HOOK_EVENT" \
-  --arg nsid "${NATIVE_SID:-}" \
-  --arg cwd "${NATIVE_CWD:-}" \
-  --argjson extra "$EXTRA" \
-  '{ftown_session_id: $sid, ftown_session_source: "env", hook_event_name: $ev, session_id: $nsid, cwd: $cwd} + $extra' \
-  2>/dev/null) || exit 0
-[ -n "$PAYLOAD" ] || exit 0
-post_hook "$PAYLOAD"
-
-# Stop also drains the inbox. Single wait=0 drain (marks delivered), then the
-# mail is printed as additionalContext — emission always succeeds, so no
-# peek/mark two-step like the interactive opencode flow.
-if [ "$HOOK_EVENT" = "Stop" ]; then
-  SID_ENC=$(jq -n -r --arg s "$FTOWN_SESSION_ID" '$s | @uri' 2>/dev/null)
-  [ -n "$SID_ENC" ] || exit 0
-  FTOWN_SECURE_CLI=$(command -v ftown 2>/dev/null || true)
-  [ -n "$FTOWN_SECURE_CLI" ] || FTOWN_SECURE_CLI="${HOME:-}/.ftown/bin/ftown"
-  [ -x "$FTOWN_SECURE_CLI" ] || exit 0
-  REQUEST=$(jq -n -c --arg path "/api/sessions/${SID_ENC}/inbox?wait=0" '{method:"GET",path:$path,timeoutMs:2000}') || exit 0
-  INBOX=$(printf '%s' "$REQUEST" | "$FTOWN_SECURE_CLI" security proxy 2>/dev/null | jq -c 'select(.status >= 200 and .status < 300) | .body' 2>/dev/null)
-  [ -n "$INBOX" ] || exit 0
-  COUNT=$(printf '%s' "$INBOX" | jq -r '(.messages // []) | length' 2>/dev/null)
-  if [ -n "$COUNT" ] && [ "$COUNT" -gt 0 ] 2>/dev/null; then
-    printf '%s' "$INBOX" | jq -c \
-      '{hookSpecificOutput: {hookEventName: "Stop", additionalContext: ("[ftown mail]\n" + ([(.messages // [])[] | "[\(.ts // "")] \(.fromName // .from // "external") (\(.type // "message")): \(.body // "")"] | join("\n")))}}' \
-      2>/dev/null || exit 0
-  fi
-fi
-exit 0
+exec "$harness" hook "$KIND"

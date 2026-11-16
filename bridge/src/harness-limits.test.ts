@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { detectLimit, parseResetAt } from './harness-limits.js';
+import { detectLimit, parseResetAt, stripScreenAnsi } from './harness-limits.js';
 
 const NOW = new Date(2026, 0, 2, 8, 0, 0);
 
@@ -111,6 +111,26 @@ test('ansi around a limit line still matches', () => {
   const hit = detectLimit('muse', '\x1b[31mUsage limit reached\x1b[0m\nresets at 21:00', NOW);
   assert.equal(hit?.reason, 'usage_limit');
   assert.equal(hit?.resetAt, at(21));
+});
+
+test('tmux capability escapes do not glue onto a limit line', () => {
+  // A real tmux attach client emits two- and three-byte escapes (`ESC =`,
+  // `ESC ( B`, `ESC >`) and device-attribute replies before the child's text.
+  // Stripping only `ESC` plus one `@-_` char left `(B` attached, so the
+  // `\b` anchor failed and the usage screen was missed.
+  const screen = '\x1b=\x1b(B\x1b>\x1b[?1;2c\x1b>\x1b[?qUsage limit reached\nresets at 21:00\n';
+  assert.equal(stripScreenAnsi(screen).split('\n')[0], 'Usage limit reached');
+  const hit = detectLimit('muse', screen, NOW);
+  assert.equal(hit?.reason, 'usage_limit');
+  assert.equal(hit?.line, 'Usage limit reached');
+  assert.equal(hit?.resetAt, at(21));
+});
+
+test('osc titles and dcs payloads are stripped without eating later text', () => {
+  assert.equal(stripScreenAnsi('\x1b]0;title\x07Usage limit reached'), 'Usage limit reached');
+  assert.equal(stripScreenAnsi('\x1bP1;2|payload\x1b\\Usage limit reached'), 'Usage limit reached');
+  // A truncated DCS (no ST) must not swallow the phrase that follows.
+  assert.equal(stripScreenAnsi('\x1bPpayload Usage limit reached'), 'payload Usage limit reached');
 });
 
 test('a clock that has already passed is tomorrow', () => {

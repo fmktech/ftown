@@ -35,8 +35,12 @@ case "$job" in
     ;;
   centrifugo) bash scripts/ci/validate-centrifugo.sh ;;
   unit)
-    # The opencode child-launch proof starts `/bin/zsh -l -c` inside tmux.
-    # A hosted runner without both never runs that regression.
+    # P0.5: shell scripts and hook assets stay LF, including on a Windows
+    # checkout with core.autocrlf=true.
+    bash scripts/ci/check-eol.sh
+    node --test scripts/ci/check-eol.test.mjs
+    # The opencode child-launch proof starts the resolved login shell inside
+    # tmux. A hosted runner without tmux never runs that regression.
     sudo apt-get update
     sudo apt-get install -y zsh tmux
     # Runner images ship group-writable completion dirs. compaudit then blocks a login zsh.
