@@ -24,3 +24,77 @@ jobs:
       - uses: ./.github/actions/run-ci
         with:
           job: unit
+
+  # Regression gate for the bash-only Linux path: the hosted image ships
+  # optional tools the bridge must not require. Informational (allowed to
+  # fail) until the session shell resolver (P1.1) and the Node hooks (P1.3)
+  # land, then remove continue-on-error and mark the job required.
+  unit-minimal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.1'
+      - name: Remove zsh, tmux and jq
+        run: |
+          # The image preinstalls jq (and may add zsh or tmux later), which
+          # would silently hide the dependencies this job exists to catch.
+          # The runner is disposable, so any dependent packages removed along
+          # with these tools do not matter here.
+          for tool in zsh tmux jq; do
+            if command -v "$tool" >/dev/null 2>&1; then
+              sudo apt-get remove -y "$tool"
+            fi
+          done
+          hash -r
+          for tool in zsh tmux jq; do
+            if command -v "$tool" >/dev/null 2>&1; then
+              echo "::error::$tool is still installed; unit-minimal must run without it"
+              exit 1
+            fi
+          done
+      # Informational until P1.1/P1.3 land: the suite fails here without
+      # jq/tmux/zsh by design. Step-level continue-on-error keeps the job (and
+      # the PR rollup) green while the failing assertions stay in the log;
+      # remove it when this job becomes required.
+      - name: Bridge unit tests
+        working-directory: bridge
+        continue-on-error: true
+        run: |
+          npm ci
+          npm test
+
+  # macOS is the primary development platform and had no CI coverage.
+  # `scripts/ci/run-job.sh` and its setup helper pin Linux x86_64, so this job
+  # runs the suites directly on the runner.
+  unit-macos:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.1'
+      # The bridge suite fails under CI when tmux is missing (opencode launch
+      # proof); macOS runners do not preinstall it.
+      - name: Install tmux
+        run: command -v tmux >/dev/null 2>&1 || HOMEBREW_NO_AUTO_UPDATE=1 brew install tmux
+      - name: Bridge unit tests
+        working-directory: bridge
+        run: |
+          npm ci
+          npm run build
+          npm test
+      - name: UI unit tests
+        working-directory: ui
+        run: |
+          npm ci
+          npm test
