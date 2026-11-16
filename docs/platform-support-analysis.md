@@ -441,7 +441,7 @@ phase 3 with the harness list narrowed to those that exist natively.
 | Job | Now | After phase 0 | After phase 1 | After phase 3 |
 |---|---|---|---|---|
 | unit, ubuntu (zsh+tmux+jq) | required, launch proof skipped | required, nothing skipped | required | required |
-| unit-minimal, ubuntu (bash only) | — | informational | required | required |
+| unit-minimal, ubuntu (bash only) | required | required | required | required |
 | unit, macos | — | required | required | required |
 | e2e, ubuntu (3 shards) | required | required | required | required |
 | docker-solo, amd64+arm64 | — | — | required | required |
