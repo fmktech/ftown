@@ -513,8 +513,8 @@ describe('loadClaudeCredentials with fixture homes', () => {
     const services: string[] = [];
     const reader = { readKeychain: async (service: string) => { services.push(service); return null; } };
     const [alphaCredentials, betaCredentials] = await Promise.all([
-      loadClaudeCredentials(resolveClaudeCredentialSources(home, alphaEnv), 1000, reader),
-      loadClaudeCredentials(resolveClaudeCredentialSources(home, betaEnv), 1000, reader),
+      loadClaudeCredentials(resolveClaudeCredentialSources(home, alphaEnv, 'darwin'), 1000, reader),
+      loadClaudeCredentials(resolveClaudeCredentialSources(home, betaEnv, 'darwin'), 1000, reader),
     ]);
     assert.deepEqual([alphaCredentials?.accessToken, betaCredentials?.accessToken], ['alpha-token', 'beta-token']);
     assert.notEqual(services[0], services[1]);
