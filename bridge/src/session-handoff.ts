@@ -57,6 +57,23 @@ export interface SessionHandoffDeps {
   now?: () => Date;
 }
 
+export async function waitForSessionHealthy(
+  inspect: () => Promise<{ status: Session['status'] | undefined; processActive: boolean }>,
+  options: { timeoutMs?: number; pollIntervalMs?: number } = {},
+): Promise<boolean> {
+  const timeoutMs = options.timeoutMs ?? 30_000;
+  const pollIntervalMs = options.pollIntervalMs ?? 50;
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const snapshot = await inspect();
+    if (snapshot.status !== 'running') return false;
+    if (snapshot.processActive) return true;
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) return false;
+    await new Promise<void>((resolve) => setTimeout(resolve, Math.min(pollIntervalMs, remainingMs)));
+  }
+}
+
 export interface HandoffResult {
   session: Session;
   previousId: string;

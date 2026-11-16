@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import type { PlanItem } from './coordination/contract-c.js';
 import type { CreateFtownSessionInput } from './create-ftown-session.js';
-import { handoffSession, pickAvailableRouting, type SessionHandoffDeps } from './session-handoff.js';
+import { handoffSession, pickAvailableRouting, waitForSessionHealthy, type SessionHandoffDeps } from './session-handoff.js';
 import type { Session } from './types.js';
 
 function session(partial: Partial<Session> & Pick<Session, 'id'>): Session {
@@ -259,6 +259,26 @@ test('handoff stops the old writer before creating and waits for replacement hea
   h.sessions.set('old', session({ id: 'old', workingDir: undefined }));
   await handoffSession(h.deps, 'old', { shellType: 'shell' });
   assert.deepEqual(h.events, ['stop', 'create', 'healthy', 'archive']);
+});
+
+test('session health waits for the asynchronous process attach after record creation', async () => {
+  let reads = 0;
+  const healthy = await waitForSessionHealthy(async () => {
+    reads += 1;
+    return { status: 'running', processActive: reads >= 3 };
+  }, { timeoutMs: 100, pollIntervalMs: 1 });
+  assert.equal(healthy, true);
+  assert.equal(reads, 3);
+});
+
+test('session health stops waiting when the replacement becomes terminal', async () => {
+  let reads = 0;
+  const healthy = await waitForSessionHealthy(async () => {
+    reads += 1;
+    return { status: reads === 1 ? 'running' : 'error', processActive: false };
+  }, { timeoutMs: 100, pollIntervalMs: 1 });
+  assert.equal(healthy, false);
+  assert.equal(reads, 2);
 });
 
 test('an unhealthy replacement leaves the old session unarchived', async () => {

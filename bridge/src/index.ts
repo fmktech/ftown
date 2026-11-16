@@ -46,7 +46,7 @@ import { removeFtownSession } from './remove-ftown-session.js';
 import { SessionResurrection, shouldResurrectStoredSession } from './session-resurrection.js';
 import { createTerminalOutput } from './terminal-output.js';
 import { SessionFailureMonitor } from './session-block.js';
-import { handoffSession, type HandoffRequest } from './session-handoff.js';
+import { handoffSession, waitForSessionHealthy, type HandoffRequest } from './session-handoff.js';
 import { hasTmuxSession, killTmuxSession } from './tmux.js';
 import { collectSessionUsage } from './usage-collector.js';
 import { AgentSessionIdPersister } from './session-ids.js';
@@ -1066,10 +1066,10 @@ program
       publishSession: (session) => centrifugo.publishSessionUpdate(userId, session),
       createSession: (input) => createFtownSession(sessionFactoryDeps, input),
       stopSession: stopHandoffSession,
-      isSessionHealthy: async (id) => {
+      isSessionHealthy: (id) => waitForSessionHealthy(async () => {
         const session = await store.loadSession(id);
-        return session?.status === 'running' && runner.isRunning(id);
-      },
+        return { status: session?.status, processActive: runner.isRunning(id) };
+      }),
       archiveSession: async (id) => {
         const result = await sessionController.remove(id, undefined, 'keep');
         if (!result.removed) throw new Error(`could not archive session ${id}`);
