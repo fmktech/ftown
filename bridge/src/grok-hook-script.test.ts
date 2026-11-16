@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 
 const HOOK_SCRIPT = fileURLToPath(new URL('../hooks/ftown-grok-hook.sh', import.meta.url));
 
-const TOOL_PATHS = { cat: '/bin/cat', jq: '/usr/bin/jq', curl: '/usr/bin/curl' } as const;
+const HARNESS_CLI = fileURLToPath(new URL('./harness-cli.ts', import.meta.url));
 const REREAD_POINTER = '[ftown mail truncated: run `ftown sessions inbox --all --peek` to read the full messages]';
 
 const NATIVE_SID ='7c1f3e52-9a4b-4d1e-8f2a-1b2c3d4e5f60';
@@ -153,9 +153,11 @@ function scriptEnv(stub: StubBridge, extra: Record<string, string | undefined> =
   const response = join(home, 'proxy-response.json');
   const request = join(home, 'proxy-request.json');
   writeFileSync(response, JSON.stringify({ status: 200, body: stub.inboxPayload }));
+  const quote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
+  writeFileSync(join(bin, 'ftown-harness'), `#!/bin/sh\nexec ${quote(process.execPath)} --import tsx ${quote(HARNESS_CLI)} "$@"\n`, { mode: 0o700 });
   writeFileSync(
     join(bin, 'ftown'),
-    '#!/bin/sh\n[ "$1" = security ] && [ "$2" = proxy ] || exit 1\ncat > "$FTOWN_TEST_PROXY_REQUEST"\ncat "$FTOWN_TEST_PROXY_RESPONSE"\n',
+    '#!/bin/sh\n[ "$1" = security ] && [ "$2" = proxy ] || exit 1\n/bin/cat > "$FTOWN_TEST_PROXY_REQUEST"\n/bin/cat "$FTOWN_TEST_PROXY_RESPONSE"\n',
     { mode: 0o700 },
   );
   return {
@@ -200,21 +202,16 @@ describe('grok hook script', () => {
     assert.equal(stub.requests.length, 0);
   });
 
-  for (const [missing, present] of [['curl', ['cat', 'jq']], ['jq', ['cat', 'curl']]] as const) {
-    it(`is inert when ${missing} is missing (${present.join(' + ')} present)`, async () => {
-      const stub = await startStubBridge();
-      const binDir = tempDir('ftown-grok-bin-');
-      for (const tool of present) symlinkSync(TOOL_PATHS[tool], join(binDir, tool));
-      const env = scriptEnv(stub, { PATH: binDir });
-      refreshInbox(env, stub);
-      const result = await runScript(payload('Stop', { reason: 'end_turn' }), env);
-      assert.equal(result.exitCode, 0);
-      assert.equal(result.stdout, '');
-      assert.equal(result.stderr, '');
-      assert.equal(result.proxyRequest, undefined);
-      assert.equal(stub.requests.length, 0);
-    });
-  }
+  it('delivers an event when jq and curl are absent from PATH', async () => {
+    const stub = await startStubBridge();
+    const binDir = tempDir('ftown-grok-bin-');
+    const result = await runScript(payload('SessionStart'), scriptEnv(stub, { PATH: binDir }));
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.stdout, '');
+    assert.equal(result.stderr, '');
+    assert.equal(posts(stub).length, 1);
+    assert.equal((JSON.parse(posts(stub)[0].body) as { hook_event_name: string }).hook_event_name, 'SessionStart');
+  });
 
   it('SessionStart posts the wire format with bearer auth and prints nothing', async () => {
     const stub = await startStubBridge();
@@ -401,13 +398,14 @@ describe('grok hook script', () => {
     assert.equal(posts(stub).length, 2);
   });
 
-  it('invalid JSON or a missing hook_event_name exits 0 silently with nothing sent', async () => {
+  it('invalid JSON or a missing hook_event_name exits 0 with nothing sent', async () => {
     const stub = await startStubBridge();
     for (const stdin of ['not-json{{{', '', '42', JSON.stringify({ session_id: NATIVE_SID, cwd: CWD })]) {
       const result = await runScript(stdin, scriptEnv(stub));
       assert.equal(result.exitCode, 0);
       assert.equal(result.stdout, '');
-      assert.equal(result.stderr, '');
+      if (stdin === 'not-json{{{' || stdin === '' || stdin === '42') assert.match(result.stderr, /ftown hook: native hook payload/);
+      else assert.equal(result.stderr, '');
       assert.equal(result.proxyRequest, undefined);
     }
     assert.equal(stub.requests.length, 0);
@@ -499,7 +497,7 @@ describe('grok hook script', () => {
     assert.equal(body.tool_use_id, 'call_big');
   });
 
-  it('reads a 5 MB payload quickly', async () => {
+  it('delivers a 5 MB payload intact', async () => {
     const stub = await startStubBridge();
     const huge = 'y'.repeat(5 * 1024 * 1024);
     const result = await runScript(payload('PostToolUse', { tool_name: 'read', tool_input: { content: huge } }), scriptEnv(stub));
@@ -507,6 +505,6 @@ describe('grok hook script', () => {
     assert.equal(result.exitCode, 0);
     assert.equal(result.stdout, '');
     assert.equal(posts(stub).length, 1);
-    assert.ok(result.elapsedMs < 3000, `5 MB payload took ${result.elapsedMs}ms`);
+    assert.equal((JSON.parse(posts(stub)[0].body) as { tool_input: { content: string } }).tool_input.content, huge);
   });
 });

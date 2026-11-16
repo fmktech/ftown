@@ -1,3 +1,4 @@
+import { grokHookAdapter } from './grok-hook-adapter.js';
 import type {
   HookAdapter,
   HookKind,
@@ -42,4 +43,5 @@ export const museSessionStartAdapter: HookAdapter = async ({ input, env, post })
  */
 export const HOOK_ADAPTERS: Readonly<Partial<Record<HookKind, HookAdapter>>> = Object.freeze({
   'muse-session-start': museSessionStartAdapter,
+  grok: grokHookAdapter,
 });
