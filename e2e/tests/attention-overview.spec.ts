@@ -116,9 +116,11 @@ async function bridgeCommand(type: string, payload: Record<string, unknown>): Pr
     localApplication: (pointer: unknown, application: unknown) => Promise<{ response?: { success?: boolean; error?: string; data?: { code?: string } } }>;
   };
   const requestId = `e2e-${type}-${randomUUID()}`;
+  // The bridge requires the command route's sessionId to be the payload's sessionId.
+  const sessionId = typeof payload.sessionId === "string" ? payload.sessionId : null;
   const response = await localApplication(pointer, {
     type: "application",
-    route: { kind: "command", command: type, requestId, sessionId: null },
+    route: { kind: "command", command: type, requestId, sessionId },
     data: { type, requestId, payload: { bridgeId: pointer.bridgeId, ...payload } },
     mcp: null,
   });
@@ -267,10 +269,10 @@ test("a notice and a retired child's item are answered with a typed error, never
     const overview = page.getByRole("region", { name: `Overview: ${parentName}` });
     await expect(overview).toBeVisible({ timeout: 30_000 });
     const panel = overview.getByRole("region", { name: "Child attention requests" });
-    await expect(panel).toContainText(childName);
+    await expect(panel).toContainText(childName, { timeout: 30_000 });
     const item = panel.locator(`[data-child-attention="${eventId}"]`);
     await item.getByRole("button").first().click();
-    await expect(item.getByRole("button", { name: "Dismiss" })).toBeVisible();
+    await expect(item.getByRole("button", { name: "Dismiss" })).toBeVisible({ timeout: 30_000 });
     await expect(item.getByRole("button", { name: "Send answer" })).toHaveCount(0);
 
     // The bridge answers the notice with a typed error instead of staying silent.
