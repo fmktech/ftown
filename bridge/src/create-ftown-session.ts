@@ -526,6 +526,7 @@ async function createFtownSessionImpl(
   let account = input.account ?? resolvedParentSession?.account;
   const resolvedPolicy = resolvedParentSession?.allowedAccounts;
   const directPolicy = parentSession?.allowedAccounts;
+  // An alias may impose a narrower policy than its resolved parent; preserve both restrictions.
   const parentPolicy = resolvedPolicy && directPolicy
     ? resolvedPolicy.filter(id => directPolicy.includes(id))
     : resolvedPolicy ?? directPolicy;
@@ -558,7 +559,7 @@ async function createFtownSessionImpl(
     }
   }
 
-  const shellType = input.shellType !== undefined ? normalizeShellType(input.shellType) : parentSession?.shellType;
+  const shellType = input.shellType !== undefined ? normalizeShellType(input.shellType) : resolvedParentSession?.shellType;
   const harness = shellType === 'codex' ? 'codex' : shellType === 'claude' || shellType === undefined ? 'claude' : undefined;
   let selectedAccountEnv: Record<string, string> = {};
   if (account && account !== 'default') {

@@ -43,6 +43,7 @@ describe('account-aware session creation', () => {
       saveAccounts({ version: 1, accounts: [
         { id: 'personal', harness: 'claude', configDir: join(home, 'claude-personal') },
         { id: 'other', harness: 'claude', configDir: join(home, 'claude-other') },
+        { id: 'codex-lab', harness: 'codex', configDir: join(home, 'codex-lab') },
       ] }, home);
       const { deps, runs, saved } = fakeDeps();
       const launched = await createFtownSession(deps, { shellType: 'claude', account: 'personal', workingDir: work });
@@ -64,6 +65,13 @@ describe('account-aware session creation', () => {
       assert.equal(sibling.parentSessionId, 'parent');
       assert.equal(sibling.account, 'personal');
       assert.deepEqual(sibling.allowedAccounts, ['personal']);
+      const codexParent = { ...fakeSession('codex-parent'), shellType: 'codex' as const, account: 'codex-lab' };
+      const claudeAlias = { ...fakeSession('claude-alias'), parentSessionId: 'codex-parent', shellType: 'claude' as const };
+      const codexAliasHarness = fakeDeps([codexParent, claudeAlias]);
+      const codexChild = await createFtownSession(codexAliasHarness.deps, { parentSessionId: 'claude-alias', workingDir: work });
+      assert.equal(codexChild.shellType, 'codex');
+      assert.equal(codexChild.account, 'codex-lab');
+      assert.deepEqual(codexAliasHarness.runs[0].env, { CODEX_HOME: join(home, 'codex-lab') });
       const restricted = fakeDeps([{ ...parent, allowedAccounts: ['personal'] }, alias]);
       await assert.rejects(createFtownSession(restricted.deps, { parentSessionId: 'alias', account: 'other', workingDir: work }),
         (error: unknown) => error instanceof AccountSelectionError && error.code === 'account_not_allowed');

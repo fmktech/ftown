@@ -297,11 +297,14 @@ Choose an account when starting a session with `ftown sessions create
 --shell claude --account personal ...` (or `--shell codex`). A child started
 with `--parent` inherits the parent's account unless `--account` is supplied.
 To constrain future children, set `--allowed-accounts personal,work`; the
-bridge enforces this policy for CLI and API requests, and descendants can only
-narrow the inherited list. Attempts to select an account outside the parent's
+bridge enforces this policy for CLI and API requests, intersecting a child's
+requested list with inherited restrictions so descendants can only narrow it.
+When a parent resolves through an alias, both policies apply. Attempts to select an account outside the parent's
 list fail with `account_not_allowed`. An omitted policy leaves children
 unrestricted. Setup installs FTown hooks, skill links, and supported plugins
-for the default configuration and each registered account configuration.
+for the default configuration and each registered account configuration. For
+Codex accounts, setup links the skill into `CODEX_HOME/skills`, a Codex
+compatibility skill root.
 
 To ask with options or free text, use `ftown sessions attention --option ...` or
 `--questions-json`, then check the returned event ID with `ftown sessions

@@ -125,7 +125,7 @@ test('real setup installers write each harness only to its own account directory
     for (const dir of [codexDefault, codexAccount]) assert.ok(existsSync(join(dir, 'hooks.json')));
     assert.ok(existsSync(join(claudeAccount, 'skills', 'ftown', 'SKILL.md')));
     assert.equal(existsSync(join(codexAccount, 'settings.json')), false);
-    assert.equal(existsSync(join(codexAccount, 'skills', 'ftown')), false);
+    assert.ok(existsSync(join(codexAccount, 'skills', 'ftown', 'SKILL.md')));
     assert.equal(existsSync(join(claudeAccount, 'hooks.json')), false);
     assert.equal(process.env.CLAUDE_CONFIG_DIR, claudeDefault);
     assert.equal(process.env.CODEX_HOME, codexDefault);
