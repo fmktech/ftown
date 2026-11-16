@@ -140,4 +140,21 @@ describe("ChildrenAttentionPanel", () => {
     expect(onAnswer).toHaveBeenCalledWith(expect.objectContaining({ session: expect.objectContaining({ id: "child" }) }), [{ selected: [1] }]);
     expect((await screen.findAllByRole("status")).some(node => node.textContent === "Answer delivered to Child.")).toBe(true);
   });
+
+  it("offers a child notice without a question only Dismiss and Open", () => {
+    const onOpenChange = vi.fn();
+    const noticeOnly: ChildAttentionItem = {
+      entry: { ...entry("child", { title: "Work complete", prompt: undefined, message: "Review the result and checks." }, { name: "Child", parentSessionId: "boss", status: "stopped" }),
+        notice: { type: "agent_needs_input", title: "Work complete", message: "Review the result and checks.", receivedAt: now - 60_000, attentionId: "evt-3", attentionSequence: 1 } },
+      eventId: "evt-3",
+      live: true,
+    };
+    render(
+      <ChildrenAttentionPanel items={[noticeOnly]} openId="evt-3" onOpenChange={onOpenChange} onOpenSession={vi.fn()} onDismiss={vi.fn(async () => {})} onReply={vi.fn(async () => {})} onAnswer={vi.fn()} now={now} />,
+    );
+    expect(screen.getByRole("button", { name: "Dismiss" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open session" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Send answer" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Send reply" })).toBeNull();
+  });
 });
