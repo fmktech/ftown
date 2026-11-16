@@ -105,6 +105,35 @@ const stateOf = (cfg: ModelRoutingConfig, dirty = false, origins?: (string | nul
 const reduce = (state: RoutingEditorState, action: RoutingEditorAction): RoutingEditorState =>
   routingEditorReducer(deepFreeze(state), deepFreeze(action));
 
+describe('per-account routing data', () => {
+  it('preserves account selection through parsing and unrelated draft edits', () => {
+    const selected: RoutingPick = { ...pick('claude', 'claude-sonnet-4'), account: 'work' };
+    const source = config([tier('simple', [selected])]);
+    const parsed = parseModelRoutingSnapshot({ schema: 1, cached: false, config: source, report: fixtureReport() });
+    expect(parsed?.config.tiers[0].picks[0].account).toBe('work');
+    const initial = initialRoutingEditorState(source);
+    expect(initial.config.tiers[0].picks[0].account).toBe('work');
+    const edited = reduce(initial, { type: 'set_steering', value: 'Prefer the chosen subscription' });
+    expect(edited.config.tiers[0].picks[0].account).toBe('work');
+  });
+
+  it('keeps different account picks distinct and normalizes against that account’s models', () => {
+    const report = fixtureReport();
+    report.models.unshift({ ...modelsEntry('claude', 'ok', [harnessModel('work-model', { isDefault: true })]), account: 'work' });
+    expect(modelOptions(report, 'claude').map(model => model.id)).not.toContain('work-model');
+    expect(normalizePick(report, { ...pick('claude', 'missing'), account: 'work' })).toEqual({ provider: 'claude', model: 'work-model', effort: null, account: 'work' });
+    expect(validateRoutingDraft(config([tier('simple', [pick('claude', 'shared'), { ...pick('claude', 'shared'), account: 'work' }])]))).toEqual([]);
+  });
+
+  it('uses the selected account’s availability rather than another account’s matching model', () => {
+    const report = fixtureReport();
+    const base = { provider: 'claude' as const, leftPercent: 0, bindingWindow: 'weekly' as const, resetsAt: null, resetsInMinutes: null, runway: null, reason: 'Default exhausted' };
+    report.routing = [{ ...base, availability: 'exhausted' }, { ...base, account: 'work', availability: 'available', leftPercent: 80, reason: 'Work available' }];
+    const selected = { ...pick('claude', 'shared'), account: 'work' };
+    expect(resolvePickAvailability(report, null, selected)).toMatchObject({ availability: 'available', leftPercent: 80, reason: 'Work available' });
+  });
+});
+
 describe('initialRoutingEditorState', () => {
   it('starts clean and deep-copies the config', () => {
     const source = config([tier('simple', [pick('claude', 'claude-opus-4', 'high')])], 'note');

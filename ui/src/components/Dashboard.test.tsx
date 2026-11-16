@@ -123,6 +123,14 @@ it("does not reissue bridge update reads when Dashboard rerenders with a fresh R
   expect(state.rpcCommands.filter(type => type === "get_bridge_update")).toHaveLength(1);
 });
 
+it("shows the selected non-default account in the session header", async () => {
+  state.sessions = [session("work-session", "Account worker", { shellType: "codex", account: "coding" })];
+  dashboard();
+  fireEvent.click(screen.getByText("Account worker", { exact: true }));
+  await waitFor(() => expect(within(screen.getByRole("region", { name: "Terminal session header" })).getByLabelText("Account: coding")).toBeTruthy());
+  expect(within(document.querySelector("#dashboard-sidebar") as HTMLElement).getByLabelText("Account: coding")).toBeTruthy();
+});
+
 it("preserves the controller and forwards later calls through the latest RPC callback", async () => {
   const data = { schema: 1, bridgeId: "a", currentVersion: "1.0.0", latestVersion: "1.1.0", checkedAt: null, availability: "available", canUpdate: true, blockedReason: null, operation: null, manualCommand: "npx ftown@1.1.0 setup" };
   const first = vi.fn().mockResolvedValue({ success: true, data });

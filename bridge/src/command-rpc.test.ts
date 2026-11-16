@@ -589,6 +589,60 @@ test('browser session mail reports readiness and uncertain enqueue failures with
   assert.equal((responses.at(-1)?.data as { code?: string } | undefined)?.code, 'enqueue_failed');
 });
 
+test('account listing requires read permission and returns only public account metadata', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'account-list-rpc-'));
+  const previousHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    saveAccounts({ version: 1, accounts: [
+      { id: 'personal', harness: 'claude', label: 'Personal', configDir: join(home, 'personal') },
+      { id: 'work', harness: 'codex', configDir: join(home, 'work') },
+    ] });
+    const responses: CommandResponse[] = [];
+    const permissions: string[] = [];
+    let deny = false;
+    const security = { revalidate: async () => {}, policy: { revalidate: async (_principal: unknown, permission: string) => {
+      permissions.push(permission);
+      if (deny) throw new BridgeSecurityError('permission_denied');
+    } } } as unknown as BridgeSecurityService;
+    const verified = { principal: {} } as VerifiedApplication;
+    const handler = createCommandHandler({ bridgeId: 'bridge', security, sessionController: {} as SessionController,
+      publishCommandResponse: async response => { responses.push(response); } });
+    const send = async (requestId: string, payload: Record<string, unknown>, principal = verified) => {
+      await handler({ type: 'get_accounts', requestId, payload }, principal);
+      return responses.at(-1)!;
+    };
+    assert.deepEqual(await send('list', { bridgeId: 'bridge' }), {
+      requestId: 'list', success: true, data: { accounts: [
+        { id: 'personal', harness: 'claude', label: 'Personal' },
+        { id: 'work', harness: 'codex' },
+      ] },
+    });
+    assert.deepEqual(permissions, ['read']);
+    for (const payload of [{}, { bridgeId: 'bridge', extra: true }]) {
+      const response = await send('invalid', payload);
+      assert.equal(response.success, false);
+      assert.deepEqual(response.data, { code: 'invalid' });
+    }
+    const count = responses.length;
+    await send('foreign', { bridgeId: 'another' });
+    assert.equal(responses.length, count);
+    deny = true;
+    const denied = await send('denied', { bridgeId: 'bridge' });
+    assert.equal(denied.success, false);
+    assert.deepEqual(denied.data, { code: 'permission_denied' });
+    await handler({ type: 'get_accounts', requestId: 'anonymous', payload: { bridgeId: 'bridge' } });
+    assert.equal(responses.at(-1)?.success, false);
+    const bare = createCommandHandler({ bridgeId: 'bridge', sessionController: {} as SessionController,
+      publishCommandResponse: async response => { responses.push(response); } });
+    await bare({ type: 'get_accounts', requestId: 'no-security', payload: { bridgeId: 'bridge' } }, verified);
+    assert.equal(responses.at(-1)?.success, false);
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test('model routing RPC validates payloads and dispatches to the injected service', async () => {
   const responses: CommandResponse[] = [];
   const gets: unknown[] = []; const sets: unknown[] = [];

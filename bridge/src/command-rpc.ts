@@ -8,6 +8,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { listNativeSessions } from './native-session-list.js';
+import { loadAccounts } from './accounts.js';
 import type { NativeSessionHarness, NativeSessionSummary } from './native-session-list.js';
 
 import { prReviewGeneration, toWireSession } from './session-wire.js';
@@ -347,6 +348,24 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
             if (result.ticket) deps.updateEffects.attachTicket(verified, result.ticket);
             response = { requestId: command.requestId, success: true, data: result.accepted as unknown as Record<string, unknown> };
           }
+          break;
+        }
+        case 'get_accounts': {
+          if (!deps.security || !verified) throw new BridgeSecurityError('approval_required');
+          await deps.security.policy.revalidate(verified.principal, 'read');
+          const payload = command.payload as Record<string, unknown> | null;
+          if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+            || payload.bridgeId !== bridgeId || Object.keys(payload).some(key => key !== 'bridgeId')) {
+            response = { requestId: command.requestId, success: false, error: 'Invalid accounts request', data: { code: 'invalid' } };
+            break;
+          }
+          let registered;
+          try { registered = loadAccounts().accounts; }
+          catch { throw new Error('Could not read accounts on this bridge'); }
+          const accounts = registered.map(({ id, harness, label }) => ({
+            id, harness, ...(label === undefined ? {} : { label }),
+          }));
+          response = { requestId: command.requestId, success: true, data: { accounts } };
           break;
         }
         case 'get_model_routing':

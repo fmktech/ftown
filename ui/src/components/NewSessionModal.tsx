@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
-import { ShellType } from "@/types";
+import { ShellType, type AccountHarness, type HarnessAccountSummary, type Session } from "@/types";
 import { BridgeInfo } from "@/hooks/useBridges";
 import { CreateSessionBridgeError, CreateSessionOptions } from "@/hooks/useSessions";
 import type { Command, CommandResponse } from "@/types";
@@ -14,6 +14,9 @@ export interface SessionDefaults {
   workingDir?: string;
   bridgeId?: string;
   shellType?: ShellType;
+  account?: string;
+  parentSessionId?: string;
+  allowedAccounts?: string[];
 }
 
 interface NewSessionModalProps {
@@ -23,6 +26,23 @@ interface NewSessionModalProps {
   bridges: BridgeInfo[];
   defaults?: SessionDefaults;
   sendCommand: (command: Command) => Promise<CommandResponse>;
+  sessions?: Session[];
+}
+
+const EMPTY_SESSIONS: Session[] = [];
+const ACCOUNT_ID = /^[a-z0-9-]{1,32}$/;
+type AccountsView = { bridgeId: string; status: "loading" | "ready" | "error" | "unsupported"; accounts: HarnessAccountSummary[]; error?: string };
+
+function parseAccounts(value: unknown): HarnessAccountSummary[] | null {
+  if (!value || typeof value !== "object" || !("accounts" in value) || !Array.isArray(value.accounts)) return null;
+  const accounts: HarnessAccountSummary[] = [];
+  for (const account of value.accounts) {
+    if (!account || typeof account !== "object" || typeof account.id !== "string" || account.id === "default" || !ACCOUNT_ID.test(account.id)
+      || (account.harness !== "claude" && account.harness !== "codex") || (account.label !== undefined && typeof account.label !== "string")
+      || accounts.some(candidate => candidate.id === account.id)) return null;
+    accounts.push({ id: account.id, harness: account.harness, ...(account.label ? { label: account.label } : {}) });
+  }
+  return accounts;
 }
 
 const FIREWORKS_MODELS_KEY = "ftown:fireworksModels";
@@ -320,13 +340,21 @@ function ProviderTokenHint({ provider, envVar, flavor }: { provider: string; env
   );
 }
 
-export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, sendCommand }: NewSessionModalProps) {
+export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, sendCommand, sessions = EMPTY_SESSIONS }: NewSessionModalProps) {
   const [name, setName] = useState("");
   const [workingDir, setWorkingDir] = useState("");
   const [topShell, setTopShell] = useState<TopShell>("claude");
   const [claudeFlavor, setClaudeFlavor] = useState<ClaudeFlavor>("standard");
   const shellType: ShellType = resolveShellType(topShell, claudeFlavor);
   const [bridgeId, setBridgeId] = useState("");
+  const [parentSessionId, setParentSessionId] = useState("");
+  const [account, setAccount] = useState("default");
+  const [accountChosen, setAccountChosen] = useState(false);
+  const [allowedAccounts, setAllowedAccounts] = useState<string[] | undefined>();
+  const [accountsView, setAccountsView] = useState<AccountsView | null>(null);
+  const [accountsReload, setAccountsReload] = useState(0);
+  const sendCommandRef = useRef(sendCommand);
+  sendCommandRef.current = sendCommand;
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [selectedClaudeSessionId, setSelectedClaudeSessionId] = useState<string | null>(null);
   const [selectedClaudeSummary, setSelectedClaudeSummary] = useState<string | null>(null);
@@ -359,6 +387,69 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
   const effectiveBridgeId = bridgeId || (bridges.length > 0 ? bridges[0].bridgeId : "");
   const selectedBridge = bridges.find((b) => b.bridgeId === effectiveBridgeId);
   const hostname = selectedBridge?.hostname ?? "";
+  const parents = sessions.filter(session => session.bridgeId === effectiveBridgeId);
+  const parent = parents.find(session => session.id === parentSessionId);
+  const resolvedParent = parent?.parentSessionId ? parents.find(session => session.id === parent.parentSessionId) : parent;
+  const directPolicy = parent?.allowedAccounts;
+  const resolvedPolicy = resolvedParent?.allowedAccounts;
+  const parentPolicy = directPolicy && resolvedPolicy
+    ? directPolicy.filter(id => resolvedPolicy.includes(id)) : directPolicy ?? resolvedPolicy;
+  const accountHarness: AccountHarness | null = shellType === "claude" || shellType === "codex" ? shellType : null;
+  const currentAccounts = accountsView?.bridgeId === effectiveBridgeId ? accountsView : null;
+  const accountsLoading = Boolean(effectiveBridgeId) && (!currentAccounts || currentAccounts.status === "loading");
+  const registeredAccounts = currentAccounts?.status === "ready" ? currentAccounts.accounts : [];
+  const choices = [
+    { id: "default", label: "Default account" },
+    ...registeredAccounts.filter(candidate => candidate.harness === accountHarness)
+      .sort((a, b) => a.id.localeCompare(b.id)).map(candidate => ({ id: candidate.id, label: candidate.label ? `${candidate.label} (${candidate.id})` : candidate.id })),
+  ].filter(candidate => parentPolicy === undefined || parentPolicy.includes(candidate.id));
+  const preferredAccount = parent ? resolvedParent?.account ?? "default" : defaults?.account ?? "default";
+  const missingPreferredAccount = accountHarness !== null && preferredAccount !== "default"
+    && !accountsLoading && !registeredAccounts.some(candidate => candidate.id === preferredAccount);
+  const needsReplacement = missingPreferredAccount && !accountChosen;
+  const selectedAccount = needsReplacement ? "" : choices.some(candidate => candidate.id === account) ? account
+    : choices.some(candidate => candidate.id === preferredAccount) ? preferredAccount : choices[0]?.id ?? "";
+  const policyChoices = [
+    { id: "default", label: "Default account" },
+    ...registeredAccounts.slice().sort((a, b) => a.id.localeCompare(b.id)).map(candidate => ({ id: candidate.id, label: `${candidate.label ?? candidate.id} (${candidate.harness})` })),
+  ].filter(candidate => parentPolicy === undefined || parentPolicy.includes(candidate.id));
+  const incompatibleInheritance = Boolean(parent && !accountHarness && resolvedParent?.account !== undefined);
+  const parentDisallowsDefault = Boolean(parent && !accountHarness && parentPolicy !== undefined && !parentPolicy.includes("default"));
+  const policyUnavailable = allowedAccounts !== undefined && (currentAccounts?.status !== "ready"
+    || allowedAccounts.some(id => !policyChoices.some(choice => choice.id === id)));
+  const accountBlocked = incompatibleInheritance || parentDisallowsDefault || policyUnavailable
+    || (accountHarness !== null && (accountsLoading || choices.length === 0 || needsReplacement));
+
+  useEffect(() => {
+    if (!isOpen || !effectiveBridgeId) return;
+    let cancelled = false;
+    setAccountsView({ bridgeId: effectiveBridgeId, status: "loading", accounts: [] });
+    void sendCommandRef.current({ type: "get_accounts", payload: { bridgeId: effectiveBridgeId }, requestId: crypto.randomUUID() })
+      .then(response => {
+        if (cancelled) return;
+        if (!response.success) {
+          const unsupported = response.error === "Unknown command type: get_accounts";
+          setAccountsView({ bridgeId: effectiveBridgeId, status: unsupported ? "unsupported" : "error", accounts: [], error: unsupported
+            ? "Update this computer's bridge to choose registered accounts." : "Could not load accounts from this computer." });
+          return;
+        }
+        const accounts = parseAccounts(response.data);
+        setAccountsView(accounts === null
+          ? { bridgeId: effectiveBridgeId, status: "error", accounts: [], error: "Could not read the accounts returned by this computer." }
+          : { bridgeId: effectiveBridgeId, status: "ready", accounts });
+      }).catch(() => {
+        if (!cancelled) setAccountsView({ bridgeId: effectiveBridgeId, status: "error", accounts: [], error: "Could not load accounts from this computer." });
+      });
+    return () => { cancelled = true; };
+  }, [isOpen, effectiveBridgeId, accountsReload]);
+
+  useEffect(() => {
+    setAccount(preferredAccount);
+    setAccountChosen(false);
+    setAllowedAccounts(defaults?.allowedAccounts);
+    setSelectedClaudeSessionId(null);
+    setSelectedClaudeSummary(null);
+  }, [isOpen, effectiveBridgeId, shellType, parentSessionId, preferredAccount, defaults?.account, defaults?.allowedAccounts]);
 
   const suggestedPaths = useMemo(() => {
     if (!hostname) return [];
@@ -415,6 +506,9 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
     setTopShell(top);
     setClaudeFlavor(flavor);
     setBridgeId(restoredBridgeId);
+    setParentSessionId(defaults?.parentSessionId ?? "");
+    setAccount(defaults?.account ?? "default");
+    setAllowedAccounts(defaults?.allowedAccounts);
     setSelectedClaudeSessionId(null);
     setSelectedClaudeSummary(null);
     setSelectedCursorSessionId(null);
@@ -452,6 +546,10 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
   const handleSubmit = useCallback(async (createMissingWorkingDir = false) => {
     setSubmitError(null);
     setMissingWorkingDir(null);
+    if (accountBlocked) {
+      setSubmitError(accountsLoading ? "Wait for accounts to finish loading." : "This parent does not allow an account for the selected shell.");
+      return;
+    }
     if (hostname && workingDir.trim()) {
       storePath(hostname, workingDir.trim());
     }
@@ -490,6 +588,9 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
         workingDir: workingDir.trim() || undefined,
         bridgeId: effectiveBridgeId || undefined,
         shellType,
+        ...(accountHarness ? { account: selectedAccount } : {}),
+        ...(parent ? { parentSessionId: parent.id } : {}),
+        ...(allowedAccounts !== undefined ? { allowedAccounts } : {}),
         claudeSessionId: selectedClaudeSessionId ?? undefined,
         cursorSessionId: selectedCursorSessionId ?? undefined,
         env,
@@ -554,7 +655,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
     setSelectedCursorSessionId(null);
     setSelectedCursorSummary(null);
     onClose();
-  }, [shellType, topShell, claudeFlavor, name, workingDir, effectiveBridgeId, hostname, selectedClaudeSessionId, selectedCursorSessionId, fireworksModels, zaiModels, grokModel, museModel, antigravityModel, piModel, kimiCodeModel, opencodeModel, autoCompactWindow, onSubmit, onClose]);
+  }, [shellType, topShell, claudeFlavor, name, workingDir, effectiveBridgeId, hostname, selectedClaudeSessionId, selectedCursorSessionId, fireworksModels, zaiModels, grokModel, museModel, antigravityModel, piModel, kimiCodeModel, opencodeModel, autoCompactWindow, onSubmit, onClose, accountBlocked, accountsLoading, accountHarness, selectedAccount, allowedAccounts, parent, policyChoices]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -840,6 +941,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
                   bridgeEditedRef.current = true;
                   pendingRestoredBridgeIdRef.current = null;
                   setBridgeId(e.target.value);
+                  setParentSessionId("");
                 }}
                 className={INPUT_CLASS + " text-sm"}
               >
@@ -850,6 +952,54 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
                 ))}
               </select>
             )}
+          </div>
+
+          {parents.length > 0 && <div>
+            <label htmlFor="ns-parent" className="block text-sm text-[var(--text-muted)] mb-1">Parent Session <span className="text-xs text-[var(--text-faint)]">(optional)</span></label>
+            <select id="ns-parent" className={INPUT_CLASS + " text-sm"} value={parent?.id ?? ""} onChange={event => setParentSessionId(event.target.value)}>
+              <option value="">No parent</option>
+              {parents.map(candidate => <option key={candidate.id} value={candidate.id}>{candidate.name || candidate.id}</option>)}
+            </select>
+          </div>}
+
+          <div className="space-y-3">
+            {accountHarness && <div>
+              <label htmlFor="ns-account" className="block text-sm text-[var(--text-muted)] mb-1">Account</label>
+              <select id="ns-account" className={INPUT_CLASS + " text-sm"} value={selectedAccount} disabled={accountsLoading || choices.length === 0}
+                aria-describedby="ns-account-help" onChange={event => { setAccount(event.target.value); setAccountChosen(true); setSelectedClaudeSessionId(null); setSelectedClaudeSummary(null); }}>
+                {needsReplacement && <option value="" disabled>Choose an account</option>}
+                {choices.length === 0 && <option value="">No allowed accounts</option>}
+                {choices.map(candidate => <option key={candidate.id} value={candidate.id}>{candidate.label}</option>)}
+              </select>
+              <p id="ns-account-help" className="mt-1 text-xs text-[var(--text-faint)]">
+                {accountsLoading ? "Loading accounts…" : parentPolicy !== undefined ? "Only accounts allowed by the parent are available." : "Uses the account configured on the selected computer."}
+              </p>
+              {needsReplacement && <p role="alert" className="mt-1 text-xs text-[var(--status-pending)]">The requested account could not be verified. Choose another account or retry loading accounts.</p>}
+            </div>}
+            {currentAccounts?.error && <div className="mt-1 flex items-center gap-2 text-xs text-[var(--status-pending)]" role="status">
+              <span>{currentAccounts.error}</span>
+              {currentAccounts.status === "error" && <button type="button" className="btn-ghost shrink-0" onClick={() => setAccountsReload(value => value + 1)}>Retry</button>}
+            </div>}
+            {incompatibleInheritance && <p role="alert" className="text-xs text-[var(--status-pending)]">This child shell cannot inherit the parent&apos;s account. Choose a compatible shell or a different parent.</p>}
+            {parentDisallowsDefault && !incompatibleInheritance && <p role="alert" className="text-xs text-[var(--status-pending)]">The parent does not allow the default account required by this child shell. Choose a compatible shell or a different parent.</p>}
+            {policyUnavailable && <p role="alert" className="text-xs text-[var(--status-pending)]">The child account restrictions cannot be verified. Load the account list or update the restrictions before creating this session.</p>}
+            <div>
+              <label className="flex min-h-9 items-center gap-2 text-sm text-[var(--text-muted)]">
+                <input type="checkbox" checked={allowedAccounts !== undefined} disabled={accountsLoading && allowedAccounts === undefined}
+                  onChange={event => setAllowedAccounts(event.target.checked ? policyChoices.map(candidate => candidate.id) : undefined)} />
+                Restrict accounts for child sessions
+              </label>
+              {allowedAccounts !== undefined && <fieldset className="mt-1 space-y-1 rounded-[var(--radius-sm)] border border-[var(--border-default)] p-2">
+                <legend className="px-1 text-xs text-[var(--text-muted)]">Allowed accounts for children</legend>
+                {policyChoices.map(candidate => <label key={candidate.id} className="flex min-h-9 items-center gap-2 text-xs text-[var(--text-secondary)]">
+                  <input type="checkbox" checked={allowedAccounts.includes(candidate.id)} onChange={event => setAllowedAccounts(current => event.target.checked
+                    ? [...(current ?? []), candidate.id] : (current ?? []).filter(id => id !== candidate.id))} />
+                  {candidate.label}
+                </label>)}
+                <p className="text-xs text-[var(--text-faint)]">Selecting none prevents children from using any account.</p>
+              </fieldset>}
+              {parentPolicy !== undefined && allowedAccounts === undefined && <p className="text-xs text-[var(--text-faint)]">Children inherit the parent&apos;s account restrictions.</p>}
+            </div>
           </div>
 
           <div>
@@ -946,7 +1096,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
             )
           )}
 
-          {(shellType === "claude" || shellType === "zai") && effectiveBridgeId && workingDir.trim() && (
+          {(shellType === "claude" && selectedAccount === "default" || shellType === "zai") && effectiveBridgeId && workingDir.trim() && (
             selectedClaudeSessionId ? (
               <div className="flex items-center gap-2 px-3 py-2 border border-[var(--accent)]/30 rounded-[var(--radius-sm)] bg-[var(--accent-dim)]">
                 <span className="text-xs text-[var(--accent)] flex-1 truncate font-mono">
@@ -1032,6 +1182,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
             <button
               type="button"
               onClick={() => void handleSubmit()}
+              disabled={accountBlocked}
               className="btn-accent"
             >
               Create Session

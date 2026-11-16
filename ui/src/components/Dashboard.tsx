@@ -17,7 +17,7 @@ import { useAllSessionEvents, type SessionActivity } from "@/hooks/useAllSession
 import type { SecurityCommand, SecurityCommandResults } from "@security/protocol";
 import { SecurityPanel, type SecurityBridge } from "./SecurityPanel";
 import { SecurityLockIcon } from "./SecurityLockIcon";
-import { SessionList } from "./SessionList";
+import { SessionList, SessionAccountBadge } from "./SessionList";
 import type { AttentionAnswerEntry } from "../../../bridge/src/attention-prompt-protocol";
 import type { AttentionAnswerSubmitResult } from "./AttentionAnswerForm";
 import { SessionInboxPage, SessionInboxTrigger, inboxEntries, inboxItemKey, isWithParent, waitingInboxCount, noticeKey, queueSessionReply, attentionAnswerSubmitResult, type InboxEntry } from "./SessionInbox";
@@ -556,9 +556,9 @@ PY`;
     if (selectedSessionId) retrySession(selectedSessionId);
   }, [selectedSessionId, retrySession]);
   const selectedTransportMode = selectedSessionId ? transport?.getMode(selectedSessionId) ?? "connecting" : null;
-  const sessionHeaderActions = selectedSession ? <SessionHeaderActions hasPreview={Boolean(selectedPreviewDescriptor)} previewOpen={previewOpen}
+  const sessionHeaderActions = selectedSession ? <><SessionAccountBadge account={selectedSession.account} /><SessionHeaderActions hasPreview={Boolean(selectedPreviewDescriptor)} previewOpen={previewOpen}
     running={selectedSession.status === "running"} relaunchLabel={sessionRelaunchLabel ?? null}
-    onPreview={() => { setPreviewOpen(true); if (attentionShown) hideAttention(false); }} onStop={handleStopSession} onRelaunch={handleRelaunchSession} hasReview={!!reviewIdentity} onReview={openReview} hasWaiting={attentionMarker !== null && !inboxOpen && !attentionShown} onWaiting={showAttention} /> : null;
+    onPreview={() => { setPreviewOpen(true); if (attentionShown) hideAttention(false); }} onStop={handleStopSession} onRelaunch={handleRelaunchSession} hasReview={!!reviewIdentity} onReview={openReview} hasWaiting={attentionMarker !== null && !inboxOpen && !attentionShown} onWaiting={showAttention} /></> : null;
 
   // Claude's Stop hook does not fire on user interrupt, so a lone ESC leaves the
   // dashboard stuck on "thinking"/"tool_use". Optimistically clear it locally.
@@ -802,6 +802,8 @@ PY`;
       workingDir: session.workingDir,
       bridgeId: session.bridgeId,
       shellType: session.shellType,
+      account: session.account,
+      allowedAccounts: session.allowedAccounts,
     });
     setShowNewSession(true);
   }, []);
@@ -1444,6 +1446,7 @@ PY`;
         onClose={() => { setShowNewSession(false); setSessionDefaults(undefined); }}
         onSubmit={handleCreateSession}
         bridges={readyBridges}
+        sessions={sessions}
         defaults={sessionDefaults}
         sendCommand={rpc.sendCommand}
       />

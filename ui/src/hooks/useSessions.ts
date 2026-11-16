@@ -63,9 +63,10 @@ function acceptSessionRow(value: unknown): Session | null {
 function isSessionRow(value: unknown): value is Session {
   if (!value || typeof value !== "object") return false;
   const row = value as Record<string, unknown>;
-  const optionalStrings = ["prompt", "model", "workingDir", "shellType", "claudeSessionId", "cursorSessionId", "codexSessionId", "piSessionId", "piSessionFile", "opencodeSessionId", "museSessionId", "grokSessionId", "antigravitySessionId", "command", "parentSessionId", "loopId"];
+  const optionalStrings = ["prompt", "model", "workingDir", "shellType", "account", "claudeSessionId", "cursorSessionId", "codexSessionId", "piSessionId", "piSessionFile", "opencodeSessionId", "museSessionId", "grokSessionId", "antigravitySessionId", "command", "parentSessionId", "loopId"];
   return (row.preview === undefined || isPreviewDescriptor(row.preview))
     && optionalStrings.every(key => row[key] === undefined || typeof row[key] === "string")
+    && (row.allowedAccounts === undefined || (Array.isArray(row.allowedAccounts) && row.allowedAccounts.every(id => typeof id === "string")))
     && (row.usage === undefined || isSessionUsage(row.usage))
     && (row.runtime === undefined || row.runtime === "tmux" || row.runtime === "direct")
     && typeof row.id === "string" && row.id.length > 0
@@ -125,6 +126,9 @@ export interface CreateSessionOptions {
   workingDir?: string;
   bridgeId?: string;
   shellType?: ShellType;
+  account?: string;
+  allowedAccounts?: string[];
+  parentSessionId?: string;
   claudeSessionId?: string;
   cursorSessionId?: string;
   codexSessionId?: string;
@@ -455,6 +459,9 @@ export function useSessions(
         workingDir: options?.workingDir,
         bridgeId: options?.bridgeId,
         shellType,
+        ...(options?.account !== undefined ? { account: options.account } : {}),
+        ...(options?.allowedAccounts !== undefined ? { allowedAccounts: options.allowedAccounts } : {}),
+        ...(options?.parentSessionId ? { parentSessionId: options.parentSessionId } : {}),
         claudeSessionId: options?.claudeSessionId,
         cursorSessionId: options?.cursorSessionId,
         codexSessionId: options?.codexSessionId,

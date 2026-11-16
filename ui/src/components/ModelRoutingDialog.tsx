@@ -41,15 +41,22 @@ function AvailabilityBadge({ availability, title }: { availability: QuotaAvailab
   return <span title={title} className="inline-flex shrink-0 items-center rounded border px-1.5 py-px text-[10px] font-medium leading-4" style={{ color, borderColor: color }}>{availability}</span>;
 }
 
-function Subscriptions({ report }: { report: QuotaReport }) {
+export function Subscriptions({ report }: { report: QuotaReport }) {
   if (report.providers.length === 0) return <p className="text-xs text-[var(--text-muted)]">No subscriptions reported by this bridge.</p>;
+  const rows = report.providers.slice().sort((a, b) => {
+    const left = a.account ?? "default";
+    const right = b.account ?? "default";
+    return left === right ? 0 : left === "default" ? -1 : right === "default" ? 1 : left.localeCompare(right);
+  });
   return <ul className="divide-y divide-[var(--border-muted)] rounded-lg border border-[var(--border-muted)] bg-[var(--bg-elevated)] text-xs">
-    {report.providers.map(row => {
-      const routing = report.routing.find(entry => entry.provider === row.provider);
+    {rows.map(row => {
+      const account = row.account ?? "default";
+      const routing = report.routing.find(entry => entry.provider === row.provider && (entry.account ?? "default") === account);
       const problem = statusLabel[row.status];
       const summaryLabel = providerSummaryLabel(row, routing);
-      return <li key={row.provider} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-1.5">
+      return <li key={`${row.provider}:${account}`} aria-label={`${row.provider} account ${account}`} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-1.5">
         <span className="w-16 shrink-0 font-[family-name:var(--font-mono)] text-[var(--text-primary)]">{row.provider}</span>
+        <span className="max-w-32 truncate font-mono text-[var(--text-muted)]" title={`Account: ${account}`}>{account === "default" ? "Default" : account}</span>
         <span className="min-w-0 max-w-44 truncate text-[var(--text-secondary)]" title={summaryLabel !== "–" ? summaryLabel : undefined}>{summaryLabel}</span>
         {problem ? <span className="text-[var(--status-pending)]" title={row.message ?? undefined}>{problem}</span> : <>
           <span className="text-[var(--text-secondary)]"><span className="text-[var(--text-muted)]">5h </span>{windowLeft(row, "five_hour")}</span>
@@ -62,15 +69,15 @@ function Subscriptions({ report }: { report: QuotaReport }) {
   </ul>;
 }
 
-function PickRow({ report, tierIndex, pick, index, count, disabled, originName, onChange, onMove, onRemove }: {
+export function PickRow({ report, tierIndex, pick, index, count, disabled, originName, onChange, onMove, onRemove }: {
   report: QuotaReport; tierIndex: number; pick: RoutingPick; index: number; count: number; disabled: boolean; originName: string | null;
   onChange: (pick: RoutingPick) => void; onMove: (direction: -1 | 1) => void; onRemove: () => void;
 }) {
   const noteId = useId();
   const label = `Tier ${tierIndex + 1} pick ${index + 1}`;
   const providers = providerOptions(report);
-  const models = modelOptions(report, pick.provider);
-  const { efforts, defaultEffort } = effortOptions(report, pick.provider, pick.model);
+  const models = modelOptions(report, pick.provider, pick.account);
+  const { efforts, defaultEffort } = effortOptions(report, pick.provider, pick.model, pick.account);
   const pickStatus = resolvePickAvailability(report, originName, pick);
   const annotation = findAnnotatedPick(report.tiers, originName, pick);
   const problem = annotation?.problem ?? null;
@@ -80,8 +87,13 @@ function PickRow({ report, tierIndex, pick, index, count, disabled, originName, 
   return <li className="rounded-md border border-[var(--border-muted)] bg-[var(--bg-base)] p-2">
     <div className="flex flex-wrap items-center gap-2">
       <span className="w-5 shrink-0 text-right font-[family-name:var(--font-mono)] text-xs text-[var(--text-muted)]" aria-hidden="true">{index + 1}</span>
+      {pick.account && pick.account !== "default" && <span className="max-w-28 truncate text-xs text-[var(--text-muted)]" title={`Account: ${pick.account}`}>{pick.account}</span>}
       <select aria-label={`${label} CLI`} aria-describedby={describedBy} className={`${field} w-28`} value={pick.provider} disabled={disabled}
-        onChange={event => onChange(normalizePick(report, { ...pick, provider: event.target.value as QuotaProviderId }))}>
+        onChange={event => {
+          const provider = event.target.value as QuotaProviderId;
+          const { account: _account, ...rest } = pick;
+          onChange(normalizePick(report, provider === pick.provider ? pick : { ...rest, provider }));
+        }}>
         {providers.map(option => <option key={option.provider} value={option.provider} disabled={!option.available && option.provider !== pick.provider} title={option.reason ?? undefined}>{option.provider}{option.available ? "" : " (unavailable)"}</option>)}
       </select>
       <select aria-label={`${label} model`} aria-describedby={describedBy} className={`${field} min-w-0 max-w-full flex-1 basis-40`} value={pick.model} disabled={disabled}
