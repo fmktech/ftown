@@ -595,7 +595,7 @@ test('account listing requires read permission and returns only public account m
   process.env.HOME = home;
   try {
     saveAccounts({ version: 1, accounts: [
-      { id: 'personal', harness: 'claude', label: 'Personal', configDir: join(home, 'personal') },
+      { id: 'personal', harness: 'claude', label: 'Personal', configDir: join(home, 'personal'), ...{ privateNote: 'not public' } },
       { id: 'work', harness: 'codex', configDir: join(home, 'work') },
     ] });
     const responses: CommandResponse[] = [];
@@ -614,8 +614,10 @@ test('account listing requires read permission and returns only public account m
     };
     assert.deepEqual(await send('list', { bridgeId: 'bridge' }), {
       requestId: 'list', success: true, data: { accounts: [
-        { id: 'personal', harness: 'claude', label: 'Personal' },
-        { id: 'work', harness: 'codex' },
+        { id: 'default', harness: 'claude', isDefault: true },
+        { id: 'default', harness: 'codex', isDefault: true },
+        { id: 'personal', harness: 'claude', label: 'Personal', isDefault: false },
+        { id: 'work', harness: 'codex', isDefault: false },
       ] },
     });
     assert.deepEqual(permissions, ['read']);

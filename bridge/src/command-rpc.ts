@@ -362,9 +362,13 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
           let registered;
           try { registered = loadAccounts().accounts; }
           catch { throw new Error('Could not read accounts on this bridge'); }
-          const accounts = registered.map(({ id, harness, label }) => ({
-            id, harness, ...(label === undefined ? {} : { label }),
-          }));
+          const accounts = [
+            { id: 'default', harness: 'claude', isDefault: true },
+            { id: 'default', harness: 'codex', isDefault: true },
+            ...registered.map(({ id, harness, label }) => ({
+              id, harness, ...(label === undefined ? {} : { label }), isDefault: false,
+            })),
+          ];
           response = { requestId: command.requestId, success: true, data: { accounts } };
           break;
         }
