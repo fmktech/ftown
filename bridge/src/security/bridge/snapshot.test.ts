@@ -195,21 +195,19 @@ describe('AtomicSnapshot identity cache', () => {
     );
   });
 
-  it('does not cache reads taken right after a write (racy window)', async () => {
-    for (let attempt = 0; attempt < 10; attempt++) {
-      sync({ n: 1, items: [] });
-      const wrote = Date.now();
-      parses = 0;
-      const snap = make();
-      await snap.read((s) => s.n);
-      await snap.read((s) => s.n);
-      if (Date.now() - wrote >= 40) continue;
-      assert.equal(parses, 2);
-      sync({ n: 2, items: [] });
-      assert.equal(await snap.read((s) => s.n), 2);
-      return;
-    }
-    assert.fail('could not complete two reads within 40 ms of a write');
+  it('does not cache files with recent timestamps (racy window)', async () => {
+    sync({ n: 1, items: [] });
+    // Future timestamps model clock skew and stay inside the racy window for
+    // the whole test, independent of filesystem timestamp precision/load.
+    const recent = new Date(Date.now() + 5000);
+    utimesSync(file, recent, recent);
+    parses = 0;
+    const snap = make();
+    await snap.read((s) => s.n);
+    await snap.read((s) => s.n);
+    assert.equal(parses, 2);
+    sync({ n: 2, items: [] });
+    assert.equal(await snap.read((s) => s.n), 2);
   });
 
   it('maps a corrupt file to storage_unavailable', async () => {

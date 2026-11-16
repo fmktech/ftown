@@ -17,6 +17,8 @@ import {
 import { homedir } from 'node:os';
 import { join, relative } from 'node:path';
 
+import { claudeConfigDir, opencodeConfigDir } from './config-dirs.js';
+
 export function ftownSkillPath(skillName: string): string {
   return join(homedir(), '.ftown', 'skills', skillName);
 }
@@ -24,18 +26,14 @@ export function ftownSkillPath(skillName: string): string {
 /**
  * OpenCode skills directory. `OPENCODE_CONFIG_DIR` replaces the config
  * directory itself. Otherwise skills live under `$XDG_CONFIG_HOME/opencode`
- * or `~/.config/opencode`.
+ * or `~/.config/opencode` — the same directory the plugin installer uses.
  */
 export function opencodeSkillsDir(home: string, env: NodeJS.ProcessEnv = process.env): string {
-  const override = env.OPENCODE_CONFIG_DIR;
-  if (typeof override === 'string' && override.trim().length > 0) return join(override.trim(), 'skills');
-  const xdg = env.XDG_CONFIG_HOME;
-  const configHome = typeof xdg === 'string' && xdg.trim().length > 0 ? xdg.trim() : join(home, '.config');
-  return join(configHome, 'opencode', 'skills');
+  return join(opencodeConfigDir(home, env), 'skills');
 }
 
 function skillLinkDirs(home: string, env: NodeJS.ProcessEnv): readonly string[] {
-  return [join(home, '.agents', 'skills'), join(home, '.claude', 'skills'), opencodeSkillsDir(home, env)];
+  return [join(home, '.agents', 'skills'), join(claudeConfigDir(home, env), 'skills'), opencodeSkillsDir(home, env)];
 }
 
 /** Relative symlink target from a skill link directory back to the canonical skill. */

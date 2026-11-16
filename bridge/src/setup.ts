@@ -19,6 +19,13 @@ import { ensureFtownOnPath } from './ensure-ftown-path.js';
 import { readSetupState, writeSetupState, assertSetupReady, acquireSetupLock, assertSetupVersion } from './setup-state.js';
 import { runSetupMigrations } from './setup-migrations.js';
 import { assertUpdateReservationAllowed } from './update-handoff.js';
+import {
+  defaultPreflightEnv,
+  formatPreflight,
+  runPreflight,
+  type PreflightEnv,
+  type PreflightReport,
+} from './setup-preflight.js';
 
 export interface IntegrationResult { name: string; status: 'installed' | 'skipped'; detail?: string }
 export interface SetupDependencies {
@@ -104,14 +111,30 @@ export async function performSetup(options: { root?: string; repair?: boolean; d
   } finally { release(); }
 }
 
-export async function runSetup(argv: string[]): Promise<number> {
+export interface SetupCliDeps {
+  /** Override the environment probe or the report builder for tests. */
+  preflightEnv?: PreflightEnv;
+  preflight?: (env: PreflightEnv) => PreflightReport;
+  /** Override the installer so a failing preflight can be proven to block it. */
+  perform?: typeof performSetup;
+}
+
+export async function runSetup(argv: string[], deps: SetupCliDeps = {}): Promise<number> {
   if (argv.includes('--help') || argv.includes('-h')) {
-    console.log('Usage: ftown setup [--repair]\nInstall or upgrade local runtime, integrations, skill and PATH. --repair rechecks current setup and cleanup.');
+    console.log('Usage: ftown setup [--repair]\nInstall or upgrade local runtime, integrations, skill and PATH. --repair rechecks current setup and cleanup.\nChecks tmux, git, jq, curl, a usable shell and the Node version first: fails only on required checks, warns on the rest.');
     return 0;
   }
   if (argv.some((arg) => arg !== '--repair')) { console.error('Usage: ftown setup [--repair]'); return 1; }
   try {
-    const result = await performSetup({ repair: argv.includes('--repair') });
+    const env = deps.preflightEnv ?? defaultPreflightEnv();
+    const report = (deps.preflight ?? runPreflight)(env);
+    for (const line of formatPreflight(report)) console.log(line);
+    if (!report.ok) {
+      for (const problem of report.problems) console.error(`ftown setup: ${problem}`);
+      if (report.hint) console.error(`ftown setup: ${report.hint}`);
+      return 1;
+    }
+    const result = await (deps.perform ?? performSetup)({ repair: argv.includes('--repair') });
     console.log(`ftown setup ${result.version}: ${result.action}`);
     for (const integration of result.integrations) console.log(`  ${integration.name}: ${integration.status}${integration.detail ? ` (${integration.detail})` : ''}`);
     console.log('Open a new shell for PATH changes; run ftown start when ready.');

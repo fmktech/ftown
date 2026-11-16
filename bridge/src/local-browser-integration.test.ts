@@ -13,6 +13,7 @@ import { SessionStore } from './session-store.js';
 import { SessionController } from './session-controller.js';
 import { CentrifugoClient } from './centrifugo-client.js';
 import { createCommandHandler } from './command-rpc.js';
+import { AttentionStore } from './attention-store.js';
 import { removeFtownSession } from './remove-ftown-session.js';
 import { generateEndpoint, open, seal } from './security/crypto.js';
 import { BridgeSecurityService, applicationJson } from './security/bridge/security.js';
@@ -31,6 +32,8 @@ async function harness() {
   const security = new BridgeSecurityService(identity, BRIDGE, dataDir, { relayUserId: 'local-user',
     relayUrl: 'wss://broker.example.test/connection/websocket', browserOrigin: ORIGIN });
   const store = new SessionStore(dataDir);
+  // The bridge keeps a session's attention ledger in that session's directory.
+  const attentionStore = new AttentionStore(id => store.sessionDir(id));
   const launched: string[] = []; const stopped: string[] = []; const inputs: Array<[string, string]> = [];
   const runner = { run: (id: string) => launched.push(id), stop: (id: string) => { stopped.push(id); return true; },
     getPreferredRuntime: () => 'direct', isRunning: (id: string) => launched.includes(id) && !stopped.includes(id) } as unknown as ProcessRunner;
@@ -44,9 +47,10 @@ async function harness() {
   const controller = new SessionController({ store, runner, sessionFactory: factory, publishSessionUpdate: session => centrifugo.publishSessionUpdate('local-user', session),
     removeSession: (id, options) => removeFtownSession({ store, runner, centrifugo, userId: 'local-user' }, id, options) });
   localApi.setSessionController(controller);
+  localApi.setAttentionStore(attentionStore);
   localApi.setSecurity(security, { protocolVersion: 1, ownerId: OWNER, bridgeId: BRIDGE, endpoint: identity.endpoint, relayUserId: 'local-user' }, async message => {
     let response: CommandResponse | undefined;
-    await createCommandHandler({ bridgeId: BRIDGE, security, sessionController: controller, publishCommandResponse: async value => { response = value; } })
+    await createCommandHandler({ bridgeId: BRIDGE, security, sessionController: controller, attentionStore, publishCommandResponse: async value => { response = value; } })
       (message.application.data as never, message);
     return applicationJson({ type: 'command_response', response });
   });
@@ -87,7 +91,7 @@ async function harness() {
   const rpc = (type: string, payload: Record<string, unknown> = {}) => { const requestId = randomUUID();
     return request({ type: 'application', route: { kind: 'command', command: type, requestId, sessionId: typeof payload.sessionId === 'string' ? payload.sessionId : null },
       data: applicationJson({ type, requestId, payload: { ...payload, bridgeId: BRIDGE } }), mcp: null }); };
-  return { port, dataDir, security, identity, browser, inputs, launched, stopped, store, rpc, request, pair, packet, decoded,
+  return { port, dataDir, security, identity, browser, inputs, launched, stopped, store, attentionStore, rpc, request, pair, packet, decoded,
     async close() { stopPublication(); loopback.closeAll(); localApi.getHttpServer()?.closeAllConnections(); localApi.stop(); await security.close(); rmSync(dataDir, { recursive: true, force: true }); } };
 }
 
@@ -105,6 +109,26 @@ test('real encrypted enrollment controls sessions and streams local events while
     assert.equal(update.events[0].data.session.id, id);
     assert.equal((await h.rpc('remove_session', { sessionId: id })).response.success, true);
     assert.equal(await h.store.loadSession(id), null); assert.ok(h.stopped.includes(id));
+  } finally { await h.close(); }
+});
+
+test('an attention answer always gets one typed error through the encrypted command path', { timeout: 15000 }, async () => {
+  const h = await harness();
+  try {
+    await h.pair();
+    const created = await h.rpc('create_session', { shellType: 'shell', command: 'printf local', name: 'Child', workingDir: h.dataDir });
+    assert.equal(created.response.success, true);
+    const sessionId = created.response.data.session.id as string;
+    // A durable notice with no question: the bridge answers, it never stays silent.
+    const notice = await h.attentionStore.record(sessionId, 'Notification', { notification_type: 'agent_needs_input', title: 'Work complete', message: 'Review the result and checks.' });
+    const answered = await h.rpc('answer_session_attention', { sessionId, eventId: notice!.id, answers: [{ selected: [0] }] });
+    assert.equal(answered.response.success, false);
+    assert.equal(answered.response.data.code, 'attention_not_answerable');
+    // A retired session: one typed error, not a bare string and not silence.
+    assert.equal((await h.rpc('remove_session', { sessionId })).response.success, true);
+    const retired = await h.rpc('answer_session_attention', { sessionId, eventId: notice!.id, answers: [{ selected: [0] }] });
+    assert.equal(retired.response.success, false);
+    assert.equal(retired.response.data.code, 'session_unavailable');
   } finally { await h.close(); }
 });
 

@@ -2,7 +2,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSy
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, it } from 'node:test';
+import { afterEach, beforeEach, describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { installFtownSkill, removeFtownSkill, retireBundledAutomationAssets, retireBundledAgentAssets } from './install-ftown-skill.js';
@@ -45,6 +45,18 @@ describe('ftown skill installer', () => {
     if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
     else process.env.XDG_CONFIG_HOME = savedXdg;
     rmSync(home, { recursive: true, force: true });
+  });
+
+  it('links Claude skills under CLAUDE_CONFIG_DIR', () => {
+    const previous = process.env.CLAUDE_CONFIG_DIR;
+    try {
+      process.env.CLAUDE_CONFIG_DIR = join(home, 'claude-config');
+      installFtownSkill('ftown', bundled);
+      assert.equal(existsSync(join(home, 'claude-config', 'skills', 'ftown')), true);
+      assert.equal(existsSync(join(home, '.claude', 'skills', 'ftown')), false);
+    } finally {
+      if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = previous;
+    }
   });
 
   it('installs one canonical skill and executable bundled scripts', () => {
@@ -252,4 +264,23 @@ exec node "${join(ftown, 'ftown-workflows-cli.js')}" "$@"
     assert.equal(existsSync(join(home, '.config', 'opencode', 'skills', 'ftown')), false);
   });
 
+});
+
+// Tests in this module own temporary homes and must not access inherited harness paths.
+const inheritedPathOverrides: NodeJS.ProcessEnv = {};
+const pathOverrideNames = [
+  'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME',
+  'OPENCODE_CONFIG_DIR', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME',
+] as const;
+before(() => {
+  for (const name of pathOverrideNames) {
+    inheritedPathOverrides[name] = process.env[name];
+    delete process.env[name];
+  }
+});
+after(() => {
+  for (const name of pathOverrideNames) {
+    const value = inheritedPathOverrides[name];
+    if (value === undefined) delete process.env[name]; else process.env[name] = value;
+  }
 });

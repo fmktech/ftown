@@ -3,6 +3,7 @@ import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
+import { codexHome } from './config-dirs.js';
 
 import { canonicalNotifyPath, isFtownNotifyCommand } from './install-notify-script.js';
 import { isFtownMailPumpCommand } from './hook-installer.js';
@@ -97,7 +98,7 @@ export function ensureCodexHooks(
   harnessBinPath: string,
   notifyScriptPath: string = canonicalNotifyPath(),
 ): boolean {
-  const hooksPath = join(homedir(), '.codex', 'hooks.json');
+  const hooksPath = join(codexHome(), 'hooks.json');
 
   let raw: string;
   try {
@@ -214,7 +215,7 @@ export function ensureCodexWorkdirTrust(dir: string): void {
     // Path may not exist yet; fall back to the input verbatim.
   }
 
-  const configPath = join(homedir(), '.codex', 'config.toml');
+  const configPath = join(codexHome(), 'config.toml');
 
   let raw = '';
   try {

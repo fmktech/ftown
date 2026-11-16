@@ -20,6 +20,7 @@ import {
   run,
 } from './ftown-env-cli.js';
 import { loadProviderEnv } from './provider-env-store.js';
+import { runPreflight } from './setup-preflight.js';
 
 /** Capture console.log lines produced while running `fn`, restoring it after. */
 function captureLog(fn: () => void): string[] {
@@ -163,6 +164,12 @@ describe('buildDoctorReport', () => {
     );
     assert.deepStrictEqual(report.blocked, []);
   });
+
+  it('carries the environment preflight when one is supplied', () => {
+    const preflight = runPreflight();
+    const report = buildDoctorReport({}, {}, preflight);
+    assert.strictEqual(report.preflight, preflight);
+  });
 });
 
 describe('ftown-env CLI commands (HOME-overridden)', () => {
@@ -211,6 +218,12 @@ describe('ftown-env CLI commands (HOME-overridden)', () => {
 
   it('rejects on an unknown command (handled as exit-1 by main)', async () => {
     await assert.rejects(run(['bogus']), /Unknown command/);
+  });
+
+  it('doctor prints the same environment preflight as setup', async () => {
+    const out = (await captureLogAsync(() => run(['doctor']))).join('\n');
+    assert.match(out, /ftown preflight \(/);
+    assert.match(out, /\[required\]/);
   });
 });
 

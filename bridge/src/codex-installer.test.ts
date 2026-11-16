@@ -1,10 +1,10 @@
-import { describe, it } from 'node:test';
+import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { ensureCodexHooks } from './codex-installer.js';
+import { ensureCodexHooks, ensureCodexWorkdirTrust } from './codex-installer.js';
 
 function restoreHome(realHome: string | undefined): void {
   if (realHome === undefined) delete process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
@@ -88,4 +88,48 @@ describe('ensureCodexHooks', () => {
       rmSync(home, { recursive: true, force: true });
     }
   });
+});
+
+it('installs hooks and trust in CODEX_HOME and defaults when blank', () => {
+  const key = process.platform === 'win32' ? 'USERPROFILE' : 'HOME';
+  const previousHome = process.env[key];
+  const previousConfig = process.env.CODEX_HOME;
+  const home = mkdtempSync(join(tmpdir(), 'ftown-codex-home-'));
+  process.env[key] = home;
+  try {
+    process.env.CODEX_HOME = join(home, 'custom');
+    assert.equal(ensureCodexHooks(join(home, 'harness'), join(home, 'notify')), true);
+    ensureCodexWorkdirTrust(home);
+    assert.equal(existsSync(join(home, 'custom', 'hooks.json')), true);
+    assert.match(readFileSync(join(home, 'custom', 'config.toml'), 'utf8'), /trust_level = "trusted"/);
+    assert.equal(existsSync(join(home, '.codex')), false);
+    process.env.CODEX_HOME = ' ';
+    assert.equal(ensureCodexHooks(join(home, 'harness'), join(home, 'notify')), true);
+    ensureCodexWorkdirTrust(home);
+    assert.equal(existsSync(join(home, '.codex', 'hooks.json')), true);
+    assert.equal(existsSync(join(home, '.codex', 'config.toml')), true);
+  } finally {
+    restoreHome(previousHome);
+    if (previousConfig === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previousConfig;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// Tests in this module own temporary homes and must not access inherited harness paths.
+const inheritedPathOverrides: NodeJS.ProcessEnv = {};
+const pathOverrideNames = [
+  'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME',
+  'OPENCODE_CONFIG_DIR', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME',
+] as const;
+before(() => {
+  for (const name of pathOverrideNames) {
+    inheritedPathOverrides[name] = process.env[name];
+    delete process.env[name];
+  }
+});
+after(() => {
+  for (const name of pathOverrideNames) {
+    const value = inheritedPathOverrides[name];
+    if (value === undefined) delete process.env[name]; else process.env[name] = value;
+  }
 });

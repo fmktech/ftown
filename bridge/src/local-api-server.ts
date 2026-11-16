@@ -1917,9 +1917,9 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         ? this.terminalManager.allLines(sessionId)
         : (await this.store.loadTerminalLog(sessionId)).split('\n');
 
-      let indexes: number[] | null;
+      let result: Awaited<ReturnType<typeof boundedMatchIndexes>>;
       try {
-        indexes = await boundedMatchIndexes(pattern, allLines);
+        result = await boundedMatchIndexes(pattern, allLines);
       } catch (error) {
         if (error instanceof GrepBusyError) {
           jsonResponse(res, 429, { error: 'Too many concurrent searches' });
@@ -1928,13 +1928,17 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         jsonResponse(res, 400, { error: 'Invalid regex pattern' });
         return;
       }
-      if (indexes === null) {
+      if (result.status === 'timeout' && result.phase === 'match') {
         jsonResponse(res, 400, { error: 'Pattern too complex' });
+        return;
+      }
+      if (result.status !== 'completed') {
+        jsonResponse(res, 503, { error: 'Search worker unavailable' });
         return;
       }
 
       const matches: { lineNumber: number; text: string; before?: string[]; after?: string[] }[] = [];
-      for (const i of indexes) {
+      for (const i of result.indexes) {
         const entry: { lineNumber: number; text: string; before?: string[]; after?: string[] } = {
           lineNumber: i + 1,
           text: allLines[i],
