@@ -97,3 +97,13 @@ The helper must remain unpaired when it returns, so it exposes a bounded `bridge
 | Task | Tier / model / effort | Exclusive writable files | Acceptance |
 | --- | --- | --- | --- |
 | Gate account E2E on readiness | Tier 1 / `gpt-6.1-terra` / `medium` | `e2e/helpers/ledger-bridge.ts`, `e2e/scripts/ci-fixtures.test.mjs`, `e2e/tests/harness-accounts.spec.ts` | Add bounded `IsolatedBridge.waitReady()` over captured process output; call it after pairing in the account test before dashboard interaction. Cover delayed readiness, timeout and process exit. Do not alter app command/security behavior or run local E2E/browser/server/stack/CI, install dependencies or perform Git operations. Root owns focused helper tests, CI and Git. |
+
+## PR #270 verify and pin the scratch bridge build
+
+Parent requested explicit evidence that each E2E scratch bridge is running this PR's 0.30.29 build. Current CI builds `bridge/dist` from the checked-out PR in `scripts/ci/run-job.sh`, `startIsolatedBridge` runs `setup` from that dist (which copies to `$HOME/.ftown/cli`), and currently spawns `bridge/dist/index.js` directly. Implement an explicit launched-path/version diagnostic and launch the setup-installed copy after verifying its package version matches the build source. Version remains 0.30.29.
+
+| Task | Tier / model / effort | Exclusive writable files | Acceptance |
+| --- | --- | --- | --- |
+| Pin scratch bridge to verified PR build | Tier 1 / `gpt-6.1-terra` / `medium` | `e2e/helpers/ledger-bridge.ts`, `e2e/scripts/ci-fixtures.test.mjs` | At startup, record the scratch executable path and source/install package versions in captured test bridge output. Launch `$scratchHome/.ftown/cli/dist/index.js` (the runtime installed by setup) only after verifying its version equals `bridge/package.json`; fail clearly if files/versions differ. Add focused fixture-level coverage for path/version selection. Do not run local E2E/browser/server/stack, CI, install deps or perform Git. Root owns test runs, push, and CI. |
+
+Scratch-runtime audit implementation: `isolatedBridgeRuntime()` now verifies scratch `~/.ftown/cli/package.json` version matches the checkout's `bridge/package.json`, checks the built `index.js`, `command-rpc.js`, and security permission module bytes against the checkout dist, and returns the installed runtime entrypoint. `startIsolatedBridge` logs the entrypoint and both versions into its captured output and launches that verified installed copy. The focused fixture suite passed 11/11; root's `npx tsc --noEmit` in `e2e/` passed. Current-head CI is still running; use its account E2E attachment to confirm the runtime diagnostic and picker behavior.
