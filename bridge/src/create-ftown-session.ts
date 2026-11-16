@@ -21,6 +21,7 @@ import { registerSessionWorkspace } from './session-registry.js';
 import { GitWorktrees } from './worktrees.js';
 import { WorktreeError, type SessionWorktree, type WorktreeApi } from './coordination/contract-b.js';
 import type { SessionPlan } from './coordination/contract-c.js';
+import { detectWsl2, isUnderWslMnt, wslMntWorkdirWarning, type Wsl2Probe } from './wsl2.js';
 
 import type { CentrifugoClient } from './centrifugo-client.js';
 import type { ProcessRunner } from './claude-runner.js';
@@ -65,6 +66,23 @@ export interface CreateFtownSessionDeps {
   worktrees?: Pick<WorktreeApi, 'create' | 'remove'>;
   /** Optional plan store (contract-c): enables `--plan-item` child creation. */
   planStore?: CreatePlanStoreDep;
+  /** Injectable WSL2 probe; defaults to reading the kernel release files. */
+  isWsl2?: Wsl2Probe;
+  /** Sink for operator-facing warnings; defaults to console.warn. */
+  warn?: (message: string) => void;
+}
+
+function defaultWarn(message: string): void {
+  console.warn(message);
+}
+
+/** Warn (under WSL2 only) when a session workdir lives on the slow 9p /mnt mount. */
+function warnIfWslMntWorkdir(deps: CreateFtownSessionDeps, workingDir: string | undefined): void {
+  if (!workingDir) return;
+  const isWsl2 = deps.isWsl2 ?? detectWsl2;
+  if (isWsl2() && isUnderWslMnt(workingDir)) {
+    (deps.warn ?? defaultWarn)(wslMntWorkdirWarning(workingDir));
+  }
 }
 
 export interface CreateFtownSessionInput {
@@ -451,6 +469,8 @@ async function relaunchFtownSessionImpl(
 
   await staggerHarnessSpawn(session.shellType);
 
+  warnIfWslMntWorkdir(deps, session.workingDir);
+
   const terminalSize = deps.getTerminalSize?.(session.id);
   deps.runner.run(session.id, command, {
     ...terminalSize,
@@ -620,6 +640,7 @@ async function createFtownSessionImpl(
     }
 
     registerSessionWorkspace(sessionId, workingDir);
+    warnIfWslMntWorkdir(deps, workingDir);
 
     // Agent sessions (anything but a plain 'shell') spawned by a parent get a
     // one-paragraph briefing prepended to their first input so they know their
