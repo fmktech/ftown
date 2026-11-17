@@ -1313,6 +1313,8 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     const sessionKeysMatch = path.match(/^\/api\/sessions\/([^/]+)\/keys$/);
     const sessionMessageMatch = path.match(/^\/api\/sessions\/([^/]+)\/message$/);
     const sessionInboxMatch = path.match(/^\/api\/sessions\/([^/]+)\/inbox$/);
+    const sessionInboxAckMatch = path.match(/^\/api\/sessions\/([^/]+)\/inbox\/ack$/);
+    const sessionInboxChunkMatch = path.match(/^\/api\/sessions\/([^/]+)\/inbox\/([^/]+)\/chunk$/);
     const sessionResizeMatch = path.match(/^\/api\/sessions\/([^/]+)\/resize$/);
     const sessionRunningMatch = path.match(/^\/api\/sessions\/([^/]+)\/running$/);
     const sessionUsageMatch = path.match(/^\/api\/sessions\/([^/]+)\/usage$/);
@@ -2039,6 +2041,18 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       return;
     }
 
+    // GET /api/sessions/:id/inbox/:mailId/chunk — bounded, non-consuming body retrieval.
+    if (sessionInboxChunkMatch && req.method === 'GET') {
+      await this.handleInboxChunk(res, sessionInboxChunkMatch[1], sessionInboxChunkMatch[2], url);
+      return;
+    }
+
+    // POST /api/sessions/:id/inbox/ack — acknowledge IDs after consumer output.
+    if (sessionInboxAckMatch && req.method === 'POST') {
+      await this.handleInboxAck(req, res, sessionInboxAckMatch[1]);
+      return;
+    }
+
     // POST /api/sessions/:id/inbox — store mail for a session (long-poll kick or nudge)
     if (sessionInboxMatch && req.method === 'POST') {
       await this.handleInboxPost(req, res, sessionInboxMatch[1]);
@@ -2170,6 +2184,55 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     jsonResponse(res, 201, { id: result.id });
   }
 
+  private async handleInboxAck(req: IncomingMessage, res: ServerResponse, sessionId: string): Promise<void> {
+    if (!this.store || !this.mail.isReady()) {
+      jsonResponse(res, 503, { error: 'Mail store not ready' });
+      return;
+    }
+    if (!await this.store.loadSession(sessionId)) {
+      jsonResponse(res, 404, { error: 'Session not found' });
+      return;
+    }
+    const body = await parseBody(req);
+    const rawIds = body && !Array.isArray(body) ? body.ids : undefined;
+    const ids = Array.isArray(rawIds)
+      ? rawIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+      : [];
+    if (!body || Array.isArray(body) || Object.keys(body).some(key => key !== 'ids' && key !== 'completionToken') || !Array.isArray(rawIds)
+      || ids.length !== rawIds.length || !ids.length || ids.length > 500 || new Set(ids).size !== ids.length) {
+      jsonResponse(res, 400, { error: 'Invalid mail IDs (expected 1 to 500 unique nonempty strings)' });
+      return;
+    }
+    if (body.completionToken !== undefined && (typeof body.completionToken !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(body.completionToken))) {
+      jsonResponse(res, 400, { error: 'Invalid mail completion token' }); return;
+    }
+    try {
+      const acknowledged = await this.mail.acknowledgeMail(sessionId, ids, body.completionToken as string | undefined);
+      jsonResponse(res, 200, { acknowledgedIds: acknowledged.map(message => message.id) });
+    } catch (error) {
+      if (!(error instanceof RangeError)) throw error;
+      jsonResponse(res, 400, { error: error.message });
+    }
+  }
+
+  private async handleInboxChunk(res: ServerResponse, sessionId: string, mailId: string, url: URL): Promise<void> {
+    if (!this.store || !this.mail.isReady()) { jsonResponse(res, 503, { error: 'Mail store not ready' }); return; }
+    if (!await this.store.loadSession(sessionId)) { jsonResponse(res, 404, { error: 'Session not found' }); return; }
+    const cursor = url.searchParams.get('cursor') ?? undefined;
+    if ((cursor !== undefined && !/^[A-Za-z0-9_-]{43}$/.test(cursor)) || url.searchParams.getAll('cursor').length > 1
+      || [...url.searchParams.keys()].some(key => key !== 'cursor')) {
+      jsonResponse(res, 400, { error: 'Invalid mail cursor request' }); return;
+    }
+    try {
+      const chunk = await this.mail.readMailChunk(sessionId, mailId, cursor);
+      if (!chunk) { jsonResponse(res, 404, { error: 'Mail not found' }); return; }
+      jsonResponse(res, 200, chunk);
+    } catch (error) {
+      if (!(error instanceof RangeError)) throw error;
+      jsonResponse(res, 400, { error: error.message });
+    }
+  }
+
   private async handleInboxGet(res: ServerResponse, sessionId: string, url: URL): Promise<void> {
     if (!this.store || !this.mail.isReady()) {
       jsonResponse(res, 503, { error: 'Mail store not ready' });
@@ -2191,15 +2254,25 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       return;
     }
 
+    const peek = getQueryInt(url, 'peek', 0) === 1;
+    const all = url.searchParams.get('all') === '1';
+    const limit = Number(url.searchParams.get('limit') ?? 50);
+    const offset = Number(url.searchParams.get('offset') ?? 0);
+    if (peek && (!Number.isSafeInteger(limit) || limit < 1 || !Number.isSafeInteger(offset) || offset < 0)) {
+      jsonResponse(res, 400, { error: 'Invalid inbox page (positive limit and nonnegative offset required)' });
+      return;
+    }
     const result = await this.mail.readMail(session, {
       wait: getQueryInt(url, 'wait', 0),
-      peek: getQueryInt(url, 'peek', 0) === 1,
-      all: url.searchParams.get('all') === '1',
-      limit: getQueryInt(url, 'limit', 50),
+      peek,
+      all,
+      limit,
+      offset,
     });
 
     if (result.kind === 'immediate') {
-      jsonResponse(res, 200, { messages: result.messages });
+      jsonResponse(res, 200, { messages: result.messages, ...(peek ? { moreAvailable: result.moreAvailable ?? false,
+        nextOffset: result.nextOffset ?? null, oversizedMessages: result.oversizedMessages ?? [] } : {}) });
       return;
     }
 

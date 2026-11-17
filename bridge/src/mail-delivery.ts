@@ -1,4 +1,5 @@
 import { createMailMessage, createNudgeToken } from './mail-store.js';
+import { createHash, randomBytes } from 'node:crypto';
 import { HOOKED_SHELL_TYPES } from './harness-registry.js';
 import { createNativeMailWaker, type NativeMailWaker } from './native-mail.js';
 import {
@@ -17,6 +18,15 @@ import type { MailMessage, Session, ShellType } from './types.js';
 export { MAIL_TYPES_V2, MAX_WAKE_ATTEMPTS, NON_WAKING_MAIL_TYPES };
 
 export const MAX_MAIL_BODY_LENGTH = 64 * 1024;
+export const MAX_INBOX_RESPONSE_BYTES = 200_000;
+export const MAX_INBOX_PAGE_BYTES = 32_000;
+export const MAX_MAIL_CHUNK_CHARS = 7_000;
+export const MAIL_CONTINUATION_TTL_MS = 15 * 60_000;
+export const MAX_MAIL_CONTINUATIONS_PER_SESSION = 4;
+const INBOX_PAGE_OVERHEAD_BYTES = Buffer.byteLength(JSON.stringify({ messages: [], moreAvailable: false,
+  nextOffset: Number.MAX_SAFE_INTEGER, oversizedMessages: [] }));
+const requiresContinuation = (message: MailMessage): boolean =>
+  Buffer.byteLength(JSON.stringify(message)) + INBOX_PAGE_OVERHEAD_BYTES >= MAX_INBOX_PAGE_BYTES;
 export const MAX_MAIL_WAIT_SECONDS = 30;
 export const MAIL_NUDGE_DELAY_MS = 5_000;
 // Hooked agents (claude/codex and claude flavors) get mail through their Stop
@@ -110,13 +120,7 @@ export function sanitizeMessageText(text: string): string {
 interface MailWaiter {
   deliver: (messages: MailMessage[]) => void;
 }
-const codexMetadata = (value: string) => value.slice(0, 200).replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ');
-const codexMailText = (message: MailMessage) =>
-  `${INJECTED_PROMPT_PREFIXES[1]} id=${JSON.stringify(codexMetadata(message.id))} from=${JSON.stringify(codexMetadata(message.from))}`
-  + (message.fromName ? ` fromName=${JSON.stringify(codexMetadata(message.fromName))}` : '')
-  + ` type=${JSON.stringify(codexMetadata(message.type))}`
-  + (message.threadId ? ` threadId=${JSON.stringify(codexMetadata(message.threadId))}` : '')
-  + `\n\n${message.body}`;
+const CODEX_MAIL_WAKE_TEXT = '[ftown mail] You have new ftown mail. Run `ftown harness mail read` to read it.';
 const nativeIdentity = (session: Session) => `${session.shellType}:${session.shellType === 'codex' ? session.codexSessionId ?? '' : session.museSessionId ?? ''}`;
 
 /** The slice of SessionStore the mail engine needs. */
@@ -164,8 +168,27 @@ export interface MailDeliveryOptions {
 export type AcceptMailResult = { ok: true; id: string } | { ok: false; error: string };
 
 export type InboxReadResult =
-  | { kind: 'immediate'; messages: MailMessage[] }
+  | { kind: 'immediate'; messages: MailMessage[]; moreAvailable?: boolean; nextOffset?: number | null;
+      oversizedMessages?: Array<{ id: string; serializedBytes: number; index: number }> }
   | { kind: 'longpoll'; messages: Promise<MailMessage[]>; abandon: () => void };
+
+export interface MailContentPart {
+  offset: number;
+  chunk: string;
+  totalChars: number;
+  nextOffset: number | null;
+}
+export interface MailContinuation {
+  messageId: string;
+  body: MailContentPart;
+  metadata: MailContentPart;
+  nextCursor: string | null;
+  completionToken: string | null;
+}
+interface MailReadTicket {
+  sessionId: string; mailId: string; bodyOffset: number; metadataOffset: number; fingerprint: string;
+  expires: number; kind: 'continue' | 'complete';
+}
 
 /**
  * The bridge's mail-delivery engine, extracted from the HTTP router so its
@@ -198,6 +221,7 @@ export class MailDeliveryService {
   private batchAttempts = new Map<string, { key: string; count: number }>();
   private museNativeTried = new Map<string, string>();
   private wakeLocks = new Map<string, Promise<void>>();
+  private mailReadTickets = new Map<string, MailReadTicket>();
   private wakeControllers = new Map<string, AbortController>();
   private legacyReadyAt = new Map<string, number>();
   private lastInjection = new Map<string, { text: string; at: number }>();
@@ -248,6 +272,7 @@ export class MailDeliveryService {
     this.nudgeTimers.clear();
     this.batchAttempts.clear();
     this.museNativeTried.clear();
+    this.mailReadTickets.clear();
     for (const controller of this.wakeControllers.values()) controller.abort();
   }
 
@@ -546,7 +571,7 @@ export class MailDeliveryService {
       const waiter = this.mailWaiters.get(session.id);
       hadWaiter = !!waiter;
       if (waiter) {
-        const undelivered = this.available(session.id, await mailStore.listUndelivered(session.id));
+        const undelivered = await mailStore.listUndelivered(session.id);
         if (this.mailWaiters.get(session.id) === waiter && undelivered.length > 0) {
           const marked = await mailStore.markDelivered(session.id, undelivered.map(m => m.id), 'poll');
           waiter.deliver(marked);
@@ -563,6 +588,72 @@ export class MailDeliveryService {
     }
   }
 
+  /** Explicit consumer acknowledgment, serialized with competing inbox selections. */
+  async acknowledgeMail(sessionId: string, ids: string[], completionToken?: string): Promise<MailMessage[]> {
+    const mailStore = this.mailStore;
+    if (!mailStore) return [];
+    return this.withSelection(sessionId, async () => {
+      this.expireMailReadTickets();
+      const selected = (await mailStore.listAll(sessionId, 0)).filter(message => ids.includes(message.id));
+      if (completionToken !== undefined) {
+        const ticket = this.mailReadTickets.get(completionToken);
+        if (ids.length !== 1 || !ticket || ticket.kind !== 'complete' || ticket.sessionId !== sessionId || ticket.mailId !== ids[0]
+          || selected.length !== 1 || this.mailFingerprint(selected[0]) !== ticket.fingerprint) throw new RangeError('Invalid or expired mail completion token');
+        this.mailReadTickets.delete(completionToken);
+      } else if (selected.some(requiresContinuation)) {
+        throw new RangeError('Oversized mail requires a completion token');
+      }
+      return mailStore.markDelivered(sessionId, ids, 'cli');
+    });
+  }
+
+  private mailFingerprint(message: MailMessage): string {
+    const { body, ...metadata } = message;
+    return createHash('sha256').update(String(body.length)).update(':').update(body).update(JSON.stringify(metadata)).digest('hex');
+  }
+
+  private expireMailReadTickets(): void {
+    for (const [token, ticket] of this.mailReadTickets) if (ticket.expires <= this.monotonicNow()) this.mailReadTickets.delete(token);
+  }
+
+  private issueMailReadTicket(ticket: MailReadTicket): string {
+    const sessionTokens = [...this.mailReadTickets].filter(([, existing]) => existing.sessionId === ticket.sessionId);
+    for (const [token] of sessionTokens.slice(0, Math.max(0, sessionTokens.length - MAX_MAIL_CONTINUATIONS_PER_SESSION + 1))) this.mailReadTickets.delete(token);
+    const token = randomBytes(32).toString('base64url');
+    this.mailReadTickets.set(token, ticket);
+    return token;
+  }
+
+  /** Opaque one-time cursors prove contiguous body and exact metadata progress. */
+  async readMailChunk(sessionId: string, mailId: string, cursor?: string): Promise<MailContinuation | null> {
+    return this.withSelection(sessionId, async () => {
+      this.expireMailReadTickets();
+      const ticket = cursor === undefined ? undefined : this.mailReadTickets.get(cursor);
+      if (cursor !== undefined && (!ticket || ticket.kind !== 'continue' || ticket.sessionId !== sessionId || ticket.mailId !== mailId)) {
+        throw new RangeError('Invalid, replayed or expired mail cursor');
+      }
+      const message = (await this.mailStore?.listAll(sessionId, 0))?.find(entry => entry.id === mailId);
+      if (!message) return null;
+      const fingerprint = this.mailFingerprint(message);
+      if (ticket && ticket.fingerprint !== fingerprint) throw new RangeError('Mail changed; restart continuation');
+      const { body, ...metadata } = message;
+      const metadataJson = JSON.stringify(metadata);
+      const part = (content: string, offset: number): MailContentPart => {
+        const chunk = content.slice(offset, offset + MAX_MAIL_CHUNK_CHARS);
+        const next = offset + chunk.length;
+        return { offset, chunk, totalChars: content.length, nextOffset: next < content.length ? next : null };
+      };
+      const bodyPart = part(body, ticket?.bodyOffset ?? 0);
+      const metadataPart = part(metadataJson, ticket?.metadataOffset ?? 0);
+      if (cursor !== undefined) this.mailReadTickets.delete(cursor);
+      const complete = bodyPart.nextOffset === null && metadataPart.nextOffset === null;
+      const next = this.issueMailReadTicket({ sessionId, mailId, fingerprint, kind: complete ? 'complete' : 'continue',
+        bodyOffset: bodyPart.nextOffset ?? body.length, metadataOffset: metadataPart.nextOffset ?? metadataJson.length,
+        expires: this.monotonicNow() + MAIL_CONTINUATION_TTL_MS });
+      return { messageId: mailId, body: bodyPart, metadata: metadataPart, nextCursor: complete ? null : next, completionToken: complete ? next : null };
+    });
+  }
+
   /**
    * Read a session's inbox: peek, drain, or long poll. A long poll returns a
    * promise that resolves when mail arrives (or the wait elapses) plus an
@@ -571,7 +662,7 @@ export class MailDeliveryService {
    */
   async readMail(
     session: Session,
-    query: { wait: number; peek: boolean; all: boolean; limit: number },
+    query: { wait: number; peek: boolean; all: boolean; limit: number; offset?: number },
   ): Promise<InboxReadResult> {
     const mailStore = this.mailStore;
     if (!mailStore) {
@@ -581,10 +672,34 @@ export class MailDeliveryService {
     const wait = Math.min(query.wait, MAX_MAIL_WAIT_SECONDS);
 
     if (query.peek) {
-      const messages = query.all
-        ? await mailStore.listAll(session.id, query.limit)
+      const candidates = query.all
+        ? await mailStore.listAll(session.id, 0)
         : await mailStore.listUndelivered(session.id);
-      return { kind: 'immediate', messages };
+      const offset = typeof query.offset === 'number' && Number.isSafeInteger(query.offset) && query.offset > 0 ? query.offset : 0;
+      const limit = Number.isSafeInteger(query.limit) && query.limit > 0 ? Math.min(query.limit, 50) : 50;
+      const messages: MailMessage[] = [];
+      const oversizedMessages: Array<{ id: string; serializedBytes: number; index: number }> = [];
+      // Reserve the largest possible offset field and the longer boolean spelling.
+      const envelopeBytes = INBOX_PAGE_OVERHEAD_BYTES;
+      let bytes = envelopeBytes;
+      let scanned = 0;
+      for (const message of candidates.slice(offset)) {
+        if (scanned >= limit) break;
+        const serializedBytes = Buffer.byteLength(JSON.stringify(message));
+        const oversized = serializedBytes + envelopeBytes >= MAX_INBOX_PAGE_BYTES;
+        const descriptor = { id: message.id, serializedBytes, index: scanned };
+        const extraBytes = oversized
+          ? Buffer.byteLength(JSON.stringify(descriptor)) + (oversizedMessages.length ? 1 : 0)
+          : serializedBytes + (messages.length ? 1 : 0);
+        if (bytes + extraBytes >= MAX_INBOX_PAGE_BYTES) break;
+        if (oversized) oversizedMessages.push(descriptor);
+        else messages.push(message);
+        bytes += extraBytes;
+        scanned++;
+      }
+      const moreAvailable = offset + scanned < candidates.length;
+      return { kind: 'immediate', messages, moreAvailable,
+        nextOffset: moreAvailable ? offset + scanned : null, oversizedMessages };
     }
 
     // The listen window is earned, not universal: a session with no mail
@@ -597,8 +712,8 @@ export class MailDeliveryService {
     }
 
     return this.withSelection(session.id, async () => {
-      const undelivered = this.available(session.id, await mailStore.listUndelivered(session.id));
-      // Claimed mail must not hold the queue-triggered hook open.
+      const undelivered = await mailStore.listUndelivered(session.id);
+      // A claim without remaining mail must not hold a queue-triggered hook open.
       if (undelivered.length > 0 || effectiveWait <= 0 || this.codexClaims.has(session.id)) {
         const marked = await mailStore.markDelivered(
           session.id,
@@ -635,7 +750,7 @@ export class MailDeliveryService {
         // would be lost without ever reaching a session.
         if (settled || this.mailWaiters.get(session.id) !== waiter) return;
         void this.withSelection(session.id, async () => {
-          const pending = this.available(session.id, await mailStore.listUndelivered(session.id));
+          const pending = await mailStore.listUndelivered(session.id);
           if (settled || this.mailWaiters.get(session.id) !== waiter || pending.length === 0) return [] as MailMessage[];
           return mailStore.markDelivered(session.id, pending.map(m => m.id), 'poll');
         }).then(marked => waiter.deliver(marked)).catch(() => waiter.deliver([]));
@@ -793,7 +908,7 @@ export class MailDeliveryService {
           && live.shellType === 'codex' && nativeIdentity(live) === identity && runner.isRunning(sessionId)
           && this.codexClaims.get(sessionId) === claimSet && batchIds.some(id => pendingIds.has(id));
       };
-      const wakeText = batch.map(codexMailText).join('\n\n');
+      const wakeText = CODEX_MAIL_WAKE_TEXT;
       // Recorded BEFORE the wake call: the prompt hook can fire before it resolves.
       this.recordInjection(sessionId, wakeText);
       const result = await this.nativeWake(session, wakeText, controller.signal, isCurrent)
@@ -802,8 +917,7 @@ export class MailDeliveryService {
         const token = createNudgeToken(this.now());
         accepted = await this.withSelection(sessionId, async () => {
           if (!current() || controller.signal.aborted || this.codexClaims.get(sessionId) !== claimSet) return false;
-          const marked = await mailStore.markDelivered(sessionId, batchIds, 'cli');
-          await mailStore.markNudged(sessionId, batchIds, token);
+          const marked = await mailStore.markNudged(sessionId, batchIds, token);
           return marked.length > 0;
         });
       }

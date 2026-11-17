@@ -15,11 +15,10 @@ import { formatAttentionAnswerText } from './attention-prompt.js';
 import { ATTENTION_ITEM_WAIT_MAX_SECONDS, type AttentionAnswer, type AttentionPrompt } from './attention-prompt-protocol.js';
 import { PREVIEW_CHAT_TEXT_BYTES } from './preview-chat-protocol.js';
 import { validateChatInput } from './preview-chat.js';
-import { api as request, loadPointer, listSessions, fetchInbox, sendMail } from './cli-client.js';
+import { api as request, loadPointer, listSessions, readInboxForCli, sendMail } from './cli-client.js';
 import {
   MAIL_TYPES,
   AUTOMATION_REMOVED_MESSAGE,
-  formatMailMessage,
   type BridgePointer,
   type MailMessage,
   type Session,
@@ -140,6 +139,7 @@ interface SessionsOptions {
   createWorkdir?: boolean; worktree?: boolean; branch?: string; base?: string;
   keepWorktree?: boolean; forceWorktree?: boolean; to?: string;
   offset?: string; limit?: string; pattern?: string;
+  messageId?: string; cursor?: string;
   planItem?: string; requireGreenPr?: boolean;
   account?: string; allowedAccounts?: string;
   children?: boolean; siblings?: boolean; keys?: boolean; type?: string; thread?: string;
@@ -200,6 +200,9 @@ function sessionProgram(): Command {
     .action((target: string | undefined, text: string[], _opts, cmd: Command) => run('tell', [...(target === undefined ? [] : [target]), ...text], cmd));
   command('inbox', 'Read own inbox (requires FTOWN_SESSION_ID)').alias('mail')
     .option('--peek', 'Do not mark delivered').option('--limit <n>', 'Max messages').option('--all', 'Include delivered messages')
+    .option('--offset <n>', 'With --peek or --all, start at this oldest-first offset')
+    .option('--message-id <id>', 'Read one oversized message incrementally')
+    .option('--cursor <token>', 'One-time continuation cursor for --message-id')
     .action((_opts, cmd: Command) => run('inbox', [], cmd));
   command('usage <session-id...>', 'Model/token usage per session')
     .action((ids: string[], _opts, cmd: Command) => run('usage', ids, cmd));
@@ -733,15 +736,12 @@ async function executeSessionCommand(cmd: SessionCommand, rest: string[], option
       case 'mail': {
         const self = process.env.FTOWN_SESSION_ID?.trim();
         if (!self) throw new Error('inbox requires FTOWN_SESSION_ID to be set');
-        const limit = options.limit;
-        const messages = await fetchInbox(loadPointer(), self, { peek: !!options.peek, all: !!options.all, ...(limit ? { limit: Number(limit) } : {}) });
-        if (!!options.json) {
-          console.log(JSON.stringify({ messages }, null, 2));
-        } else if (messages.length === 0) {
-          console.log('(no mail)');
-        } else {
-          for (const m of messages) console.log(formatMailMessage(m));
-        }
+        const pointer = loadPointer();
+        await readInboxForCli(pointer, self, { peek: !!options.peek, all: !!options.all, json: !!options.json,
+          ...(options.limit !== undefined ? { limit: Number(options.limit) } : {}),
+          ...(options.offset !== undefined ? { offset: Number(options.offset) } : {}),
+          ...(options.messageId !== undefined ? { messageId: options.messageId } : {}),
+          ...(options.cursor !== undefined ? { cursor: options.cursor } : {}) }, 'ftown sessions inbox');
         break;
       }
 

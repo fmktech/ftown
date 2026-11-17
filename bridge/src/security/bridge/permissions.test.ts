@@ -17,6 +17,27 @@ test('reads cannot consume inboxes or register native wake targets, while POST h
   assert.equal(classifyHttp('POST', '/api/sessions/session/grep').permission, 'read');
 });
 
+test('inbox acknowledgments require control authority and reject alternate methods or query arguments', () => {
+  assert.deepEqual(classifyHttp('POST', '/api/sessions/session/inbox/ack'), {
+    permission: 'control', mutating: true, operation: 'messages_ack', sessionId: 'session',
+  });
+  for (const method of ['GET', 'PUT', 'PATCH', 'DELETE']) {
+    assert.throws(() => classifyHttp(method, '/api/sessions/session/inbox/ack'), { code: 'permission_denied' });
+  }
+  assert.throws(() => classifyHttp('POST', '/api/sessions/session/inbox/ack?peek=1'), { code: 'permission_denied' });
+});
+
+test('mail body chunks use non-consuming inbox read authority', () => {
+  assert.deepEqual(classifyHttp('GET', '/api/sessions/session/inbox/mail-id/chunk'), {
+    permission: 'read', mutating: false, operation: 'messages_peek', sessionId: 'session',
+  });
+  for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
+    assert.throws(() => classifyHttp(method, '/api/sessions/session/inbox/mail-id/chunk'), { code: 'permission_denied' });
+  }
+  assert.throws(() => classifyHttp('GET', '/api/sessions/session/inbox/mail-id/chunk?adapter=opencode'), { code: 'permission_denied' });
+  assert.throws(() => classifyHttp('GET', '/api/sessions/session/inbox/mail-id/chunk?offset=65536'), { code: 'permission_denied' });
+});
+
 test('preview reads require read authority and registration cannot be tunneled', () => {
   assert.equal(classifyCommand('session_preview_status', { sessionId: 'session' }).permission, 'read');
   assert.equal(classifyCommand('session_preview_chunk', { sessionId: 'session' }).permission, 'read');

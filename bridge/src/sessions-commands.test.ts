@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { Readable } from 'node:stream';
+import { Readable, Writable } from 'node:stream';
 import { attentionClock, runSessions } from './sessions-commands.js';
 import { secureFixture } from './security/bridge/fixtures.test.js';
 
@@ -11,7 +11,8 @@ interface Request { url: string; method: string; body?: unknown }
 function lastPost(requests: Request[]): Request | undefined {
   return [...requests].reverse().find((request) => request.method === 'POST');
 }
-async function fixture(run: (requests: Request[], output: string[]) => Promise<void>, reply?: (request: Request) => unknown): Promise<void> {
+async function fixture(run: (requests: Request[], output: string[]) => Promise<void>, reply?: (request: Request) => unknown,
+  writeOutput?: (callback: (error?: Error | null) => void) => void): Promise<void> {
   const home = mkdtempSync(join(tmpdir(), 'ftown-sessions-unit-'));
   const previousHome = process.env.HOME;
   const previousSession = process.env.FTOWN_SESSION_ID;
@@ -19,6 +20,7 @@ async function fixture(run: (requests: Request[], output: string[]) => Promise<v
   const previousFetch = globalThis.fetch;
   const previousLog = console.log;
   const previousError = console.error;
+  const stdoutDescriptor = Object.getOwnPropertyDescriptor(process, 'stdout');
   const requests: Request[] = []; const output: string[] = [];
   mkdirSync(join(home, '.ftown'));
   process.env.HOME = home;
@@ -28,12 +30,17 @@ async function fixture(run: (requests: Request[], output: string[]) => Promise<v
   process.env.FTOWN_DATA_DIR = join(home, '.ftown', 'data');
   const secure = await secureFixture(join(home, '.ftown'), async (url, init) => {
     requests.push({ url: String(url), method: init?.method ?? 'GET', ...(init?.body ? { body: JSON.parse(String(init.body)) as unknown } : {}) });
-    return new Response(JSON.stringify(reply ? reply(requests.at(-1)!) : { session: { id: 'created', name: 'unit', status: 'running' }, sessions: [], messages: [] }));
+    const response = reply ? await reply(requests.at(-1)!) : { session: { id: 'created', name: 'unit', status: 'running' }, sessions: [], messages: [] };
+    return response instanceof Response ? response : new Response(JSON.stringify(response));
   }, 12345);
   writeFileSync(join(home, '.ftown', 'bridge.json'), JSON.stringify(secure.pointer));
   globalThis.fetch = secure.fetch;
   console.log = (...args: unknown[]) => { output.push(args.map(String).join(' ')); };
   console.error = (...args: unknown[]) => { output.push(args.map(String).join(' ')); };
+  Object.defineProperty(process, 'stdout', { configurable: true, value: new Writable({ write(chunk, _encoding, callback) {
+    output.push(chunk.toString().trimEnd());
+    if (writeOutput) writeOutput(callback); else callback();
+  } }) });
   try { await run(requests, output); }
   finally {
     if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
@@ -41,6 +48,7 @@ async function fixture(run: (requests: Request[], output: string[]) => Promise<v
     if (previousDataDir === undefined) delete process.env.FTOWN_DATA_DIR; else process.env.FTOWN_DATA_DIR = previousDataDir;
     await secure.security.close();
     globalThis.fetch = previousFetch; console.log = previousLog; console.error = previousError;
+    if (stdoutDescriptor) Object.defineProperty(process, 'stdout', stdoutDescriptor);
     rmSync(home, { recursive: true, force: true });
   }
 }
@@ -114,8 +122,144 @@ test('terminal and mail commands preserve their legacy requests and inbox alias'
   process.env.FTOWN_SESSION_ID = 'self';
   assert.equal(await runSessions(['mail', '--peek', '--all', '--limit', '3', '--json']), 0);
   assert.ok(requests.at(-1)?.url.endsWith('/api/sessions/self/inbox?wait=0&peek=1&limit=3&all=1'));
-  assert.deepEqual(JSON.parse(output.at(-1) ?? ''), { messages: [] });
+  assert.deepEqual(JSON.parse(output.at(-1) ?? ''), { messages: [], moreAvailable: false, nextOffset: null, oversizedMessages: [] });
 }));
+
+for (const command of ['inbox', 'mail']) {
+  test(`sessions ${command} waits for output before acknowledging only displayed unread rows`, async () => {
+    let release!: (error?: Error | null) => void;
+    let entered!: () => void;
+    const outputStarted = new Promise<void>(resolve => { entered = resolve; });
+    await fixture(async (requests, output) => {
+      process.env.FTOWN_SESSION_ID = 'self';
+      const reading = runSessions([command, '--all', '--offset', '2', '--limit', '1', '--json']);
+      await outputStarted;
+      assert.equal(requests.length, 1, 'output callback must complete before the ack request');
+      assert.ok(requests[0].url.endsWith('inbox?wait=0&peek=1&limit=1&all=1&offset=2'));
+      assert.match(output.at(-1) ?? '', /queued/);
+      release();
+      assert.equal(await reading, 0);
+      assert.deepEqual(requests[1].body, { ids: ['unread'] });
+      assert.ok(requests[1].url.endsWith('/inbox/ack'));
+      assert.equal(JSON.parse(output[0]).nextOffset, 3);
+    }, request => request.method === 'POST' ? { acknowledgedIds: ['unread'] } : {
+      messages: [{ id: 'unread', body: 'queued', from: 'parent', to: 'self', ts: '', type: 'task' },
+        { id: 'history', body: 'displayed history', deliveredAt: 'previously', from: 'parent', to: 'self', ts: '', type: 'task' }],
+      moreAvailable: true, nextOffset: 3, oversizedMessages: [],
+    }, callback => { release = callback; entered(); });
+  });
+}
+
+test('sessions inbox peek and output failures never acknowledge a page', async () => {
+  for (const fail of [false, true]) {
+    await fixture(async (requests, output) => {
+      process.env.FTOWN_SESSION_ID = 'self';
+      assert.equal(await runSessions(['inbox', ...(fail ? [] : ['--peek']), '--json']), fail ? 1 : 0);
+      assert.equal(requests.length, 1);
+      if (fail) assert.ok(output.some(line => line.includes('stdout failed')));
+    }, () => ({ messages: [{ id: 'unread', body: 'queued', from: 'parent', to: 'self', ts: '', type: 'task' }], moreAvailable: false }),
+    callback => callback(fail ? new Error('stdout failed') : undefined));
+    await new Promise<void>(resolve => setImmediate(resolve));
+  }
+});
+
+test('sessions inbox fetch failure and invalid page arguments do not acknowledge mail', async () => {
+  await fixture(async requests => {
+    process.env.FTOWN_SESSION_ID = 'self';
+    assert.equal(await runSessions(['inbox', '--json']), 1);
+    assert.equal(requests.length, 1);
+    for (const args of [['--limit', '0'], ['--limit', '1.5'], ['--offset', '1'], ['--all', '--offset', '-1']]) {
+      assert.equal(await runSessions(['inbox', ...args]), 1);
+    }
+    assert.equal(requests.length, 1);
+  }, () => new Response(JSON.stringify({ error: 'fetch failed' }), { status: 503 }));
+});
+
+for (const command of ['inbox', 'mail']) {
+  test(`sessions ${command} follows opaque cursors and acknowledges only after final output with its token`, async () => {
+    const body = '\0'.repeat(65536);
+    const metadata = JSON.stringify({ id: 'large', from: 'parent', fromName: '\0'.repeat(12000), threadId: 'thread'.repeat(3000), to: 'self', type: 'task', ts: '' });
+    const tickets = new Map<string, { body: number; metadata: number; complete: boolean }>(); let sequence = 0;
+    await fixture(async (requests, output) => {
+      process.env.FTOWN_SESSION_ID = 'self';
+      assert.equal(await runSessions([command, '--message-id', 'large', '--body-offset', '65536', '--metadata-offset', String(metadata.length)]), 1);
+      assert.equal(requests.length, 0, 'numeric end-offset bypass must be rejected before transport');
+      let cursor: string | undefined;
+      const bodies: string[] = []; const metas: string[] = [];
+      for (;;) {
+        assert.equal(await runSessions([command, '--message-id', 'large', ...(cursor ? ['--cursor', cursor] : []), '--json']), 0);
+        const text = output.at(-1)!; assert.ok(Buffer.byteLength(text) < 100000);
+        const displayed = JSON.parse(text); bodies.push(displayed.body.chunk); metas.push(displayed.metadata.chunk);
+        if (displayed.complete) { assert.equal(displayed.continuation, null); break; }
+        assert.equal(requests.some(request => request.method === 'POST'), false);
+        assert.ok(displayed.continuation.includes(`--cursor ${displayed.nextCursor}`));
+        cursor = displayed.nextCursor;
+      }
+      assert.equal(bodies.join(''), body); assert.equal(metas.join(''), metadata);
+      assert.equal(requests.filter(request => request.method === 'POST').length, 1);
+      const ack = requests.at(-1)?.body as { ids: string[]; completionToken: string };
+      assert.deepEqual(ack.ids, ['large']); assert.equal(ack.completionToken.length, 43);
+    }, request => {
+      if (request.method === 'POST') {
+        const ack = request.body as { completionToken: string };
+        assert.equal(tickets.get(ack.completionToken)?.complete, true); tickets.delete(ack.completionToken);
+        return { acknowledgedIds: ['large'] };
+      }
+      const url = new URL(request.url); const cursor = url.searchParams.get('cursor');
+      const progress = cursor ? tickets.get(cursor) : { body: 0, metadata: 0, complete: false };
+      if (!progress || progress.complete) return new Response(JSON.stringify({ error: 'invalid cursor' }), { status: 400 });
+      if (cursor) tickets.delete(cursor);
+      const part = (content: string, offset: number) => {
+        const end = Math.min(offset + 7000, content.length);
+        return { offset, chunk: content.slice(offset, end), totalChars: content.length, nextOffset: end < content.length ? end : null };
+      };
+      const bodyPart = part(body, progress.body); const metadataPart = part(metadata, progress.metadata);
+      const complete = bodyPart.nextOffset === null && metadataPart.nextOffset === null;
+      const token = String(++sequence).padStart(43, 'c');
+      tickets.set(token, { body: bodyPart.nextOffset ?? body.length, metadata: metadataPart.nextOffset ?? metadata.length, complete });
+      return { messageId: 'large', body: bodyPart, metadata: metadataPart, nextCursor: complete ? null : token, completionToken: complete ? token : null };
+    });
+  });
+
+  test(`sessions ${command} chunk failure prevents partial page output and acknowledgment`, async () => {
+    await fixture(async (requests, output) => {
+      process.env.FTOWN_SESSION_ID = 'self';
+      assert.equal(await runSessions([command, '--message-id', 'large', '--json']), 1);
+      assert.equal(requests.some(request => request.method === 'POST'), false);
+      assert.equal(output.some(line => line.includes('"messages"')), false);
+      assert.ok(output.some(line => line.includes('chunk failed')));
+    }, request => request.url.includes('/chunk')
+      ? new Response(JSON.stringify({ error: 'chunk failed' }), { status: 503 })
+      : { messages: [], oversizedMessages: [{ id: 'large', serializedBytes: 393400, index: 0 }], moreAvailable: false });
+  });
+
+  test(`sessions ${command} displays 50 oversized descriptors without reconstruction or acknowledgment`, async () => {
+    await fixture(async (requests, output) => {
+      process.env.FTOWN_SESSION_ID = 'self';
+      assert.equal(await runSessions([command, '--json']), 0);
+      assert.ok(Buffer.byteLength(output[0]) < 100000);
+      assert.equal(JSON.parse(output[0]).oversizedMessages.length, 50);
+      assert.equal(requests.length, 1);
+    }, () => ({ messages: [], moreAvailable: false, nextOffset: null,
+      oversizedMessages: Array.from({ length: 50 }, (_, index) => ({ id: `large-${index}`, serializedBytes: 393400, index })) }));
+  });
+
+  test(`sessions ${command} traverses unread peek pages without acknowledging and prints a valid continuation`, async () => {
+    await fixture(async (requests, output) => {
+      process.env.FTOWN_SESSION_ID = 'self';
+      assert.equal(await runSessions([command, '--peek', '--limit', '1', '--offset', '1']), 0);
+      assert.ok(output[0].includes('ftown sessions inbox --peek --limit 1 --offset 2'));
+      assert.equal(await runSessions([command, '--peek', '--limit', '1', '--offset', '2', '--json']), 0);
+      const last = JSON.parse(output.at(-1)!);
+      assert.equal(last.messages[0].id, 'third'); assert.equal(last.moreAvailable, false);
+      assert.equal(requests.some(request => request.method === 'POST'), false);
+    }, request => {
+      const offset = Number(new URL(request.url).searchParams.get('offset'));
+      return { messages: [{ id: offset === 1 ? 'second' : 'third', body: offset === 1 ? 'second task' : 'third task', ts: '', from: 'parent', to: 'self', type: 'task' }],
+        oversizedMessages: [], moreAvailable: offset === 1, nextOffset: offset === 1 ? 2 : null };
+    });
+  });
+}
 
 test('fanout without message fails before resolving any target session', async () => fixture(async (requests) => {
   process.env.FTOWN_SESSION_ID = 'self';

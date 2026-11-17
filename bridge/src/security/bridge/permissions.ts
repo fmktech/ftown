@@ -86,6 +86,10 @@ export function classifyHttp(method: string, path: string): OperationPermission 
     return method === 'GET' && !url.search ? result('read', 'worktrees_list') : deny();
   if (url.pathname === '/api/worktrees/prune')
     return method === 'POST' && !url.search ? result('control', 'worktrees_prune') : deny();
+  const inboxAck = /^\/api\/sessions\/([A-Za-z0-9_-]+)\/inbox\/ack$/.exec(url.pathname);
+  if (inboxAck) return method === 'POST' && !url.search ? result('control', 'messages_ack', inboxAck[1]) : deny();
+  const inboxChunk = /^\/api\/sessions\/([A-Za-z0-9_-]+)\/inbox\/([A-Za-z0-9_-]+)\/chunk$/.exec(url.pathname);
+  if (inboxChunk) return method === 'GET' && queryAllows(url, ['cursor']) ? result('read', 'messages_peek', inboxChunk[1]) : deny();
   const match = /^\/api\/sessions\/([A-Za-z0-9_-]+)(?:\/(screen|grep|keys|message|inbox|resize|usage|running|revive|stop|retry|handoff|attention)(?:\/(ack|resolve|ask)|\/([A-Za-z0-9_-]{1,100})(?:\/(answer|escalate))?)?)?$/.exec(url.pathname);
   if (!match) return deny();
   const [, id, suffix, attentionAction, eventId, attentionVerb] = match;

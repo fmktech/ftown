@@ -38,11 +38,16 @@ describe('ensureCodexHooks', () => {
         assert.equal(notifyHook.async, undefined);
         assert.equal(notifyHook.timeout, 10);
       }
-      assert.equal(
-        eventCommands(data, 'PreToolUse').some((hook) => hook.command === `${harness} hook-pump`),
-        false,
-        'tool events should not run the mail pump',
-      );
+      for (const event of ['Stop', 'UserPromptSubmit', 'SessionStart']) {
+        const pumps = eventCommands(data, event).filter((hook) => typeof hook.command === 'string' && hook.command.includes(' hook-pump'));
+        assert.deepEqual(pumps, [{ type: 'command', command: `${harness} hook-pump --codex`, timeout: 30 }], event);
+      }
+      for (const event of ['PreToolUse', 'PostToolUse']) {
+        assert.equal(eventCommands(data, event).some((hook) => typeof hook.command === 'string' && hook.command.includes(' hook-pump')), false,
+          `${event} should not run a consuming or non-consuming mail pump`);
+      }
+      ensureCodexHooks(harness, notify);
+      assert.deepEqual(readHooks(home), data, 'repeated installation must not duplicate Codex pumps');
     } finally {
       restoreHome(realHome);
       rmSync(home, { recursive: true, force: true });
@@ -83,6 +88,38 @@ describe('ensureCodexHooks', () => {
       assert.equal(notifyHook.async, undefined);
       assert.equal(notifyHook.timeout, 10);
       assert.equal(existsSync(hooksPath), true);
+    } finally {
+      restoreHome(realHome);
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('repairs every legacy consuming Codex mail pump without duplicating hooks', () => {
+    const key = process.platform === 'win32' ? 'USERPROFILE' : 'HOME';
+    const realHome = process.env[key];
+    const home = mkdtempSync(join(tmpdir(), 'ftw-codex-pumps-repair-'));
+    process.env[key] = home;
+    try {
+      const harness = join(home, '.ftown', 'bin', 'ftown-harness');
+      const notify = join(home, '.ftown', 'notify.sh');
+      const hooksPath = join(home, '.codex', 'hooks.json');
+      mkdirSync(join(home, '.codex'), { recursive: true });
+      writeFileSync(hooksPath, JSON.stringify({ hooks: Object.fromEntries(
+        ['Stop', 'UserPromptSubmit', 'SessionStart'].map(event => [event, [{ hooks: [
+          { type: 'command', command: `${harness} hook-pump`, timeout: 10, async: true },
+          { type: 'command', command: 'custom-hook' },
+        ] }]]),
+      ) }));
+      assert.equal(ensureCodexHooks(harness, notify), true);
+      const repaired = readHooks(home);
+      for (const event of ['Stop', 'UserPromptSubmit', 'SessionStart']) {
+        const commands = eventCommands(repaired, event);
+        assert.deepEqual(commands.filter(hook => typeof hook.command === 'string' && hook.command.includes(' hook-pump')),
+          [{ type: 'command', command: `${harness} hook-pump --codex`, timeout: 30 }], event);
+        assert.ok(commands.some(hook => hook.command === 'custom-hook'));
+      }
+      assert.equal(ensureCodexHooks(harness, notify), true);
+      assert.deepEqual(readHooks(home), repaired);
     } finally {
       restoreHome(realHome);
       rmSync(home, { recursive: true, force: true });

@@ -135,7 +135,7 @@ export function ensureCodexHooks(
   const hooks = parsed.hooks as Record<string, HookMatcherEntry[]>;
 
   const counters = { added: 0, repaired: 0, kept: 0 };
-  const pumpCommand = `${harnessBinPath} hook-pump`;
+  const pumpCommand = `${harnessBinPath} hook-pump --codex`;
 
   for (const event of CODEX_MAIL_HOOK_EVENTS) {
     upsertCodexHookEntry(hooks, event, {
