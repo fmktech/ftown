@@ -67,7 +67,7 @@ Adjacent-cause check: compare durable state before/after refresh and verify the 
 The dashboard's attention state is an event-only projection of a durable bridge ledger with no reload restoration. A correct fix must restore unresolved attention and persist the user actions that clear it; replaying events or caching locally alone could resurrect dismissed requests.
 
 ## Coordination
-Shared checkout: /Users/fkesheh/projects/ftown-simplify-all.
+Shared checkout: <repo>-simplify-all.
 Workers explicitly gpt-6.1-sol/high, previous leases released before reuse.
 - /root/session_ui: read-only diagnosis; bounded implementation after exact ownership and reviewed contract.
 - /root/npx_review: read-only ledger diagnosis and independent review.

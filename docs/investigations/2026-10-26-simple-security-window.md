@@ -13,7 +13,7 @@ Activity uses plain labels (Computer, Source, MCP actions, Computer actions); te
 Mobile: 44px touch targets, no horizontal overflow at390px, safe-area scrolling and compact header. No decorative redesign outside security.
 
 ## Ownership and sequencing
-Shared checkout /Users/fkesheh/projects/ftown-simplify-all; main checkout unrelated dirty. Existing four investigation notes protected by baseline /tmp/ftown-e2ee-notes-before.json.
+Shared checkout <repo>-simplify-all; main checkout unrelated dirty. Existing four investigation notes protected by baseline /tmp/ftown-e2ee-notes-before.json.
 Native implementation/integration owner /root/existing_pwa_access explicitly gpt-6.1-sol/high owns exact files:
 - ui/src/components/SecurityPanel.tsx
 - ui/src/components/SecurityDevices.tsx

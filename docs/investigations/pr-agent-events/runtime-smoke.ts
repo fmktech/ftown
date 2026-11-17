@@ -1,5 +1,5 @@
 // Root-only, after `cd bridge && npm run build`, from repo root:
-// PATH=/Users/fkesheh/.nvm/versions/node/v24.22.1/bin:$PATH node --experimental-strip-types docs/investigations/pr-agent-events/runtime-smoke.ts
+// PATH=/Users/example/.nvm/versions/node/v24.22.1/bin:$PATH node --experimental-strip-types docs/investigations/pr-agent-events/runtime-smoke.ts
 // Scratch files, fake gh executable, no GitHub/network or production sessions.
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, chmod, rm, access } from 'node:fs/promises';

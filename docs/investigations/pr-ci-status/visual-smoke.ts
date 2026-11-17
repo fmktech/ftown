@@ -1,5 +1,5 @@
 // Root-only visual check. From the task worktree, with Node 24.22.1:
-// PATH=/Users/fkesheh/.nvm/versions/node/v24.22.1/bin:$PATH node --experimental-strip-types docs/investigations/pr-ci-status/visual-smoke.ts
+// PATH=/Users/example/.nvm/versions/node/v24.22.1/bin:$PATH node --experimental-strip-types docs/investigations/pr-ci-status/visual-smoke.ts
 // Requires installed bridge/ui/e2e dependencies and Playwright Chromium. Uses an ephemeral
 // localhost server, mocked RPC, no bridge, production services, database or GitHub.
 import { createRequire } from "node:module";

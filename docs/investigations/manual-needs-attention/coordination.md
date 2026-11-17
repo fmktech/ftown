@@ -2,7 +2,7 @@
 
 User request: add an upper sidebar section like the supplied reference, initially using existing manual-input requests and retaining sessions in their original view.
 
-Shared checkout: `/Users/fkesheh/projects/ftown-simplify-all`. Branch: `feat/manual-needs-attention`. Base: `9f44fccbfd8ec6cb2a5a0805717d540fa9c4a9f6`. The four pre-existing dirty investigation notes are excluded; the Git owner recorded their hashes in `/tmp/ftown-manual-attention-notes-before.json`.
+Shared checkout: `<repo>-simplify-all`. Branch: `feat/manual-needs-attention`. Base: `9f44fccbfd8ec6cb2a5a0805717d540fa9c4a9f6`. The four pre-existing dirty investigation notes are excluded; the Git owner recorded their hashes in `/tmp/ftown-manual-attention-notes-before.json`.
 
 ## Contract
 

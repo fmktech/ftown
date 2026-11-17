@@ -5,9 +5,9 @@ FROZEN. Implementers conform to this exactly; do not renegotiate. Mirror how
 claude flavor (it is its own binary `grok`, xAI Grok Build TUI v0.2.93).
 
 All edits happen in the worktree:
-`/Users/fkesheh/projects/ftown/.claude/worktrees/grok-agent`
+`.claude/worktrees/grok-agent`
 Edit ONLY the worktree copies (absolute paths under that dir). Never touch the
-main repo checkout at `/Users/fkesheh/projects/ftown/<same-relative-path>`.
+main repo checkout at `<repo>/<same-relative-path>`.
 
 ## grok invocation facts (verified on this machine)
 - Binary: `~/.local/bin/grok`, on PATH as `grok`. Auth: OAuth session in

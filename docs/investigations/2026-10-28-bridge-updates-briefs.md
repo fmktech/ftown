@@ -1,12 +1,12 @@
 # Implementation briefs
 
-All work uses `/Users/fkesheh/projects/ftown-bridge-updates` on
+All work uses `<repo>-bridge-updates` on
 `feat/bridge-update-flow`. Others share this checkout: never revert their edits,
 write outside ownership, run Git mutations or recursively dispatch workers. Escalate
 contract changes to root; root pauses dependents and reviews/re-freezes them. Native
 worker IDs, ownership and leases live in the adjacent ownership JSON. No worker
 starts E2E/browser runs, servers, test databases, sandbox runtime or CI. Root owns
-those resources and execution. Node: `/Users/fkesheh/.nvm/versions/node/v24.22.1/bin`;
+those resources and execution. Node: `/Users/example/.nvm/versions/node/v24.22.1/bin`;
 prefix every shell command with `rtk`. Root installed package dependencies, and
 retains the exclusive install/lockfile lease until integration.
 
@@ -376,7 +376,7 @@ package/setup/installed bridge path. Provide exact root command and release leas
 ## E2E fixture repair — P1 integration owner
 
 Tier 1, `gpt-6.1-terra`, `xhigh`, `/root/site_integration`. Shared checkout
-`/Users/fkesheh/projects/ftown-bridge-updates`; others share this checkout: never
+`<repo>-bridge-updates`; others share this checkout: never
 revert others or edit outside ownership. Only writable files are
 `e2e/tests/bridge-updates.spec.ts` and
 `docs/investigations/bridge-updates-package-handoff.md`. No prerequisite writers
@@ -433,7 +433,7 @@ runtime, E2E, Git or application writes; handoff concise conclusion and release.
 ## L1 — final integration and PR
 
 Tier1 `gpt-6.1-terra` / `xhigh`, `/root/site_integration`, designated single Git
-owner in shared checkout `/Users/fkesheh/projects/ftown-bridge-updates`, branch
+owner in shared checkout `<repo>-bridge-updates`, branch
 `feat/bridge-update-flow`. All source writers/reviewer released leases; root passed
 final checks recorded in `bridge-updates-validation.md`. No application changes
 expected. Worker may write only its package handoff and ownership coordination JSON
@@ -454,7 +454,7 @@ task paths. The common-Git agent-receipts evidence is private and must not be
 staged. Use existing repo PR template if present, scale body appropriately.
 
 Commit completed task changes, push branch, open PR to main (do not merge). Draft
-body available at `/Users/fkesheh/projects/ftown/.git/agent-receipts/bridge-updates-pr-body.md`;
+body available at `<repo>/.git/agent-receipts/bridge-updates-pr-body.md`;
 use --body-file preserving newlines, update exact final counts/results from
 validation. Title: Add bridge update checks and opt-in assisted upgrades.
 Record commit/PR link, git status, checks and release Git/file leases in handoff.

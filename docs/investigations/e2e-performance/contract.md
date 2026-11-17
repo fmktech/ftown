@@ -1,6 +1,6 @@
 # Frozen contract: bounded E2E concurrency
 
-Task E2E-PERF, base `acf5a180039d04753f7d79433477b1bcde938a32`. Architect `/root`; implementation/integration `/root/e2e_integration` (Tier 1, `gpt-6.1-terra`, `xhigh`); independent review `/root/e2e_review` (Tier 2, `gpt-6.1-sol`, `max`). Shared checkout `/Users/fkesheh/projects/ftown-e2e-performance`. Audit accepted this design before implementation; no public/application interfaces change.
+Task E2E-PERF, base `acf5a180039d04753f7d79433477b1bcde938a32`. Architect `/root`; implementation/integration `/root/e2e_integration` (Tier 1, `gpt-6.1-terra`, `xhigh`); independent review `/root/e2e_review` (Tier 2, `gpt-6.1-sol`, `max`). Shared checkout `<repo>-e2e-performance`. Audit accepted this design before implementation; no public/application interfaces change.
 
 ## Outcome and frozen boundaries
 

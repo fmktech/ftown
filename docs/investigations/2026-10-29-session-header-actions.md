@@ -1,6 +1,6 @@
 # Session header actions at the right edge
 
-Request received via LegBI coordinator 3b8340bd-886a-4e7c-87c0-078a14ae92ee. Move Stop/Rerun after metadata/status to the far-right edge; preserve behavior and accessibility. Root confirmed ftown_1 has no header writer; dirty original checkout remains untouched. Reuse completed clean /Users/fkesheh/projects/ftown-device-names, branch fix/session-header-actions-right, base origin/main a5303b4. Existing workers completed/released. Main is repository target; no merge authorization for main.
+Request received via LegBI coordinator 3b8340bd-886a-4e7c-87c0-078a14ae92ee. Move Stop/Rerun after metadata/status to the far-right edge; preserve behavior and accessibility. Root confirmed ftown_1 has no header writer; dirty original checkout remains untouched. Reuse completed clean <repo>-device-names, branch fix/session-header-actions-right, base origin/main a5303b4. Existing workers completed/released. Main is repository target; no merge authorization for main.
 
 ## H1 implementation brief
 

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "checkout": "/Users/fkesheh/projects/ftown-simplify-all",
+  "checkout": "<repo>-simplify-all",
   "branch": "feat/pending-device-approvals",
   "contract": "docs/investigations/2026-10-25-pending-approval-contract.md",
   "state": "CI account-controls repair and independent review accepted; integration push then automatic CI",
@@ -129,7 +129,7 @@
         "agent": "/root/mcp_security_impl",
         "model": "gpt-6.1-sol",
         "reasoningEffort": "high",
-        "checkout": "/Users/fkesheh/projects/ftown-simplify-all",
+        "checkout": "<repo>-simplify-all",
         "writes": [
           "ui/src/components/DashboardClient.tsx",
           "ui/src/components/DashboardClient.test.tsx",

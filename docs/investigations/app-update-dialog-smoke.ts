@@ -1,5 +1,5 @@
 // Root-only isolated browser check. From task checkout with Node 24.22.1:
-// PATH=/Users/fkesheh/.nvm/versions/node/v24.22.1/bin:$PATH node --experimental-strip-types docs/investigations/app-update-dialog-smoke.ts
+// PATH=/Users/example/.nvm/versions/node/v24.22.1/bin:$PATH node --experimental-strip-types docs/investigations/app-update-dialog-smoke.ts
 // Requires installed bridge/ui/e2e dependencies and Chromium. Ephemeral loopback only;
 // mocked fetch, no production services, bridge, database, or external requests.
 import { createRequire } from "node:module";

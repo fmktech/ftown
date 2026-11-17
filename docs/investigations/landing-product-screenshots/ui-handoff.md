@@ -1,6 +1,6 @@
 # SITE-UI handoff
 
-Tier 1 `gpt-6.1-terra` / `xhigh`; checkout `/Users/fkesheh/projects/ftown-e2e-performance`.
+Tier 1 `gpt-6.1-terra` / `xhigh`; checkout `<repo>-e2e-performance`.
 
 ## Deliverable
 

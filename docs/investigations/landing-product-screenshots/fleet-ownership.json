@@ -1,5 +1,5 @@
 {
-  "checkout": "/Users/fkesheh/projects/ftown-e2e-performance",
+  "checkout": "<repo>-e2e-performance",
   "phase": "final reviewed deliverable; exclusive Git landing delegated",
   "integrationOwner": "/root/site_integration",
   "runtimeOwner": "/root",

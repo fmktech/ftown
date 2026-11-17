@@ -1,6 +1,6 @@
 # Independent CI repair review — PR136
 
-Reviewer `/root/account_server_review`, explicitly reused `gpt-6.1-sol` / `high`; shared checkout `/Users/fkesheh/projects/ftown-simplify-all`, root-reported starting head `9819b77`. Read-only application/test review; only this report is writable. No Git, install, generated output, runtime, server, database, browser/E2E or CI execution.
+Reviewer `/root/account_server_review`, explicitly reused `gpt-6.1-sol` / `high`; shared checkout `<repo>-simplify-all`, root-reported starting head `9819b77`. Read-only application/test review; only this report is writable. No Git, install, generated output, runtime, server, database, browser/E2E or CI execution.
 
 ## Pairing repair verdict
 

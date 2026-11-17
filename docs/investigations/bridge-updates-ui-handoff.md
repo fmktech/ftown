@@ -1,6 +1,6 @@
 # U1 bridge and app updates: handoff
 
-Owner `/root/site_capture`, Tier 1 `gpt-6.1-terra` / `xhigh`; shared checkout `/Users/fkesheh/projects/ftown-bridge-updates`. Implemented against frozen `bridge/src/update-protocol.ts`. No bridge runtime or shared contract source was edited.
+Owner `/root/site_capture`, Tier 1 `gpt-6.1-terra` / `xhigh`; shared checkout `<repo>-bridge-updates`. Implemented against frozen `bridge/src/update-protocol.ts`. No bridge runtime or shared contract source was edited.
 
 Changed `ui/src/types.ts`, `ui/src/hooks/useBridgeUpdates.ts` and its test, `ui/src/components/Dashboard.tsx`, `SessionList.tsx`, new `BridgeUpdatesDialog.tsx`, `AppUpdateNotice.tsx` and their focused component tests, new `ui/src/app/api/version/route.ts` and its test, `ui/next.config.ts`, and authored `e2e/tests/bridge-updates.spec.ts`. The existing service worker remains unchanged: `/api/` is already excluded from caching, preserving push handlers.
 

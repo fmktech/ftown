@@ -2,7 +2,7 @@
 
 - Worker native identity: `/root/npx_implementation`; explicitly selected
   `gpt-6.1-sol`, reasoning effort `high`.
-- Shared checkout: `/Users/fkesheh/projects/ftown-simplify-all`.
+- Shared checkout: `<repo>-simplify-all`.
 - Branch: `feat/npx-ftown-setup`, created after fetching origin from
   `origin/main` at `c98766de6521464b5247da6bba3af89bc49dcc98` (PR115).
 - npm latest and main were both `0.19.41`; selected patch `0.19.42`.

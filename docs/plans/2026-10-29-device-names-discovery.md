@@ -1,6 +1,6 @@
 # Account device nickname discovery
 
-Read-only discovery at `8a64c2d`, shared checkout `/Users/fkesheh/projects/ftown-device-names`. No source, services, database, or runtime mutated. All recommendations below are for architect review, not frozen product or API decisions.
+Read-only discovery at `8a64c2d`, shared checkout `<repo>-device-names`. No source, services, database, or runtime mutated. All recommendations below are for architect review, not frozen product or API decisions.
 
 ## Identity and UI
 

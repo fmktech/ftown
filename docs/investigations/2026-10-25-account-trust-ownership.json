@@ -1,5 +1,5 @@
 {
-  "checkout": "/Users/fkesheh/projects/ftown-simplify-all",
+  "checkout": "<repo>-simplify-all",
   "branch": "feat/account-trust-pairing",
   "base": "8425849",
   "phase": "implementation/reviews/focusedvalidation complete; exclusive integrationlanding",

@@ -1,6 +1,6 @@
 {
   "task": "live-claude-picker-permission-denied",
-  "checkout": "/Users/fkesheh/projects/ftown/.claude/worktrees/picker-live",
+  "checkout": ".claude/worktrees/picker-live",
   "branch": "fix/claude-picker-live",
   "integration_owner": "/root (picker-live)",
   "dependencies": {

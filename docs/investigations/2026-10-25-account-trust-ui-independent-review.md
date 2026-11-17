@@ -1,6 +1,6 @@
 # Independent security review — account-trust browser/UI slice
 
-Reviewer `/root/account_server_review`, explicitly reused `gpt-6.1-sol` / `high`. Shared checkout `/Users/fkesheh/projects/ftown-simplify-all`, branch `feat/account-trust-pairing`, base `8425849`. Production source was initially STOP-WRITE. Root subsequently reopened a bounded UI repair lease after accepting the two findings below. This reviewer writes only this report; application/test code stays read-only. No installs, Git mutations, generated output, servers, databases, browser/E2E, CI or recursive agents.
+Reviewer `/root/account_server_review`, explicitly reused `gpt-6.1-sol` / `high`. Shared checkout `<repo>-simplify-all`, branch `feat/account-trust-pairing`, base `8425849`. Production source was initially STOP-WRITE. Root subsequently reopened a bounded UI repair lease after accepting the two findings below. This reviewer writes only this report; application/test code stays read-only. No installs, Git mutations, generated output, servers, databases, browser/E2E, CI or recursive agents.
 
 ## Current verdict
 

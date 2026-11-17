@@ -24,7 +24,7 @@ ftown and reports ftown-bridge latest 0.19.41. Prior PR115 is merged.
 
 ## Ownership and dependencies
 
-Shared checkout: `/Users/fkesheh/projects/ftown-simplify-all`.
+Shared checkout: `<repo>-simplify-all`.
 One implementation/integration worker `/root/npx_implementation`, explicitly
 `gpt-6.1-sol` / `high`, owns exactly:
 
@@ -53,7 +53,7 @@ No other live implementation workers existed at dispatch.
 
 Preserve three previously modified investigation/coordination notes; exclude
 them from the new PR. Use one new branch from current main in this shared
-checkout. Do not touch the original dirty `/Users/fkesheh/projects/ftown`.
+checkout. Do not touch the original dirty `<repo>`.
 
 ## Gates and status
 

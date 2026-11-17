@@ -27,7 +27,7 @@ User: "debug then" after live showcase exposed plain PR badges. Root observed FT
 - Prediction: installed artifact lacks handler, direct RPC fails, published package belongs to earlier commit.
 - Verification: inspect installed distribution; sanitized encrypted localApplication probe; npm metadata; failed publish log.
 - Evidence:
-  - Installed /Users/fkesheh/.ftown/cli/package.json version0.19.62; dist/command-rpc.js lacks get_pull_request_statuses; dist/pull-request-status.js absent.
+  - Installed /Users/example/.ftown/cli/package.json version0.19.62; dist/command-rpc.js lacks get_pull_request_statuses; dist/pull-request-status.js absent.
   - RPC: {"status":403,"code":"permission_denied","error":"permission_denied","outcomeUnknown":false}
   - npm view ftown@0.19.62 gitHead version --json: {"gitHead":"0657a8eaef2670a4b3f39164acbecf84e83dd7b5","version":"0.19.62"}
   - Publish41087077663: "ftown@0.19.62 has a different or missing gitHead. Bump bridge/package.json and its lockfile before releasing this commit."
@@ -57,7 +57,7 @@ Isolation: direct encrypted RPC reproduces denial without browser/provider sched
 The bridge release was blocked by a version collision, leaving users on a same-numbered older artifact. H1 is rejected by production deployment/source evidence; H3 by frontend-independent denial. Recovery requires a distinct publishable version and prevention requires integration-time version validation. The existing immutable npm guard must remain intact. Live resolution cannot be claimed before the new artifact is released, installed and original UI reproduction passes.
 
 ## Ownership and initial briefs
-Native workers reused, same task-owned shared checkout; no app writes until debug gate is fulfilled (3hypotheses,1rejected,1proven,5Whys,falsification). Root owns this investigation and all live UI/E2E/runtime experiments. Do not touch original dirty /Users/fkesheh/projects/ftown, user services/data, secrets or unrelated agents. Workers use rtk and Semble for discovery, no recursive agents.
+Native workers reused, same task-owned shared checkout; no app writes until debug gate is fulfilled (3hypotheses,1rejected,1proven,5Whys,falsification). Root owns this investigation and all live UI/E2E/runtime experiments. Do not touch original dirty <repo>, user services/data, secrets or unrelated agents. Workers use rtk and Semble for discovery, no recursive agents.
 
 W1 /root/pr_status_impl Tier1 gpt-6.1-terra xhigh: exclusive Git setup lease only. Fetch main; create NEW shared task checkout /tmp/ftown-live-pr-badges on fix/live-pr-badges from current origin/main, preserve old task checkout. Record SHA/branch. Read backend command/protocol/service and local encrypted client APIs to propose safe root read-only production RPC probe for current session a321895d-59ae-4575-b2ec-d7087392757b. Do not read/print credentials; do not restart/update bridge. No app changes or commits, tests/servers/CI. Return setup and bounded findings, release Git lease; root then assigns implementation exactfiles once proven.
 

@@ -1,5 +1,5 @@
 {
-  "checkout": "/Users/fkesheh/projects/ftown-simplify-all",
+  "checkout": "<repo>-simplify-all",
   "branch": "feat/e2ee-security-log",
   "base": "0c32f76a9bea6de5155957c6d684cacd40f81040",
   "integrationOwner": "/root/mcp_security_impl",

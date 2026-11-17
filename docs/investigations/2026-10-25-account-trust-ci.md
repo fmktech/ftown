@@ -1,6 +1,6 @@
 # PR 136 CI repair coordination
 
-- Checkout: `/Users/fkesheh/projects/ftown-simplify-all`; branch `feat/account-trust-pairing`; starting SHA `9819b77c4bebfdd0891825f64295b7d634f02234`.
+- Checkout: `<repo>-simplify-all`; branch `feat/account-trust-pairing`; starting SHA `9819b77c4bebfdd0891825f64295b7d634f02234`.
 - Evidence: GitHub run `40210710101`, 45 passed / 3 failed / 2 skipped; `/tmp/ftown-pr136-ci-failed.log` and `/tmp/ftown-pr136-ci-artifacts`.
 - Failures: old device-pairing test waits for a stdout code; two push tests fail registering users with HTTP 429; cleanup reports first bridge PID identity mismatch.
 - Existing four unrelated notes remain protected and unstaged. No production deployment or merge authorized.

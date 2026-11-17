@@ -1,5 +1,5 @@
 // Root-only; from repository root with Node 24.22.1:
-// PATH=/Users/fkesheh/.nvm/versions/node/v24.22.1/bin:$PATH node --experimental-strip-types docs/investigations/update-dialog/ci-repro.ts
+// PATH=/Users/example/.nvm/versions/node/v24.22.1/bin:$PATH node --experimental-strip-types docs/investigations/update-dialog/ci-repro.ts
 // Actual components; ephemeral localhost server, no live bridge/database. Collects both assertions before exit.
 import { createRequire } from "node:module";
 import { createServer } from "node:http";

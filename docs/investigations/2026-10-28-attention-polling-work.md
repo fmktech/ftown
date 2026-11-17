@@ -1,7 +1,7 @@
 # Attention polling investigation and delivery
 
 ## Task A: investigate (active)
-Tier 1: gpt-6.1-terra, xhigh. Shared checkout: /Users/fkesheh/projects/ftown.
+Tier 1: gpt-6.1-terra, xhigh. Shared checkout: <repo>.
 Exclusive writable file: docs/investigations/2026-10-28-attention-polling.md.
 All source/runtime files read-only. No source changes, installs, Git mutations, servers, E2E, or runtime upgrades. Others share this checkout; preserve all existing edits. Root owns integration and runtime resources. No parallel source writers.
 Outcome: identify actual running bridge version and source of get_session_attention traffic; distinguish noisy logging, excessive polling and version mismatch. Current checkout lacks this command and has extensive unrelated dirty changes. Do not assume current checkout is deployed.
@@ -11,7 +11,7 @@ Acceptance: report exact producer/interval/lifecycle if available, runtime path/
 
 ## Dispatch and workspace
 Task A native agent: /root/attention_fix, Tier 1 gpt-6.1-terra xhigh.
-Root created ONE shared task worktree /Users/fkesheh/projects/ftown-attention-polling at ebd108e on fix/attention-polling-noise because original checkout has 94 unrelated changes. All implementation uses this worktree. Root owns dependencies, Git landing, E2E, coordination artifact. Dependency install in bridge running under root lease.
+Root created ONE shared task worktree <repo>-attention-polling at ebd108e on fix/attention-polling-noise because original checkout has 94 unrelated changes. All implementation uses this worktree. Root owns dependencies, Git landing, E2E, coordination artifact. Dependency install in bridge running under root lease.
 
 ## Task B: bounded logging fix (pending investigation gate and independent contract review)
 Worker: reuse /root/attention_fix, Tier 1 gpt-6.1-terra xhigh; integration implementation owner same worker, root owns Git.

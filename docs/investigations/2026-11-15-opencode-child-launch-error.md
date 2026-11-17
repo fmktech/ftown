@@ -151,7 +151,7 @@ Prompt text is not on the stored command by design (`create-ftown-session.ts` pe
 
 ```
 pane_dead=0
-Plugin failed: /Users/fkesheh/.config/opencode/plugins/ftown.js
+Plugin failed: /Users/example/.config/opencode/plugins/ftown.js
 Build auto · GLM-5.3-Flash OpenCode Go · high
 ```
 

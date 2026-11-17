@@ -1,7 +1,7 @@
 # Independent setup/CLI lifecycle review
 
 Reviewer: `/root/review_all`, explicit `gpt-6.1-sol` / `high`.
-Checkout: `/Users/fkesheh/projects/ftown-simplify-all`.
+Checkout: `<repo>-simplify-all`.
 Only writable scope: this report. No application/Git/build/runtime leases.
 
 ## Pre-freeze review

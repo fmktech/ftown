@@ -1,7 +1,7 @@
 # Account trust pairing coordination
 
 - Request: one bridge approval, one account-wide browser approval, one selected-bridge MCP consent.
-- Checkout: `/Users/fkesheh/projects/ftown-simplify-all`, branch `feat/account-trust-pairing`, base8425849.
+- Checkout: `<repo>-simplify-all`, branch `feat/account-trust-pairing`, base8425849.
 - Integration owner: `/root/mcp_security_impl`; all E2E execution/resources: `/root`.
 - Existing native agents reused with previously explicitly selected `gpt-6.1-sol` / `high`; all stopped after prep before any new leases. Other historical agents are not task-owned and remain untouched.
 - Four preexisting investigation notes are unrelated, protected by `/tmp/ftown-e2ee-notes-before.json`; do not stage or modify.

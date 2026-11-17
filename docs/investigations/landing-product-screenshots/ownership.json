@@ -2,7 +2,7 @@
   "task": "Real product images for landing",
   "base": "482662e4a6919d7352aa24d5a496e6e9bfd0115d",
   "branch": "feat/landing-product-screenshots",
-  "checkout": "/Users/fkesheh/projects/ftown-e2e-performance",
+  "checkout": "<repo>-e2e-performance",
   "phase": "final acceptance complete; Git integration in progress",
   "rootWrites": [
     "docs/investigations/landing-product-screenshots/coordination.md",

@@ -1,6 +1,6 @@
 # AI demo presentation: bounded discovery review
 
-AI-DESIGN-REVIEW — Tier 2 `gpt-6.1-sol` / `max`. Shared checkout `/Users/fkesheh/projects/ftown-e2e-performance`; sole writable file is this report. All application/capture source is read-only. Root owns architecture, media execution/publication and E2E; eventual implementation/integration owner is `/root/site_integration`.
+AI-DESIGN-REVIEW — Tier 2 `gpt-6.1-sol` / `max`. Shared checkout `<repo>-e2e-performance`; sole writable file is this report. All application/capture source is read-only. Root owns architecture, media execution/publication and E2E; eventual implementation/integration owner is `/root/site_integration`.
 
 ## Finding and recommended direction
 

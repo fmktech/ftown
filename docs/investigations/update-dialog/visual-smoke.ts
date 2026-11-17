@@ -1,4 +1,4 @@
-// Root-only: PATH=/Users/fkesheh/.nvm/versions/node/v24.22.1/bin:$PATH node --experimental-strip-types docs/investigations/update-dialog/visual-smoke.ts
+// Root-only: PATH=/Users/example/.nvm/versions/node/v24.22.1/bin:$PATH node --experimental-strip-types docs/investigations/update-dialog/visual-smoke.ts
 // Actual component with fixture props; ephemeral loopback server, no bridge or database.
 import { createRequire } from "node:module";
 import { createServer } from "node:http";

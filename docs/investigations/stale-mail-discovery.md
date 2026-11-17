@@ -1,6 +1,6 @@
 # Stale mail wake: source discovery
 
-MAIL-DISCOVERY — Tier 1 `gpt-6.1-terra` / `xhigh`. Shared checkout `/Users/fkesheh/projects/ftown-e2e-performance`; application source was read-only. This is source analysis, not proof of the exact captured event ordering.
+MAIL-DISCOVERY — Tier 1 `gpt-6.1-terra` / `xhigh`. Shared checkout `<repo>-e2e-performance`; application source was read-only. This is source analysis, not proof of the exact captured event ordering.
 
 ## Finding and limits
 

@@ -1,6 +1,6 @@
 # Setup and CLI lifecycle simplification
 
-User authorized all four recommendations on 2026-10-17. All task agents share `/Users/fkesheh/projects/ftown-simplify-all`; preserve the original dirty checkout and previous task's local retirement note. Prior PR #114 merged.
+User authorized all four recommendations on 2026-10-17. All task agents share `<repo>-simplify-all`; preserve the original dirty checkout and previous task's local retirement note. Prior PR #114 merged.
 
 ## Proposed contract (freeze after discovery/review)
 
@@ -14,7 +14,7 @@ Acceptance: setup on fresh temporary HOME; second normal startup cannot rewrite 
 ## Ownership and resources
 
 Root owns this coordination file and all E2E/browser/server/database operations and execution evidence. Implementation/integration worker `/root/simplify_all` explicitly `gpt-6.1-sol` / `high` reactivated for this new task: exclusive setup/Git lease, discovery report `worker.md`; exact implementation manifest pending. Worker must not execute E2E or mutate actual user HOME.
-Reviewer `/root/review_all`, explicitly `gpt-6.1-sol` / `high`, owns only `review.md`, code read-only. No parallel application writers. Dependency/lock/build resources will be leased to implementation worker then released for root verification. Preserve original checkout `/Users/fkesheh/projects/ftown`.
+Reviewer `/root/review_all`, explicitly `gpt-6.1-sol` / `high`, owns only `review.md`, code read-only. No parallel application writers. Dependency/lock/build resources will be leased to implementation worker then released for root verification. Preserve original checkout `<repo>`.
 
 Gates: discovery → concise independent contract review and exact ownership validation → implement/static/unit → review/fix → root E2E/runtime → PR. Reuse successful evidence; no additional user approvals within scope.
 

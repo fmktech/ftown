@@ -13,7 +13,7 @@ hypotheses_proven: 1
 
 # Bounded CI account-trust investigation
 
-AI-CI-REVIEW — Tier 2 `gpt-6.1-sol` / `max`, shared checkout `/Users/fkesheh/projects/ftown-e2e-performance`. Sole writable file is this report. All application/test/artifact reads are non-mutating; root owns runtime, isolated local database, diagnostic execution and CI. No source fix is justified yet.
+AI-CI-REVIEW — Tier 2 `gpt-6.1-sol` / `max`, shared checkout `<repo>-e2e-performance`. Sole writable file is this report. All application/test/artifact reads are non-mutating; root owns runtime, isolated local database, diagnostic execution and CI. No source fix is justified yet.
 
 ## Symptom and preserved evidence
 

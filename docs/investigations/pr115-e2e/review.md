@@ -1,6 +1,6 @@
 # PR 115 pairing fixture review
 
-Independent reviewer `/root/review_all`, explicitly `gpt-6.1-sol` / `high`, shared checkout `/Users/fkesheh/projects/ftown-simplify-all`.
+Independent reviewer `/root/review_all`, explicitly `gpt-6.1-sol` / `high`, shared checkout `<repo>-simplify-all`.
 
 Approved; no findings. Reviewed the complete `e2e/tests/device-pairing.spec.ts` diff and investigation evidence. The fixture awaits setup using the current compiled package CLI and the exact fresh HOME/USERPROFILE later supplied to the bridge. Setup runs from the empty scratch directory, preventing accidental repository legacy-data migration. Failure removes the scratch HOME and reports captured diagnostics/cause. Successful setup does not add a token or stored auth; startup still exercises pairing, and the existing userCode/browser approval/presence/revoke assertions and PID-scoped teardown remain intact. No product code changed.
 

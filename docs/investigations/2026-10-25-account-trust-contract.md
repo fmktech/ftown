@@ -2,7 +2,7 @@
 
 # Account trust and unified pairing — frozen contract v1
 
-Base: `8425849`; shared checkout `/Users/fkesheh/projects/ftown-simplify-all`; branch `feat/account-trust-pairing`. Root owns this contract and `bridge/src/security/{protocol,account-protocol}.ts`. Frozen after three independent reviews and central corrections; no local amendments. Core implementation is the first write wave. Existing E2EE contract remains authoritative except the explicit additions here.
+Base: `8425849`; shared checkout `<repo>-simplify-all`; branch `feat/account-trust-pairing`. Root owns this contract and `bridge/src/security/{protocol,account-protocol}.ts`. Frozen after three independent reviews and central corrections; no local amendments. Core implementation is the first write wave. Existing E2EE contract remains authoritative except the explicit additions here.
 
 ## Product and acceptance
 

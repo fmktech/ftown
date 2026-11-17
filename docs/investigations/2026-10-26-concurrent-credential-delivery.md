@@ -26,7 +26,7 @@ Retry exactly once, total two attempts, ONLY a well-formed final SQL result with
 Tests cover deterministic overlap and immutable same snapshot, bounded retries, fresh revocation/rotation/expiry/history/owner validation, and unchanged failure behavior. No keys, scopes, schema or approval bypass changes.
 
 ## Ownership
-Shared checkout /Users/fkesheh/projects/ftown-simplify-all, PR141 branch. Existing protected four dirty notes remain untouched/hash-identical.
+Shared checkout <repo>-simplify-all, PR141 branch. Existing protected four dirty notes remain untouched/hash-identical.
 Implementation/integration /root/existing_pwa_access explicit gpt-6.1-sol/high: e2e/scripts/pending-approvals-db.ts first for deterministic test only. ui/src/lib/pending-approval-store.ts and ui/src/lib/pending-approval-store.test.ts reserved for later GO after RED. Root owns this report. Read-only reviewer /root/rate_window_review explicit gpt-6.1-sol/high. Four exact paths disjoint; single writer. No dependency installs, local DB/server/E2E/CI execution by workers.
 Git commit/push lease only when root authorizes; root owns CI dispatch/monitoring. Existing workflow/env audited localhost ftown database with Docker teardown; never production DB. No merge/deploy.
 

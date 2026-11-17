@@ -2,7 +2,7 @@
 
 ## Scope and contract
 
-User authorized all five proposed simplifications on 2026-10-17. Work against current main including PR #113. Preserve the original dirty checkout. All task workers share `/Users/fkesheh/projects/ftown-simplify-all`; no per-worker checkouts.
+User authorized all five proposed simplifications on 2026-10-17. Work against current main including PR #113. Preserve the original dirty checkout. All task workers share `<repo>-simplify-all`; no per-worker checkouts.
 
 1. Stop bundling/installing fticket with ftown. Remove only provably ftown-managed installed assets on upgrade; preserve independently installed skills, custom paths, and user data.
 2. Retire the workflow runner, CLI entrypoint/dispatcher routing, installer, bundled reference and examples. Remove source/runtime dependencies unique to it. Existing workflow run data must survive. Do not remove CI workflows or unrelated uses of the word workflow.
@@ -17,7 +17,7 @@ Acceptance: no automatic fticket install or workflow feature in packaged output;
 Architect/root owns this file, scope decisions, all E2E execution and task server/process setup/cleanup.
 Implementation/integration worker `/root/simplify_all`: explicit `gpt-6.1-sol`, `high`; setup and Git lease; implementation file manifest pending discovery and review. Sole implementation writer. May write `worker.md` and proposed smoke scripts after scope freeze.
 Reviewer `/root/review_all`: explicit `gpt-6.1-sol`, `high`, same checkout, read-only code and uniquely owned `review.md` only.
-Original checkout `/Users/fkesheh/projects/ftown` is read-only for this task.
+Original checkout `<repo>` is read-only for this task.
 No E2E server, browser, database, or CI execution by workers. No live HOME installation by any worker. Dependency install/build output and Git operations serialized to implementation worker. Root E2E begins after worker releases resources.
 
 ## Gates

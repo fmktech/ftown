@@ -1,6 +1,6 @@
 # Boat CI implementation review — 2026-10-28
 
-Reviewer: `/root/boat_ci_review`, Tier 2, `gpt-6.1-sol`, `max`. Shared checkout `/Users/fkesheh/projects/ftown-bridge-updates`; read-only source, sole writable report lease. Reviewed the frozen coordination contract, ownership manifest, implementation handoff, all five changed workflows, composite action, controller/tests, three payload scripts, and CI documentation against the original workflow bodies.
+Reviewer: `/root/boat_ci_review`, Tier 2, `gpt-6.1-sol`, `max`. Shared checkout `<repo>-bridge-updates`; read-only source, sole writable report lease. Reviewed the frozen coordination contract, ownership manifest, implementation handoff, all five changed workflows, composite action, controller/tests, three payload scripts, and CI documentation against the original workflow bodies.
 
 Decision: **source review approved; no remaining blocking source findings**. R1–R5 were accepted, repaired by the implementation owner, and closed by source inspection after the final repair handoff. Actual provider/E2E results remain root-owned acceptance gates; this report does not claim those checks ran.
 

@@ -3,9 +3,9 @@
 ## Setup and discovery
 
 - Worker: `/root/simplify_all`, explicitly `gpt-6.1-sol` / `high`.
-- Shared checkout: `/Users/fkesheh/projects/ftown-simplify-all`.
+- Shared checkout: `<repo>-simplify-all`.
 - Branch: `simplify/ftown-agent-surface`; base `origin/main` at `4f6811c215865c839f9b6a9f3e277346bbde4b74`.
-- Original dirty checkout preserved. Read `bridge/AGENTS.md` and `/Users/fkesheh/.codex/RTK.md`. Semble CLI located startup installer, briefing, generated guide, skill and workflow surfaces; literal occurrence scans checked dependent references.
+- Original dirty checkout preserved. Read `bridge/AGENTS.md` and `/Users/example/.codex/RTK.md`. Semble CLI located startup installer, briefing, generated guide, skill and workflow surfaces; literal occurrence scans checked dependent references.
 - No implementation, install, runtime, E2E or CI execution yet.
 
 ## Proposed exclusive writable manifest

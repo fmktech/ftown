@@ -1,5 +1,5 @@
 {
-  "checkout": "/Users/fkesheh/projects/ftown-simplify-all",
+  "checkout": "<repo>-simplify-all",
   "branch": "fix/bridge-launch-mail-recovery",
   "base": "92d0110302afcf61f8ac48b999d5603ad9c521ca",
   "workers": [

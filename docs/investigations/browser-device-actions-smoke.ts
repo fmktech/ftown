@@ -1,5 +1,5 @@
 // Root-only mocked browser check. From the task checkout with Node 24.22.1:
-// PATH=/Users/fkesheh/.nvm/versions/node/v24.22.1/bin:$PATH node --experimental-strip-types docs/investigations/browser-device-actions-smoke.ts
+// PATH=/Users/example/.nvm/versions/node/v24.22.1/bin:$PATH node --experimental-strip-types docs/investigations/browser-device-actions-smoke.ts
 // Uses real access map/editor, mocked selected details and name/revoke actions.
 // Ephemeral loopback only; no account, bridge, database or external network.
 import { createRequire } from "node:module";

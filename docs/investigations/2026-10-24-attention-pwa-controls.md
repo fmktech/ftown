@@ -9,7 +9,7 @@ User requests removal of the in-page attention popup in favor of PWA system noti
 - Root alone runs focused E2E/browser and visual checks; workers may run unit/static checks when assigned. Always PR, no merge.
 
 ## Ownership and dispatch
-Shared checkout /Users/fkesheh/projects/ftown-simplify-all. Prior workers completed and leases released; reused native workers explicitly gpt-6.1-sol/high.
+Shared checkout <repo>-simplify-all. Prior workers completed and leases released; reused native workers explicitly gpt-6.1-sol/high.
 - /root/session_ui: read-only UI discovery then sole application/test writer after exact scope is frozen.
 - /root/npx_review: read-only notification-path discovery, pre-freeze review and final review.
 - /root/npx_implementation: sole Git prep/landing owner and assigned isolated unit/static validation.
