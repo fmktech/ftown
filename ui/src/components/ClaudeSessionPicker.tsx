@@ -14,14 +14,15 @@ interface ClaudeSession {
 interface ClaudeSessionPickerProps {
   bridgeId: string;
   workingDir: string;
+  account: string;
   onSelect: (claudeSessionId: string, summary: string) => void;
-  sendCommand: (command: { type: "list_native_sessions"; payload: { bridgeId: string; workingDir: string; harness: "claude" }; requestId: string }) => Promise<CommandResponse>;
+  sendCommand: (command: { type: "list_native_sessions"; payload: { bridgeId: string; workingDir: string; harness: "claude"; account?: string }; requestId: string }) => Promise<CommandResponse>;
 }
 
-export function ClaudeSessionPicker({ bridgeId, workingDir, onSelect, sendCommand }: ClaudeSessionPickerProps) {
+export function ClaudeSessionPicker({ bridgeId, workingDir, account, onSelect, sendCommand }: ClaudeSessionPickerProps) {
   const [sessions, setSessions] = useState<ClaudeSession[]>([]);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<"load" | "upgrade" | null>(null);
 
   const fetchSessions = useCallback(async () => {
     if (!bridgeId || !workingDir) return;
@@ -30,16 +31,22 @@ export function ClaudeSessionPicker({ bridgeId, workingDir, onSelect, sendComman
     setError(null);
 
     try {
-      const response = await sendCommand({ type: "list_native_sessions", payload: { bridgeId, workingDir, harness: "claude" }, requestId: uuidv4() });
+      const response = await sendCommand({ type: "list_native_sessions", payload: { bridgeId, workingDir, harness: "claude", ...(account !== "default" ? { account } : {}) }, requestId: uuidv4() });
+      if (!response.success && (response.error === "Unknown command type: list_native_sessions"
+        || (account !== "default" && response.error === "Invalid native session list request"))) {
+        setError("upgrade");
+        setSessions([]);
+        return;
+      }
       if (!response.success) throw new Error(response.error ?? "Failed to fetch sessions");
       setSessions((response.data as { sessions: ClaudeSession[] }).sessions);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to fetch sessions");
+      setError("load");
       setSessions([]);
     } finally {
       setLoading(false);
     }
-  }, [bridgeId, workingDir, sendCommand]);
+  }, [bridgeId, workingDir, account, sendCommand]);
 
   useEffect(() => {
     fetchSessions();
@@ -64,7 +71,7 @@ export function ClaudeSessionPicker({ bridgeId, workingDir, onSelect, sendComman
       >
         <div className="flex items-start gap-2 text-xs text-[var(--status-error)]">
           <span aria-hidden>⚠</span>
-          <span className="break-words">Couldn&apos;t load Claude sessions.</span>
+          <span className="break-words">{error === "upgrade" ? "Upgrade this computer's ftown bridge to load Claude sessions." : "Couldn't load Claude sessions."}</span>
         </div>
         <button
           type="button"

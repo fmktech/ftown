@@ -1129,7 +1129,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
             )
           )}
 
-          {(shellType === "claude" && selectedAccount === "default" || shellType === "zai") && effectiveBridgeId && workingDir.trim() && (
+          {((shellType === "claude" && selectedAccount) || shellType === "zai") && effectiveBridgeId && workingDir.trim() && (
             selectedClaudeSessionId ? (
               <div className="flex items-center gap-2 px-3 py-2 border border-[var(--accent)]/30 rounded-[var(--radius-sm)] bg-[var(--accent-dim)]">
                 <span className="text-xs text-[var(--accent)] flex-1 truncate font-mono">
@@ -1147,6 +1147,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
               <ClaudeSessionPicker
                 bridgeId={effectiveBridgeId}
                 workingDir={workingDir.trim()}
+                account={shellType === "claude" ? selectedAccount : "default"}
                 onSelect={(sid, summary) => {
                   setSelectedClaudeSessionId(sid);
                   setSelectedClaudeSummary(summary);

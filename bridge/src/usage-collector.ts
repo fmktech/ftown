@@ -109,13 +109,14 @@ function usageFromModels(
 }
 
 /**
- * Claude Code project-directory slug: every non-alphanumeric character of the
- * working directory becomes '-'. Verified against real transcript dirs on this
- * machine — e.g. /Users/x/projects/ftown/.claude/worktrees/foo maps to
+ * Claude Code project-directory slug: resolve the working directory first so
+ * trailing separators do not change its identity, then replace every
+ * non-alphanumeric character with '-'. Verified against real transcript dirs
+ * on this machine — e.g. /Users/x/projects/ftown/.claude/worktrees/foo maps to
  * -Users-x-projects-ftown--claude-worktrees-foo ('.' → '-', '/' → '-').
  */
 export function claudeProjectSlug(workingDir: string): string {
-  return workingDir.replace(/[^a-zA-Z0-9]/g, '-');
+  return resolve(workingDir).replace(/[^a-zA-Z0-9]/g, '-');
 }
 
 export async function collectSessionUsage(
