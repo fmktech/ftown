@@ -4,7 +4,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { NewSessionModal, type SessionDefaults } from "./NewSessionModal";
 import type { Command, CommandResponse, Session } from "@/types";
 
-vi.mock("./ClaudeSessionPicker", () => ({ ClaudeSessionPicker: () => null }));
+vi.mock("./ClaudeSessionPicker", () => ({ ClaudeSessionPicker: ({ account }: { account: string }) => <div data-testid="claude-session-picker-account">{account}</div> }));
 vi.mock("./CursorSessionPicker", () => ({ CursorSessionPicker: () => null }));
 vi.mock("./EnvVarsEditor", () => ({ default: () => null, getStoredEnvVars: () => ({}) }));
 
@@ -104,6 +104,12 @@ it("lists default first, filters accounts by harness, and submits the selected a
   fireEvent.click(within(childPolicy).getByLabelText("spare (claude)"));
   fireEvent.click(screen.getByRole("button", { name: "Create Session" }));
   expect(onSubmit).toHaveBeenCalledWith("", expect.objectContaining({ account: "work", allowedAccounts: ["coding", "work"] }));
+});
+
+it("shows Claude sessions for the selected non-default account", async () => {
+  accountsModal({ defaults: { bridgeId: "a", workingDir: "/Users/example/", account: "work" } });
+  await waitFor(() => expect((screen.getByLabelText("Account") as HTMLSelectElement).value).toBe("work"));
+  expect((await screen.findByTestId("claude-session-picker-account")).textContent).toBe("work");
 });
 
 it("retries the account read briefly when the bridge reports it is starting", async () => {

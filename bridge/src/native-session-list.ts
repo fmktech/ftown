@@ -8,10 +8,10 @@ import { claudeProjectSlug } from './usage-collector.js';
 export interface NativeSessionSummary { sessionId: string; timestamp: string; summary: string }
 export type NativeSessionHarness = 'claude' | 'cursor';
 
-async function listClaude(workingDir: string, home: string): Promise<NativeSessionSummary[]> {
-  const root = join(home, '.claude', 'projects', claudeProjectSlug(workingDir));
+async function listClaude(workingDir: string, home: string, configDir?: string): Promise<NativeSessionSummary[]> {
+  const root = join(configDir ?? join(home, '.claude'), 'projects', claudeProjectSlug(workingDir));
   let names: string[];
-  try { names = await readdir(root); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
+  try { names = await readdir(root); } catch { return []; }
   const results: NativeSessionSummary[] = [];
   for (const name of names.filter(value => value.endsWith('.jsonl'))) {
     const sessionId = name.slice(0, -6);
@@ -73,6 +73,6 @@ async function listCursor(workingDir: string, home: string): Promise<NativeSessi
   return results.sort((a, b) => b.timestamp.localeCompare(a.timestamp)).slice(0, 20);
 }
 
-export function listNativeSessions(harness: NativeSessionHarness, workingDir: string, home = homedir()): Promise<NativeSessionSummary[]> {
-  return harness === 'claude' ? listClaude(workingDir, home) : listCursor(workingDir, home);
+export function listNativeSessions(harness: NativeSessionHarness, workingDir: string, home = homedir(), claudeConfigDir?: string): Promise<NativeSessionSummary[]> {
+  return harness === 'claude' ? listClaude(workingDir, home, claudeConfigDir) : listCursor(workingDir, home);
 }

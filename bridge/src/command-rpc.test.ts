@@ -110,6 +110,29 @@ test('list_native_sessions requires authenticated dispatch, validates input, ret
   assert.equal(responses.at(-1)?.success, false); assert.match(responses.at(-1)?.error ?? '', /storage unavailable/);
 });
 
+test('list_native_sessions resolves the selected Claude account config directory', async t => {
+  const home = await mkdtemp(join(tmpdir(), 'native-session-account-rpc-'));
+  const previousHome = process.env.HOME;
+  t.after(async () => {
+    if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
+    await rm(home, { recursive: true, force: true });
+  });
+  process.env.HOME = home;
+  const configDir = join(home, '.claude-vitalsigns');
+  saveAccounts({ version: 1, accounts: [{ id: 'vitalsigns', harness: 'claude', configDir }] });
+  const responses: CommandResponse[] = [];
+  const calls: Array<{ harness: string; workingDir: string; configDir?: string }> = [];
+  const security = { revalidate: async () => {} } as unknown as BridgeSecurityService;
+  const verified = { envelope: { messageId: 'account-list' }, principal: {}, application: { route: { kind: 'command', requestId: 'account-list', command: 'list_native_sessions', sessionId: null }, data: {} } } as unknown as VerifiedApplication;
+  const handler = createCommandHandler({ bridgeId: 'bridge', security, sessionController: {} as SessionController,
+    listNativeSessions: async (harness, workingDir, _home, selectedConfigDir) => {
+      calls.push({ harness, workingDir, configDir: selectedConfigDir }); return [];
+    }, publishCommandResponse: async response => { responses.push(response); } });
+  await handler({ type: 'list_native_sessions', requestId: 'account-list', payload: { bridgeId: 'bridge', workingDir: '/work', harness: 'claude', account: 'vitalsigns' } }, verified);
+  assert.deepEqual(calls, [{ harness: 'claude', workingDir: '/work', configDir }]);
+  assert.deepEqual(responses.at(-1), { requestId: 'account-list', success: true, data: { sessions: [] } });
+});
+
 test('attention RPC requires owner targeting and persists read/resolve results', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'attention-rpc-'));
   await mkdir(join(dir, 'session'));
