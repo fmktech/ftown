@@ -466,6 +466,10 @@ async function relaunchFtownSessionImpl(
 
   session.status = 'running';
   session.bridgeId = deps.bridgeId;
+  delete session.block;
+  delete session.lastError;
+  delete session.exitCode;
+  delete session.errorReason;
   if (mode === 'resume') {
     session.runtime = deps.runner.getPreferredRuntime();
     session.errorReason = undefined;

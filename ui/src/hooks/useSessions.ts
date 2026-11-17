@@ -162,6 +162,7 @@ interface UseSessionsResult {
   createSession: (prompt: string, options?: CreateSessionOptions) => Promise<Session>;
   stopSession: (sessionId: string) => void;
   retrySession: (sessionId: string) => void;
+  dismissSessionBlock: (session: Session) => Promise<void>;
   handoffSession: (sessionId: string, options?: { shellType?: string; model?: string; name?: string }) => Promise<Session>;
   renameSession: (sessionId: string, name: string) => void;
   setSessionParent: (sessionId: string, parentSessionId: string | null) => void;
@@ -567,6 +568,20 @@ export function useSessions(
     [userId, publishCommand]
   );
 
+  const dismissSessionBlock = useCallback(async (session: Session) => {
+    if (!session.block) return;
+    const response = await sendCommand({ type: 'dismiss_session_block', requestId: uuidv4(), payload: {
+      sessionId: session.id, bridgeId: session.bridgeId,
+      transitionKey: session.block.transitionKey, detectedAt: session.block.detectedAt,
+    } });
+    if (!response.success) throw new Error(response.error ?? 'Could not dismiss session block');
+    const updated = acceptSessionRow((response.data as { session?: unknown } | undefined)?.session);
+    if (updated) updateSessions(prev => prev.map(row => {
+      if (row.id !== updated.id || row.block?.transitionKey !== session.block?.transitionKey || row.block?.detectedAt !== session.block?.detectedAt) return row;
+      return mergeSessionSnapshot(row, updated);
+    }));
+  }, [sendCommand, updateSessions]);
+
   const renameSession = useCallback(
     (sessionId: string, name: string) => {
       if (!userId) return;
@@ -618,6 +633,7 @@ export function useSessions(
     createSession,
     stopSession,
     retrySession,
+    dismissSessionBlock,
     handoffSession,
     renameSession,
     setSessionParent,

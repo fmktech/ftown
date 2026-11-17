@@ -14,6 +14,17 @@ const ERROR_CHARS = 2000;
 const MAIL_CHARS = 8000;
 const ATTENTION_CHARS = 2000;
 const BACKOFF_MS = 5000;
+/** Failure annotations are transient even if a session never emits again. */
+export const BLOCK_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+export function clearSessionBlock(session: Session): void {
+  const block = session.block;
+  if (!block) return;
+  // lastError is written together with the block by this monitor. Keep the
+  // terminal status/errorReason itself, which describes process lifecycle.
+  delete session.lastError;
+  delete session.block;
+}
 
 export interface FailureLifecycle {
   kind: 'output' | 'completed' | 'error';
@@ -206,6 +217,7 @@ export class SessionFailureMonitor {
   private readonly buffers = new Map<string, string>();
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly backoffUntil = new Map<string, number>();
+  private readonly observed = new Set<string>();
   private readonly debounceMs: number;
 
   constructor(private readonly deps: SessionFailureDeps) {
@@ -245,6 +257,21 @@ export class SessionFailureMonitor {
     await this.evaluate(sessionId, event);
   }
 
+  /** Remove legacy or inactive annotations after their bounded retention. */
+  async expire(sessionId: string): Promise<void> {
+    await this.deps.withSessionWrite(sessionId, async () => {
+      const session = await this.deps.loadSession(sessionId);
+      if (!session?.block) return;
+      this.observed.add(sessionId);
+      const detected = Date.parse(session.block.detectedAt);
+      if (Number.isFinite(detected) && this.now().getTime() - detected < BLOCK_RETENTION_MS) return;
+      clearSessionBlock(session);
+      session.updatedAt = this.now().toISOString();
+      await this.deps.saveSession(session);
+      await this.deps.publishSession(session);
+    });
+  }
+
   private now(): Date {
     return this.deps.now?.() ?? new Date();
   }
@@ -257,11 +284,33 @@ export class SessionFailureMonitor {
       if (this.deps.loadTerminalLog) {
         try { log = await this.deps.loadTerminalLog(sessionId); } catch { log = ''; }
       }
-      const screen = combineScreen(log, this.buffers.get(sessionId) ?? '');
+      const pending = this.buffers.get(sessionId) ?? '';
+      // Once classified, old terminal history cannot classify a recovered or
+      // dismissed incident again. Each subsequent output batch is fresh.
+      const screen = event.kind === 'output' && (this.observed.has(sessionId) || pending)
+        ? pending : combineScreen(log, pending);
+      if (event.kind === 'output' && pending) {
+        this.observed.add(sessionId);
+        this.buffers.delete(sessionId);
+      }
+      if (event.kind === 'output' && pending && session.status === 'running' && session.block && screenTail(screen) && !detectLimit(session.shellType, screen, this.now())) {
+        clearSessionBlock(session);
+        session.updatedAt = this.now().toISOString();
+        await this.deps.saveSession(session);
+        await this.deps.publishSession(session);
+        return;
+      }
       const message = event.kind === 'output' ? undefined : event.message ?? session.errorReason;
       const hasResult = session.status === 'completed' || session.status === 'error'
         ? await this.reportedResult(session)
         : false;
+      if (session.status === 'completed' && hasResult && session.block) {
+        clearSessionBlock(session);
+        session.updatedAt = this.now().toISOString();
+        await this.deps.saveSession(session);
+        await this.deps.publishSession(session);
+        return;
+      }
       const decision = classifyFailure({ session, screen, message, hasResult, now: this.now() });
       if (decision.action !== 'apply' || !decision.block || !decision.lastError) return;
 

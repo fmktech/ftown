@@ -494,7 +494,12 @@ test('hook-channel answers need a live waiter and report waiterLive', async t =>
   const item = (await f.store.record('s1', 'PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'h1', tool_input: askInput }))!;
   await assert.rejects(f.store.answer('s1', item.id, [{ selected: [0] }]), (e) => e instanceof AttentionError && e.status === 409 && e.code === 'answer_waiter_gone');
   const poll = f.store.waitForItem('s1', item.id, 5000);
-  await delay(20);
+  let pollSettled = false;
+  void poll.then(() => { pollSettled = true; }, () => { pollSettled = true; });
+  while (!f.store.hasLiveWaiter(item.id)) {
+    assert.equal(pollSettled, false, 'wait ended before the waiter became live');
+    await new Promise<void>(resolve => setImmediate(resolve));
+  }
   assert.equal(f.store.hasLiveWaiter(item.id), true);
   const result = await f.store.answer('s1', item.id, [{ selected: [1] }]);
   assert.equal(result.waiterLive, true);

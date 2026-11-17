@@ -951,3 +951,26 @@ test('create_session forwards requireGreenPr only when strictly true', async () 
   await handler({ type: 'create_session', requestId: 'rgp-2', payload: { command: 'claude', bridgeId: 'bridge', requireGreenPr: false } });
   assert.equal(inputs[1]?.requireGreenPr, undefined);
 });
+
+
+test('dismiss_session_block persists only the incident identified by the caller', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'block-dismiss-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const store = new SessionStore(dir);
+  const block = { reason: 'auth' as const, screenTail: 'Not logged in', detectedAt: '2026-01-01T00:00:00Z', transitionKey: 'auth||running' };
+  const session: Session = { id: 'child', name: 'child', command: 'claude', status: 'running', bridgeId: 'bridge', createdAt: block.detectedAt, updatedAt: block.detectedAt, block, lastError: 'auth: Not logged in' };
+  await store.saveSession(session);
+  const published: Session[] = [];
+  const controller = new SessionController({ store, runner: { stop: () => false }, removeSession: async () => null, publishSessionUpdate: async item => { published.push(item); } });
+  const responses: CommandResponse[] = [];
+  const handler = createCommandHandler({ bridgeId: 'bridge', sessionController: controller, publishCommandResponse: async response => { responses.push(response); } });
+  const payload = { bridgeId: 'bridge', sessionId: 'child', transitionKey: block.transitionKey, detectedAt: block.detectedAt };
+  await handler({ type: 'dismiss_session_block', requestId: 'stale', payload: { ...payload, detectedAt: '2025-01-01T00:00:00Z' } });
+  assert.ok((await store.loadSession('child'))?.block);
+  assert.equal(published.length, 0);
+  await handler({ type: 'dismiss_session_block', requestId: 'current', payload });
+  assert.equal(responses.at(-1)?.success, true);
+  assert.equal((await store.loadSession('child'))?.block, undefined);
+  assert.equal((await store.loadSession('child'))?.lastError, undefined);
+  assert.equal(published.length, 1);
+});

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, within } from "@testing-library/react";
-import { afterEach, expect, it } from "vitest";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { afterEach, expect, it, vi } from "vitest";
 import type { Session } from "@/types";
 import { SessionAccountBadge, SessionList } from "./SessionList";
 
@@ -24,4 +24,14 @@ it("renders the account badge on the owning session row only", () => {
   expect(workRow).toBeTruthy();
   expect(within(workRow as HTMLElement).getByLabelText("Account: work")).toBeTruthy();
   expect(screen.queryByLabelText("Account: default")).toBeNull();
+});
+
+
+it("offers dismissal for the displayed incident", () => {
+  const onDismissBlock = vi.fn().mockResolvedValue(undefined);
+  const session: Session = { id: "s1", name: "Blocked", bridgeId: "a", shellType: "claude", status: "running", createdAt: "2026-11-16", updatedAt: "2026-11-16", block: { reason: "auth", screenTail: "", detectedAt: "2026-11-16", transitionKey: "auth||running" } };
+  render(<SessionList sessions={[session]} bridges={[{ bridgeId: "a", hostname: "Computer", clientId: "client", connectedAt: "2026-11-16" }]} bridgeOrder={["a"]} selectedSessionId={null} onSelectSession={() => {}} onStopSession={() => {}} onRemoveSession={() => {}} onDismissBlock={onDismissBlock} />);
+  fireEvent.contextMenu(screen.getByText("Blocked", { exact: true }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Dismiss badge" }));
+  expect(onDismissBlock).toHaveBeenCalledWith(session);
 });

@@ -174,10 +174,9 @@ test('a clean exit that already reported a result does not send exited', async (
   const current = h.sessions.get('child')!;
   current.status = 'completed';
   h.sessions.set('child', current);
-  const before = current.block?.transitionKey;
   await h.monitor.settle('child', { kind: 'completed', message: 'Process exited with code 0' });
   assert.equal(h.mail.filter((item) => item.type === 'escalation').length, 1);
-  assert.equal(h.sessions.get('child')!.block?.transitionKey, before);
+  assert.equal(h.sessions.get('child')!.block, undefined);
 });
 
 test('a completed shell is not a failure and raises no attention', async () => {
@@ -257,4 +256,27 @@ test('automation retirement is not a harness failure', async () => {
   assert.equal(h.sessions.get('child')!.block, undefined);
   assert.equal(h.mail.length, 0);
   assert.equal(h.attention.length, 0);
+});
+
+
+test('fresh healthy output clears a recorded auth block without rescanning old log', async () => {
+  const h = harness();
+  h.sessions.set('child', session({ id: 'child' }));
+  h.deps.loadTerminalLog = async () => 'Not logged in · Please run /login\n';
+  h.monitor.observe('child', 'Not logged in · Please run /login\n');
+  await h.monitor.flush('child');
+  assert.equal(h.sessions.get('child')?.block?.reason, 'auth');
+  h.monitor.observe('child', 'Working on the requested task\n');
+  await h.monitor.flush('child');
+  assert.equal(h.sessions.get('child')?.block, undefined);
+  h.monitor.observe('child', 'More work\n');
+  await h.monitor.flush('child');
+  assert.equal(h.sessions.get('child')?.block, undefined);
+});
+
+test('expired blocks are removed at startup using the injected clock', async () => {
+  const h = harness();
+  h.sessions.set('child', session({ id: 'child', block: { reason: 'crashed', screenTail: '', detectedAt: '2025-12-20T00:00:00.000Z', transitionKey: 'crashed||error' } }));
+  await h.monitor.expire('child');
+  assert.equal(h.sessions.get('child')?.block, undefined);
 });

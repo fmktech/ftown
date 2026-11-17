@@ -895,6 +895,11 @@ program
       },
     });
 
+    // Bound retained failure annotations from sessions that never emit again.
+    for (const session of await store.listSessions()) {
+      if (session.block) await failureMonitor.expire(session.id);
+    }
+
     // Resurrection engine for sessions left live by a previous bridge process.
     const resurrection = new SessionResurrection({
       store,

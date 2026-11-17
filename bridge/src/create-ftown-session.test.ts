@@ -1025,7 +1025,7 @@ describe('relaunchFtownSession — entry-point parity with createFtownSession', 
     }
   });
 
-  it('retry reruns the stored command verbatim and leaves runtime/errorReason untouched', async () => {
+  it('retry reruns the stored command and clears prior failure metadata', async () => {
     const realHome = process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'];
     const home = mkdtempSync(join(tmpdir(), 'ftw-home-'));
     process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = home;
@@ -1035,6 +1035,9 @@ describe('relaunchFtownSession — entry-point parity with createFtownSession', 
       command: 'my-wrapper --flag',
       status: 'error',
       errorReason: 'boom',
+      lastError: 'boom',
+      exitCode: 1,
+      block: { reason: 'crashed', screenTail: '', detectedAt: '2026-01-01T00:00:00Z', transitionKey: 'crashed||error' },
       runtime: 'tmux',
       bridgeId: 'old-bridge',
       env: { FOO: 'bar' },
@@ -1046,7 +1049,10 @@ describe('relaunchFtownSession — entry-point parity with createFtownSession', 
       assert.strictEqual(command, 'my-wrapper --flag');
       assert.strictEqual(session.status, 'running');
       assert.strictEqual(session.bridgeId, 'bridge');
-      assert.strictEqual(session.errorReason, 'boom');
+      assert.strictEqual(session.errorReason, undefined);
+      assert.strictEqual(session.block, undefined);
+      assert.strictEqual(session.lastError, undefined);
+      assert.strictEqual(session.exitCode, undefined);
       assert.strictEqual(session.runtime, 'tmux');
       assert.strictEqual(harness.saved.length, 1);
       assert.deepEqual(harness.runs[0], {
