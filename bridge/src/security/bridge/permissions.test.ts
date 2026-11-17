@@ -48,6 +48,14 @@ test('preview reads require read authority and registration cannot be tunneled',
   assert.throws(() => classifyHttp('PUT', '/api/sessions/session/preview?x=1'), { code: 'permission_denied' });
 });
 
+test('the captured native session picker request requires read authority', () => {
+  assert.deepEqual(classifyCommand('list_native_sessions', {
+    bridgeId: 'a24d2e44-d63f-4fa4-ad53-4b9a594e23cf',
+    workingDir: '/Users/fkesheh/projects/legbi-v3',
+    harness: 'claude',
+  }), { permission: 'read', mutating: false, operation: 'list_native_sessions', sessionId: null });
+});
+
 test('preview conversation reads require read and sends/replies require control', () => {
   assert.equal(classifyCommand('preview_chat_list', { sessionId: 'session' }).permission, 'read');
   for (const type of ['preview_chat_send', 'preview_chat_reply']) assert.equal(classifyCommand(type, { sessionId: 'session' }).permission, 'control');

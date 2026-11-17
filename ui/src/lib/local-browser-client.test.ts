@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { generateEndpoint, open, seal } from '@security/crypto';
+import { generateEndpoint, open, seal, SecurityError } from '@security/crypto';
 import type { SecureEnvelope } from '@security/protocol';
 import { SecureEndpointRuntime } from './secure-endpoint-runtime';
 import { bootstrapLocal, localOrigin, localRequest, LocalBrowserClient, type BrowserBootstrap } from './local-browser-client';
@@ -8,6 +8,17 @@ const json = (data: unknown) => new Response(JSON.stringify(data));
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe('encrypted local browser control', () => {
+  it('preserves a security code in a delivered command failure', async () => {
+    const bridge = await generateEndpoint(ownerId, 'bridge');
+    const boot: BrowserBootstrap = { version: 1, protocolVersion: 1, ownerId, bridgeId: 'bridge-a', endpoint: bridge.endpoint, relayUserId: 'local-owner', userId: 'local-owner', hostname: 'laptop', localPort: 43127 };
+    const client = new LocalBrowserClient({ port: 43127, bridgeId: boot.bridgeId }, boot, vi.fn(), vi.fn());
+    vi.spyOn(client, 'command').mockRejectedValue(new SecurityError('permission_denied', 'Encrypted local command was rejected'));
+    const subscription = client.newSubscription('commands:rpc#local-owner');
+    const delivered = vi.fn(); subscription.on('publication', delivered); subscription.subscribe();
+    await subscription.publish({ type: 'list_native_sessions', requestId: 'picker', payload: { bridgeId: 'bridge-a', workingDir: '/work', harness: 'claude' } });
+    expect(delivered).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ type: 'command_response', response: expect.objectContaining({ requestId: 'picker', success: false, data: { code: 'permission_denied' } }) }) }));
+    client.close();
+  });
   it('limits discovery to numeric loopback and never sends cookies or legacy bearer credentials', async () => {
     for (const bad of ['0', '65536', 'localhost:123', '123/path', '1@evil.test', '-1', '1.5']) expect(() => localOrigin(bad)).toThrow();
     const bridge = await generateEndpoint(ownerId, 'bridge');

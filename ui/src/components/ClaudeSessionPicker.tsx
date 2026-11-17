@@ -19,16 +19,22 @@ interface ClaudeSessionPickerProps {
   sendCommand: (command: { type: "list_native_sessions"; payload: { bridgeId: string; workingDir: string; harness: "claude"; account?: string }; requestId: string }) => Promise<CommandResponse>;
 }
 
+function safeErrorCode(value: unknown): string | null {
+  return typeof value === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(value) ? value : null;
+}
+
 export function ClaudeSessionPicker({ bridgeId, workingDir, account, onSelect, sendCommand }: ClaudeSessionPickerProps) {
   const [sessions, setSessions] = useState<ClaudeSession[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<"load" | "upgrade" | null>(null);
+  const [errorCode, setErrorCode] = useState<string | null>(null);
 
   const fetchSessions = useCallback(async () => {
     if (!bridgeId || !workingDir) return;
 
     setLoading(true);
     setError(null);
+    setErrorCode(null);
 
     try {
       const response = await sendCommand({ type: "list_native_sessions", payload: { bridgeId, workingDir, harness: "claude", ...(account !== "default" ? { account } : {}) }, requestId: uuidv4() });
@@ -38,9 +44,16 @@ export function ClaudeSessionPicker({ bridgeId, workingDir, account, onSelect, s
         setSessions([]);
         return;
       }
-      if (!response.success) throw new Error(response.error ?? "Failed to fetch sessions");
+      if (!response.success) {
+        const data = response.data;
+        setErrorCode(safeErrorCode(data && typeof data === "object" && "code" in data ? data.code : null));
+        setError("load");
+        setSessions([]);
+        return;
+      }
       setSessions((response.data as { sessions: ClaudeSession[] }).sessions);
     } catch (e) {
+      setErrorCode(safeErrorCode(e && typeof e === "object" && "code" in e ? e.code : null));
       setError("load");
       setSessions([]);
     } finally {
@@ -73,6 +86,7 @@ export function ClaudeSessionPicker({ bridgeId, workingDir, account, onSelect, s
           <span aria-hidden>⚠</span>
           <span className="break-words">{error === "upgrade" ? "Upgrade this computer's ftown bridge to load Claude sessions." : "Couldn't load Claude sessions."}</span>
         </div>
+        {error === "load" && errorCode && <div className="mt-1 text-xs text-[var(--status-error)] break-words">Code: {errorCode}</div>}
         <button
           type="button"
           onClick={() => void fetchSessions()}

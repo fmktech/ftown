@@ -83,7 +83,8 @@ class LocalSubscription implements MessageSubscription {
       // Resolve the shared RPC immediately with an explicit failure, never retry
       // a mutation whose request might already have reached the controller.
       response = { requestId: command.requestId, success: false,
-        error: `${error instanceof Error ? error.message : 'Local request failed'}. Delivery may be uncertain; refresh before retrying.` };
+        error: `${error instanceof SecurityError ? 'Encrypted local command failed' : error instanceof Error ? error.message : 'Local request failed'}. Delivery may be uncertain; refresh before retrying.`,
+        ...(error instanceof SecurityError && /^[a-z][a-z0-9_]{0,63}$/.test(error.code) ? { data: { code: error.code } } : {}) };
     }
     this.owner.deliver(this.channel, { type: 'command_response', response });
   }
