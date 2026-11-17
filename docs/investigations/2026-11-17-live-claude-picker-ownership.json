@@ -1,0 +1,63 @@
+{
+  "task": "live-claude-picker-permission-denied",
+  "checkout": "/Users/fkesheh/projects/ftown/.claude/worktrees/picker-live",
+  "branch": "fix/claude-picker-live",
+  "integration_owner": "/root (picker-live)",
+  "dependencies": {
+    "source_gate": "Investigation log reached root-cause-proven before source dispatch.",
+    "shared_contract": "Frozen: list_native_sessions is a non-mutating read RPC; exact observed payload is {bridgeId, workingDir, harness:'claude'}; default account omits account.",
+    "cross_task": "Bridge permission fix, picker error-code presentation, and version bump are independent files; integration follows all handoffs."
+  },
+  "resources": {
+    "bridge_version_and_lockfile": "single writer W3; no concurrent package install or lockfile edit",
+    "E2E_and_shared_runtime": "root-only; no bridge restart or kill during live capture",
+    "git_and_pr": "root only"
+  },
+  "ownership": [
+    {
+      "task_id": "W1",
+      "agent_id": "/root/permission_classifier",
+      "tier": 1,
+      "model": "gpt-6.1-terra",
+      "reasoning_effort": "medium",
+      "writable_files": ["bridge/src/security/bridge/permissions.ts", "bridge/src/security/bridge/permissions.test.ts"],
+      "read_only_references": ["bridge/src/security/bridge/security.ts", "bridge/src/security/bridge/security.test.ts", "bridge/src/command-rpc.ts", "docs/investigations/2026-11-17-live-claude-picker-permission-denied.md"],
+      "acceptance": "Classify the exact captured list_native_sessions payload as read with mutating=false and operation=list_native_sessions; add a regression assertion that fails on current code. Run the focused test if installed dependencies permit; do not start any bridge or browser runtime.",
+      "handoff": "Completed; released both files. Focused permission suite passed 16/16 using Node type stripping/inline resolver; installed dependencies absent. Exact captured payload failed against installed 0.30.32 classifier with permission_denied before the source fix. Scoped diff check passed."
+    },
+    {
+      "task_id": "W2",
+      "agent_id": "/root/picker_error_code",
+      "tier": 1,
+      "model": "gpt-6.1-terra",
+      "reasoning_effort": "medium",
+      "writable_files": ["ui/src/components/ClaudeSessionPicker.tsx", "ui/src/components/ClaudeSessionPicker.test.tsx", "ui/src/lib/local-browser-client.ts", "ui/src/lib/local-browser-client.test.ts"],
+      "read_only_references": ["ui/src/types.ts", "ui/src/components/CursorSessionPicker.tsx", "docs/investigations/2026-11-17-live-claude-picker-permission-denied.md"],
+      "acceptance": "Preserve/display a bounded underlying error code for response.data.code and typed thrown error.code; render it below the existing generic message. Because the LocalBrowserClient currently wraps typed SecurityError into a CommandResponse without data.code, preserve only the safe SecurityError.code in that failure response. Test both transport propagation (permission_denied code survives subscription publish) and UI display beneath exact message 'Couldn't load Claude sessions.' using the captured request payload. Keep success/list behavior unchanged. Run focused Vitest tests if dependencies permit; do not start browser/E2E/runtime.",
+      "handoff": "Completed after W2 follow-up; released all four files. Added error code propagation and picker display/retry tests. Focused Vitest could not run because ui/node_modules/.bin/vitest is absent; no install performed. Scoped diff check passed."
+    },
+    {
+      "task_id": "W3",
+      "agent_id": "/root/version_bump",
+      "tier": 1,
+      "model": "gpt-6.1-terra",
+      "reasoning_effort": "medium",
+      "writable_files": ["bridge/package.json", "bridge/package-lock.json"],
+      "read_only_references": ["docs/investigations/2026-11-17-live-claude-picker-permission-denied.md"],
+      "acceptance": "Bump bridge version from 0.30.32 to 0.30.33 in both manifest and lockfile metadata only. Do not install dependencies or edit unrelated lock entries. Verify both metadata versions and git diff --check.",
+      "handoff": "Completed; released both files. Both manifests report 0.30.33, diff check passed, and only three version fields changed."
+    }
+  ],
+  "ownership_validation": {
+    "result": "PASS",
+    "method": "Exact writable file sets are pairwise disjoint; no parent/child directories are owned; root reserves integration, generated output, E2E, Git and PR operations. W2 follow-up adds local-browser-client.ts and its test after the original W2 handoff released the component files.",
+    "reviewers": "Root performs final read-only review after worker handoffs."
+  },
+  "completion": {
+    "pr": "https://github.com/fmktech/ftown/pull/275",
+    "pr_state": "open",
+    "ci": "green; unit-macos attempt 1 cancelled while queued without a runner, attempt 2 passed; no repeated full workflow",
+    "bridge_version": "0.30.33",
+    "live_bridge": "left running at 0.30.32; no restart or kill"
+  }
+}
