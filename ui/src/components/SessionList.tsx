@@ -54,6 +54,7 @@ interface SessionListProps {
   onOpenUpdates?: (bridgeId: string) => void;
   onOpenModelRouting?: (bridgeId: string) => void;
   onHandoff?: (sessionId: string, input: { shellType?: string; model?: string; name?: string }) => Promise<void>;
+  onDismissBlock?: (session: Session) => Promise<void>;
 }
 
 type ContextMenuState =
@@ -373,6 +374,7 @@ function SessionContextMenu({
   onRemove,
   onClone,
   onHandoff,
+  onDismissBlock,
   onHide,
   onUnhide,
   isHidden,
@@ -385,6 +387,7 @@ function SessionContextMenu({
   onRemove: (sessionId: string) => void;
   onClone: (session: Session) => void;
   onHandoff?: (session: Session) => void;
+  onDismissBlock?: (session: Session) => Promise<void>;
   onHide: (sessionId: string) => void;
   onUnhide: (sessionId: string) => void;
   isHidden: boolean;
@@ -428,6 +431,9 @@ function SessionContextMenu({
       )}
       {menu.session.block && onHandoff && (
         <ContextMenuButton largeOnMobile label="Hand off" color="var(--status-pending)" onClick={() => { onHandoff(menu.session); onClose(); }} />
+      )}
+      {menu.session.block && onDismissBlock && (
+        <ContextMenuButton largeOnMobile label="Dismiss badge" onClick={() => { void onDismissBlock(menu.session).catch(console.error); onClose(); }} />
       )}
       <ContextMenuButton largeOnMobile label="Rename" onClick={() => { onRename(menu.session); onClose(); }} />
       <ContextMenuButton largeOnMobile label="Clone" onClick={() => { onClone(menu.session); onClose(); }} />
@@ -542,6 +548,7 @@ export function SessionList({
   onOpenUpdates,
   onOpenModelRouting,
   onHandoff,
+  onDismissBlock,
 }: SessionListProps) {
   const [handoffTarget, setHandoffTarget] = useState<Session | null>(null);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
@@ -1820,6 +1827,7 @@ export function SessionList({
           onUnhide={onUnhideSession ?? (() => {})}
           isHidden={hiddenSet.has(contextMenu.session.id)}
           onHandoff={onHandoff ? (session) => setHandoffTarget(session) : undefined}
+          onDismissBlock={onDismissBlock}
           onClose={closeContextMenu}
         />
       )}

@@ -278,7 +278,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   // session management consumes this shared transport.
   const rpc = useBridgeRpc(client, userId);
   const { bridgeExec } = rpc;
-  const { sessions: rawSessions, createSession, stopSession, retrySession, handoffSession, renameSession, setSessionParent, removeSession } = useSessions(client, userId, rpc);
+  const { sessions: rawSessions, createSession, stopSession, retrySession, handoffSession, dismissSessionBlock, renameSession, setSessionParent, removeSession } = useSessions(client, userId, rpc);
   const { bridges, prepareLocalAccess } = useBridges(client, userId);
   const securityRuntime = client?.securityRuntime;
   useEffect(() => securityRuntime?.onChange(() => setSecurityGeneration(value => value + 1)), [securityRuntime]);
@@ -1379,6 +1379,7 @@ PY`;
               onOpenUpdates={setUpdateBridgeId}
               onOpenModelRouting={setModelRoutingBridgeId}
               onHandoff={handleHandoff}
+              onDismissBlock={dismissSessionBlock}
             />
           </div>
           {!sidebarCollapsed && (

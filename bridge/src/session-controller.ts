@@ -20,6 +20,7 @@ import { PreviewChatError, PreviewChatStore, validateChatInput } from './preview
 import { PREVIEW_CHAT_AGENT_SHELLS } from './preview-chat-protocol.js';
 import type { PreviewChatErrorCode, PreviewChatInput, PreviewChatPage, PreviewChatWriteResult } from './preview-chat-protocol.js';
 import type { AcceptMailResult } from './mail-delivery.js';
+import { clearSessionBlock } from './session-block.js';
 
 /**
  * Transport-agnostic session operations, defined ONCE and shared by the two
@@ -172,6 +173,20 @@ export class SessionController {
 
   get(sessionId: string): Promise<Session | null> {
     return this.deps.store.loadSession(sessionId);
+  }
+
+  async dismissBlock(sessionId: string, bridgeId: string, transitionKey: string, detectedAt: string): Promise<SessionControllerResult<{ session: Session }>> {
+    return this.withSessionMutation(sessionId, async () => {
+      const session = await this.deps.store.loadSession(sessionId);
+      if (!session || session.bridgeId !== bridgeId) return { ok: false, code: 'not_found', message: 'Session not found' };
+      if (session.block?.transitionKey === transitionKey && session.block.detectedAt === detectedAt) {
+        clearSessionBlock(session);
+        session.updatedAt = new Date().toISOString();
+        await this.deps.store.saveSession(session);
+        await this.deps.publishSessionUpdate(session);
+      }
+      return { ok: true, session };
+    });
   }
 
   private async chat<T>(sessionId: string, task: (store: PreviewChatStore, session: Session) => Promise<T>): Promise<({ ok: true } & T) | { ok: false; code: PreviewChatErrorCode; message: string }> {

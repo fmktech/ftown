@@ -541,6 +541,17 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
           break;
         }
 
+        case 'dismiss_session_block': {
+          const payload = command.payload as Record<string, unknown>;
+          if (!payload || payload.bridgeId !== bridgeId || typeof payload.sessionId !== 'string' || !/^[A-Za-z0-9_-]{1,200}$/.test(payload.sessionId)
+            || typeof payload.transitionKey !== 'string' || payload.transitionKey.length > 512 || typeof payload.detectedAt !== 'string' || payload.detectedAt.length > 64
+            || Object.keys(payload).sort().join(',') !== 'bridgeId,detectedAt,sessionId,transitionKey') throw new Error('Invalid block dismissal');
+          const result = await sessionController.dismissBlock(payload.sessionId, bridgeId, payload.transitionKey, payload.detectedAt);
+          response = result.ok ? { requestId: command.requestId, success: true, data: { session: toWireSession(result.session) } }
+            : { requestId: command.requestId, success: false, error: result.message };
+          break;
+        }
+
         case 'retry_session': {
           const payload = command.payload as StopSessionPayload;
 
