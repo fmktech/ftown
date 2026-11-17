@@ -7,7 +7,7 @@ import type { BridgePointer } from './wire-types.js';
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { MailDeliveryService } from './mail-delivery.js';
+import { MailDeliveryService, type MailContinuation } from './mail-delivery.js';
 import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { AttentionStore, AttentionError } from './attention-store.js';
 import type { AttentionItem } from './attention-events.js';
@@ -32,7 +32,7 @@ import { PreviewChatStore } from './preview-chat.js';
 import type { CentrifugoClient } from './centrifugo-client.js';
 import type { CreateFtownSessionDeps } from './create-ftown-session.js';
 import type { ProcessRunner } from './claude-runner.js';
-import type { Session } from './types.js';
+import type { MailMessage, Session } from './types.js';
 import type { VerifiedApplication } from './security/protocol.js';
 import { createCoordination } from './coordination/wiring.js';
 import type { Board, SessionCard, TreeEventPage } from './coordination/contract.js';
@@ -132,6 +132,131 @@ describe('LocalApiServer mail recovery wiring (no HTTP listener)', () => {
     await flush(); assert.deepEqual(calls, ['healthy']);
     server.stop();
   });
+});
+
+describe('LocalApiServer inbox acknowledgment (no HTTP listener)', () => {
+  async function fixture() {
+    const home = mkdtempSync(join(tmpdir(), 'ftown-mail-ack-route-'));
+    const store = new SessionStore(join(home, 'data'));
+    const session: Session = { id: 'recipient', name: 'Recipient', command: 'fake', status: 'completed', bridgeId: 'bridge', createdAt: '', updatedAt: '' };
+    await store.saveSession(session);
+    await store.saveSession({ ...session, id: 'other' });
+    const mail = new MailStore(id => store.sessionDir(id));
+    await mail.append({ id: 'queued', ts: '', from: 'parent', to: session.id, type: 'task', body: 'queued task' });
+    await mail.append({ id: 'foreign', ts: '', from: 'parent', to: 'other', type: 'task', body: 'other task' });
+    const server = new BaseLocalApiServer();
+    server.setDependencies(store, { isRunning: () => false } as unknown as ProcessRunner, {} as CentrifugoClient, 'user');
+    server.setMailStore(mail);
+    const call = async (body: unknown, sessionId = session.id, query?: string, mailId?: string): Promise<{ status: number; data: {
+      acknowledgedIds?: string[]; messages?: MailMessage[]; moreAvailable?: boolean; nextOffset?: number | null; error?: string;
+      field?: 'body' | 'metadata'; chunk?: string; totalChars?: number;
+    } }> => {
+      const path = `/api/sessions/${sessionId}/inbox${mailId ? `/${mailId}/chunk` : query === undefined ? '/ack' : ''}`;
+      const request = Readable.from([Buffer.from(JSON.stringify(body))]) as unknown as IncomingMessage;
+      request.method = query === undefined ? 'POST' : 'GET'; request.headers = {}; request.url = path + (query ?? '');
+      let status = 0; let responseBody = '';
+      const response = {
+        writeHead: (code: number) => { status = code; },
+        end: (text: string) => { responseBody = text; },
+      } as unknown as ServerResponse;
+      const handler = server as unknown as { handleApiRoute: (req: IncomingMessage, res: ServerResponse, path: string, url: URL) => Promise<void> };
+      await handler.handleApiRoute(request, response, path, new URL(path + (query ?? ''), 'http://bridge.invalid'));
+      return { status, data: JSON.parse(responseBody) as { acknowledgedIds?: string[]; messages?: MailMessage[]; moreAvailable?: boolean;
+        nextOffset?: number | null; error?: string; field?: 'body' | 'metadata'; chunk?: string; totalChars?: number } };
+    };
+    return { mail, call, close: () => { server.stop(); rmSync(home, { recursive: true, force: true }); } };
+  }
+
+  it('acknowledges only selected queued IDs after a non-consuming read and is idempotent', async () => {
+    const f = await fixture();
+    try {
+      assert.equal((await f.mail.listUndelivered('recipient')).length, 1);
+      const response = await f.call({ ids: ['queued', 'foreign', 'unknown'] });
+      assert.equal(response.status, 200);
+      assert.deepEqual(response.data, { acknowledgedIds: ['queued'] });
+      assert.equal((await f.mail.listAll('recipient', 0))[0].deliveredVia, 'cli');
+      assert.deepEqual(await f.mail.listUndelivered('recipient'), []);
+      assert.equal((await f.mail.listUndelivered('other')).length, 1);
+      assert.deepEqual((await f.call({ ids: ['queued', 'unknown'] })).data, { acknowledgedIds: [] });
+      assert.equal((await f.call({ ids: ['queued'] }, 'missing')).status, 404);
+    } finally { f.close(); }
+  });
+
+  it('rejects malformed, empty, duplicate, and oversized acknowledgment batches without consuming mail', async () => {
+    const f = await fixture();
+    try {
+      for (const body of [null, [], {}, { ids: 'queued' }, { ids: [] }, { ids: [''] }, { ids: [' '] }, { ids: [1] },
+        { ids: ['queued', 'queued'] }, { ids: ['queued'], extra: true }, { ids: Array.from({ length: 501 }, (_, index) => `id-${index}`) }]) {
+        const response = await f.call(body);
+        assert.equal(response.status, 400, JSON.stringify(body));
+        assert.equal(typeof response.data.error, 'string');
+        assert.equal((await f.mail.listUndelivered('recipient')).length, 1);
+      }
+      const boundary = await f.call({ ids: ['queued', ...Array.from({ length: 499 }, (_, index) => `id-${index}`)] });
+      assert.equal(boundary.status, 200);
+      assert.deepEqual(boundary.data, { acknowledgedIds: ['queued'] });
+    } finally { f.close(); }
+  });
+
+  it('returns bounded oldest-first peek pages and validates history offsets', async () => {
+    const f = await fixture();
+    try {
+      await f.mail.append({ id: 'second', ts: '', from: 'parent', to: 'recipient', type: 'task', body: 'second task' });
+      const first = await f.call({}, 'recipient', '?peek=1&limit=1');
+      assert.equal(first.status, 200);
+      assert.deepEqual(first.data.messages?.map(message => message.id), ['queued']);
+      assert.equal(first.data.moreAvailable, true);
+      assert.equal(first.data.nextOffset, 1);
+      const next = await f.call({}, 'recipient', '?peek=1&all=1&limit=1&offset=1');
+      assert.deepEqual(next.data.messages?.map(message => message.id), ['second']);
+      assert.equal(next.data.moreAvailable, false);
+      assert.equal((await f.mail.listUndelivered('recipient')).length, 2);
+      const unreadNext = await f.call({}, 'recipient', '?peek=1&limit=1&offset=1');
+      assert.deepEqual(unreadNext.data.messages?.map(message => message.id), ['second']);
+      for (const query of ['?peek=1&limit=0', '?peek=1&limit=1.5', '?peek=1&all=1&offset=-1']) {
+        assert.equal((await f.call({}, 'recipient', query)).status, 400, query);
+      }
+    } finally { f.close(); }
+  });
+
+  it('requires contiguous opaque cursors and a completion token; numeric skips, replay and wrong targets fail', async () => {
+    const f = await fixture();
+    try {
+      const body = '\0'.repeat(65536);
+      await f.mail.append({ id: 'large', ts: '', from: 'parent', fromName: '\0'.repeat(3000), to: 'recipient', type: 'task', body });
+      for (const query of ['?offset=65536&metadataOffset=20000', '?field=body&offset=7000&limit=7000', '?cursor=forged']) {
+        assert.equal((await f.call({}, 'recipient', query, 'large')).status, 400, query);
+      }
+      assert.equal((await f.call({ ids: ['large'] })).status, 400);
+      assert.equal((await f.call({ ids: ['queued', 'large'] })).status, 400);
+      assert.equal((await f.mail.listUndelivered('recipient')).length, 2);
+      const firstResponse = await f.call({}, 'recipient', '', 'large');
+      assert.equal(firstResponse.status, 200);
+      let part = firstResponse.data as unknown as MailContinuation;
+      assert.equal(part.body.offset, 0); assert.equal(part.metadata.offset, 0); assert.ok(part.nextCursor);
+      const firstCursor = part.nextCursor;
+      assert.equal((await f.call({}, 'other', `?cursor=${firstCursor}`, 'large')).status, 400);
+      assert.equal((await f.call({}, 'recipient', `?cursor=${firstCursor}`, 'queued')).status, 400);
+      const bodyParts: string[] = []; const metadataParts: string[] = [];
+      for (;;) {
+        assert.ok(Buffer.byteLength(JSON.stringify(part)) < 100000);
+        bodyParts.push(part.body.chunk); metadataParts.push(part.metadata.chunk);
+        if (part.completionToken) break;
+        const next = await f.call({}, 'recipient', `?cursor=${part.nextCursor}`, 'large');
+        assert.equal(next.status, 200); part = next.data as unknown as MailContinuation;
+      }
+      assert.equal(bodyParts.join(''), body);
+      assert.equal(JSON.parse(metadataParts.join('')).fromName, '\0'.repeat(3000));
+      assert.equal((await f.call({}, 'recipient', `?cursor=${firstCursor}`, 'large')).status, 400);
+      assert.equal((await f.call({ ids: ['queued', 'large'], completionToken: part.completionToken })).status, 400);
+      const ack = await f.call({ ids: ['large'], completionToken: part.completionToken });
+      assert.equal(ack.status, 200); assert.deepEqual(ack.data.acknowledgedIds, ['large']);
+      assert.equal((await f.call({ ids: ['large'], completionToken: part.completionToken })).status, 400);
+      assert.deepEqual((await f.mail.listUndelivered('recipient')).map(message => message.id), ['queued']);
+      assert.equal((await f.call({}, 'recipient', '', 'missing')).status, 404);
+    } finally { f.close(); }
+  });
+
 });
 
 async function api(

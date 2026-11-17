@@ -14,6 +14,9 @@ import {
   parseNativeWakeRegistration,
   NativeWakeRegistrationError,
   MailDeliveryService,
+  MAX_INBOX_RESPONSE_BYTES,
+  MAX_MAIL_BODY_LENGTH,
+  MAIL_CONTINUATION_TTL_MS,
   type MailDeliveryMailStore,
   type MailDeliveryRunner,
   type MailDeliverySessionStore,
@@ -222,6 +225,178 @@ function setup(startTime?: number, nativeWake?: NativeMailWaker) {
   return { clock, store, mailStore, runner, service };
 }
 
+describe('MailDeliveryService explicit acknowledgment', () => {
+  it('marks only selected unread IDs with CLI delivery and serializes repeated acknowledgments', async () => {
+    const { service, mailStore } = setup();
+    await mailStore.append({ id: 'selected', ts: '', from: 'parent', to: 'recipient', type: 'task', body: 'selected task' });
+    await mailStore.append({ id: 'unselected', ts: '', from: 'parent', to: 'recipient', type: 'task', body: 'still unread' });
+    await mailStore.append({ id: 'foreign', ts: '', from: 'parent', to: 'other', type: 'task', body: 'other inbox' });
+    const results = await Promise.all([
+      service.acknowledgeMail('recipient', ['selected', 'foreign', 'unknown']),
+      service.acknowledgeMail('recipient', ['selected']),
+    ]);
+    assert.deepEqual(results.flat().map(message => message.id), ['selected']);
+    assert.equal(mailStore.messages[0].deliveredVia, 'cli');
+    assert.deepEqual((await mailStore.listUndelivered('recipient')).map(message => message.id), ['unselected']);
+    assert.equal((await mailStore.listUndelivered('other')).length, 1);
+    service.stop();
+  });
+});
+
+describe('MailDeliveryService bounded peek pages', () => {
+  const message = (id: string, body = id): MailMessage => ({ id, ts: '', from: 'parent', to: 'recipient', type: 'fyi', body });
+
+  it('honors limit in oldest-first order and advances unread pages only after acknowledgment', async () => {
+    const { service, mailStore } = setup();
+    for (const id of ['first', 'second', 'third']) await mailStore.append(message(id));
+    const query = { peek: true, wait: 0, all: false, limit: 1 };
+    const first = await service.readMail(makeSession('recipient'), query);
+    assert.equal(first.kind, 'immediate');
+    if (first.kind !== 'immediate') return;
+    assert.deepEqual(first.messages.map(entry => entry.id), ['first']); assert.equal(first.moreAvailable, true);
+    assert.equal((await mailStore.listUndelivered('recipient')).length, 3);
+    await service.acknowledgeMail('recipient', ['first']);
+    const second = await service.readMail(makeSession('recipient'), query);
+    assert.equal(second.kind, 'immediate');
+    if (second.kind === 'immediate') assert.deepEqual(second.messages.map(entry => entry.id), ['second']);
+    service.stop();
+  });
+
+  it('keeps delivered history traversable with stable oldest-first offsets', async () => {
+    const { service, mailStore } = setup();
+    for (const id of ['first', 'second', 'third']) await mailStore.append(message(id));
+    await service.acknowledgeMail('recipient', ['first']);
+    const page = await service.readMail(makeSession('recipient'), { peek: true, wait: 0, all: true, limit: 1 });
+    assert.equal(page.kind, 'immediate');
+    if (page.kind !== 'immediate') return;
+    assert.deepEqual(page.messages.map(entry => entry.id), ['first']); assert.equal(page.nextOffset, 1);
+    const next = await service.readMail(makeSession('recipient'), { peek: true, wait: 0, all: true, limit: 1, offset: page.nextOffset! });
+    assert.equal(next.kind, 'immediate');
+    if (next.kind === 'immediate') { assert.deepEqual(next.messages.map(entry => entry.id), ['second']); assert.equal(next.nextOffset, 2); }
+    service.stop();
+  });
+
+  it('pages maximum-size accepted UTF-8 bodies below the encrypted response budget without dropping unread mail', async () => {
+    const { service, mailStore } = setup();
+    for (const id of ['first', 'second']) await mailStore.append(message(id, '中'.repeat(MAX_MAIL_BODY_LENGTH)));
+    const page = await service.readMail(makeSession('recipient'), { peek: true, wait: 0, all: false, limit: 50 });
+    assert.equal(page.kind, 'immediate');
+    if (page.kind !== 'immediate') return;
+    assert.deepEqual(page.messages, []); assert.equal(page.moreAvailable, false);
+    assert.deepEqual(page.oversizedMessages?.map(entry => entry.id), ['first', 'second']);
+    const { kind: _kind, ...response } = page;
+    assert.ok(Buffer.byteLength(JSON.stringify(response)) < MAX_INBOX_RESPONSE_BYTES);
+    assert.equal((await mailStore.listUndelivered('recipient')).length, 2);
+    await assert.rejects(service.acknowledgeMail('recipient', ['first']), /completion token/);
+    service.stop();
+  });
+
+  it('reports an individually oversized accepted message without returning a truncated body or acknowledging it', async () => {
+    const { service, mailStore } = setup();
+    const accepted = await service.acceptMail(makeSession('recipient'), { body: '\0'.repeat(MAX_MAIL_BODY_LENGTH), type: 'fyi' });
+    assert.equal(accepted.ok, true);
+    await mailStore.append(message('readable', 'normal task'));
+    const page = await service.readMail(makeSession('recipient'), { peek: true, wait: 0, all: false, limit: 50 });
+    assert.equal(page.kind, 'immediate');
+    if (page.kind !== 'immediate') return;
+    assert.deepEqual(page.messages.map(entry => entry.id), ['readable']);
+    assert.equal(page.oversizedMessages?.[0].id, accepted.ok ? accepted.id : '');
+    assert.ok(page.oversizedMessages![0].serializedBytes > MAX_INBOX_RESPONSE_BYTES);
+    assert.equal(page.moreAvailable, false);
+    const { kind: _kind, ...response } = page;
+    assert.ok(Buffer.byteLength(JSON.stringify(response)) < MAX_INBOX_RESPONSE_BYTES);
+    await service.acknowledgeMail('recipient', ['readable']);
+    assert.equal((await mailStore.listUndelivered('recipient')).length, 1);
+    service.stop();
+  });
+});
+
+describe('MailDeliveryService opaque mail continuations', () => {
+  const large = (id = 'large', to = 'recipient'): MailMessage => ({ id, ts: '', from: 'parent', fromName: '\0'.repeat(12000),
+    threadId: 'thread'.repeat(3000), to, type: 'fyi', body: '\0'.repeat(65536) });
+
+  it('proves contiguous exact content and requires a one-time completion token bound to one ID', async () => {
+    const { service, mailStore } = setup();
+    const message = large(); await mailStore.append(message);
+    await mailStore.append({ ...message, id: 'normal', fromName: 'parent', threadId: 'thread', body: 'normal' });
+    const { body, ...metadata } = message;
+    await assert.rejects(service.acknowledgeMail('recipient', ['large']), /completion token/);
+    await assert.rejects(service.acknowledgeMail('recipient', ['normal', 'large']), /completion token/);
+    assert.equal((await mailStore.listUndelivered('recipient')).length, 2);
+    let cursor: string | undefined; let bodyOffset = 0; let metadataOffset = 0;
+    const bodies: string[] = []; const metas: string[] = []; const seen = new Set<string>();
+    let completionToken = '';
+    for (;;) {
+      const page = await service.readMailChunk('recipient', 'large', cursor); assert.ok(page);
+      assert.ok(Buffer.byteLength(JSON.stringify(page)) < 100000);
+      assert.equal(page.body.offset, bodyOffset); assert.equal(page.metadata.offset, metadataOffset);
+      bodies.push(page.body.chunk); metas.push(page.metadata.chunk);
+      bodyOffset += page.body.chunk.length; metadataOffset += page.metadata.chunk.length;
+      if (page.completionToken) { completionToken = page.completionToken; assert.equal(page.nextCursor, null); break; }
+      assert.ok(page.nextCursor); assert.equal(seen.has(page.nextCursor), false); seen.add(page.nextCursor);
+      assert.equal(page.completionToken, null);
+      cursor = page.nextCursor;
+    }
+    assert.equal(bodies.join(''), body); assert.equal(metas.join(''), JSON.stringify(metadata));
+    await assert.rejects(service.acknowledgeMail('other', ['large'], completionToken), /completion token/);
+    await assert.rejects(service.acknowledgeMail('recipient', ['normal'], completionToken), /completion token/);
+    await assert.rejects(service.acknowledgeMail('recipient', ['large', 'normal'], completionToken), /completion token/);
+    assert.deepEqual((await service.acknowledgeMail('recipient', ['large'], completionToken)).map(message => message.id), ['large']);
+    await assert.rejects(service.acknowledgeMail('recipient', ['large'], completionToken), /completion token/);
+    assert.deepEqual((await mailStore.listUndelivered('recipient')).map(message => message.id), ['normal']);
+    service.stop();
+  });
+
+  it('rejects skipped, replayed, cross-message and cross-session cursors without consuming valid progress', async () => {
+    const { service, mailStore } = setup();
+    await mailStore.append(large()); await mailStore.append(large('other-message'));
+    const first = await service.readMailChunk('recipient', 'large'); assert.ok(first?.nextCursor);
+    const cursor = first.nextCursor;
+    await assert.rejects(service.readMailChunk('recipient', 'large', 'forged'), /cursor/);
+    await assert.rejects(service.readMailChunk('recipient', 'other-message', cursor), /cursor/);
+    await assert.rejects(service.readMailChunk('other-session', 'large', cursor), /cursor/);
+    const second = await service.readMailChunk('recipient', 'large', cursor); assert.ok(second);
+    assert.equal(second.body.offset, 7000); assert.equal(second.metadata.offset, 7000);
+    await assert.rejects(service.readMailChunk('recipient', 'large', cursor), /cursor/);
+    assert.equal((await mailStore.listUndelivered('recipient')).length, 2);
+    service.stop();
+  });
+
+  it('caps progress at four tickets per session; expiry and restart leave mail unread and restart at zero', async () => {
+    const { service, mailStore, clock } = setup(); await mailStore.append(large());
+    const first = await service.readMailChunk('recipient', 'large'); assert.ok(first?.nextCursor);
+    for (let index = 0; index < 4; index++) await service.readMailChunk('recipient', 'large');
+    await assert.rejects(service.readMailChunk('recipient', 'large', first.nextCursor), /cursor/);
+    const recent = await service.readMailChunk('recipient', 'large'); assert.ok(recent?.nextCursor);
+    await clock.advance(MAIL_CONTINUATION_TTL_MS + 1);
+    await assert.rejects(service.readMailChunk('recipient', 'large', recent.nextCursor), /cursor/);
+    const restarted = await service.readMailChunk('recipient', 'large'); assert.ok(restarted?.nextCursor);
+    assert.equal(restarted.body.offset, 0); assert.equal(restarted.metadata.offset, 0);
+    const replacement = new MailDeliveryService({ mailStore });
+    await assert.rejects(replacement.readMailChunk('recipient', 'large', restarted.nextCursor), /cursor/);
+    assert.equal((await mailStore.listUndelivered('recipient')).length, 1);
+    replacement.stop(); service.stop();
+  });
+
+  it('fails closed if mail content changes during continuation', async () => {
+    const { service, mailStore } = setup(); await mailStore.append(large());
+    const first = await service.readMailChunk('recipient', 'large'); assert.ok(first?.nextCursor);
+    mailStore.messages[0].threadId = 'changed';
+    await assert.rejects(service.readMailChunk('recipient', 'large', first.nextCursor), /changed/);
+    assert.equal((await mailStore.listUndelivered('recipient')).length, 1); service.stop();
+  });
+
+  it('keeps 50 maximum-size messages descriptor-only, bounded, and unacknowledged', async () => {
+    const { service, mailStore } = setup();
+    for (let index = 0; index < 50; index++) await mailStore.append({ ...large(`large-${index}`), fromName: 'parent', threadId: 'thread' });
+    const page = await service.readMail(makeSession('recipient'), { peek: true, wait: 0, all: false, limit: 50 });
+    assert.equal(page.kind, 'immediate');
+    if (page.kind === 'immediate') { assert.deepEqual(page.messages, []); assert.equal(page.oversizedMessages?.length, 50);
+      const { kind: _kind, ...response } = page; assert.ok(Buffer.byteLength(JSON.stringify(response)) < 32000); }
+    assert.equal((await mailStore.listUndelivered('recipient')).length, 50); service.stop();
+  });
+});
+
 /** A session that earns the listen window (has a parent). */
 function participatingSession(id: string, overrides: Partial<Session> = {}): Session {
   return makeSession(id, { parentSessionId: 'parent-1', ...overrides });
@@ -257,7 +432,7 @@ describe('MailDeliveryService receiver recovery', () => {
     await Promise.all(Array.from({ length: 10 }, () => service.recoverPendingMail(session.id)));
     await clock.advance(54_999); assert.equal(attempts, 0);
     await clock.advance(1); assert.equal(attempts, 1);
-    assert.equal((await mailStore.listUndelivered(session.id)).length, 0);
+    assert.equal((await mailStore.listUndelivered(session.id)).length, 1);
     assert.equal(runner.writes.length, 0); service.stop();
   });
 
@@ -1044,39 +1219,61 @@ const nativeSession = (id = 'native') => makeSession(id, { shellType: 'codex', c
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve }; }
 
 describe('MailDeliveryService Codex body delivery', () => {
-  it('delivers exact body and bounded metadata while busy, acknowledges only the queued ID', async () => {
-    const calls: Array<{ session: Session; text: string }> = [];
-    const f = setup(undefined, async (session, text, _signal, current) => {
-      assert.equal(await current?.(), true); calls.push({ session, text }); return { status: 'accepted' };
+  it('explicitly reads queued mail while a Codex wake is in flight', async () => {
+    const wake = deferred<{ status: 'accepted' }>();
+    let entered!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const f = setup(undefined, async () => { entered(); return wake.promise; });
+    const session = nativeSession(); f.store.add(session); f.runner.running.add(session.id);
+    try {
+      await f.service.acceptMail(session, { body: 'queued during wake' });
+      await f.clock.advance(5_000); await started;
+      const read = await f.service.readMail(session, { peek: false, wait: 0, all: false, limit: 50 });
+      assert.equal(read.kind, 'immediate');
+      if (read.kind === 'immediate') assert.deepEqual(read.messages.map(message => message.body), ['queued during wake']);
+    } finally {
+      wake.resolve({ status: 'accepted' }); await flushAsync(); f.service.stop();
+    }
+  });
+
+  it('keeps queued mail undelivered after Codex accepts a wake until explicit read', async () => {
+    const f = setup(undefined, async () => ({ status: 'accepted' }));
+    const session = nativeSession(); f.store.add(session); f.runner.running.add(session.id);
+    try {
+      await f.service.acceptMail(session, { body: 'queued after acceptance' });
+      await f.clock.advance(5_000);
+      assert.equal(f.mailStore.messages[0].deliveredAt, undefined);
+      const read = await f.service.readMail(session, { peek: false, wait: 0, all: false, limit: 50 });
+      assert.equal(read.kind, 'immediate');
+      if (read.kind === 'immediate') assert.deepEqual(read.messages.map(message => message.body), ['queued after acceptance']);
+    } finally { f.service.stop(); }
+  });
+
+  it('queues a pointer while busy and leaves the body in the inbox', async () => {
+    const calls: string[] = [];
+    const f = setup(undefined, async (_session, text, _signal, current) => {
+      assert.equal(await current?.(), true); calls.push(text); return { status: 'accepted' };
     });
     const session = nativeSession(); f.store.add(session); f.runner.running.add(session.id); f.service.markAgentBusy(session.id);
-    const body = "  line one\n'`$(touch nope) 雪\n  ";
-    const sent = await f.service.acceptMail(session, { body, from: 'child\nspoof', fromName: '名', type: 'task', threadId: 'thread' });
-    assert.equal(sent.ok, true); await f.clock.advance(5_000);
-    assert.equal(calls.length, 1); assert.equal(calls[0].session.codexSessionId, session.codexSessionId);
-    assert.match(calls[0].text, /^\[ftown mail\] id=/); assert.match(calls[0].text, /from="child spoof"/);
-    assert.match(calls[0].text, /fromName="名"/); assert.match(calls[0].text, /type="task"/);
-    assert.match(calls[0].text, /threadId="thread"/); assert.ok(calls[0].text.endsWith('\n\n' + body));
-    assert.ok(sent.ok && calls[0].text.includes(sent.id));
-    assert.equal((await f.mailStore.listUndelivered(session.id)).length, 0);
-    assert.equal(f.mailStore.messages[0].deliveredVia, 'cli'); assert.deepEqual(f.runner.writes, []);
+    const body = 'private mail body';
+    await f.service.acceptMail(session, { body, type: 'task' }); await f.clock.advance(5_000);
+    assert.equal(calls.length, 1); assert.match(calls[0], /ftown harness mail read/);
+    assert.ok(!calls[0].includes(body));
+    assert.equal((await f.mailStore.listUndelivered(session.id)).length, 1);
+    assert.equal(f.mailStore.messages[0].deliveredAt, undefined); assert.deepEqual(f.runner.writes, []);
     await f.clock.advance(120_000); assert.equal(calls.length, 1); f.service.stop();
   });
 
-  it('excludes an in-flight claim from immediate and long-poll hook drains, but not peek', async () => {
+  it('allows an explicit read during an in-flight Codex claim', async () => {
     const pending = deferred<{ status: 'accepted' }>(); let entered!: () => void;
     const started = new Promise<void>(resolve => { entered = resolve; });
     const f = setup(undefined, async () => { entered(); return pending.promise; });
     const session = nativeSession(); f.store.add(session); f.runner.running.add(session.id);
     await f.service.acceptMail(session, { body: 'claimed' }); await f.clock.advance(5_000); await started;
-    for (const wait of [0, 30]) {
-      const read = await f.service.readMail(session, { peek: false, wait, all: false, limit: 50 });
-      assert.deepEqual(read, { kind: 'immediate', messages: [] });
-    }
-    const peek = await f.service.readMail(session, { peek: true, wait: 0, all: false, limit: 50 });
-    assert.equal(peek.kind, 'immediate'); if (peek.kind === 'immediate') assert.equal(peek.messages[0].body, 'claimed');
+    const read = await f.service.readMail(session, { peek: false, wait: 0, all: false, limit: 50 });
+    assert.equal(read.kind, 'immediate'); if (read.kind === 'immediate') assert.equal(read.messages[0].body, 'claimed');
     pending.resolve({ status: 'accepted' }); await flushAsync();
-    assert.equal(f.mailStore.messages[0].deliveredVia, 'cli'); f.service.stop();
+    assert.equal(f.mailStore.messages[0].deliveredVia, 'drain'); f.service.stop();
   });
 
   it('batches simultaneous arrivals and dispatches a subsequent batch for mail arriving mid-flight', async () => {
@@ -1085,12 +1282,12 @@ describe('MailDeliveryService Codex body delivery', () => {
     const session = nativeSession(); f.store.add(session); f.runner.running.add(session.id);
     await Promise.all([f.service.acceptMail(session, { body: 'one' }), f.service.acceptMail(session, { body: 'two' })]);
     await f.clock.advance(5_000); assert.equal(calls.length, 1);
-    assert.ok(calls[0].includes('\n\none') && calls[0].includes('\n\ntwo'));
+    assert.match(calls[0], /ftown harness mail read/);
     await f.service.acceptMail(session, { body: 'three' }); await f.clock.advance(5_000); assert.equal(calls.length, 1);
     first.resolve({ status: 'accepted' }); await flushAsync(); await f.clock.advance(10_000);
     assert.equal(calls.length, 2);
-    assert.ok(calls[1].endsWith('\n\nthree'));
-    assert.deepEqual(f.mailStore.messages.map(m => m.deliveredVia), ['cli', 'cli', 'cli']);
+    assert.match(calls[1], /ftown harness mail read/);
+    assert.deepEqual(f.mailStore.messages.map(m => m.deliveredVia), [undefined, undefined, undefined]);
     assert.ok(f.mailStore.messages.every(m => Boolean(m.nudgedAt)));
     f.service.stop();
   });
@@ -1103,7 +1300,7 @@ describe('MailDeliveryService Codex body delivery', () => {
       await f.service.acceptMail(session, { body: 'second' }); await f.clock.advance(59_999);
       assert.equal(calls.length, 1, status); assert.equal((await f.mailStore.listUndelivered(session.id)).length, 2);
       await f.clock.advance(1); assert.equal(calls.length, 2);
-      assert.ok(calls[1].includes('\n\nfirst') && calls[1].includes('\n\nsecond'));
+      assert.match(calls[1], /ftown harness mail read/);
       // Batch changed from [first] to [first, second], resetting attempts for the new batch (attempt 1 of 3)
       await f.clock.advance(60_000); assert.equal(calls.length, 3);
       assert.ok(f.mailStore.messages.every(m => !m.nudgedAt), 'not yet stamped before MAX_WAKE_ATTEMPTS for new batch');
@@ -1127,7 +1324,7 @@ describe('MailDeliveryService Codex body delivery', () => {
     assert.equal(f.runner.writes.length, 0); f.service.stop();
   });
 
-  it('long-poll timeout cannot consume a claim and a later failed enqueue leaves it readable', async () => {
+  it('long-poll timeout can consume a claim during a wake', async () => {
     const gate = deferred<{ status: 'unknown' }>(); let entered!: () => void;
     const started = new Promise<void>(resolve => { entered = resolve; });
     const f = setup(undefined, async () => { entered(); return gate.promise; });
@@ -1137,11 +1334,11 @@ describe('MailDeliveryService Codex body delivery', () => {
     // Insert as a durable recovery record without a waiter kick.
     f.mailStore.messages.push({ id: 'persisted', ts: new Date().toISOString(), from: 'external', to: session.id, type: 'message', body: 'claimed' });
     await f.service.recoverPendingMail(session.id); await f.clock.advance(5_000); await started;
-    await f.clock.advance(5_000); if (poll.kind === 'longpoll') assert.deepEqual(await poll.messages, []);
+    await f.clock.advance(5_000); if (poll.kind === 'longpoll') assert.deepEqual((await poll.messages).map(m => m.id), ['persisted']);
     gate.resolve({ status: 'unknown' }); await flushAsync();
     const read = await f.service.readMail(session, { peek: false, wait: 0, all: false, limit: 50 });
-    assert.equal(read.kind, 'immediate'); if (read.kind === 'immediate') assert.deepEqual(read.messages.map(m => m.id), ['persisted']);
-    assert.equal(f.mailStore.messages[0].deliveredVia, 'drain'); f.service.stop();
+    assert.equal(read.kind, 'immediate'); if (read.kind === 'immediate') assert.deepEqual(read.messages.map(m => m.id), []);
+    assert.equal(f.mailStore.messages[0].deliveredVia, 'poll'); f.service.stop();
   });
 
   it('fences a changed native identity after the probe, then retries with the current identity', async () => {
@@ -1156,7 +1353,7 @@ describe('MailDeliveryService Codex body delivery', () => {
     const newId = '00000000-0000-4000-8000-000000000002'; f.store.add({ ...session, codexSessionId: newId });
     gate.resolve(); await flushAsync(); assert.equal((await f.mailStore.listUndelivered(session.id)).length, 1);
     await f.clock.advance(60_000); assert.deepEqual(identities, [session.codexSessionId, newId]);
-    assert.equal(f.mailStore.messages[0].deliveredVia, 'cli'); f.service.stop();
+    assert.equal(f.mailStore.messages[0].deliveredVia, undefined); f.service.stop();
   });
 
   it('stops an in-flight wake and leaves mail pending without scheduling a retry', async () => {
@@ -1171,11 +1368,11 @@ describe('MailDeliveryService Codex body delivery', () => {
   it('does not hot-loop if acknowledgment persistence fails', async () => {
     let calls = 0; const f = setup(undefined, async () => { calls++; return { status: 'accepted' }; });
     const session = nativeSession(); f.store.add(session); f.runner.running.add(session.id);
-    const mark = f.mailStore.markDelivered.bind(f.mailStore); let fail = true;
-    f.mailStore.markDelivered = async (...args) => { if (fail) { fail = false; throw new Error('disk'); } return mark(...args); };
+    const mark = f.mailStore.markNudged.bind(f.mailStore); let fail = true;
+    f.mailStore.markNudged = async (...args) => { if (fail) { fail = false; throw new Error('disk'); } return mark(...args); };
     await f.service.acceptMail(session, { body: 'durable' }); await f.clock.advance(5_000);
     assert.equal((await f.mailStore.listUndelivered(session.id)).length, 1); await f.clock.advance(59_999); assert.equal(calls, 1);
-    await f.clock.advance(1); assert.equal(calls, 2); assert.equal(f.mailStore.messages[0].deliveredVia, 'cli'); f.service.stop();
+    await f.clock.advance(1); assert.equal(calls, 2); assert.equal(f.mailStore.messages[0].deliveredVia, undefined); f.service.stop();
   });
 
   it('leaves missing native ID available and prevents Codex PTY fallback while preserving other fallback', async () => {
@@ -1250,7 +1447,7 @@ describe('late mail wake revalidation', () => {
       const read = f.mailStore.listUndelivered.bind(f.mailStore); let reads = 0;
       f.mailStore.listUndelivered = async id => { const messages = await read(id); if (++reads === 2) f.store.add({ ...session, shellType: 'codex', codexSessionId: '00000000-0000-4000-8000-000000000001' }); return messages; };
       await f.service.acceptMail(session, { body: 'body' }); await f.clock.advance(10_000);
-      assert.deepEqual(f.runner.writes, []); assert.equal(calls.length, 1); assert.ok(calls[0].endsWith('\n\nbody')); f.service.stop();
+      assert.deepEqual(f.runner.writes, []); assert.equal(calls.length, 1); assert.match(calls[0], /ftown harness mail read/); f.service.stop();
     });
     it('rechecks resumed activity during the final awaited mail scan before PTY input', async () => {
       const f = setup(); const session = makeSession('grok', { shellType: 'grok' }); f.store.add(session); f.runner.running.add(session.id);

@@ -6,7 +6,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Command, CommanderError } from 'commander';
-import { api, loadPointer, bridgePointerPath, listSessions, resolveSessionId, fetchInbox, sendMail } from './cli-client.js';
+import { api, loadPointer, bridgePointerPath, listSessions, resolveSessionId, fetchInbox, fetchInboxPage, readInboxForCli, sendMail } from './cli-client.js';
 import { runAskHookCli, runningUnderGrokHook } from './ask-question-hook.js';
 import { runHookCli } from './hook-cli.js';
 import { cleanTerminalLine, formatLogLines, isDisplayableLine } from './harness-format.js';
@@ -417,27 +417,13 @@ async function cmdMailSend(
 
 async function cmdMailRead(
   pointer: BridgePointer,
-  opts: { peek: boolean; limit?: number; all: boolean; json: boolean },
+  opts: { peek: boolean; limit?: number; offset?: number; all: boolean; json: boolean; messageId?: string; cursor?: string },
 ): Promise<void> {
   const sessionId = resolveOwnSessionId();
   if (!sessionId) {
     throw new Error('Cannot resolve own session — set FTOWN_SESSION_ID or run inside a registered workspace');
   }
-  const messages = await fetchInbox(pointer, sessionId, {
-    wait: 0,
-    peek: opts.peek,
-    limit: opts.limit,
-    all: opts.all,
-  });
-  if (opts.json) {
-    emit(true, { sessionId, messages }, '');
-    return;
-  }
-  if (messages.length === 0) {
-    console.log('(no mail)');
-    return;
-  }
-  for (const m of messages) console.log(formatMailMessage(m));
+  await readInboxForCli(pointer, sessionId, opts, 'ftown harness mail read', true);
 }
 
 /** Counter file for the mail pump, under the OS temp dir so it works on Windows. */
@@ -493,7 +479,7 @@ async function resolvePumpSessionId(
 const PUMP_STOP_BLOCK_LIMIT = 20;
 
 /** Mail pump for Claude Code hooks. MUST always exit 0 and never write noise. */
-async function cmdHookPump(): Promise<void> {
+async function cmdHookPump(codex = false): Promise<void> {
   const controller = new AbortController();
   const killer = setTimeout(() => { controller.abort(); process.stdin.destroy(); }, 28_000);
   killer.unref();
@@ -510,6 +496,26 @@ async function cmdHookPump(): Promise<void> {
     const pointer = loadPointer();
     const sessionId = await resolvePumpSessionId(pointer, hook, controller.signal);
     if (!sessionId) return;
+
+    if (codex) {
+      const page = await fetchInboxPage(pointer, sessionId, { wait: 0, peek: true, signal: controller.signal });
+      if (!page.messages.length && !page.oversizedMessages.length) {
+        if (event === 'Stop') writePumpCount(sessionId, 0);
+        return;
+      }
+      const pointerText = '[ftown mail] You have new ftown mail. Run `ftown harness mail read` to read it.';
+      if (event === 'Stop') {
+        if (hook.stop_hook_active === true && readPumpCount(sessionId) >= PUMP_STOP_BLOCK_LIMIT) {
+          writePumpCount(sessionId, 0);
+          return;
+        }
+        writePumpCount(sessionId, readPumpCount(sessionId) + 1);
+        console.log(JSON.stringify({ decision: 'block', reason: pointerText }));
+      } else {
+        console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: pointerText } }));
+      }
+      return;
+    }
 
     if (event === 'Stop') {
       if (hook.stop_hook_active === true && readPumpCount(sessionId) >= PUMP_STOP_BLOCK_LIMIT) {
@@ -676,13 +682,19 @@ mail
   .description('Read own inbox (FTOWN_SESSION_ID or cwd workspace session)')
   .option('--peek', 'Do not mark messages as delivered')
   .option('--limit <n>', 'Max messages')
+  .option('--offset <n>', 'With --peek or --all, start at this oldest-first offset')
   .option('--all', 'Include already-delivered messages')
-  .action(async (opts: { peek?: boolean; limit?: string; all?: boolean }, cmd: Command) => {
+  .option('--message-id <id>', 'Read one oversized message incrementally')
+  .option('--cursor <token>', 'One-time continuation cursor for --message-id')
+  .action(async (opts: { peek?: boolean; limit?: string; offset?: string; all?: boolean; messageId?: string; cursor?: string }, cmd: Command) => {
     const pointer = loadPointer();
     await cmdMailRead(pointer, {
       peek: !!opts.peek,
-      limit: opts.limit !== undefined ? parseInt(opts.limit, 10) || undefined : undefined,
+      limit: opts.limit !== undefined ? Number(opts.limit) : undefined,
+      offset: opts.offset !== undefined ? Number(opts.offset) : undefined,
       all: !!opts.all,
+      messageId: opts.messageId,
+      cursor: opts.cursor,
       json: !!cmd.parent?.parent?.opts().json,
     });
   });
@@ -697,8 +709,9 @@ program
 program
   .command('hook-pump')
   .description('Claude Code hook: deliver pending mail (reads hook JSON from stdin)')
-  .action(async () => {
-    await cmdHookPump();
+  .option('--codex', 'Use non-consuming Codex mail pointers')
+  .action(async (opts: { codex?: boolean }) => {
+    await cmdHookPump(!!opts.codex);
   });
 
 program

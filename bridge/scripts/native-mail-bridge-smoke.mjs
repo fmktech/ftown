@@ -46,13 +46,10 @@ async function until(check, label, milliseconds = 20_000) {
 async function cli(args, extra = {}) {
   return exec(installed, args, { cwd: work, env: { ...env, ...extra }, timeout: 30_000, maxBuffer: 2_000_000 });
 }
-let pointer;
+let pointer, secureApi;
 async function api(method, path, body, expected = 200) {
-  const response = await fetch(`http://127.0.0.1:${pointer.port}${path}`, {
-    method, headers: { Authorization: `Bearer ${pointer.token}`, ...(body ? {'Content-Type':'application/json'} : {}) },
-    body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(10_000),
-  });
-  const data = await response.json(); assert.equal(response.status, expected, JSON.stringify(data)); return data;
+  const response = await secureApi(pointer, method, path, body, undefined, AbortSignal.timeout(10_000));
+  assert.equal(response.status, expected, JSON.stringify(response.body)); return response.body;
 }
 async function create(shellType, native = {}) {
   const data = await api('POST', '/api/sessions', { shellType, command: '/bin/cat', name: `native-${shellType}`, workingDir: work, ...native }, 201);
@@ -77,6 +74,7 @@ try {
   assert.equal(JSON.parse(readFileSync(join(ftown, 'setup-state.json'), 'utf8')).packageVersion, version);
   assert.equal(existsSync(join(ftown, 'claude-plugin')), true, 'setup copies Claude Mod assets');
   rmSync(join(temporary, 'cache'), { recursive: true, force: true });
+  ({ apiResponse: secureApi } = await import(pathToFileURL(join(ftown, 'cli/dist/cli-client.js')).href));
   child = spawn(installed, ['start', '--local', '--api-url', 'http://127.0.0.1'], { env, cwd: work, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
   child.stdout.on('data', chunk => { output += chunk; }); child.stderr.on('data', chunk => { output += chunk; });
   pointer = await until(() => {
@@ -91,9 +89,55 @@ try {
   const receipts = await until(() => existsSync(receiptPath) ? readFileSync(receiptPath, 'utf8').trim().split('\n').map(line => JSON.parse(line)) : undefined, 'native wake receipt');
   assert.equal(receipts.length, 1); assert.equal(receipts[0].thread, nativeID);
   assert.match(receipts[0].text, /ftown harness mail read/); assert.ok(!receipts[0].text.includes('private payload'));
-  assert.equal((await api('GET', `/api/sessions/${codex.id}/inbox?peek=1`)).messages.length, 1);
-  assert.match((await cli(['harness', 'mail', 'read', '--json'], { FTOWN_SESSION_ID: codex.id })).stdout, /private payload/);
+  const queued = (await api('GET', `/api/sessions/${codex.id}/inbox?peek=1`)).messages;
+  assert.equal(queued.length, 1); assert.equal(queued[0].deliveredAt, undefined);
+  const peek = JSON.parse((await cli(['harness', 'mail', 'read', '--peek', '--json'], { FTOWN_SESSION_ID: codex.id })).stdout);
+  assert.equal(peek.messages[0].id, queued[0].id);
+  assert.equal((await api('GET', `/api/sessions/${codex.id}/inbox?peek=1`)).messages.length, 1, 'CLI peek never acknowledges');
+  const read = JSON.parse((await cli(['harness', 'mail', 'read', '--json'], { FTOWN_SESSION_ID: codex.id })).stdout);
+  assert.match(read.messages[0].body, /private payload/);
+  assert.equal(read.messages[0].id, queued[0].id);
+  assert.equal(read.messages[0].deliveredAt, undefined, 'CLI output contains the non-consuming fetch before acknowledgment');
+  const history = (await api('GET', `/api/sessions/${codex.id}/inbox?peek=1&all=1`)).messages;
+  assert.equal(history[0].deliveredVia, 'cli'); assert.ok(history[0].deliveredAt, 'completed output is acknowledged');
+  assert.deepEqual((await api('POST', `/api/sessions/${codex.id}/inbox/ack`, { ids: [queued[0].id] })).acknowledgedIds, [], 'ack retry is idempotent');
   assert.equal(JSON.parse((await cli(['harness', 'mail', 'read', '--json'], { FTOWN_SESSION_ID: codex.id })).stdout).messages.length, 0);
+  for (const body of ['first page task', 'second page task', 'next page task']) {
+    await cli(['harness', 'mail', 'send', codex.id, '--type', 'fyi', body]);
+  }
+  const sessionEnv = { FTOWN_SESSION_ID: codex.id };
+  const firstPage = JSON.parse((await cli(['sessions', 'inbox', '--limit', '2', '--json'], sessionEnv)).stdout);
+  assert.deepEqual(firstPage.messages.map(message => message.body), ['first page task', 'second page task']);
+  assert.equal(firstPage.moreAvailable, true);
+  assert.equal((await api('GET', `/api/sessions/${codex.id}/inbox?peek=1`)).messages.length, 1, 'only displayed rows are acknowledged');
+  const nextPage = JSON.parse((await cli(['sessions', 'mail', '--json'], sessionEnv)).stdout);
+  assert.deepEqual(nextPage.messages.map(message => message.body), ['next page task']);
+  assert.equal(nextPage.moreAvailable, false);
+  const historyPage = JSON.parse((await cli(['sessions', 'inbox', '--all', '--limit', '1', '--json'], sessionEnv)).stdout);
+  assert.equal(historyPage.messages[0].id, queued[0].id);
+  assert.equal(historyPage.nextOffset, 1);
+  const largeBody = '\0'.repeat(20000);
+  const largeSender = 'sender'.repeat(5000);
+  const large = await api('POST', `/api/sessions/${codex.id}/inbox`, { body: largeBody, fromName: largeSender, threadId: 'exact-thread', type: 'fyi' }, 201);
+  const descriptorPage = JSON.parse((await cli(['sessions', 'inbox', '--json'], sessionEnv)).stdout);
+  assert.deepEqual(descriptorPage.messages, []);
+  assert.equal(descriptorPage.oversizedMessages[0].id, large.id);
+  let cursor;
+  const bodyParts = [], metadataParts = [];
+  for (;;) {
+    const text = (await cli(['harness', 'mail', 'read', '--message-id', large.id, ...(cursor ? ['--cursor', cursor] : []), '--json'], sessionEnv)).stdout;
+    assert.ok(Buffer.byteLength(text) < 100000);
+    const part = JSON.parse(text); bodyParts.push(part.body.chunk); metadataParts.push(part.metadata.chunk);
+    if (part.complete) break;
+    assert.equal((await api('GET', `/api/sessions/${codex.id}/inbox?peek=1`)).oversizedMessages[0].id, large.id, 'intermediate chunks never acknowledge');
+    cursor = part.nextCursor;
+  }
+  assert.equal(bodyParts.join(''), largeBody);
+  const originalMetadata = JSON.parse(metadataParts.join(''));
+  assert.equal(originalMetadata.fromName, largeSender); assert.equal(originalMetadata.threadId, 'exact-thread');
+  assert.equal(Object.hasOwn(originalMetadata, 'body'), false);
+  assert.equal((await api('GET', `/api/sessions/${codex.id}/inbox?peek=1`)).messages.length, 0);
+  assert.equal((await api('GET', `/api/sessions/${codex.id}/inbox?peek=1`)).oversizedMessages.length, 0, 'only completed chunk output acknowledges');
   const claude = await create('claude', { claudeSessionId: nativeID });
   const heartbeat = `/api/sessions/${claude.id}/inbox?peek=1&wait=0&adapter=claude-mod&nativeSessionId=${nativeID}`;
   await api('GET', heartbeat);
@@ -103,7 +147,7 @@ try {
   await until(async () => !(await api('GET', `/api/sessions/${claude.id}/running`)).running, 'stopped process');
   await api('GET', heartbeat, undefined, 409);
   for (const id of owned) await api('DELETE', `/api/sessions/${id}`); owned.clear();
-  console.log(JSON.stringify({ result:'PASS', version, copiedPackage:true, cacheIndependent:true, realLocalBridge:true, harnessStatus:true, nativeWake:'stub command admission; pointer only; pending until exact-once inbox drain', heartbeat:'valid/malformed/mismatch/stopped', realProvider:false, cloud:false, database:false }));
+  console.log(JSON.stringify({ result:'PASS', version, copiedPackage:true, cacheIndependent:true, realLocalBridge:true, harnessStatus:true, nativeWake:'stub command admission; pointer only; pending until CLI output and idempotent acknowledgment', heartbeat:'valid/malformed/mismatch/stopped', realProvider:false, cloud:false, database:false }));
 } finally {
   if (child && pointer) for (const id of owned) { try { await api('DELETE', `/api/sessions/${id}`); } catch {} }
   try { await stop(); } finally { rmSync(temporary, { recursive:true, force:true }); }
