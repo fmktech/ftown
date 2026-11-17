@@ -38,6 +38,12 @@ export function parseSessionBlock(value: unknown): SessionBlock | undefined {
 
 export type ShellType = 'claude' | 'cursor' | 'codex' | 'shell' | 'zai' | 'kimi' | 'opencode' | 'deepseek' | 'fireworks' | 'grok' | 'pi' | 'kimi-code' | 'muse' | 'antigravity';
 
+export type AccountHarness = 'claude' | 'codex';
+export interface HarnessAccount { id: string; harness: AccountHarness; label?: string; configDir: string }
+export interface AccountsFile { version: 1; accounts: HarnessAccount[] }
+/** Read-only account metadata returned by get_accounts; paths stay on the bridge. */
+export type HarnessAccountSummary = Omit<HarnessAccount, 'configDir'> & { isDefault: boolean };
+
 export interface Session {
   id: string;
   name: string;
@@ -49,6 +55,8 @@ export interface Session {
   model?: string;
   workingDir?: string;
   shellType?: ShellType;
+  account?: string;
+  allowedAccounts?: string[];
   claudeSessionId?: string;
   cursorSessionId?: string;
   codexSessionId?: string;
@@ -160,6 +168,7 @@ import type { AnswerSessionAttentionPayload, AttentionAnswerDelivery, AttentionP
 export type { AnswerSessionAttentionPayload } from '../../bridge/src/attention-prompt-protocol';
 
 export type CommandType =
+  | 'get_accounts'
   | 'preview_chat_list' | 'preview_chat_send' | 'preview_chat_reply'
   | 'session_preview_status' | 'session_preview_chunk'
   | 'get_bridge_update' | 'update_bridge' | 'get_pull_request_statuses' | 'get_pull_request_review' | 'get_pull_request_review_chunk'
@@ -197,6 +206,8 @@ export interface CreateSessionPayload {
   workingDir?: string;
   bridgeId?: string;
   shellType?: ShellType;
+  account?: string;
+  allowedAccounts?: string[];
   claudeSessionId?: string;
   cursorSessionId?: string;
   codexSessionId?: string;

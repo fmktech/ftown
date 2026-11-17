@@ -35,6 +35,7 @@ import { createFtownSession, type CreateFtownSessionDeps } from './create-ftown-
 import { loadOrCreateIdentity, readBoundBridgeIdentity } from './security/bridge/identity.js';
 import { bindLedgerIdentity } from './security/bridge/ledger-identity.js';
 import { BridgeSecurityService, applicationJson } from './security/bridge/security.js';
+import { BridgeStartingError } from './security/bridge/errors.js';
 import type { ApplicationJson, EndpointIdentity, VerifiedApplication } from './security/protocol.js';
 import { createCommandHandler } from './command-rpc.js';
 import { createRealModelRoutingService } from './quota/routing-service.js';
@@ -1127,7 +1128,7 @@ program
     centrifugo.subscribeToSessions(userId);
 
     centrifugo.subscribeSecureCommands(userId, async message => {
-      if (!ready) throw new Error('Bridge is starting');
+      if (!ready) throw new BridgeStartingError();
       return localApiServer.dispatchSecure(message);
     }, updateEffects);
     setTimeout(() => {

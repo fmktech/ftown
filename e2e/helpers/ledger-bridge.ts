@@ -40,6 +40,18 @@ export async function waitForPairingPrompt(read: () => string, options: { afterO
   }
 }
 
+/** Wait for command readiness after pairing, not merely the bridge's presence. */
+export async function waitForBridgeReady(read: () => string, options: { timeoutMs?: number; alive?: () => boolean } = {}): Promise<void> {
+  const deadline = Date.now() + (options.timeoutMs ?? 30_000);
+  for (;;) {
+    if (options.alive && !options.alive()) throw new Error("test-owned bridge exited before command readiness");
+    if (read().includes("[Bridge] Ready and listening for commands")) return;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new Error("test-owned bridge did not reach command readiness in time");
+    await new Promise(resolve => setTimeout(resolve, Math.min(200, remaining)));
+  }
+}
+
 /** Log of a shared bridge started by scripts/start-services.sh. */
 export function readSharedBridgeLog(name: "bridge" | "bridge-2"): string {
   try { return readFileSync(join(E2E_DIR, `${name}.log`), "utf8"); } catch { return ""; }
@@ -84,6 +96,8 @@ export interface IsolatedBridge {
   replicaTip(): { revision: number; head: string } | null;
   /** The last pairing prompt printed after `afterOffset` characters of output. */
   pairing(options?: { afterOffset?: number; timeoutMs?: number }): Promise<PairingPrompt>;
+  /** Wait for this process to accept commands after its pairing is approved. */
+  waitReady(options?: { timeoutMs?: number }): Promise<void>;
   hasTmuxSession(sessionId: string): Promise<boolean>;
   /** Stop THIS bridge's process (SIGTERM, then SIGKILL) and keep its HOME, data and tmux server. */
   stopProcess(): Promise<void>;
@@ -124,13 +138,17 @@ export async function startIsolatedBridge(options: { apiUrl?: string } = {}): Pr
     throw new Error("test-owned bridge setup failed");
   }
   let output = "";
+  let processOutput = "";
   const append = (chunk: Buffer) => {
     output += chunk.toString("utf8");
+    processOutput += chunk.toString("utf8");
     if (output.length > MAX_OUTPUT) output = output.slice(-MAX_OUTPUT);
+    if (processOutput.length > MAX_OUTPUT) processOutput = processOutput.slice(-MAX_OUTPUT);
   };
   let child: ChildProcess;
   let exited = false;
   const spawnBridge = async () => {
+    processOutput = "";
     const next = spawn(process.execPath, [join(BRIDGE_DIST, "index.js"), "--api-url", options.apiUrl ?? UI_BASE_URL], {
       cwd: home, env, stdio: ["ignore", "pipe", "pipe"],
     });
@@ -174,6 +192,7 @@ export async function startIsolatedBridge(options: { apiUrl?: string } = {}): Pr
       } catch { return null; }
     },
     pairing: (opts = {}) => waitForPairingPrompt(() => output, { ...opts, alive: () => !stopped() }),
+    waitReady: (opts = {}) => waitForBridgeReady(() => processOutput, { ...opts, alive: () => !stopped() }),
     async hasTmuxSession(sessionId: string) {
       try { await tmux(["has-session", "-t", `=ftown-${sessionId}`]); return true; } catch { return false; }
     },

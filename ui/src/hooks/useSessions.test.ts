@@ -56,6 +56,15 @@ function setup(immediate = false, commandTimeoutMs?: number) {
 describe("structured session creation through the actual hook", () => {
   const shellTypes: ShellType[] = ["claude", "cursor", "codex", "shell", "zai", "kimi", "opencode", "deepseek", "fireworks", "grok", "pi", "kimi-code", "muse", "antigravity"];
 
+  it("sends account selection and child restrictions through the dashboard RPC", async () => {
+    const h = setup();
+    await act(async () => h.result.current.createSession("", { shellType: "claude", bridgeId: "chosen", account: "work", allowedAccounts: ["work"], parentSessionId: "manager" }));
+    const command = vi.mocked(h.rpc.sendCommand).mock.calls.map(([value]) => value).find(value => value.type === "create_session")!;
+    expect(command.payload).toMatchObject({ account: "work", allowedAccounts: ["work"], parentSessionId: "manager" });
+    h.publication(row("account-session", "a", { account: "work", allowedAccounts: ["work"] }));
+    expect(h.result.current.sessions.find(session => session.id === "account-session")).toMatchObject({ account: "work", allowedAccounts: ["work"] });
+  });
+
   it.each(shellTypes)("leaves %s command and task delivery construction to the bridge", async (shellType) => {
     const h = setup();
     const prompt = "inspect today's changes; $(not a command)\nsecond line";

@@ -297,6 +297,25 @@ it.each(['bridge_offline', 'epoch_changed', 'permission_denied', 'unknown'])('on
   if (code === 'bridge_offline' || code === 'epoch_changed') expect(hook.result.current.state).toMatchObject({ kind: 'ready', key: old.key });
   else expect(hook.result.current.state.kind).toBe('error');
 });
+it('keeps authorized cached content when the browser goes offline during a preview poll', async () => {
+  const h = stablePreviewHarness(); const auth = authorityFixture(); let statusCalls = 0;
+  const sendCommand = vi.fn((command: Command) => {
+    if (command.type === 'session_preview_status' && ++statusCalls === 2) return Promise.reject(new Error('network disconnected'));
+    return h.sendCommand(command);
+  });
+  const hook = renderHook(() => useSessionPreview({ client: auth.client, userId: 'user', target, visible: true, readable: true, securityGeneration: 1, sendCommand, subscribeAuthority: auth.subscribeAuthority }));
+  await act(async () => {}); const old = hook.result.current.state; if (old.kind !== 'ready') throw new Error('expected ready');
+  const descriptor = Object.getOwnPropertyDescriptor(Navigator.prototype, 'onLine');
+  Object.defineProperty(Navigator.prototype, 'onLine', { configurable: true, get: () => false });
+  try {
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(hook.result.current.state).toMatchObject({ kind: 'ready', key: old.key });
+  } finally {
+    if (descriptor) Object.defineProperty(Navigator.prototype, 'onLine', descriptor);
+    else delete (Navigator.prototype as { onLine?: boolean }).onLine;
+    hook.unmount();
+  }
+});
 it('latches authority loss and recovery while the preview is offline and hidden', async () => {
   const h = stablePreviewHarness(); const auth = authorityFixture();
   const hook = renderHook(({ readable, visible }) => useSessionPreview({ client: auth.client, userId: 'user', target, visible, readable, securityGeneration: 1, sendCommand: h.sendCommand, subscribeAuthority: auth.subscribeAuthority }), { initialProps: { readable: true, visible: true } });

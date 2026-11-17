@@ -26,6 +26,9 @@ import { generateAuthKey } from '../ledger/proof.js';
 import type { Ledger, LedgerGenesis, LedgerOperation, LedgerTransition, Signed } from '../ledger/protocol.js';
 import { createSoftPasskey, type SoftPasskey } from '../ledger/testing.js';
 import { BridgeLedgerStore } from './ledger-store.js';
+import { createCommandHandler } from '../../command-rpc.js';
+import type { Command, CommandResponse } from '../../types.js';
+import { saveAccounts } from '../../accounts.js';
 
 const owner = '7bac2a7f-c58e-4845-856f-8283fb07ad96';
 async function fixture(t: { after(fn: () => Promise<void>): void }) {
@@ -44,6 +47,63 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
   };
   return { dir, identity, client, security, route, packet };
 }
+
+test('encrypted browser read commands dispatch account metadata and session lists', async t => {
+  const f = await fixture(t);
+  const previousHome = process.env.HOME;
+  process.env.HOME = f.dir;
+  t.after(async () => {
+    if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
+    await f.security.close();
+  });
+  saveAccounts({ version: 1, accounts: [{ id: 'coding', harness: 'codex', label: 'Coding subscription', configDir: join(f.dir, 'coding') }] });
+  const browser = await generateEndpoint(owner, 'browser');
+  const invite = await f.security.policy.createInvitation(await f.security.policy.principal(f.client.endpoint.id), { label: 'browser' });
+  await f.security.policy.consumeInvitation({ type: 'enroll', candidate: browser.endpoint, invitationId: invite.invitationId, invitationSecret: invite.secret, label: 'browser' });
+
+  const dispatched: string[] = [];
+  const subscription = Object.assign(new EventEmitter(), { subscribe() {}, unsubscribe() {} });
+  let deliver!: (packet: SecureEnvelope) => void;
+  const wire = { state: 'connected', newSubscription: () => subscription, publish: async (_channel: string, packet: SecureEnvelope) => { deliver(packet); } };
+  const cloud = new CentrifugoClient('ws://127.0.0.1:1/unused', '', async () => '');
+  Object.defineProperty(cloud, 'client', { value: wire }); cloud.setSecurity(f.security);
+  const api = new LocalApiServer();
+  api.setSecurity(f.security, { protocolVersion: 1, ownerId: owner, bridgeId: 'bridge', endpoint: f.identity.endpoint, relayUserId: 'owner@example.test' }, async message => {
+    dispatched.push(message.application.route.kind === 'command' ? message.application.route.command : 'unexpected');
+    let response: CommandResponse | undefined;
+    await createCommandHandler({ bridgeId: 'bridge', security: f.security,
+      sessionController: { list: async () => [] } as unknown as SessionController,
+      publishCommandResponse: async value => { response = value; },
+    })(message.application.data as unknown as Command, message);
+    return JSON.parse(JSON.stringify({ type: 'command_response', response }));
+  });
+  cloud.subscribeSecureCommands('owner@example.test', message => api.dispatchSecure(message));
+  const send = async (type: 'list_sessions' | 'get_accounts') => {
+    const requestId = randomUUID();
+    const command: Command = { type, requestId, payload: { bridgeId: 'bridge' } };
+    const app: SecureApplication = { type: 'application', route: { kind: 'command', requestId, command: type, sessionId: null }, data: command, mcp: null };
+    const response = new Promise<SecureEnvelope>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`No encrypted response for ${type}`)), 2000);
+      deliver = packet => { clearTimeout(timer); resolve(packet); };
+    });
+    subscription.emit('publication', { info: { user: 'owner@example.test' }, data: await f.packet(app, f.route, browser) });
+    const reply = await response;
+    const plaintext = await open(browser, f.identity.endpoint, reply, { ownerId: owner, bridgeId: 'bridge', channel: f.route.channel, recipientId: browser.endpoint.id, purpose: 'application' });
+    return JSON.parse(new TextDecoder().decode(plaintext)).data.response as CommandResponse;
+  };
+
+  const sessions = await send('list_sessions');
+  assert.equal(sessions.success, true);
+  assert.deepEqual(sessions.data, { bridgeId: 'bridge', sessions: [] });
+  const accounts = await send('get_accounts');
+  assert.equal(accounts.success, true);
+  assert.deepEqual(accounts.data, { accounts: [
+    { id: 'default', harness: 'claude', isDefault: true },
+    { id: 'default', harness: 'codex', isDefault: true },
+    { id: 'coding', harness: 'codex', label: 'Coding subscription', isDefault: false },
+  ] });
+  assert.deepEqual(dispatched, ['list_sessions', 'get_accounts']);
+});
 
 test('browser control cannot register preview through encrypted HTTP and causes no session mutation', async t => {
   const f = await fixture(t);

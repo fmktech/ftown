@@ -91,6 +91,7 @@ test('coordination card, board and events routes classify per method and deny ex
 
 test('model routing reads need read authority and saving it needs control', () => {
   assert.deepEqual(classifyCommand('get_model_routing', { bridgeId: 'bridge' }), { permission: 'read', mutating: false, operation: 'get_model_routing', sessionId: null });
+  assert.deepEqual(classifyCommand('get_accounts', { bridgeId: 'bridge' }), { permission: 'read', mutating: false, operation: 'get_accounts', sessionId: null });
   assert.deepEqual(classifyCommand('set_model_routing', { bridgeId: 'bridge', config: {} }), { permission: 'control', mutating: true, operation: 'set_model_routing', sessionId: null });
   for (const command of ['model_routing', 'get_model_routing_x', 'SET_MODEL_ROUTING']) assert.throws(() => classifyCommand(command), { code: 'permission_denied' });
 });

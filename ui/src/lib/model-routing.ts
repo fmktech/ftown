@@ -48,7 +48,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
 function copyPick(pick: RoutingPick): RoutingPick {
-  return { provider: pick.provider, model: pick.model, effort: pick.effort };
+  return { provider: pick.provider, model: pick.model, effort: pick.effort, ...(pick.account !== undefined ? { account: pick.account } : {}) };
 }
 
 function copyTier(tier: RoutingTier): RoutingTier {
@@ -60,10 +60,10 @@ function copyConfig(config: ModelRoutingConfig): ModelRoutingConfig {
 }
 
 function samePick(
-  a: { provider: string; model: string; effort: string | null },
-  b: { provider: string; model: string; effort: string | null },
+  a: { provider: string; model: string; effort: string | null; account?: string },
+  b: { provider: string; model: string; effort: string | null; account?: string },
 ): boolean {
-  return a.provider === b.provider && a.model === b.model && a.effort === b.effort;
+  return a.provider === b.provider && a.model === b.model && a.effort === b.effort && (a.account ?? 'default') === (b.account ?? 'default');
 }
 
 function inRange(list: readonly unknown[], index: number): boolean {
@@ -212,8 +212,8 @@ export function uniqueTierName(existing: readonly string[], base: string = 'tier
   }
 }
 
-function modelsEntry(report: QuotaReport, provider: QuotaProviderId) {
-  return report.models.find((entry) => entry.provider === provider);
+function modelsEntry(report: QuotaReport, provider: QuotaProviderId, account = 'default') {
+  return report.models.find((entry) => entry.provider === provider && (entry.account ?? 'default') === account);
 }
 
 export function providerOptions(
@@ -229,8 +229,8 @@ export function providerOptions(
   });
 }
 
-export function modelOptions(report: QuotaReport, provider: QuotaProviderId): HarnessModel[] {
-  const entry = modelsEntry(report, provider);
+export function modelOptions(report: QuotaReport, provider: QuotaProviderId, account = 'default'): HarnessModel[] {
+  const entry = modelsEntry(report, provider, account);
   return entry !== undefined && entry.status === 'ok' ? entry.models.slice() : [];
 }
 
@@ -250,28 +250,29 @@ export function effortOptions(
   report: QuotaReport,
   provider: QuotaProviderId,
   model: string,
+  account = 'default',
 ): { efforts: string[]; defaultEffort: string | null } {
-  const found = modelOptions(report, provider).find((candidate) => candidate.id === model);
+  const found = modelOptions(report, provider, account).find((candidate) => candidate.id === model);
   if (found === undefined) return { efforts: [], defaultEffort: null };
   return { efforts: found.efforts.slice(), defaultEffort: found.defaultEffort };
 }
 
-export function defaultPickFor(report: QuotaReport, provider: QuotaProviderId): RoutingPick | null {
-  const models = modelOptions(report, provider);
+export function defaultPickFor(report: QuotaReport, provider: QuotaProviderId, account = 'default'): RoutingPick | null {
+  const models = modelOptions(report, provider, account);
   if (models.length === 0) return null;
   const model = models.find((candidate) => candidate.isDefault) ?? models[0];
   const effort =
     model.defaultEffort !== null && model.efforts.includes(model.defaultEffort) ? model.defaultEffort : null;
-  return { provider, model: model.id, effort };
+  return { provider, model: model.id, effort, ...(account !== 'default' ? { account } : {}) };
 }
 
 export function normalizePick(report: QuotaReport, pick: RoutingPick): RoutingPick {
-  const models = modelOptions(report, pick.provider);
+  const models = modelOptions(report, pick.provider, pick.account);
   if (models.length === 0) return copyPick(pick);
 
   let model = models.find((candidate) => candidate.id === pick.model);
   if (model === undefined) {
-    const fallback = defaultPickFor(report, pick.provider);
+    const fallback = defaultPickFor(report, pick.provider, pick.account);
     if (fallback === null) return copyPick(pick);
     model = models.find((candidate) => candidate.id === fallback.model);
     if (model === undefined) return copyPick(pick);
@@ -286,7 +287,7 @@ export function normalizePick(report: QuotaReport, pick: RoutingPick): RoutingPi
     effort =
       model.defaultEffort !== null && model.efforts.includes(model.defaultEffort) ? model.defaultEffort : null;
   }
-  return { provider: pick.provider, model: model.id, effort };
+  return { ...copyPick(pick), model: model.id, effort };
 }
 
 /** Structural checks mirroring the bridge's rules, so errors show before saving. Empty list = valid. */
@@ -338,7 +339,7 @@ export function validateRoutingDraft(config: ModelRoutingConfig): string[] {
       if (pick.model.trim() === '') {
         errors.push(`${pickLabel}: model is required.`);
       }
-      const key = JSON.stringify([pick.provider, pick.model, pick.effort]);
+      const key = JSON.stringify([pick.provider, pick.model, pick.effort, pick.account ?? 'default']);
       if (keysSeen.has(key)) {
         errors.push(`${pickLabel}: duplicates an earlier pick in this tier.`);
       }
@@ -354,10 +355,10 @@ export function validateRoutingDraft(config: ModelRoutingConfig): string[] {
 }
 
 /** The annotated pick in the tier originally named `originName` with this provider, model and effort. */
-export function findAnnotatedPick<T extends { provider: string; model: string; effort: string | null }>(
+export function findAnnotatedPick<T extends { provider: string; model: string; effort: string | null; account?: string }>(
   tiers: readonly { name: string; picks: readonly T[] }[],
   originName: string | null,
-  pick: { provider: string; model: string; effort: string | null },
+  pick: { provider: string; model: string; effort: string | null; account?: string },
 ): T | null {
   if (originName === null) return null;
   const tier = tiers.find((candidate) => candidate.name === originName);
@@ -396,7 +397,8 @@ function normalizeConfigPick(pick: unknown): Record<string, unknown> | null {
   if (!isRecord(pick)) return null;
   if (typeof pick.provider !== 'string' || typeof pick.model !== 'string') return null;
   if (pick.effort !== null && pick.effort !== undefined && typeof pick.effort !== 'string') return null;
-  return { provider: pick.provider, model: pick.model, effort: typeof pick.effort === 'string' ? pick.effort : null };
+  if (pick.account !== undefined && (typeof pick.account !== 'string' || !/^[a-z0-9-]{1,32}$/.test(pick.account))) return null;
+  return { provider: pick.provider, model: pick.model, effort: typeof pick.effort === 'string' ? pick.effort : null, ...(pick.account !== undefined ? { account: pick.account } : {}) };
 }
 
 /** Config tiers. Null when any tier or pick is malformed. */
@@ -793,18 +795,18 @@ function adviseAgyModelFromRow(
 export function resolvePickAvailability(
   report: QuotaReport,
   originName: string | null,
-  pick: Pick<RoutingPick, 'provider' | 'model' | 'effort'>,
+  pick: Pick<RoutingPick, 'provider' | 'model' | 'effort' | 'account'>,
 ): { availability: QuotaAvailability; leftPercent: number | null; reason: string | undefined } {
-  const routing = report.routing.find((entry) => entry.provider === pick.provider);
+  const routing = report.routing.find((entry) => entry.provider === pick.provider && (entry.account ?? 'default') === (pick.account ?? 'default'));
   const exactAnnotation = findAnnotatedPick(report.tiers, originName, pick);
   const modelAnnotation =
     exactAnnotation ??
     report.tiers
       .flatMap((tier) => (Array.isArray(tier.picks) ? tier.picks : []))
-      .find((candidate) => candidate.provider === pick.provider && candidate.model === pick.model) ??
+      .find((candidate) => candidate.provider === pick.provider && candidate.model === pick.model && (candidate.account ?? 'default') === (pick.account ?? 'default')) ??
     null;
 
-  const quotaRow = report.providers.find((entry) => entry.provider === pick.provider);
+  const quotaRow = report.providers.find((entry) => entry.provider === pick.provider && (entry.account ?? 'default') === (pick.account ?? 'default'));
   const agyLive =
     pick.provider === 'agy' && quotaRow !== undefined
       ? adviseAgyModelFromRow(quotaRow, pick.model, report.generatedAt)

@@ -9,3 +9,11 @@ export class BridgeSecurityError extends Error implements SecurityFailure {
     this.retryable = code === 'storage_unavailable' || code === 'audit_unavailable';
   }
 }
+
+/** Raised only by the command dispatcher before it accepts work during startup. */
+export class BridgeStartingError extends Error {
+  constructor() {
+    super('Bridge is starting');
+    this.name = 'BridgeStartingError';
+  }
+}

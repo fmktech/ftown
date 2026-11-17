@@ -64,6 +64,61 @@ describe("createRpcCore", () => {
       await expect(promise).resolves.toMatchObject({ success: false, error: "boom" });
     });
 
+    it("accepts a legitimate create_session response without retrying", async () => {
+      const pending = core.sendCommand(cmd("create-ok", "create_session"));
+      core.handleResponse(resp("create-ok", { data: { sessionId: "session-1" } }));
+      await expect(pending).resolves.toMatchObject({ success: true, data: { sessionId: "session-1" } });
+      expect(published).toHaveLength(1);
+    });
+
+    it("retries bridge_starting with bounded backoff, then resolves the next response", async () => {
+      const pending = core.sendCommand(cmd("starting", "create_session"));
+      for (const [index, delay] of [250, 500, 1000, 2000].entries()) {
+        core.handleResponse(resp(published.at(-1)!.requestId, { success: false, error: "Bridge is starting", data: { code: "bridge_starting", retryable: true } }));
+        await vi.advanceTimersByTimeAsync(delay);
+        expect(published).toHaveLength(index + 2);
+        expect(published.at(-1)).toMatchObject({ type: published[0].type, payload: published[0].payload });
+        expect(published.at(-1)?.requestId).not.toBe(published.at(-2)?.requestId);
+      }
+      core.handleResponse(resp(published.at(-1)!.requestId, { data: { ready: true } }));
+      await expect(pending).resolves.toMatchObject({ requestId: "starting", success: true, data: { ready: true } });
+    });
+
+    it("returns bridge_starting after the bounded retry window", async () => {
+      const pending = core.sendCommand(cmd("exhausted"));
+      for (const delay of [250, 500, 1000, 2000]) {
+        core.handleResponse(resp(published.at(-1)!.requestId, { success: false, error: "Bridge is starting", data: { code: "bridge_starting", retryable: true } }));
+        await vi.advanceTimersByTimeAsync(delay);
+      }
+      core.handleResponse(resp(published.at(-1)!.requestId, { success: false, error: "Bridge is starting", data: { code: "bridge_starting", retryable: true } }));
+      await expect(pending).resolves.toMatchObject({ success: false, data: { code: "bridge_starting" } });
+      expect(published).toHaveLength(5);
+    });
+
+    it("can disable shared retries for callers with their own retry policy", async () => {
+      const pending = core.sendCommand(cmd("starting"), { retryBridgeStarting: false });
+      core.handleResponse(resp("starting", { success: false, error: "Bridge is starting", data: { code: "bridge_starting", retryable: true } }));
+      await expect(pending).resolves.toMatchObject({ success: false, data: { code: "bridge_starting" } });
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(published).toHaveLength(1);
+    });
+
+    it("does not retry other typed command failures", async () => {
+      const pending = core.sendCommand(cmd("denied"));
+      core.handleResponse(resp("denied", { success: false, data: { code: "permission_denied" } }));
+      await expect(pending).resolves.toMatchObject({ success: false, data: { code: "permission_denied" } });
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(published).toHaveLength(1);
+    });
+
+    it("does not retry refusal-shaped codes without the exact not-ready response", async () => {
+      const pending = core.sendCommand(cmd("refused"));
+      core.handleResponse(resp("refused", { success: false, error: "Encrypted request rejected", data: { code: "permission_denied" } }));
+      await expect(pending).resolves.toMatchObject({ success: false, error: "Encrypted request rejected", data: { code: "permission_denied" } });
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(published).toHaveLength(1);
+    });
+
     it("ignores responses for other requestIds", async () => {
       const promise = core.sendCommand(cmd("r1"));
       core.handleResponse(resp("other"));

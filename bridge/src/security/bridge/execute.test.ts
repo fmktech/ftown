@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import type { ApplicationJson, SecureEnvelope, VerifiedApplication } from '../protocol.js';
 import type { BridgeSecurityService } from './security.js';
 import { executeSecurePacket } from './execute.js';
+import { BridgeSecurityError, BridgeStartingError } from './errors.js';
 import { UpdateAdmission, UpdateResponseTicket } from '../../update-admission.js';
 import { UpdateEffects } from '../../update-effects.js';
 
@@ -38,4 +39,42 @@ test('without an observer an asynchronous seal rejection retains original propag
     sealTo: async () => { seals++; await tick(); throw new Error('original seal failure'); } } as unknown as BridgeSecurityService;
   await assert.rejects(executeSecurePacket(security, packet, route, async () => response(true)), /original seal failure/);
   assert.equal(seals, 1);
+});
+
+test('a Bridge is starting dispatch refusal returns a typed retryable command response', async () => {
+  let sealedApplication: unknown;
+  const security = { acceptApplication: async () => verified, revalidate: async () => {}, revokeSelfWithReceipt: async () => null,
+    sealTo: async (_sender: string, application: unknown) => { sealedApplication = application; return packet; } } as unknown as BridgeSecurityService;
+  await executeSecurePacket(security, packet, route, async () => { throw new BridgeStartingError(); });
+  assert.deepEqual(sealedApplication, { type: 'application', route: { kind: 'response', requestId: 'id' },
+    data: { type: 'command_response', response: { requestId: 'id', success: false, error: 'Bridge is starting', data: { code: 'bridge_starting', retryable: true } } }, mcp: null });
+});
+
+test('same-message errors outside the startup gate are not typed as bridge_starting', async () => {
+  let sealedApplication: unknown;
+  const security = { acceptApplication: async () => verified, revalidate: async () => {}, revokeSelfWithReceipt: async () => null,
+    sealTo: async (_sender: string, application: unknown) => { sealedApplication = application; return packet; } } as unknown as BridgeSecurityService;
+  await executeSecurePacket(security, packet, route, async () => { throw new Error('Bridge is starting'); });
+  assert.deepEqual(sealedApplication, { type: 'application', route: { kind: 'response', requestId: 'id' },
+    data: { status: 500, body: { error: 'outcome_unknown', code: 'outcome_unknown', outcomeUnknown: true } }, mcp: null });
+});
+
+test('an account security refusal retains its rejection code before dispatch', async () => {
+  let sealedApplication: unknown;
+  let dispatched = false;
+  const security = { acceptApplication: async () => { throw new BridgeSecurityError('account_device_revoked'); },
+    sealTo: async (_sender: string, application: unknown) => { sealedApplication = application; return packet; } } as unknown as BridgeSecurityService;
+  await executeSecurePacket(security, packet, route, async () => { dispatched = true; return response(true); });
+  assert.equal(dispatched, false);
+  assert.deepEqual(sealedApplication, { type: 'application', route: { kind: 'response', requestId: 'id' },
+    data: { status: 403, body: { error: 'account_device_revoked', code: 'account_device_revoked', outcomeUnknown: false } }, mcp: null });
+});
+
+test('other post-dispatch exceptions remain outcome_unknown', async () => {
+  let sealedApplication: unknown;
+  const security = { acceptApplication: async () => verified, revalidate: async () => {}, revokeSelfWithReceipt: async () => null,
+    sealTo: async (_sender: string, application: unknown) => { sealedApplication = application; return packet; } } as unknown as BridgeSecurityService;
+  await executeSecurePacket(security, packet, route, async () => { throw new Error('transport interrupted'); });
+  assert.deepEqual(sealedApplication, { type: 'application', route: { kind: 'response', requestId: 'id' },
+    data: { status: 500, body: { error: 'outcome_unknown', code: 'outcome_unknown', outcomeUnknown: true } }, mcp: null });
 });

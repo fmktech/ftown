@@ -188,7 +188,8 @@ export function useSessionPreview({ client, userId, target: requestedTarget, vis
       } catch (error) {
         if (isActive()) {
           let retain = false;
-          if (isTransient(error) && store.complete && client.securityRuntime && store.fingerprint) {
+          const browserOffline = typeof navigator !== 'undefined' && !navigator.onLine;
+          if (!isAuthorityDenial(error) && (isTransient(error) || browserOffline) && store.complete && client.securityRuntime && store.fingerprint) {
             try { retain = sessionAuthority(client, target.bridgeId) === store.fingerprint; } catch { retain = false; }
           }
           if (!isActive()) return;

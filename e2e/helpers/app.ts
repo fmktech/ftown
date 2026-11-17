@@ -6,6 +6,9 @@ import { sharedAccountId, signIn } from "./passkey";
 
 export { sharedAccountId };
 
+/** The transient command failures shown by the dashboard while a new browser or bridge is being admitted. */
+export const TRANSIENT_CREATE_SESSION_REFUSAL = /^Encrypted request rejected$/;
+
 /**
  * Sign `page` in to the shared account A with its synced passkey and land on
  * /dashboard. A fresh browser context enrols itself (passkey identify + "Add
@@ -68,7 +71,7 @@ export async function createShellSessionWhenAccepted(
     await createShellSession(page, name, bridgeId);
     diagnostics?.probe.mark(`create clicked (attempt ${refusals + 1})`);
     const created = page.getByRole("button", { name: new RegExp(name) });
-    const rejected = page.getByText("Encrypted request rejected", { exact: true });
+    const rejected = page.getByText(TRANSIENT_CREATE_SESSION_REFUSAL);
     const outcome = await Promise.race([
       created.waitFor({ timeout: 15_000 }).then(() => "created" as const),
       rejected.waitFor({ timeout: 15_000 }).then(() => "rejected" as const),

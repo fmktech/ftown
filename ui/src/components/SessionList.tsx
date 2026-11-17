@@ -19,6 +19,12 @@ import type { BridgeSecurityState } from "@security/protocol";
 import { SecurityLockIcon, bridgeConnectionLock } from "./SecurityLockIcon";
 import type { UpdateView } from "@/hooks/useBridgeUpdates";
 
+export function SessionAccountBadge({ account }: { account?: string }) {
+  if (!account || account === "default") return null;
+  return <span aria-label={`Account: ${account}`} title={`Account: ${account}`}
+    className="inline-flex max-w-28 shrink-0 items-center truncate rounded border border-[var(--border-muted)] bg-[var(--bg-base)] px-1.5 py-px font-mono text-[10px] leading-4 text-[var(--text-muted)]">{account}</span>;
+}
+
 interface SessionListProps {
   sessions: Session[];
   bridges: BridgeInfo[];
@@ -1282,6 +1288,7 @@ export function SessionList({
               {displayName}
             </span>
           )}
+          <SessionAccountBadge account={session.account} />
           </div>
           <div style={{ gridColumn: 3, display: "flex", minWidth: 0, alignItems: "center" }}>
             <PullRequestBadgePlaceholder url={session.pullRequestUrl} />
