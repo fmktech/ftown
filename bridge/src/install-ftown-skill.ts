@@ -94,6 +94,17 @@ function linkSkillInto(skillsDir: string, skillName: string): void {
   console.warn(`[Bridge] ${linkPath} exists and is not a symlink or directory; skipping link`);
 }
 
+/** Link the already-installed skill into one account's configuration only. */
+export function linkFtownSkillForAccount(configDir: string): void {
+  if (!existsSync(join(ftownSkillPath('ftown'), 'SKILL.md'))) throw new Error('ftown skill is not installed; run ftown setup');
+  const skillsDir = join(configDir, 'skills');
+  linkSkillInto(skillsDir, 'ftown');
+  const link = join(skillsDir, 'ftown');
+  if (!lstatSync(link).isSymbolicLink() || readlinkSync(link) !== relativeTarget(skillsDir, 'ftown')) {
+    throw new Error('Could not link ftown skill in account configuration');
+  }
+}
+
 function realDirectory(path: string): boolean {
   try { const stat = lstatSync(path); return stat.isDirectory() && !stat.isSymbolicLink(); }
   catch (error) { preserveUnknown(error); return false; }
