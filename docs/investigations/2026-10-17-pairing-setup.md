@@ -17,7 +17,7 @@ hypotheses_proven: 1
 ## Ownership
 
 Native worker `/root/simplify_all`, explicit `gpt-6.1-sol` / `high`, shared
-checkout `/Users/fkesheh/projects/ftown-simplify-all`. Exclusive writable lease:
+checkout `<repo>-simplify-all`. Exclusive writable lease:
 `e2e/tests/device-pairing.spec.ts` and this log. Other workers share the checkout;
 preserve their edits, both locally modified prior coordination notes and raw CI
 evidence. Root alone executes E2E, servers and CI; no worker runtime or CI run.

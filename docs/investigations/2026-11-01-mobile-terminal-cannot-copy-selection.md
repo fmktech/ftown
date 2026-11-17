@@ -352,7 +352,7 @@ Why 5?    Architectural root: the terminal is an emulator-rendered surface, not 
 
 ## Appendix: throwaway reproduction (outside the repo, recorded verbatim)
 
-`<scratchpad>/repro-mobile-copy/` holds two files: `vitest.repro.config.ts` (a vitest config rooted at `ui/` that includes only this file) and `node_modules` (a symlink to `ui/node_modules`). The scratchpad path is `/private/tmp/claude-501/-Users-fkesheh-projects-ftown/c1622140-6baf-4d8c-87c6-1193f081a22d/scratchpad`.
+`<scratchpad>/repro-mobile-copy/` holds two files: `vitest.repro.config.ts` (a vitest config rooted at `ui/` that includes only this file) and `node_modules` (a symlink to `ui/node_modules`). The scratchpad path is `<scratchpad>`.
 
 ### vitest.repro.config.ts
 
@@ -360,7 +360,7 @@ Why 5?    Architectural root: the terminal is an emulator-rendered surface, not 
 import { defineConfig } from "vitest/config";
 import path from "node:path";
 
-const UI = "/private/tmp/claude-501/-Users-fkesheh-projects-ftown/c1622140-6baf-4d8c-87c6-1193f081a22d/scratchpad/wt-mobile-clipboard/ui";
+const UI = "<scratchpad>/wt-mobile-clipboard/ui";
 
 export default defineConfig({
   root: UI,

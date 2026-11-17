@@ -43,7 +43,7 @@ Environment:
 - The bytes are fed into `@xterm/headless` 6.0.0. This is the same core as the UI's `@xterm/xterm` 6.0.0.
 - The links come from the UI's `@xterm/addon-web-links` 0.12.0, loaded from `ui/node_modules` and built exactly as at `ui/src/components/Terminal.tsx:260-262`.
 - Claude Code 2.1.318.
-- Experiment directory: `/private/tmp/claude-501/-Users-fkesheh-projects-ftown/99a20ec3-eacc-48b8-849e-8dba56f1eaba/scratchpad/ml-links-exp/`. The scripts are:
+- Experiment directory: `<scratchpad>/ml-links-exp/`. The scripts are:
   - `capture.js`: a PTY reader, like the bridge's.
   - `analyze.js`: dumps rows with `isWrapped`, runs the real web-links provider per row, and simulates a click.
   - `osc8-scan.js`: mirrors `OscLinkProvider`.

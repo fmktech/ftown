@@ -24,7 +24,7 @@ The user's report: "after oct 26 ftown is generating a toon of observability eve
   - The Vercel Logs for project `ftown`, over the timeline "Last week", show **783K** "Vercel Function" events, against 290 Cache and 172 Rewrites.
   - The sample in the user's screenshot (2026-11-08 10:46:40–10:46:50) is almost all `GET ftown.ia.br/api/security/approvals` with status 200, plus some interleaved `GET /api/security/account`.
   - The approvals timestamps fall into three phases, each repeating every 2 s: `.56`, `.96/.97` and `.14/.15`.
-- **CLI cross-check:** `vercel logs --project ftown --scope fkesheh-s-team --environment production --since 2h --json` returns at most 50 rows, here covering 26 s:
+- **CLI cross-check:** `vercel logs --project ftown --scope <team> --environment production --since 2h --json` returns at most 50 rows, here covering 26 s:
   ```
   42 serverless GET /api/security/approvals
   8 serverless GET /api/security/account

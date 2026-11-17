@@ -27,7 +27,7 @@ Read-only, in-memory reproduction using the installed 0.19.58 runtime's `createC
 
 ```sh
 node --input-type=module <<'NODE'
-import { createCommandHandler } from '/Users/fkesheh/.ftown/cli/dist/command-rpc.js';
+import { createCommandHandler } from '/Users/example/.ftown/cli/dist/command-rpc.js';
 const responses = [];
 const handler = createCommandHandler({bridgeId:'owner',sessionController:{get:async id=>({id,bridgeId:'owner'})},attentionStore:{explicitSnapshot:async()=>({attention:null,sequence:0})},publishCommandResponse:async response=>responses.push(response)});
 await handler({type:'get_session_attention',requestId:'local-read',payload:{bridgeId:'owner',sessionId:'session'}});
@@ -44,7 +44,7 @@ Verified 2026-10-28; command output (Node color warning omitted):
 responses: [{"requestId":"local-read","success":true,"data":{"sessionId":"session","attention":null,"sequence":0}}]
 ```
 
-`cmp` verified the copied runtime `~/.ftown/cli/dist/command-rpc.js` is byte-identical to the running npm package's `dist/command-rpc.js`. PID 78921 runs `node /Users/fkesheh/.npm/_npx/42a3c29a29e8ae75/node_modules/.bin/ftown --api-url https://ftown.ia.br`; the corresponding package is `ftown` 0.19.58. This is evidence of installed artifacts and process path, not proof that the process's in-memory code could not predate an on-disk replacement. Its stdout/stderr point to `/dev/ttys000`; no timestamped current log was available. Current main package is also 0.19.58. The original dirty `feat/solo-mode` checkout is 0.19.39 and does not represent this runtime.
+`cmp` verified the copied runtime `~/.ftown/cli/dist/command-rpc.js` is byte-identical to the running npm package's `dist/command-rpc.js`. PID 78921 runs `node /Users/example/.npm/_npx/42a3c29a29e8ae75/node_modules/.bin/ftown --api-url https://ftown.ia.br`; the corresponding package is `ftown` 0.19.58. This is evidence of installed artifacts and process path, not proof that the process's in-memory code could not predate an on-disk replacement. Its stdout/stderr point to `/dev/ttys000`; no timestamped current log was available. Current main package is also 0.19.58. The original dirty `feat/solo-mode` checkout is 0.19.39 and does not represent this runtime.
 
 ## Hypotheses
 
@@ -90,7 +90,7 @@ Isolation/adjacent-cause check: a valid owned snapshot returned successfully and
 - Add regression to `bridge/src/command-rpc.test.ts`: owned read succeeds unchanged and is quiet by default; foreign read ignored and quiet; debug-enabled owned read logs; debug-enabled foreign read remains quiet; a mutation still logs; failed read and response publication failure behavior stay visible/unchanged. Ensure tests cleanly restore env and console spies. Assert RED before patch, GREEN after.
 - Bridge runtime changes require patch bump in `bridge/package.json` and matching `bridge/package-lock.json` per `bridge/AGENTS.md`; one owner serializes these. Relevant checks: `cd bridge && node --import tsx --test src/command-rpc.test.ts` and `npm run build`; root owns focused E2E/runtime execution and cleanup.
 - Do not change hydration, reconnect or scheduling without timestamped evidence of unnecessary traffic and a discriminating test; these are required to restore persisted attention and protect correctness.
-- Base is clean `fix/attention-polling-noise` at ebd108eb1628d261339891cb683d0a2b16ae8d62 in `/Users/fkesheh/projects/ftown-attention-polling`. Preserve the extensive unrelated edits in `/Users/fkesheh/projects/ftown`.
+- Base is clean `fix/attention-polling-noise` at ebd108eb1628d261339891cb683d0a2b16ae8d62 in `<repo>-attention-polling`. Preserve the extensive unrelated edits in `<repo>`.
 
 ## Resolution
 The bridge now filters commands addressed to other bridges before receipt logging and suppresses `get_session_attention` receipt logs by default. Starting the bridge with `FTOWN_DEBUG_COMMANDS=1` enables targeted attention-read receipt logs. Other command receipt logging, responses, and existing publication-error logging remain intact. The option is documented in `docs/bridge-command-logging.md`; bridge package and lock were bumped to 0.19.59.

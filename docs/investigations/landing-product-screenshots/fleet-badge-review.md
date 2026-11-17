@@ -1,6 +1,6 @@
 # Clickable compact PR badge: bounded architecture review
 
-Tier 2 `gpt-6.1-sol` / `max`; shared checkout `/Users/fkesheh/projects/ftown-e2e-performance`. Sole writable file is this report. Read `PullRequestLink.tsx`, `SessionList.tsx:1056-1323`, `session-pull-request.test.ts`, the two specified prior investigations, URL parser and Semble-located `e2e/tests/session-tools.spec.ts`. No implementation, runtime, providers, tests or Git work.
+Tier 2 `gpt-6.1-sol` / `max`; shared checkout `<repo>-e2e-performance`. Sole writable file is this report. Read `PullRequestLink.tsx`, `SessionList.tsx:1056-1323`, `session-pull-request.test.ts`, the two specified prior investigations, URL parser and Semble-located `e2e/tests/session-tools.spec.ts`. No implementation, runtime, providers, tests or Git work.
 
 **Recommend a native compact anchor as a sibling of the preserved draggable selection button, aligned through a small row/header CSS subgrid.** Keep the existing button element, handlers, selected details and row identity. A passive hidden placeholder reserves the current badge's exact intrinsic width; the real sibling anchor occupies the matching header/PR grid cell. This permits a native URL while preserving the user's small green 10px bordered badge.
 

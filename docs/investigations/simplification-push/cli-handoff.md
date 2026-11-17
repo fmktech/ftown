@@ -1,7 +1,7 @@
 # CLI/release/installation handoff
 
 Worker `/root/npx_implementation`, explicitly `gpt-6.1-sol` / `high`, integration
-owner. Shared checkout `/Users/fkesheh/projects/ftown-simplify-all`; branch
+owner. Shared checkout `<repo>-simplify-all`; branch
 `feat/simplify-cli-release-and-notifications` from main
 `957d90bbd265b90d60f54848a26a13a74722ccca`. Exact file scope is ownership.json;
 four previously dirty investigation notes were preserved throughout.

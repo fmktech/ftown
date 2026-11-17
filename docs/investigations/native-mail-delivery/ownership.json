@@ -1,5 +1,5 @@
 {
-  "checkout": "/Users/fkesheh/projects/ftown-simplify-all",
+  "checkout": "<repo>-simplify-all",
   "branch": "feat/native-mail-delivery",
   "base": "804370e88312278d3446e653594b274da5300c93",
   "workers": [

@@ -1,6 +1,6 @@
 # Deployment failure after PR 126
 
-Task: investigate and repair the deployment CI failure reported by the user. Shared checkout: `/Users/fkesheh/projects/ftown-simplify-all`; branch `fix/centrifugo-deploy-routing`, base `c2814df1829a385b65f98b5d0e17dea91ef7a285`. Four existing unrelated investigation notes remain byte-identical and excluded from staging.
+Task: investigate and repair the deployment CI failure reported by the user. Shared checkout: `<repo>-simplify-all`; branch `fix/centrifugo-deploy-routing`, base `c2814df1829a385b65f98b5d0e17dea91ef7a285`. Four existing unrelated investigation notes remain byte-identical and excluded from staging.
 
 Evidence: [legacy AWS run 39961413221](https://github.com/fmktech/ftown/actions/runs/39961413221) stopped before SSH because `CENTRIFUGO_KNOWN_HOSTS` is empty. Config validation passed. The failure did not reach the v6 runtime guard or modify the remote host. The runbook contradicts this required pin with old optional/TOFU text.
 

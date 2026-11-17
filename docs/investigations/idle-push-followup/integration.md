@@ -2,7 +2,7 @@
 
 Integration and independent review owner: native `/root/npx_implementation`,
 explicit `gpt-6.1-sol` with `high` reasoning effort. Shared checkout:
-`/Users/fkesheh/projects/ftown-simplify-all`. Exact ownership and serialized
+`<repo>-simplify-all`. Exact ownership and serialized
 resources are recorded in `/tmp/ftown-push-followup/coordination.json`.
 
 Branch `fix/idle-push-after-ten-minutes` starts from main

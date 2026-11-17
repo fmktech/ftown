@@ -1,6 +1,6 @@
 # AI walkthrough revision
 
-User feedback: the repeated disclosure-style “Watch desktop walkthrough” presentation is poor, and the demo must show AI. Update open PR147 in the shared checkout `/Users/fkesheh/projects/ftown-e2e-performance`. Root owns architecture, capture execution, services, credentials and public media publication. No live personal workspace or fabricated AI output.
+User feedback: the repeated disclosure-style “Watch desktop walkthrough” presentation is poor, and the demo must show AI. Update open PR147 in the shared checkout `<repo>-e2e-performance`. Root owns architecture, capture execution, services, credentials and public media publication. No live personal workspace or fabricated AI output.
 
 ## Discovery wave (read-only, no application writes)
 
@@ -65,7 +65,7 @@ The isolated r2 trace showed successful206MP4 responses from service-worker fetc
 
 ### Git integration and handoff brief
 
-AI-LAND, `/root/site_integration`, Tier1 `gpt-6.1-terra` / `xhigh`, shared checkout `/Users/fkesheh/projects/ftown-e2e-performance`. Acquire the exclusive Git index/history/remote mutation lease only after capture/UI/reviewer release. All implementation, reviewed media,701unit/build, isolated failure reproduction and8focused browser gates passed; root deleted and verified absence of its sandbox. Root supplies `/tmp/ftown-ai-media-20261027/pr147-body.md`.
+AI-LAND, `/root/site_integration`, Tier1 `gpt-6.1-terra` / `xhigh`, shared checkout `<repo>-e2e-performance`. Acquire the exclusive Git index/history/remote mutation lease only after capture/UI/reviewer release. All implementation, reviewed media,701unit/build, isolated failure reproduction and8focused browser gates passed; root deleted and verified absence of its sandbox. Root supplies `/tmp/ftown-ai-media-20261027/pr147-body.md`.
 
 Stage exactly the task diff under `ui/src/components/ProductScreenshots.tsx`, `ProductWalkthrough.tsx`, the ten approved `ui/public/product/` files, `e2e/capture/{README.md,product.spec.ts,ai-demo.ts,run.sh}`, `e2e/tests/landing-product-screenshots.spec.ts`, and the seven new/updated investigation files listed by current status (capture-audit,ui-handoff,ai-capture-findings,ai-design-review,ai-ownership,ai-revision,ai-validation). Do not stage private raw frames/logs/credentials or touch another checkout. Verify no unexpected files. Run staged diff check and commit through the mandatory Gitleaks hook with message `Show real AI work in landing page demos`. Do not skip hooks or change source. Push current feature branch and update existing open PR147 title to `Show real AI sessions in the landing page demos`, using root's exact body file after checking its claims against evidence. No merge or CI rerun. Root monitors automatic CI and preview. Handoff commit SHA, PR URL, staged paths, checks, clean status and released Git lease; complete worker when done. Root links FTown metadata and sends one completion attention only after handoff.
 

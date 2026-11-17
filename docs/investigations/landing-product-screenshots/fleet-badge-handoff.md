@@ -1,6 +1,6 @@
 # BADGE-IMPLEMENT handoff
 
-Tier 1 `gpt-6.1-terra` / `xhigh`; shared checkout `/Users/fkesheh/projects/ftown-e2e-performance`.
+Tier 1 `gpt-6.1-terra` / `xhigh`; shared checkout `<repo>-e2e-performance`.
 
 - `ui/src/components/PullRequestLink.tsx`: compact PR metadata is now a parsed, safe native sibling anchor with the original graphic styling and a separately exported noninteractive hidden placeholder sharing the same parser and graphic; the default header link is unchanged.
 - `ui/src/components/SessionList.tsx`: preserves the original draggable selection button and its handlers, uses shared header/details subgrid tracks with conditional PR/count gaps, and overlays the native link as a semantic sibling aligned to its placeholder using the same selected/drag padding values. No measurement hook, new state, nested anchor or `window.open` was added.

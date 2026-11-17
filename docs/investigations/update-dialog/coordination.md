@@ -4,7 +4,7 @@ User requests cleanup of screenshot's oversized, monospace update dialog. Direct
 
 ## S1 — source checkout discovery/setup
 - Tier 1, `gpt-6.1-terra`, `xhigh`; native agent ID recorded after dispatch.
-- Shared starting checkout: `/Users/fkesheh/projects/ftown`, dirty `feat/solo-mode`. Source screenshot text is absent here. Other active FTown sessions exist; preserve all their files and services.
+- Shared starting checkout: `<repo>`, dirty `feat/solo-mode`. Source screenshot text is absent here. Other active FTown sessions exist; preserve all their files and services.
 - Own only setup Git operations and report `docs/investigations/update-dialog/setup.md`. Read-only all application files. No implementation yet. No installs, servers, E2E, CI, commits, pushes, or other sessions' mutations.
 - Fetch origin, locate current update dialog via Semble (CLI fallback) in latest main; inspect existing worktrees. If source is on main, create ONE task-wide shared worktree `/tmp/ftown-update-dialog` branch `fix/update-dialog-layout` from origin/main, ensuring neither exists first. This exception is required because original checkout contains extensive unrelated in-progress changes and lacks dialog source. All task workers will share it.
 - Report exact source paths, current props/types and eligibility/render states, available modal primitives, styles, focused test/build commands, relevant repo instructions and existing E2E strategy. Read only pertinent sections. Identify required writable files for implementation; no redesign of contracts.

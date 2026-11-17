@@ -1,5 +1,5 @@
 {
-  "checkout": "/Users/fkesheh/projects/ftown-simplify-all",
+  "checkout": "<repo>-simplify-all",
   "phase": "validated; PR landing",
   "workers": {
     "/root/session_ui": {

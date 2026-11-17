@@ -1,6 +1,6 @@
 # Canonical startup handoff
 
-Owner: `/root/canonical_start`, explicit `gpt-6.1-sol` / `high`. Shared checkout `/Users/fkesheh/projects/ftown-simplify-all`. No Git, dependency, generated-output or E2E resource leases acquired.
+Owner: `/root/canonical_start`, explicit `gpt-6.1-sol` / `high`. Shared checkout `<repo>-simplify-all`. No Git, dependency, generated-output or E2E resource leases acquired.
 
 ## Changes
 

@@ -1,7 +1,7 @@
 # Automatic device approvals
 
 - User request: new browser/computer appears in the existing trusted FTown dashboard for approval without creating or copying a private pairing link.
-- Shared checkout: `/Users/fkesheh/projects/ftown-simplify-all`; branch `feat/pending-device-approvals`; base `d2701bcfae7ff9ccc9ee7c910d6dec2d33d262c1` (PR136 merged).
+- Shared checkout: `<repo>-simplify-all`; branch `feat/pending-device-approvals`; base `d2701bcfae7ff9ccc9ee7c910d6dec2d33d262c1` (PR136 merged).
 - Root is architect and sole E2E/browser/server/database/CI executor. Existing native workers retain explicit `gpt-6.1-sol` / `high` selections. No fallback sessions, worktrees or recursive worker dispatch.
 - Four preexisting investigation notes are protected by `/tmp/ftown-e2ee-notes-before.json`, remain byte-identical/unstaged and excluded from commits.
 

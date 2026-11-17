@@ -14,7 +14,7 @@ hypotheses_proven: 1
 # npm JSON output breaks the release helper
 
 Worker: `/root/npx_implementation`, explicitly selected `gpt-6.1-sol` / `high`.
-Shared checkout: `/Users/fkesheh/projects/ftown-simplify-all`. Branch created
+Shared checkout: `<repo>-simplify-all`. Branch created
 from fetched main `cf4060f...` after PR116 merged. Four unrelated modified
 investigation/coordination notes preserved. Exact writable scope:
 `bridge/scripts/publish-packages.mjs`, its `.test.mjs`, `bridge/package.json`,

@@ -1,7 +1,7 @@
 # Setup and CLI lifecycle implementation brief
 
 Worker `/root/simplify_all`: explicit `gpt-6.1-sol` / `high`. Shared checkout
-`/Users/fkesheh/projects/ftown-simplify-all`, branch `simplify/setup-cli-lifecycle`,
+`<repo>-simplify-all`, branch `simplify/setup-cli-lifecycle`,
 base `origin/main` at `f202f98ac782505394777567047a044b2ad9acf9` (bridge 0.19.40).
 Read current bridge AGENTS and RTK instructions. The prior task's local
 `docs/investigations/simplify-agent-surface/coordination.md` modification is

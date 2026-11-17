@@ -1,6 +1,6 @@
 # Session attention request and PR association
 
-Status: independently reviewed and FROZEN for implementation. Shared checkout `/Users/fkesheh/projects/ftown-simplify-all`; branch `feat/session-attention-pr`; base `9e636a55ff122884daefa54e90cb9d6f168712b7`. This document is both the external API style/spec and the frozen implementation contract. User requested an agent-callable attention tool and PR association with its ftown session. An optional question about multiple PRs remains unanswered; default is one replaceable PR per session.
+Status: independently reviewed and FROZEN for implementation. Shared checkout `<repo>-simplify-all`; branch `feat/session-attention-pr`; base `9e636a55ff122884daefa54e90cb9d6f168712b7`. This document is both the external API style/spec and the frozen implementation contract. User requested an agent-callable attention tool and PR association with its ftown session. An optional question about multiple PRs remains unanswered; default is one replaceable PR per session.
 
 ## Existing API style
 

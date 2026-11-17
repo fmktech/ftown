@@ -65,7 +65,7 @@ Creation resolves only completion, discarding the authoritative session, and its
 
 ## Frozen contract and ownership
 
-Implementation owner `/root/npx_implementation`, model `gpt-6.1-sol`, effort `high`, shared checkout `/Users/fkesheh/projects/ftown-simplify-all`. Reviewer `/root/npx_review`, same explicit model/effort, read-only. Root owns this artifact and all E2E execution/resources. No other writers.
+Implementation owner `/root/npx_implementation`, model `gpt-6.1-sol`, effort `high`, shared checkout `<repo>-simplify-all`. Reviewer `/root/npx_review`, same explicit model/effort, read-only. Root owns this artifact and all E2E execution/resources. No other writers.
 
 Exclusive implementation files:
 

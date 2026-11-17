@@ -1,6 +1,6 @@
 # Independent security review — account-trust bridge slice
 
-Reviewer `/root/account_server_review`, explicitly reused `gpt-6.1-sol` / `high`. Shared checkout `/Users/fkesheh/projects/ftown-simplify-all`, branch `feat/account-trust-pairing`, base `8425849`. Bridge implementation was STOP-WRITE; application code remained read-only. Writable scope was this report only. Frozen contract v1 including v1.1 local-display and v1.2 exact-loopback exceptions was applied. No recursive workers, installs, Git mutations, generated files, servers, databases, browser/E2E or CI execution.
+Reviewer `/root/account_server_review`, explicitly reused `gpt-6.1-sol` / `high`. Shared checkout `<repo>-simplify-all`, branch `feat/account-trust-pairing`, base `8425849`. Bridge implementation was STOP-WRITE; application code remained read-only. Writable scope was this report only. Frozen contract v1 including v1.1 local-display and v1.2 exact-loopback exceptions was applied. No recursive workers, installs, Git mutations, generated files, servers, databases, browser/E2E or CI execution.
 
 ## Verdict
 

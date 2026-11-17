@@ -1,5 +1,5 @@
 // Root-only isolated browser verification; no bridge, DB or external calls.
-// PATH=/Users/fkesheh/.nvm/versions/node/v24.22.1/bin:$PATH node --experimental-strip-types docs/investigations/session-inbox-smoke.ts
+// PATH=/Users/example/.nvm/versions/node/v24.22.1/bin:$PATH node --experimental-strip-types docs/investigations/session-inbox-smoke.ts
 import { createRequire } from "node:module";
 import { createServer } from "node:http";
 import { readFile, mkdir } from "node:fs/promises";

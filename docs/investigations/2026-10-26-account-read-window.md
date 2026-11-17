@@ -21,7 +21,7 @@ Test expired-window and repeated-window recovery, exact threshold, concurrent ca
 Use real isolatedPostgreSQL acceptance through existing CI database harness for SQL correctness. Root exclusively executes E2E/servers/DB/CI. Workers may author tests and runisolatedunits/noEmit.
 
 ## Ownership and dispatch
-Shared checkout /Users/fkesheh/projects/ftown-simplify-all. Primary /Users/fkesheh/projects/ftown is unrelateddirty; neverstage its changes.
+Shared checkout <repo>-simplify-all. Primary <repo> is unrelateddirty; neverstage its changes.
 Implementation/integration owner: /root/existing_pwa_access, explicit gpt-6.1-sol/high.
 Exclusive write files: ui/src/app/api/security/account/_shared.ts; ui/src/app/api/security/account/_shared.test.ts; ui/src/app/api/security/account/route.test.ts; ui/src/lib/account-security-client.ts; ui/src/lib/account-security-client.test.ts; e2e/scripts/pending-approvals-db.ts.
 Root only: this coordination/investigation file.

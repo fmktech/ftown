@@ -1,6 +1,6 @@
 # Real multi-agent demo revision
 
-User: remove all Open screenshot links; show Codex opening Claude and Pi and receiving their replies. Continue open PR147 in shared checkout /Users/fkesheh/projects/ftown-e2e-performance at6e76873. Preserve genuine real UI/media, privacy, opt-in repeatable capture, existing player and responsive layout. No fake transcripts or AI footage; use actual FTown child sessions and mail reply flow. Root owns all runtime, credentials, captures, publication and E2E. Existing workers completed and all leases released at start.
+User: remove all Open screenshot links; show Codex opening Claude and Pi and receiving their replies. Continue open PR147 in shared checkout <repo>-e2e-performance at6e76873. Preserve genuine real UI/media, privacy, opt-in repeatable capture, existing player and responsive layout. No fake transcripts or AI footage; use actual FTown child sessions and mail reply flow. Root owns all runtime, credentials, captures, publication and E2E. Existing workers completed and all leases released at start.
 
 ## Discovery briefs (no application writes)
 
@@ -65,7 +65,7 @@ BADGE-THINKING fixture repair: site_integration Tier1Terra/xhigh owns only e2e/t
 
 ### FLEET-LAND — final Git/PR integration
 
-Owner `/root/site_integration`, Tier 1, `gpt-6.1-terra`, `xhigh`. Shared checkout `/Users/fkesheh/projects/ftown-e2e-performance`, branch `feat/landing-product-screenshots`, existing PR https://github.com/fmktech/ftown/pull/147. All application/test/media writers have stopped and independent source/media/visual reviews passed. This is the named integration task, with an exclusive lease on Git index/history and PR title/body; no application changes are authorized. Root coordination/media files are frozen during landing. Preserve all unrelated edits; you are not alone in the shared checkout. Do not create another branch/worktree, merge, rebase, stash, install, launch tests/servers/E2E, trigger CI, or delegate.
+Owner `/root/site_integration`, Tier 1, `gpt-6.1-terra`, `xhigh`. Shared checkout `<repo>-e2e-performance`, branch `feat/landing-product-screenshots`, existing PR https://github.com/fmktech/ftown/pull/147. All application/test/media writers have stopped and independent source/media/visual reviews passed. This is the named integration task, with an exclusive lease on Git index/history and PR title/body; no application changes are authorized. Root coordination/media files are frozen during landing. Preserve all unrelated edits; you are not alone in the shared checkout. Do not create another branch/worktree, merge, rebase, stash, install, launch tests/servers/E2E, trigger CI, or delegate.
 
 Outcome: commit and push the final requested behavior to the existing PR. The landing page has no Open screenshot anchors and shows genuine isolated Codex creation of Claude Code and Pi, with both replies returning. The existing compact sidebar PR badge is a safe native link with its original design and without changing selection/attention. The repeatable capture and strict native execution evidence are included. Use existing contracts and reviewed source unchanged.
 

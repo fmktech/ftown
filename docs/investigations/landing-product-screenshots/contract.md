@@ -32,7 +32,7 @@ SITE-CAPTURE: Tier1 gpt-6.1-terra xhigh. Exact writes e2e/capture/ (all files), 
 
 SITE-REVIEW: Tier2 gpt-6.1-sol max. Exact write design-review.md only; allsource readonly. Review contract prefreeze then final source/actualscreenshots, privacy, mobile/a11y, publicclaims, capture authenticity/cleanup, testmeaningfulness. No runtime. Report concrete issues byseverity; no speculative redesign.
 
-All workers share checkout /Users/fkesheh/projects/ftown-e2e-performance and must preserve others' edits; never revert/edit outside ownership. No recursive orchestration or Git/install/E2E operations. Contract changes escalate to root, dependent work pauses until revised/reviewed. Handoff changed files, actual checks/results, limitations and explicit released leases. Root owns runtime/resources/assets; UI worker integrates after both writers stop. Independent review + focused real runtime pass precede PR; automatic CI then monitored, no merge/deploy.
+All workers share checkout <repo>-e2e-performance and must preserve others' edits; never revert/edit outside ownership. No recursive orchestration or Git/install/E2E operations. Contract changes escalate to root, dependent work pauses until revised/reviewed. Handoff changed files, actual checks/results, limitations and explicit released leases. Root owns runtime/resources/assets; UI worker integrates after both writers stop. Independent review + focused real runtime pass precede PR; automatic CI then monitored, no merge/deploy.
 
 ## Revision 2 — repeatable screenshots and videos (user request 2026-10-27)
 

@@ -1,6 +1,6 @@
 # CI E2E failure and repeated empty-mail nudges
 
-Shared checkout `/Users/fkesheh/projects/ftown-bridge-updates`, branch
+Shared checkout `<repo>-bridge-updates`, branch
 `feat/bridge-update-flow`, PR150 HEAD678c716123e3b799273428cab50c11d5993553e5.
 Root is architect and sole E2E/runtime/DB/CI execution owner. No code writes until
 proven causes and exact implementation ownership. Existing dirty checkouts/stashes
@@ -21,7 +21,7 @@ verified current local bridge PID86247, started2026-10-26T14:53:29.499Z; main's
 latest commit ce62d9d is Fix stale native mail wakes and refresh demos (#149).
 Do not assume screenshot belongs to current session or machine without evidence.
 
-Use Semble first for code discovery (`/Users/fkesheh/.local/bin/semble`, fallback
+Use Semble first for code discovery (`/Users/example/.local/bin/semble`, fallback
 uvx if needed), then direct reads of returned exact functions. Read #149 change
 and installed source/version metadata as needed without dumping tokens/keys/mail
 contents. Read debug SKILL.md; record at least3 hypotheses across layers, rejected

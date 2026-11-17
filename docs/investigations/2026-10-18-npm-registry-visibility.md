@@ -14,7 +14,7 @@ hypotheses_proven: 1
 # Postpublication registry visibility
 
 Worker `/root/npx_implementation`, explicitly `gpt-6.1-sol` / `high`, uses shared
-checkout `/Users/fkesheh/projects/ftown-simplify-all`. Fresh branch from fetched
+checkout `<repo>-simplify-all`. Fresh branch from fetched
 main `60c19453...`; four older modified investigation notes remain untouched.
 Exclusive writable scope: `bridge/scripts/publish-packages.mjs`, its test,
 `bridge/package.json`, `bridge/package-lock.json`, and this investigation.

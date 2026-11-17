@@ -1,7 +1,7 @@
 {
   "task": "E2E performance and concurrency",
   "base": "acf5a180039d04753f7d79433477b1bcde938a32",
-  "checkout": "/Users/fkesheh/projects/ftown-e2e-performance",
+  "checkout": "<repo>-e2e-performance",
   "branch": "perf/e2e-concurrency",
   "budget": {
     "workload": "entire Chromium E2E suite, current50pass2existing skips, standard CI fixture/data and supported Node",

@@ -18,7 +18,7 @@ related:
 # Bridge drops cloud publications: "Encrypted publication capacity reached"
 
 The investigation itself changed no source file. The fix that landed afterwards is described under Fix and Resolution. The experiments live outside the repo, in
-`/private/tmp/claude-501/-Users-fkesheh-projects-ftown/99a20ec3-eacc-48b8-849e-8dba56f1eaba/scratchpad/pubcap-exp/`
+`<scratchpad>/pubcap-exp/`
 (called `pubcap-exp/` below).
 
 ## Symptom
@@ -69,7 +69,7 @@ These facts come from the allowed read-only commands: `ftown-harness status` and
 $ ~/.ftown/bin/ftown-harness status
 bridge: up  pid: 80748  id: cc184a54-ffcc-4ae5-831c-8b6b798033d4  since: 2026-11-03T13:55:51.896Z
 $ ps -o pid,etime,args -p 80748
-80748 01-04:39:39 node /Users/fkesheh/.ftown/cli/dist/ftown-cli.js start
+80748 01-04:39:39 node /Users/example/.ftown/cli/dist/ftown-cli.js start
 $ cat ~/.ftown/cli/package.json   -> {"name":"ftown","version":"0.20.1", ... "gitHead":"825bd2e5518e79eb94f0b7651e924cbed6530c13"}
 $ ~/.ftown/bin/ftown-harness ls  -> 15 sessions, every one "running alive" (codex x8, claude x4, shell x2, pi x1)
 $ grep -n "capacity reached\|outboundQueued >= " ~/.ftown/cli/dist/centrifugo-client.js
@@ -113,7 +113,7 @@ The repro is in-process only: no network, no production bridge, no cloud. It run
    - A WebRTC answer and 5 ICE candidates are sent at t = 8 s.
    - A dashboard `list_sessions` arrives every 1.5 s.
    ```
-   TERM_HZ=20 SECS=25 /Users/fkesheh/projects/ftown/bridge/node_modules/.bin/tsx e2-flood.ts
+   TERM_HZ=20 SECS=25 <repo>/bridge/node_modules/.bin/tsx e2-flood.ts
    ```
    Output (`pubcap-exp/e2-term20.txt`):
    ```

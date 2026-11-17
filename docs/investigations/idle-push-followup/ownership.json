@@ -1,5 +1,5 @@
 {
-  "checkout": "/Users/fkesheh/projects/ftown-simplify-all",
+  "checkout": "<repo>-simplify-all",
   "model": "gpt-6.1-sol",
   "effort": "high",
   "contract": "Idle push once after 600000ms continuously idle following observed activity; no repeat until thinking/tool_use resumes, then later idle begins a new cycle. Questions immediate. Stable per-cycle event keys persist for retry/restart dedup. Initial idle snapshots do not flood. VAPID production configuration and WebCraw ENV backup authorized, no rotation if keys exist; no merge or database mutation implied.",

@@ -1,6 +1,6 @@
 # Independent security review — account-trust server/API slice
 
-Reviewer: `/root/account_server_review`, explicitly dispatched `gpt-6.1-sol` / `high`. Checkout `/Users/fkesheh/projects/ftown-simplify-all`, branch `feat/account-trust-pairing`, base `8425849`. Application files were read-only; only this report was written. Frozen contract/core and server STOP-WRITE handoff were reviewed; bridge/UI implementation remains outside this review.
+Reviewer: `/root/account_server_review`, explicitly dispatched `gpt-6.1-sol` / `high`. Checkout `<repo>-simplify-all`, branch `feat/account-trust-pairing`, base `8425849`. Application files were read-only; only this report was written. Frozen contract/core and server STOP-WRITE handoff were reviewed; bridge/UI implementation remains outside this review.
 
 ## Verdict
 

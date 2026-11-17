@@ -1,5 +1,5 @@
 {
-  "checkout": "/Users/fkesheh/projects/ftown-simplify-all",
+  "checkout": "<repo>-simplify-all",
   "branch": "feat/simplify-cli-release-and-notifications",
   "base": "957d90bbd265b90d60f54848a26a13a74722ccca",
   "phase": "CI lockfile repair accepted and landed; automatic CI monitored by root",

@@ -308,7 +308,7 @@ fixed lists, effort flags, Grok `Notification` attention items, tiers.
 
 ## Gates (every task)
 
-Run from the worktree `/Users/fkesheh/projects/ftown-antigravity`:
+Run from the worktree `<repo>-antigravity`:
 
 - bridge typecheck: `cd bridge && npx tsc --noEmit`
 - bridge tests: `cd bridge && node --import tsx --test <owned test files>`

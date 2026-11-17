@@ -18,17 +18,17 @@ related:
 # Hosted Claude picker reports a generic load failure
 
 ## Symptom
-- **Observed**: “Couldn't load Claude sessions.” with Retry in the New Session modal, Default account selected, and working directory `/Users/fkesheh/projects/legbi-v3`.
+- **Observed**: “Couldn't load Claude sessions.” with Retry in the New Session modal, Default account selected, and working directory `/Users/example/projects/legbi-v3`.
 - **Expected**: The authenticated dashboard's read-only session-list RPC returns session summaries (or an empty successful list) for the selected working directory.
 - **Delta**: The modal renders a generic failure because the live bridge rejects the list command before its native session-list handler runs.
 
 ## Reproduction
 1. Open the installed FTown dashboard app at `https://ftown.ia.br/dashboard`; it is the hosted dashboard, with Local selected and bridge `a24d2e44-d63f-4fa4-ad53-4b9a594e23cf` shown as v0.30.32.
-2. Open New Session, keep Shell Type = Claude Code and Account = Default account, and set Working Directory to `/Users/fkesheh/projects/legbi-v3`. The modal displays “Couldn't load Claude sessions.”
+2. Open New Session, keep Shell Type = Claude Code and Account = Default account, and set Working Directory to `/Users/example/projects/legbi-v3`. The modal displays “Couldn't load Claude sessions.”
 3. Send the same command over the live bridge's encrypted local API session path using its current installed CLI identity:
    ```
    rpc=list_native_sessions
-   payload={"bridgeId":"a24d2e44-d63f-4fa4-ad53-4b9a594e23cf","workingDir":"/Users/fkesheh/projects/legbi-v3","harness":"claude"}
+   payload={"bridgeId":"a24d2e44-d63f-4fa4-ad53-4b9a594e23cf","workingDir":"/Users/example/projects/legbi-v3","harness":"claude"}
    ```
    Captured response: `{"status":403,"body":{"error":"permission_denied","code":"permission_denied","outcomeUnknown":false}}`.
    The adjacent read-only `get_accounts` command over the same live path returns `{"success":true}`. Verified 2026-11-17.

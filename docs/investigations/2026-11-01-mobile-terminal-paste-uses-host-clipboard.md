@@ -493,7 +493,7 @@ describe("xterm 6 textarea (desktop, or any device where xterm's textarea has fo
 
 ## Appendix B: isolated tmux pass-through script (scratchpad, outside the repo)
 
-Path: `/private/tmp/claude-501/-Users-fkesheh-projects-ftown/c1622140-6baf-4d8c-87c6-1193f081a22d/scratchpad/paste-inv/scripts/tmux_passthrough.py`. Run with `python3 -I tmux_passthrough.py <workdir>`. It uses its own socket `ftown-inv-paste-<pid>` and `kill-server`s it afterwards; the leftover socket file was removed. The prod `ftown` tmux server was never touched.
+Path: `<scratchpad>/paste-inv/scripts/tmux_passthrough.py`. Run with `python3 -I tmux_passthrough.py <workdir>`. It uses its own socket `ftown-inv-paste-<pid>` and `kill-server`s it afterwards; the leftover socket file was removed. The prod `ftown` tmux server was never touched.
 
 ```python
 import os, pty, subprocess, sys, time

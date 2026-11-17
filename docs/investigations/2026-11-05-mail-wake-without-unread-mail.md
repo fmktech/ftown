@@ -17,7 +17,7 @@ Investigation only. No application, test, Git or runtime state was changed. Prod
 bridge (PID 80748) was not touched. No `mail read`, `mail send` or `ftown-harness send` ran
 against real sessions. Live data was only read: transcripts, inbox metadata (ids,
 timestamps, `deliveredAt`/`deliveredVia`; no bodies quoted beyond system PR headings)
-and installed files. Scratch work: `/private/tmp/claude-501/-Users-fkesheh-projects-ftown/99a20ec3-eacc-48b8-849e-8dba56f1eaba/scratchpad/mailwake-exp/`.
+and installed files. Scratch work: `<scratchpad>/mailwake-exp/`.
 
 ## Symptom
 
@@ -66,12 +66,12 @@ introduced. `git show --stat ce62d9d` touches `bridge/src/mail-delivery.ts` and
 ### R-runtime: real occurrences on this machine, same code as main (read-only)
 
 Only one local Claude transcript contains plugin wakes:
-`~/.claude/projects/-Users-fkesheh-projects-prive/ac5e9a64-00fb-4d14-8733-cecf2792df52.jsonl`
+`~/.claude/projects/-Users-example-projects-prive/ac5e9a64-00fb-4d14-8733-cecf2792df52.jsonl`
 (ftown session `prive_1` `cc06db19…`, `claudeSessionId ac5e9a64…`). The classifier
 `mailwake-exp/wakes.py` printed:
 
 ```
-$ python3 -I wakes.py ~/.claude/projects/-Users-fkesheh-projects-prive/ac5e9a64-….jsonl
+$ python3 -I wakes.py ~/.claude/projects/-Users-example-projects-prive/ac5e9a64-….jsonl
 total wakes 11
 10 ('new-turn prompt', 'hook-supplied-mail', 'empty-read')
 1 ('new-turn prompt', 'no-hook-mail', 'read-got-mail')
@@ -198,7 +198,7 @@ S2) reproduce every time. Both controls (C1 and C2) behave as expected.
     That calls `listUndelivered` (`local-api-server.ts:1363`) and never consults the
     busy marker that `local-api-server.ts:1385` maintains.
   - `bridge/src/hook-installer.ts:6`: `const MAIL_PUMP_EVENTS = ['Stop', 'UserPromptSubmit', 'SessionStart']`.
-    Installed live: `UserPromptSubmit /Users/fkesheh/.ftown/bin/ftown-harness hook-pump`
+    Installed live: `UserPromptSubmit /Users/example/.ftown/bin/ftown-harness hook-pump`
     and `Stop …hook-pump`.
   - `bridge/src/harness-commands.ts:533-543`: the `UserPromptSubmit` branch runs
     `fetchInbox(pointer, sessionId, { wait: 0, … })` (no peek), then
@@ -263,7 +263,7 @@ S2) reproduce every time. Both controls (C1 and C2) behave as expected.
     does the same (`:367-369`).
   - In the real control, the 11:16:19Z prive wake, both pumps failed. The model's
     `ftown harness mail read` first hit
-    `ftown harness: Bridge not running (no valid /Users/fkesheh/.ftown/bridge.json…`. Its
+    `ftown harness: Bridge not running (no valid /Users/example/.ftown/bridge.json…`. Its
     retry returned the very message the wake was about
     (`[2026-11-03T11:16:06.775Z] FTown PR updates (message): Pull request me…`,
     `deliveredAt 11:16:35.521 drain`). So the read and the wake address the same inbox.

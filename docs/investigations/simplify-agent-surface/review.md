@@ -1,7 +1,7 @@
 # Independent review
 
 Reviewer: `/root/review_all`, explicitly `gpt-6.1-sol` / `high`.
-Shared checkout: `/Users/fkesheh/projects/ftown-simplify-all`.
+Shared checkout: `<repo>-simplify-all`.
 Writable scope: this report only. Application code, Git, installs/build outputs, and E2E resources remain unowned/read-only here.
 
 ## Pre-freeze contract review

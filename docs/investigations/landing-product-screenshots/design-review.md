@@ -1,6 +1,6 @@
 # Landing product images: pre-freeze UX review
 
-SITE-UX-REVIEW — Tier 2, `gpt-6.1-sol`, `max`. Shared checkout `/Users/fkesheh/projects/ftown-e2e-performance`. Source read-only; sole write lease is this report. Root owns runtime, screenshots, assets and E2E. Integration owner: `/root/site_integration`.
+SITE-UX-REVIEW — Tier 2, `gpt-6.1-sol`, `max`. Shared checkout `<repo>-e2e-performance`. Source read-only; sole write lease is this report. Root owns runtime, screenshots, assets and E2E. Integration owner: `/root/site_integration`.
 
 ## Findings and bounded direction
 

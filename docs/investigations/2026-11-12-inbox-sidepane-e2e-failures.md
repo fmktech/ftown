@@ -96,7 +96,7 @@ that progressed one assertion further — see F5 — which is itself evidence of
 Run headers prove the tree under test:
 
 ```
-[run-env] pwd=/private/tmp/claude-501/-Users-fkesheh-projects-ftown/99a20ec3-eacc-48b8-849e-8dba56f1eaba/scratchpad/wt-inbox/e2e head=863f5e4
+[run-env] pwd=<scratchpad>/wt-inbox/e2e head=863f5e4
 ```
 
 (identical first line in both `step2.log` and `step3.log`).

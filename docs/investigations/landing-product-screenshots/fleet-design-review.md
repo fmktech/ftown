@@ -1,6 +1,6 @@
 # Real fleet demo: bounded UX and contract review
 
-FLEET-REVIEW — Tier 2 `gpt-6.1-sol` / `max`, shared checkout `/Users/fkesheh/projects/ftown-e2e-performance`. Sole writable file is this report. Read `fleet-revision.md`, current `ProductScreenshots.tsx`, `ProductWalkthrough.tsx`, the full focused spec, capture spec and manifest v2. Applied the existing mobile/React review principles. No application writes, runtime, tests, providers, credentials or Git operations.
+FLEET-REVIEW — Tier 2 `gpt-6.1-sol` / `max`, shared checkout `<repo>-e2e-performance`. Sole writable file is this report. Read `fleet-revision.md`, current `ProductScreenshots.tsx`, `ProductWalkthrough.tsx`, the full focused spec, capture spec and manifest v2. Applied the existing mobile/React review principles. No application writes, runtime, tests, providers, credentials or Git operations.
 
 **Approve the direction:** remove all three screenshot links and show a genuine Codex → Claude Code/Pi → Codex reply workflow. The existing player is sufficient and should remain read-only for this UI wave. Provider/command feasibility and the full sequence's duration must be resolved centrally before implementation is frozen; no unseen fleet footage is approved by this discovery review.
 

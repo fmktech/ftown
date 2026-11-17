@@ -1,6 +1,6 @@
 # R2 encrypted update transport handoff
 
-Owner `/root/site_capture`, Tier 1 `gpt-6.1-terra` / `xhigh`. Shared checkout `/Users/fkesheh/projects/ftown-bridge-updates`. Implemented the reviewed R2 command/security/transport boundary; R1's coordinator, index, startup and session files were not edited.
+Owner `/root/site_capture`, Tier 1 `gpt-6.1-terra` / `xhigh`. Shared checkout `<repo>-bridge-updates`. Implemented the reviewed R2 command/security/transport boundary; R1's coordinator, index, startup and session files were not edited.
 
 Changed `bridge/src/types.ts`, `command-rpc.ts` and test, `security/bridge/permissions.ts` and test, `security/bridge/execute.ts` and new test, `local-api-server.ts`, `centrifugo-client.ts` and test, and new `update-effects.ts` and test. `browser-access.ts` is unchanged: its older plaintext command allow-set does not accept either new update operation. Root-authorized U1 follow-up also changed `ui/src/hooks/useBridgeUpdates.ts` and test to accept an installed version ahead of stable as current, and `e2e/tests/bridge-updates.spec.ts` to save desktop/phone screenshots through `testInfo.outputPath` during root's actual runs.
 

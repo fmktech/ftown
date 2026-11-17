@@ -1,7 +1,7 @@
 # npm JSON compatibility review
 
 Reviewer: `/root/npx_review`, explicitly `gpt-6.1-sol` / `high`.
-Checkout: `/Users/fkesheh/projects/ftown-simplify-all`.
+Checkout: `<repo>-simplify-all`.
 Scope: repair diff, dedicated PR workflow, original frozen publication contract,
 and dated investigation/handoff. Read-only except this report.
 

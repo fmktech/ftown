@@ -1,5 +1,5 @@
 {
-  "checkout": "/Users/fkesheh/projects/ftown-simplify-all",
+  "checkout": "<repo>-simplify-all",
   "branch": "fix/sidebar-pr-menu",
   "base": "537639eec99d835ff74db671bef8b45aab5e3a92",
   "model": "gpt-6.1-sol",

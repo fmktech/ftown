@@ -13,7 +13,7 @@ User direction (2026-10-18): notify after ten uninterrupted idle minutes, once f
 - API parser accepts legacy literal idle and new idle:<UUID> for rolling upgrades. Existing cloud event identity and per-endpoint delivery dedup remain. A later cycle has a new identity. No DB schema changes.
 
 ## Ownership and integration
-The authoritative dispatch manifest is ownership.json (initial dispatch was recorded at /tmp/ftown-push-followup/coordination.json); mechanically validated disjoint files/resources. All workers explicitly use gpt-6.1-sol/high in /Users/fkesheh/projects/ftown-simplify-all. Branch fix/idle-push-after-ten-minutes starts at main cb6406890217f2b7bbeb3399300c4c307839e491. Preserve the four pre-existing dirty notes.
+The authoritative dispatch manifest is ownership.json (initial dispatch was recorded at /tmp/ftown-push-followup/coordination.json); mechanically validated disjoint files/resources. All workers explicitly use gpt-6.1-sol/high in <repo>-simplify-all. Branch fix/idle-push-after-ten-minutes starts at main cb6406890217f2b7bbeb3399300c4c307839e491. Preserve the four pre-existing dirty notes.
 - npx_review: bounded store/notifier/index/parser changes, associated tests, focused E2E spec, push docs and implementation report.
 - npx_implementation: sole Git/package-version owner and independent review/integration report; no implementation ownership overlap.
 - canonical_start: independent production VAPID configuration and matching dedicated WebCraw ENV backup; no repository writes. User explicitly authorized both. Check absence before generating; never rotate existing keys or expose private values in logs/chat.

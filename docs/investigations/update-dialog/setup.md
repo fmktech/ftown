@@ -2,7 +2,7 @@
 
 Native agent `/root/dialog_worker`; Tier 1 `gpt-6.1-terra`, `xhigh`.
 
-Shared task worktree: `/tmp/ftown-update-dialog`, branch `fix/update-dialog-layout`, based on fetched `origin/main` at `16c233331a5e7520b4a06b6c8422c1b9433a3d76`. Created after verifying both branch and path were absent. Starting checkout `/Users/fkesheh/projects/ftown` has extensive unrelated dirty changes and was preserved. Other worktrees were left intact. Task worktree starts clean. Git setup lease released; no installs, servers, tests, E2E, commits, pushes, or application edits.
+Shared task worktree: `/tmp/ftown-update-dialog`, branch `fix/update-dialog-layout`, based on fetched `origin/main` at `16c233331a5e7520b4a06b6c8422c1b9433a3d76`. Created after verifying both branch and path were absent. Starting checkout `<repo>` has extensive unrelated dirty changes and was preserved. Other worktrees were left intact. Task worktree starts clean. Git setup lease released; no installs, servers, tests, E2E, commits, pushes, or application edits.
 
 ## Existing contract and rendering
 

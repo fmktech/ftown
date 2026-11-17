@@ -43,5 +43,5 @@
   },
   "integrator": "architect",
   "typecheck_cmd": "npx tsc --noEmit",
-  "root": "/Users/fkesheh/projects/ftown"
+  "root": "<repo>"
 }

@@ -54,7 +54,7 @@ This supersedes the preceding release-before-ACK ordering. In `update-handoff.ts
 
 Reacquired only `e2e/tests/bridge-updates.spec.ts` and this report. The desktop/mobile test now identifies the paired default bridge using the existing `readBridgePointer().bridgeId` and its exact `data-bridge-row` rather than assuming the first row is approved. It waits for a successful real `/api/version` response during login and asserts that the unchanged served build has no app-update notice after the real bridge dialog is ready. The separate app-update test still uses its explicit build-ID route fixture. Installed version, disabled update without opt-in, screenshots, 44px target, Escape/focus and overflow assertions remain unchanged.
 
-E2E static check passed: `/Users/fkesheh/.nvm/versions/node/v24.22.1/bin/node node_modules/typescript/bin/tsc --noEmit` from `e2e/`. No Playwright, browser, server, database, runtime or Git run by this worker. Root must rerun the focused browser file and inspect its rendered screenshots; the real version-response timing and paired fixture have not been runtime-verified by this worker. Both file leases released.
+E2E static check passed: `/Users/example/.nvm/versions/node/v24.22.1/bin/node node_modules/typescript/bin/tsc --noEmit` from `e2e/`. No Playwright, browser, server, database, runtime or Git run by this worker. Root must rerun the focused browser file and inspect its rendered screenshots; the real version-response timing and paired fixture have not been runtime-verified by this worker. Both file leases released.
 
 
 ## L1 landing handoff
