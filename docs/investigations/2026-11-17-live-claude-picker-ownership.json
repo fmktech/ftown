@@ -52,5 +52,12 @@
     "result": "PASS",
     "method": "Exact writable file sets are pairwise disjoint; no parent/child directories are owned; root reserves integration, generated output, E2E, Git and PR operations. W2 follow-up adds local-browser-client.ts and its test after the original W2 handoff released the component files.",
     "reviewers": "Root performs final read-only review after worker handoffs."
+  },
+  "completion": {
+    "pr": "https://github.com/fmktech/ftown/pull/275",
+    "pr_state": "open",
+    "ci": "green; unit-macos attempt 1 cancelled while queued without a runner, attempt 2 passed; no repeated full workflow",
+    "bridge_version": "0.30.33",
+    "live_bridge": "left running at 0.30.32; no restart or kill"
   }
 }

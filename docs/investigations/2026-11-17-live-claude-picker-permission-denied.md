@@ -7,7 +7,7 @@ investigator: Codex
 git_commit: 9669548cf147cdd7534a2010360d9d2be7de42a3
 branch: fix/claude-picker-live
 repository: fmktech/ftown
-status: root-cause-proven
+status: resolved
 hypotheses_formed: 3
 hypotheses_rejected: 2
 hypotheses_proven: 1
@@ -104,4 +104,14 @@ Why 5? The bridge security boundary uses a deny-by-default command registry, but
 - Preserve the picker error code from a command response or typed security exception and render it below the generic message.
 
 ## Resolution
-- Pending implementation and CI.
+- Added `list_native_sessions` to the bridge read-only permission set; the exact captured payload is now classified as `{permission:'read',mutating:false,operation:'list_native_sessions',sessionId:null}`.
+- Preserved only a bounded `SecurityError.code` through `LocalBrowserClient` and rendered `Code: permission_denied` below “Couldn't load Claude sessions.” Added bridge classifier, local subscription, and picker regression coverage.
+- Bumped the bridge to 0.30.33 in `bridge/package.json` and the lockfile.
+- Verification: bridge permission suite passed 16/16; PR CI passed unit-tests, unit-minimal, unit-macos (2,289 UI tests passed), all three direct-transport E2E shards, Docker, Vercel, bridge-version/artifact checks, and scan. `git diff --check` passed. UI focused tests were unavailable locally because `ui/node_modules` is absent; they ran in CI.
+- The live process remains on v0.30.32 and was not restarted, per the reproduction constraint. The fix is in PR #275 and takes effect after upgrading that bridge to 0.30.33.
+- Follow-up: upgrade the live bridge through the normal update path after the fix is merged/published.
+
+## CI diagnosis
+- Run `44123263103` completed with the `unit-macos` job cancelled after 15 minutes. GitHub reports `runner_id: 0`, an empty runner name, `status: completed`, and `conclusion: cancelled`; `gh run view 44123263103 --job 134180055020 --log` reports `log not found: 134180055020`. The macOS job never reached a runner, so no test command ran and there is no code failure to reproduce.
+- The repository's `unit-tests`, `unit-minimal`, Docker, all three direct-transport E2E shards, bridge-version/artifact, scan, and Vercel checks passed on the same commit.
+- A single targeted retry of the cancelled macOS job was requested with `gh run rerun 44123263103 --job 134180055020`. Attempt 2's macOS job `134191724707` received a runner at `2026-11-17T16:35:29Z` and completed successfully at `16:40:31Z`; no full workflow rerun was started.
