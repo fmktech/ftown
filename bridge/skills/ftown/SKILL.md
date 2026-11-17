@@ -36,8 +36,9 @@ npx ftown@<new-version> setup
 Start the bridge with `ftown start`; use `ftown start --solo` for a single-port
 LAN deployment. `npx ftown start` accepts the same options, and `ftown-bridge`
 remains compatible. `ftown start --help` only displays help. The installed alias
-uses its copied version independently of the npm cache and does not discover
-newer packages.
+checks npm for a newer version before starting and runs its setup when available.
+Use `--no-update` or `FTOWN_NO_AUTO_UPDATE=1` to skip the check; CI and Docker
+Solo images skip it automatically. An offline check is skipped.
 Use `ftown setup --repair` to repair that current copied version or detect new
 optional harnesses. If the copied runtime is incomplete, use the matching package
 entrypoint with `--repair`.
@@ -288,6 +289,8 @@ Older bridges report `bridge_upgrade_required` before mutation.
 
 Register separate Claude or Codex configuration directories with
 `ftown accounts add <id> --harness claude|codex --config-dir <absolute-path>`.
+Adding an account sets up its harness hooks and skill link. Use `--no-setup` to
+defer setup. If setup fails, the account remains saved; run `ftown setup` to retry.
 Account IDs are lowercase slugs; `default` is reserved and means the harness's
 normal configuration directory. Paths must be absolute and are used as-is for
 the harness environment variable (`CLAUDE_CONFIG_DIR` or `CODEX_HOME`). FTown

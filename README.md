@@ -288,8 +288,10 @@ and the OpenCode skills directory (`$OPENCODE_CONFIG_DIR/skills`, otherwise
 `$XDG_CONFIG_HOME/opencode/skills` or `~/.config/opencode/skills`). Start that
 copied version with `ftown start`, or use `ftown start --solo` for Solo.
 `npx ftown start` accepts the same options. The installed alias runs
-independently of the original npm cache and does not fetch or discover a newer
-package. `npx ftown-bridge` remains a compatible launcher. Ordinary bridge
+independently of the original npm cache. Before startup, it checks npm for a newer
+version and installs it with setup; use `ftown start --no-update` or
+`FTOWN_NO_AUTO_UPDATE=1` to skip this check. Offline checks are skipped. CI and
+Docker Solo images do not automatically update. `npx ftown-bridge` remains a compatible launcher. Ordinary bridge
 starts only check readiness, including the OpenCode skill link, and write
 runtime connection state. They do not create the link. Use installed
 `ftown setup --repair` to recheck the current copied version, restore its
@@ -644,3 +646,7 @@ cd bridge && npm run dev -- --api-url http://localhost:3000
 [MIT](LICENSE)
 
 chaos/qemu/patches is GPL-2.0-or-later (derived from QEMU); everything else is MIT.
+
+Registering an account with `ftown accounts add` sets up its harness hooks and
+skill link. Use `--no-setup` to defer this; if setup fails, the account remains
+saved and `ftown setup` can retry.

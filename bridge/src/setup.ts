@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { installFtownCommandCli } from './install-ftown-command-cli.js';
-import { installNotifyScript } from './install-notify-script.js';
+import { canonicalNotifyPath, canonicalNotifyReady, installNotifyScript } from './install-notify-script.js';
 import { installPiExtension } from './pi-extension-installer.js';
 import { installClaudeMod } from './claude-mod-installer.js';
 import { installClaudeHooks } from './hook-installer.js';
@@ -13,7 +13,7 @@ import { installAntigravityHooks } from './antigravity-hook-installer.js';
 import { codexBinaryAvailable, ensureCodexHooks } from './codex-installer.js';
 import { opencodeBinaryAvailable, installOpencodePlugin } from './opencode-plugin-installer.js';
 import { ensureMusePlugin } from './muse-plugin-installer.js';
-import { installFtownSkill } from './install-ftown-skill.js';
+import { installFtownSkill, linkFtownSkillForAccount } from './install-ftown-skill.js';
 import { writeHarnessAgentGuide } from './harness-installer.js';
 import { ensureFtownOnPath } from './ensure-ftown-path.js';
 import { readSetupState, writeSetupState, assertSetupReady, acquireSetupLock, assertSetupVersion } from './setup-state.js';
@@ -108,6 +108,38 @@ export function defaultDependencies(): SetupDependencies {
 export function setupAccountTargets(): Array<HarnessAccount | undefined> {
   const home = homedir();
   return [undefined, ...loadAccounts().accounts.filter(account => account.configDir !== (account.harness === 'claude' ? claudeConfigDir(home, {}) : codexHome(home, {})))];
+}
+
+/** Install only the registered account's harness integration and skill link. */
+export async function setupAccount(account: HarnessAccount): Promise<IntegrationResult[]> {
+  const release = acquireSetupLock();
+  try {
+    assertUpdateReservationAllowed(homedir());
+    if (!canonicalNotifyReady()) throw new Error('ftown notify script is not installed; run ftown setup');
+    const notify = canonicalNotifyPath();
+    const result = await withAccountEnv(account, async () => {
+      if (account.harness === 'claude') {
+        if (!installClaudeHooks(notify)) throw new Error('Claude hook setup failed');
+        return { name: 'claude', status: 'installed' } as IntegrationResult;
+      }
+      if (!await codexBinaryAvailable()) return { name: 'codex', status: 'skipped', detail: 'binary not installed' } as IntegrationResult;
+      if (!ensureCodexHooks(join(homedir(), '.ftown', 'bin', 'ftown-harness'), notify)) throw new Error('Codex hook setup failed');
+      return { name: 'codex', status: 'installed' } as IntegrationResult;
+    });
+    linkFtownSkillForAccount(account.configDir);
+    return [result, { name: 'skill', status: 'installed' }];
+  } finally { release(); }
+}
+
+async function withAccountEnv<T>(account: HarnessAccount, task: () => Promise<T>): Promise<T> {
+  const oldClaude = process.env.CLAUDE_CONFIG_DIR; const oldCodex = process.env.CODEX_HOME;
+  if (account.harness === 'claude') process.env.CLAUDE_CONFIG_DIR = account.configDir;
+  else process.env.CODEX_HOME = account.configDir;
+  try { return await task(); }
+  finally {
+    if (oldClaude === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = oldClaude;
+    if (oldCodex === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = oldCodex;
+  }
 }
 
 function withAccountEnvSync<T>(account: HarnessAccount, task: () => T): T {
