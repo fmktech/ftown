@@ -7,7 +7,7 @@ investigator: redacted
 git_commit: 3ee99ce72b886851da63c7986c834d6b36703a72
 branch: fix/stale-status-badges
 repository: fmktech/ftown
-status: root-cause-proven
+status: resolved
 hypotheses_formed: 3
 hypotheses_rejected: 1
 hypotheses_proven: 1
@@ -98,5 +98,6 @@ Why 5? Because the feature's state contract did not define ownership and expiry 
 
 ## Resolution
 - Diff summary: failure badges now clear on fresh healthy output, clean result completion, restart/resume, explicit dismissal, or a seven-day expiry sweep at bridge startup. The bridge version is bumped to 0.30.35.
-- Verification: pending final root-owned full-suite, PR CI, and runtime checks.
+- Verification: bridge build passed; bridge suite passed 3,516 tests with 5 skipped; UI suite passed 2,290 tests; focused SessionList regression passed 3 tests; GitHub PR checks all passed, including unit-macos, unit-tests, unit-minimal, all three E2E shards, Docker Solo, release artifact/version checks, and gitleaks. The attention waiter test passed 20 consecutive isolated runs after replacing a fixed delay with readiness synchronization. The first full local bridge/UI runs competed for CPU and exposed timing failures in unrelated existing tests; both were isolated, then the full suites passed serially after the waiter test was made deterministic.
+- Live validation: `ftown sessions list/get` confirmed the auth row was still `running` with `block.reason=auth` and an old detection timestamp. No live `crashed` row was present at inspection time. The live bridge was not changed or restarted.
 - Limitation: inactive annotations younger than seven days are pruned at the next bridge startup or when dismissed. The bridge never restarts a user's bridge as part of this change.
