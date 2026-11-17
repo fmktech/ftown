@@ -133,7 +133,8 @@ The proof gate is satisfied. Explicit `ftown harness mail read` is the acknowled
 - **Fix:** native wake/hook paths now present a pointer without consuming mail. Both `ftown harness mail read` and `ftown sessions inbox` / `mail` use non-consuming inbox pages, write before acknowledgment, and acknowledge compact ID lists only afterward. Pages and CLI output are bounded; large bodies/metadata use server-issued, one-time sequential cursors and a bound completion token. Skips, replay, cursor expiry, failed output, and bridge restart leave oversized mail unread. Codex hook installation uses the Codex-specific pointer pump.
 - **Version:** bridge bumped from `0.30.31` to `0.30.32`.
 - **Root verification:** focused unit set passed **196/196**; acknowledgment/cursor API cases passed **4/4**; `npm run build` passed; packaged local-bridge smoke passed (`version 0.30.32`, real local bridge, no provider/cloud/database). `git diff --check` passed. Independent closure review found no P1/P2 issues. These checks used local Node **24.12.0**, below the repo's Node 24 minimum **24.22.1**; CI remains the authoritative version-compatible gate.
-- **Limits:** stdout completion confirms successful OS stream output, not that a downstream model consumed the tool result. Non-CLI destructive inbox/long-poll consumers retain their existing semantics. Full CI is pending PR creation.
+- **CI/PR:** PR [#274](https://github.com/fmktech/ftown/pull/274), commit `a79bc02`; all **14** reported checks passed, including unit, Docker, scan, and all three direct-transport E2E shards.
+- **Limits:** stdout completion confirms successful OS stream output, not that a downstream model consumed the tool result. Non-CLI destructive inbox/long-poll consumers retain their existing semantics.
 
 ### W3 implementation brief (2026-11-17)
 
