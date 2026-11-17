@@ -7,7 +7,7 @@ investigator: Codex
 git_commit: d206785b727916449bd80e08f0132d5c6e8ac2e5
 branch: fix/claude-session-picker
 repository: fmktech/ftown
-status: investigating
+status: resolved
 hypotheses_formed: 5
 hypotheses_rejected: 4
 hypotheses_proven: 1
@@ -23,8 +23,9 @@ related: []
 
 ## Reproduction
 1. Inspect the production-reported version 0.30.29's published command handler and native session listing.
-2. Exercise the current bridge implementation's failure class: use a non-directory at the Claude projects path, which makes `readdir` reject with `ENOTDIR`; verify the command returns an error and the picker shows the generic error.
-3. Regression tests will cover old schema rejection, account path selection, absent paths, directory read errors, and unreadable individual files.
+2. Exercise the 0.30.29 bridge's directory-error failure class against an isolated temporary home: use a non-directory at the Claude projects path, which makes `readdir` reject with `ENOTDIR`.
+3. Render the modal with the `work` Claude account selected; verify the picker is absent on the pre-fix PR #270 predicate and present after the fix.
+4. Exercise account path selection, absent paths, directory read errors, unreadable individual files, and old-bridge schema errors in regression tests.
 
 Evidence collected 2026-11-17: `npm pack ftown-bridge@0.30.29` succeeded. Its `command-rpc.js` contains `get_accounts` and `list_native_sessions`; its native listing returns empty only for `ENOENT`, rethrows other directory errors, and catches each individual file read. The separate 0.30.4 artifact does not contain the RPC, but that is not the running production version.
 
@@ -125,4 +126,9 @@ Why 5? The multi-account acceptance path covered creating sessions but not resum
 - Add bridge and UI regression coverage, including account path, missing directory, unreadable transcript, partial results, and unsupported RPC.
 
 ## Resolution
-- Pending final verification, bridge version bump to 0.30.31, PR, and CI.
+- Diff: PR #273 re-enables the picker for a selected non-default Claude account, passes the account ID through the RPC, resolves the registered `configDir`, handles missing/unreadable project directories as empty and individual unreadable transcript files as partial results, normalizes working-directory separators, and shows a bridge-upgrade message for unsupported RPC/account payloads. Bridge version is 0.30.31.
+- Regression test: `ui/src/components/NewSessionModal.test.tsx`, “shows Claude sessions for the selected non-default account”. It failed on the pre-fix PR #270 condition after the Account selector reached `work` because the picker test element was absent; it passed after the fix.
+- Local verification: `bridge/npm run build`; bridge targeted tests (37 passed); UI picker/modal tests (38 passed); `git diff --check`.
+- CI verification on PR #273: all unit, minimal-unit, macOS-unit, Docker smoke, direct-transport E2E shards, bridge-version, artifact, scan, and Vercel checks passed.
+- The screenshot only exposes the picker's generic message, not its original RPC error code. The investigation reproduces the known 0.30.29 `ENOTDIR` failure path, while the PR regression is independently proven by the failing/passing non-default-account modal test.
+- Follow-up: none.
