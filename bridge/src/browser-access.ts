@@ -4,6 +4,8 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Command, CommandResponse } from './types.js';
+import { classifyCommand } from './security/bridge/permissions.js';
+import type { ApplicationJson } from './security/protocol.js';
 
 export type BrowserBootstrap = { version: 1; userId: string; bridgeId: string; hostname: string; localPort: number; localNonce: string };
 type Options = { cloudNonce?: string; dataDir: string; allowedOrigins: string[]; bootstrap: () => BrowserBootstrap; execute: (command: Command) => Promise<CommandResponse>; onRevoke?: () => void };
@@ -22,7 +24,7 @@ function canonical(value: unknown): string {
 }
 class HttpError extends Error { constructor(public status: number, public code: string, message: string) { super(message); } }
 const fail = (status: number, code: string, message: string): never => { throw new HttpError(status, code, message); };
-const commandTypes = new Set(['preview_chat_list', 'preview_chat_send', 'preview_chat_reply', 'create_session', 'stop_session', 'list_sessions', 'get_accounts', 'get_history', 'dismiss_session_block', 'retry_session', 'handoff_session', 'send_message', 'rename_session', 'remove_session', 'bridge_exec', 'clear_terminal', 'update_session_parent', 'get_session_usage', 'get_sessions_usage', 'get_session_attention', 'resolve_session_attention', 'answer_session_attention', ...RETIRED_AUTOMATION_COMMANDS]);
+const commandTypes = new Set(['preview_chat_list', 'preview_chat_send', 'preview_chat_reply', 'create_session', 'stop_session', 'list_sessions', 'get_accounts', 'get_history', 'dismiss_session_block', 'retry_session', 'handoff_session', 'send_message', 'rename_session', 'remove_session', 'bridge_exec', 'clear_terminal', 'update_session_parent', 'get_session_usage', 'get_sessions_usage', 'get_session_attention', 'get_attention_summary', 'get_session_board', 'resolve_session_attention', 'answer_session_attention', ...RETIRED_AUTOMATION_COMMANDS]);
 
 /** Loopback browser consent and control. No cloud dependency and no raw persisted tokens. */
 export class BrowserAccess {
@@ -212,6 +214,11 @@ export class BrowserAccess {
         requestId = body.requestId as string;
         const payload = body.payload as Record<string, unknown>;
         if (payload.bridgeId !== undefined && payload.bridgeId !== this.opts.bootstrap().bridgeId) fail(403, 'wrong_bridge', 'Command targets another bridge');
+        if (body.type === 'get_attention_summary' || body.type === 'get_session_board') {
+          if (payload.bridgeId !== this.opts.bootstrap().bridgeId) fail(400, 'invalid_command', 'Invalid dashboard target');
+          try { classifyCommand(body.type as string, payload as ApplicationJson); }
+          catch { fail(400, 'invalid_command', 'Invalid dashboard target'); }
+        }
         if (body.type === 'get_session_attention' || body.type === 'resolve_session_attention') {
           const allowed = body.type === 'resolve_session_attention' ? ['bridgeId', 'sessionId', 'eventId'] : ['bridgeId', 'sessionId'];
           if (payload.bridgeId !== this.opts.bootstrap().bridgeId || typeof payload.sessionId !== 'string' || !/^[A-Za-z0-9_-]+$/.test(payload.sessionId)

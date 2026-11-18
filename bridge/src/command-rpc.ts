@@ -12,7 +12,7 @@ import { loadAccounts } from './accounts.js';
 import { claudeConfigDir } from './config-dirs.js';
 import type { NativeSessionHarness, NativeSessionSummary } from './native-session-list.js';
 
-import { prReviewGeneration, toWireSession } from './session-wire.js';
+import { prReviewGeneration, toDashboardWireSession } from './session-wire.js';
 import { normalizePullRequestUrl } from './pull-request-url.js';
 import type { PullRequestStatusService } from './pull-request-status.js';
 import type { PrReviewService, PrReviewRequest, PrReviewChunkRequest } from './pull-request-review-protocol.js';
@@ -21,6 +21,8 @@ import { InvalidShellTypeError, normalizeShellType, type ShellType } from './har
 import { AccountSelectionError, PlanItemError, WorkingDirMissingError } from './create-ftown-session.js';
 import { WorktreeError } from './coordination/contract-b.js';
 import { buildSessionBoardSnapshot, type SessionBoardSource } from './session-board-snapshot.js';
+import { createSessionBoardCache, SessionBoardRequestError } from './session-board-cache.js';
+import { SESSION_BOARD_CHUNK_BYTES } from './session-board-protocol.js';
 export type { SessionBoardSource } from './session-board-snapshot.js';
 import type { AttentionItem } from './attention-events.js';
 import { AUTOMATION_REMOVED_CODE, AUTOMATION_REMOVED_MESSAGE, AutomationRemovedError, RETIRED_AUTOMATION_COMMANDS } from './retired-automation.js';
@@ -28,6 +30,7 @@ import type { SessionController } from './session-controller.js';
 import type { Session } from './types.js';
 import type { SessionMessageAccepted, SessionMessageErrorCode } from './session-inbox-protocol.js';
 import { AttentionError, type AttentionStore } from './attention-store.js';
+import { ATTENTION_SUMMARY_MAX_BYTES, ATTENTION_SUMMARY_TOO_LARGE } from './attention-summary-protocol.js';
 import { formatAttentionAnswerMail } from './attention-prompt.js';
 import type { AttentionAnswerDelivery } from './attention-prompt-protocol.js';
 import { BridgeUpdateError, type BridgeUpdateCoordinator } from './bridge-update.js';
@@ -100,6 +103,9 @@ export interface CommandRpcDeps {
 }
 
 const PLAN_ITEM_ID = /^p\d{1,6}$/;
+// index creates an adapter per command. Scope cache lifetime to the stable,
+// read-only board source, never to a transient handler or a global account key.
+const boardCaches = new WeakMap<SessionBoardSource, ReturnType<typeof createSessionBoardCache>>();
 
 function planItemFromPayload(payload: { planItem?: unknown }): string | undefined {
   return typeof payload.planItem === 'string' && PLAN_ITEM_ID.test(payload.planItem) ? payload.planItem : undefined;
@@ -114,14 +120,18 @@ async function handleGetSessionBoard(
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)
     || payload.bridgeId !== deps.bridgeId
     || typeof payload.sessionId !== 'string'
-    || !/^[A-Za-z0-9_-]+$/.test(payload.sessionId)
-    || Object.keys(payload).some((key) => key !== 'bridgeId' && key !== 'sessionId')) {
-    throw new Error('Invalid board request');
+    || !/^[A-Za-z0-9_-]{1,200}$/.test(payload.sessionId)
+    || Object.keys(payload).some((key) => !['bridgeId', 'sessionId', 'snapshotId', 'offset'].includes(key))
+    || (Object.hasOwn(payload, 'snapshotId') !== Object.hasOwn(payload, 'offset'))
+    || (Object.hasOwn(payload, 'snapshotId') && (typeof payload.snapshotId !== 'string' || !/^[a-f0-9]{64}$/.test(payload.snapshotId)
+      || typeof payload.offset !== 'number' || !Number.isSafeInteger(payload.offset) || payload.offset < 0 || payload.offset % SESSION_BOARD_CHUNK_BYTES !== 0))) {
+    throw new SessionBoardRequestError('invalid_session_board_request', 400);
   }
   if (deps.security && verified) {
     await deps.security.policy.revalidate(verified.principal, 'read');
   }
-  if (!deps.sessionBoard) {
+  const source = deps.sessionBoard;
+  if (!source) {
     return {
       requestId: command.requestId,
       success: false,
@@ -130,9 +140,18 @@ async function handleGetSessionBoard(
     };
   }
   const session = await deps.sessionController.get(payload.sessionId);
-  if (!session || session.bridgeId !== deps.bridgeId) throw new Error('Unknown session');
-  const snapshot = await buildSessionBoardSnapshot(deps.sessionBoard, payload.sessionId);
-  return { requestId: command.requestId, success: true, data: snapshot };
+  if (!session || session.bridgeId !== deps.bridgeId) throw new SessionBoardRequestError('session_board_snapshot_unavailable', 404);
+  let cache = boardCaches.get(source);
+  if (!cache) { cache = createSessionBoardCache(); boardCaches.set(source, cache); }
+  const scope = JSON.stringify([deps.bridgeId, payload.sessionId, verified?.principal.endpoint.id ?? 'local', verified?.principal.policyGeneration ?? null]);
+  if (typeof payload.snapshotId === 'string') {
+    return { requestId: command.requestId, success: true, data: cache.chunk(scope, payload.snapshotId, payload.offset as number) };
+  }
+  const snapshot = await buildSessionBoardSnapshot(source, payload.sessionId);
+  if (deps.security && verified) await deps.security.policy.revalidate(verified.principal, 'read');
+  const current = await deps.sessionController.get(payload.sessionId);
+  if (!current || current.bridgeId !== deps.bridgeId) throw new SessionBoardRequestError('session_board_snapshot_unavailable', 404);
+  return { requestId: command.requestId, success: true, data: cache.store(scope, snapshot) };
 }
 
 /**
@@ -415,8 +434,10 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
         }
         case 'get_attention_summary': {
           const payload = command.payload as Record<string, unknown>;
-          if (payload.bridgeId !== bridgeId || !Array.isArray(payload.sessionIds) || payload.sessionIds.length > 500
-            || payload.sessionIds.some(id => typeof id !== 'string' || !/^[A-Za-z0-9_-]+$/.test(id))
+          if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+            || payload.bridgeId !== bridgeId || !Array.isArray(payload.sessionIds) || payload.sessionIds.length > 500
+            || payload.sessionIds.some(id => typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,200}$/.test(id)
+              || ['__proto__', 'constructor', 'prototype'].includes(id))
             || Object.keys(payload).some(key => !['bridgeId', 'sessionIds'].includes(key)))
             throw new AttentionError('invalid_attention_request', 'Invalid attention summary target', 400);
           if (!deps.attentionStore) throw new AttentionError('attention_not_ready', 'Attention store is not ready', 503);
@@ -424,11 +445,14 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
           for (const sessionId of Array.from(new Set(payload.sessionIds as string[]))) {
             const session = await sessionController.get(sessionId);
             if (!session || session.bridgeId !== bridgeId) continue;
-            if (session.status !== 'running') continue;
+            if (session.status !== 'running' && session.status !== 'pending') continue;
             const snapshot = await deps.attentionStore.explicitSnapshot(sessionId);
             if (snapshot.attention) summary[sessionId] = { attention: snapshot.attention, sequence: snapshot.sequence };
           }
           response = { requestId: command.requestId, success: true, data: { summary } };
+          if (Buffer.byteLength(JSON.stringify({ type: 'command_response', response }), 'utf8') > ATTENTION_SUMMARY_MAX_BYTES) {
+            throw new AttentionError(ATTENTION_SUMMARY_TOO_LARGE, 'Attention summary is too large; request fewer sessions.', 413);
+          }
           break;
         }
         case 'answer_session_attention': {
@@ -490,7 +514,7 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
               ...(payload.requireGreenPr === true ? { requireGreenPr: true } : {}),
             },
           );
-          response = { requestId: command.requestId, success: true, data: { session: toWireSession(session) } };
+          response = { requestId: command.requestId, success: true, data: { session: toDashboardWireSession(session) } };
           break;
         }
 
@@ -510,7 +534,7 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
           // Only this bridge's own sessions: a data dir can still hold records of another bridge identity (a shared dir, or one left
           // from before an identity reset), and browsers reject a whole list that names any other bridge.
           const sessions = (await sessionController.list()).filter(session => session.bridgeId === bridgeId);
-          response = { requestId: command.requestId, success: true, data: { bridgeId, sessions: sessions.map(toWireSession) } };
+          response = { requestId: command.requestId, success: true, data: { bridgeId, sessions: sessions.map(toDashboardWireSession) } };
           break;
         }
 
@@ -522,7 +546,7 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
           }
 
           const session = await sessionController.get(payload.sessionId);
-          response = { requestId: command.requestId, success: true, data: { session: session ? toWireSession(session) : session } };
+          response = { requestId: command.requestId, success: true, data: { session: session ? toDashboardWireSession(session) : session } };
           break;
         }
 
@@ -532,7 +556,7 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
             || typeof payload.transitionKey !== 'string' || payload.transitionKey.length > 512 || typeof payload.detectedAt !== 'string' || payload.detectedAt.length > 64
             || Object.keys(payload).sort().join(',') !== 'bridgeId,detectedAt,sessionId,transitionKey') throw new Error('Invalid block dismissal');
           const result = await sessionController.dismissBlock(payload.sessionId, bridgeId, payload.transitionKey, payload.detectedAt);
-          response = result.ok ? { requestId: command.requestId, success: true, data: { session: toWireSession(result.session) } }
+          response = result.ok ? { requestId: command.requestId, success: true, data: { session: toDashboardWireSession(result.session) } }
             : { requestId: command.requestId, success: false, error: result.message };
           break;
         }
@@ -547,7 +571,7 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
 
           const result = await sessionController.retry(payload.sessionId);
           response = result.ok
-            ? { requestId: command.requestId, success: true, data: { session: toWireSession(result.session) } }
+            ? { requestId: command.requestId, success: true, data: { session: toDashboardWireSession(result.session) } }
             : { requestId: command.requestId, success: false, error: result.message, ...(result.code === AUTOMATION_REMOVED_CODE ? { data: { code: AUTOMATION_REMOVED_CODE } } : {}) };
           break;
         }
@@ -578,7 +602,7 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
             parent: { value: payload.parentSessionId },
           });
           response = result.ok
-            ? { requestId: command.requestId, success: true, data: { session: toWireSession(result.session) } }
+            ? { requestId: command.requestId, success: true, data: { session: toDashboardWireSession(result.session) } }
             : { requestId: command.requestId, success: false, error: result.message };
           break;
         }
@@ -592,7 +616,7 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
 
           const result = await sessionController.update(payload.sessionId, { name: payload.name });
           response = result.ok
-            ? { requestId: command.requestId, success: true, data: { session: toWireSession(result.session) } }
+            ? { requestId: command.requestId, success: true, data: { session: toDashboardWireSession(result.session) } }
             : { requestId: command.requestId, success: false, error: result.message };
           break;
         }
@@ -710,7 +734,7 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
             ...(typeof payload.model === 'string' ? { model: payload.model } : {}),
             ...(typeof payload.name === 'string' ? { name: payload.name } : {}),
           });
-          response = { requestId: command.requestId, success: true, data: { session: toWireSession(result.session) } };
+          response = { requestId: command.requestId, success: true, data: { session: toDashboardWireSession(result.session) } };
           break;
         }
 
@@ -741,7 +765,9 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
       }
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
-      response = err instanceof AttentionError
+      response = err instanceof SessionBoardRequestError
+        ? { requestId: command.requestId, success: false, error: errorMessage, data: { code: err.code } }
+        : err instanceof AttentionError
         ? { requestId: command.requestId, success: false, error: errorMessage, data: { code: err.code } }
         : err instanceof BridgeUpdateError
         ? { requestId: command.requestId, success: false, error: 'Bridge update request could not be completed.', data: { code: err.code } }

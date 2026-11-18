@@ -27,9 +27,10 @@ import type { Ledger, LedgerGenesis, LedgerOperation, LedgerTransition, Signed }
 import { createSoftPasskey, type SoftPasskey } from '../ledger/testing.js';
 import { BridgeLedgerStore } from './ledger-store.js';
 import { createCommandHandler } from '../../command-rpc.js';
-import { AttentionStore } from '../../attention-store.js';
 import type { Command, CommandResponse } from '../../types.js';
 import { saveAccounts } from '../../accounts.js';
+import { PLAN_LIMITS, type BoardSnapshot } from '../../coordination/contract-c.js';
+import { SESSION_BOARD_CHUNK_BYTES, type SessionBoardManifest, type SessionBoardChunk } from '../../session-board-protocol.js';
 
 const owner = '7bac2a7f-c58e-4845-856f-8283fb07ad96';
 async function fixture(t: { after(fn: () => Promise<void>): void }) {
@@ -109,6 +110,68 @@ test('encrypted browser read commands dispatch account metadata and session list
   assert.equal(summary.success, true);
   assert.deepEqual(summary.data, { summary: {} });
   assert.deepEqual(dispatched, ['list_sessions', 'get_accounts', 'get_attention_summary']);
+});
+
+test('read-only browser receives an oversized board through sealed bounded chunks and rejects wrong command contexts', async t => {
+  const f = await fixture(t);
+  const browser = await generateEndpoint(owner, 'browser');
+  const invite = await f.security.policy.createInvitation(await f.security.policy.principal(f.client.endpoint.id), { label: 'reader' });
+  await f.security.policy.consumeInvitation({ type: 'enroll', candidate: browser.endpoint, invitationId: invite.invitationId, invitationSecret: invite.secret, label: 'reader' });
+  await f.security.close();
+  const file = join(f.dir, 'security', 'policy.json');
+  const state = JSON.parse(await readFile(file, 'utf8')) as { devices: Array<{ endpoint: { id: string }; permissions: string[] }> };
+  state.devices.find(device => device.endpoint.id === browser.endpoint.id)!.permissions = ['read'];
+  await writeFile(file, JSON.stringify(state));
+  const security = new BridgeSecurityService(f.identity, 'bridge', f.dir, { relayUserId: 'owner@example.test' });
+  t.after(() => security.close());
+  const snapshot: BoardSnapshot = { board: { rootId: 'root', cursor: 0, cards: [], rollup: { working: 0, blocked: 0, waiting_review: 0, done: 0, failed: 0, unset: 0 },
+    plan: { ready: [], items: Array.from({ length: PLAN_LIMITS.items }, (_, n) => ({ id: `p${n + 1}`, title: '界'.repeat(PLAN_LIMITS.title), note: '界'.repeat(PLAN_LIMITS.note),
+      after: [], priority: 2, state: 'todo', createdAt: '', updatedAt: '' })) } }, events: [], attention: [] };
+  const source = { board: async () => snapshot.board, events: { head: async () => 0, read: async () => ({ events: [], cursor: 0 }) }, openAttention: async () => [] };
+  let dispatches = 0;
+  const send = async (payload: Record<string, ApplicationJson>) => {
+    const requestId = randomUUID();
+    const command: Command = { type: 'get_session_board', requestId, payload };
+    const app: SecureApplication = { type: 'application', route: { kind: 'command', command: command.type, requestId, sessionId: 'root' }, data: command, mcp: null };
+    const packet = await f.packet(app, f.route, browser, security.receiverEpoch);
+    const reply = await executeSecurePacket(security, packet, f.route, async verified => {
+      dispatches++; let response: CommandResponse | undefined;
+      await createCommandHandler({ bridgeId: 'bridge', security, sessionBoard: source,
+        sessionController: { get: async () => ({ id: 'root', bridgeId: 'bridge', status: 'running' }) } as unknown as SessionController,
+        publishCommandResponse: async value => { response = value; },
+      })(command, verified);
+      return JSON.parse(JSON.stringify({ type: 'command_response', response }));
+    });
+    assert.ok(Buffer.byteLength(JSON.stringify(reply)) < 450_000, 'every encrypted response must fit the actual envelope cap');
+    const plaintext = await open(browser, f.identity.endpoint, reply, { ownerId: owner, bridgeId: 'bridge', channel: f.route.channel, recipientId: browser.endpoint.id, purpose: 'application' });
+    return JSON.parse(new TextDecoder().decode(plaintext)).data.response as CommandResponse;
+  };
+  const manifest = (await send({ bridgeId: 'bridge', sessionId: 'root' })).data as SessionBoardManifest;
+  assert.equal(manifest.type, 'session_board_chunks');
+  const chunks: Buffer[] = [];
+  for (let offset = 0; offset < manifest.totalBytes; offset += SESSION_BOARD_CHUNK_BYTES) {
+    const result = await send({ bridgeId: 'bridge', sessionId: 'root', snapshotId: manifest.snapshotId, offset });
+    assert.equal(result.success, true); chunks.push(Buffer.from((result.data as SessionBoardChunk).data, 'base64'));
+  }
+  assert.deepEqual(JSON.parse(Buffer.concat(chunks).toString('utf8')), snapshot);
+  assert.equal(dispatches, chunks.length + 1);
+  const cases: Array<{ command: string; payload: ApplicationJson; sessionId: string | null; code: string }> = [
+    { command: 'get_attention_summary', payload: { bridgeId: 'bridge', sessionIds: ['root'] }, sessionId: null, code: '' },
+    { command: 'get_attention_summary', payload: { bridgeId: 'wrong', sessionIds: ['root'] }, sessionId: null, code: 'wrong_context' },
+    { command: 'get_attention_summary', payload: { bridgeId: 'bridge', sessionIds: ['root'] }, sessionId: 'root', code: 'wrong_context' },
+    { command: 'get_attention_summary', payload: { bridgeId: 'bridge', sessionIds: ['__proto__'] }, sessionId: null, code: 'permission_denied' },
+    { command: 'get_attention_summary', payload: { bridgeId: 'bridge', sessionIds: null }, sessionId: null, code: 'permission_denied' },
+    { command: 'get_session_board', payload: { bridgeId: 'bridge', sessionId: 'other' }, sessionId: 'root', code: 'wrong_context' },
+    { command: 'unknown_dashboard_read', payload: { bridgeId: 'bridge' }, sessionId: null, code: 'permission_denied' },
+  ];
+  for (const check of cases) {
+    const requestId = randomUUID();
+    const app: SecureApplication = { type: 'application', route: { kind: 'command', requestId, command: check.command, sessionId: check.sessionId },
+      data: { type: check.command, requestId, payload: check.payload }, mcp: null };
+    const accepted = security.acceptApplication(await f.packet(app, f.route, browser, security.receiverEpoch), f.route);
+    if (check.code) await assert.rejects(accepted, { code: check.code });
+    else assert.equal((await accepted).principal.permissions.includes('read'), true);
+  }
 });
 
 test('browser control cannot register preview through encrypted HTTP and causes no session mutation', async t => {

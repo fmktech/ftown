@@ -625,6 +625,14 @@ program
     if (updateRestart) updateAdmission.freeze();
     const updateEffects = new UpdateEffects(updateAdmission);
     let resurrectionComplete = false;
+    // Reconnect and coordination callbacks may run while later services are
+    // bootstrapping. Keep their roots until the shared snapshot source is ready.
+    let boardPublisher: ReturnType<typeof createSessionBoardPublisher> | undefined;
+    const bootstrapBoardRoots = new Set<string>();
+    const scheduleBoard = (rootId: string): void => {
+      if (boardPublisher) boardPublisher.schedule(rootId);
+      else bootstrapBoardRoots.add(rootId);
+    };
     // Account mode only: the ledger channel's records and (re)subscriptions feed the replica.
     const ledgerRelay = accountRelay;
     const ledgerOptions = ledgerRelay ? {
@@ -646,8 +654,10 @@ program
         // can't monopolize the event loop. A single publish's payload is
         // unchanged.
         const RESYNC_CHUNK = 10;
-        const sessions = await store.listSessions();
-        boardPublisher.reconcile(new Set(sessions.map(session => session.parentSessionId ?? session.id)));
+        const sessions = (await store.listSessions()).filter(session => session.bridgeId === bridgeId);
+        const roots = new Set(sessions.map(session => session.parentSessionId ?? session.id));
+        if (boardPublisher) boardPublisher.reconcile(roots);
+        else for (const rootId of roots) bootstrapBoardRoots.add(rootId);
         // The browser can remain connected while this bridge is offline, so
         // its own channel recovery cannot reveal mutations the bridge never
         // published. Tell it to reconcile the authoritative session list.
@@ -807,7 +817,7 @@ program
       mail: mailStore,
       publishSession: (session) => { void centrifugo.publishSessionUpdate(userId, session); },
       now: Date.now,
-      onBoardChanged: (rootId) => boardPublisher.schedule(rootId),
+      onBoardChanged: scheduleBoard,
       onAttentionEscalated: (sessionId, item) => {
         localApiServer.publishHumanAttention(sessionId, item);
       },
@@ -817,11 +827,17 @@ program
       events: coordination.events,
       openAttention: (sessionId) => openBoardAttention(attentionStore, sessionId),
     };
-    const boardPublisher = createSessionBoardPublisher({
+    boardPublisher = createSessionBoardPublisher({
       source: sessionBoard, userId,
-      loadSession: (id) => store.loadSession(id),
+      initialSessions: (await store.listSessions()).filter(session => session.bridgeId === bridgeId),
+      loadSession: async (id) => {
+        const session = await store.loadSession(id);
+        return session?.bridgeId === bridgeId ? session : null;
+      },
       publish: (rootId, snapshot) => centrifugo.publishSessionBoard(userId, bridgeId, rootId, snapshot),
     });
+    for (const rootId of bootstrapBoardRoots) boardPublisher.schedule(rootId);
+    bootstrapBoardRoots.clear();
     const stopBoardObserver = centrifugo.onLocalPublication(boardPublisher.observePublication);
     localApiServer.setCoordination(coordination);
     const stopPushSessionObserver = centrifugo.onLocalPublication((channel, data) => {
@@ -1199,7 +1215,7 @@ program
           attentionStore.stopNotifications();
           stopPushSessionObserver();
           stopBoardObserver();
-          boardPublisher.stop();
+          boardPublisher?.stop();
           pushNotifier?.stop();
           ledgerRelay?.stop();
           accountRegistrar?.stop();

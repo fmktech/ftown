@@ -1,5 +1,6 @@
 import type { ApplicationJson, EndpointPermission } from '../protocol.js';
 import { BridgeSecurityError } from './errors.js';
+import { SESSION_BOARD_CHUNK_BYTES } from '../../session-board-protocol.js';
 
 export interface OperationPermission { permission: EndpointPermission; mutating: boolean; operation: string; sessionId: string | null }
 const session = /^[A-Za-z0-9_-]+$/;
@@ -134,6 +135,21 @@ export function classifyHttp(method: string, path: string): OperationPermission 
 export function classifyCommand(command: string, payload?: ApplicationJson): OperationPermission {
   const body = object(payload);
   const sessionId = typeof body?.sessionId === 'string' && session.test(body.sessionId) ? body.sessionId : null;
+  if (command === 'get_attention_summary') {
+    if (!body || typeof body.bridgeId !== 'string' || !body.bridgeId || !Array.isArray(body.sessionIds)
+      || body.sessionIds.length > 500 || Object.keys(body).some(key => !['bridgeId', 'sessionIds'].includes(key))
+      || body.sessionIds.some(id => typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,200}$/.test(id)
+        || ['__proto__', 'constructor', 'prototype'].includes(id))) return deny();
+    return result('read', command);
+  }
+  if (command === 'get_session_board') {
+    if (!body || typeof body.bridgeId !== 'string' || !body.bridgeId || !sessionId || sessionId.length > 200
+      || Object.keys(body).some(key => !['bridgeId', 'sessionId', 'snapshotId', 'offset'].includes(key))
+      || Object.hasOwn(body, 'snapshotId') !== Object.hasOwn(body, 'offset')
+      || (Object.hasOwn(body, 'snapshotId') && (typeof body.snapshotId !== 'string' || !/^[a-f0-9]{64}$/.test(body.snapshotId)
+        || typeof body.offset !== 'number' || !Number.isSafeInteger(body.offset) || body.offset < 0 || body.offset % SESSION_BOARD_CHUNK_BYTES !== 0))) return deny();
+    return result('read', command, sessionId);
+  }
   if (command === 'get_pull_request_review' || command === 'get_pull_request_review_chunk') return sessionId && sessionId.length <= 200 ? result('read', command, sessionId) : deny();
   if (command === 'session_preview_status' || command === 'session_preview_chunk') return sessionId && sessionId.length <= 200 ? result('read', command, sessionId) : deny();
   if (command === 'preview_chat_list' || command === 'preview_chat_send' || command === 'preview_chat_reply') return sessionId && sessionId.length <= 200 ? result(command === 'preview_chat_list' ? 'read' : 'control', command, sessionId) : deny();

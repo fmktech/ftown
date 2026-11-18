@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Centrifuge } from "centrifuge";
 import type { Command, CommandResponse, CreateSessionPayload, Session, ShellType } from "@/types";
 import type { BridgeRpc } from "./useBridgeRpc";
-import { LIVE_USAGE_POLL_MS, useSessions, mergeSessionSnapshot } from "./useSessions";
+import { useSessions, mergeSessionSnapshot } from "./useSessions";
 import { SessionList } from "@/components/SessionList";
 
 const row = (id: string, bridgeId = "a", extra: Partial<Session> = {}): Session => ({
@@ -42,7 +42,7 @@ function harness(immediate = false, commandTimeoutMs?: number) {
   const recover = (recovered = false) => act(() => subscriptions.at(-1)?.emit("subscribed", { recovered, offset: recovered ? 1 : 0, epoch: "epoch" }));
   const publication = (s: Session, status?: string) => act(() => subscriptions.at(-1)!.emit("publication", { data: { type: "session_update", session: { ...s, ...(status ? { status } : {}) } } }));
   const request = () => commands.filter(c => c.type === "list_sessions").at(-1)!.requestId;
-  return { client: client as unknown as Centrifuge, rpc, commands, responses, subscriptions, subscriptionOptions, reply, recover, publication, request };
+  return { client: client as unknown as Centrifuge, rpc, commands, responses, subscribed, subscriptions, subscriptionOptions, reply, recover, publication, request };
 }
 let visibility = "visible";
 beforeEach(() => { vi.useFakeTimers(); visibility = "visible"; Object.defineProperty(document, "visibilityState", { configurable: true, get: () => visibility }); localStorage.clear(); });
@@ -130,13 +130,41 @@ describe("session-list transport deadlines through the actual hook", () => {
 });
 
 describe("retirement reconciliation through actual hook callbacks", () => {
-  it("keeps usage interval at one minute", () => {
-    expect(LIVE_USAGE_POLL_MS).toBe(60_000);
+  it("never refreshes visible usage or session lists from an idle timer", async () => {
+    const h = setup(true, undefined, "one");
+    const usage = { inputTokens: 9, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 9, models: [], harness: "codex", collectedAt: "2026-09-30T12:00:00Z" };
+    vi.mocked(h.rpc.sendCommand).mockImplementation(async c => ({ requestId: c.requestId, success: true, data: { usages: { one: usage } } }));
+    h.reply(h.request(), [row("one", "a", { status: "running", codexSessionId: "resume-one" })], "a");
+    await act(async () => {});
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(1);
+    expect(h.result.current.sessions[0].usage).toEqual(usage);
+    await act(async () => { await vi.advanceTimersByTimeAsync(3_600_000); });
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(1);
+    expect(h.commands.filter(c => c.type === "list_sessions")).toHaveLength(1);
+  });
+
+  it("coalesces relevant session changes and does not refresh for another session or a usage reply", async () => {
+    const h = setup(true, undefined, "one");
+    let finish!: (response: CommandResponse) => void;
+    vi.mocked(h.rpc.sendCommand).mockImplementation(c => new Promise(resolve => { finish = resolve; }));
+    const selected = row("one", "a", { status: "running", codexSessionId: "resume-one" });
+    h.reply(h.request(), [selected, row("two", "a", { status: "running", codexSessionId: "resume-two" })], "a");
+    await act(async () => {});
+    h.publication(row("two", "a", { status: "running", updatedAt: "changed" }));
+    await act(async () => {});
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(1);
+    act(() => { for (let i = 0; i < 20; i++) h.publication({ ...selected, updatedAt: `change-${i}` }); });
+    await act(async () => {});
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(1);
+    await act(async () => finish({ requestId: "usage", success: true, data: { usages: {} } }));
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(2);
+    await act(async () => finish({ requestId: "usage", success: true, data: { usages: {} } }));
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(2);
   });
 
   it("reads usage immediately for only the visible selected running session and follows selection", async () => {
     const h = setup(true, undefined, "one");
-    h.reply(h.request(), [row("one", "a", { status: "running" }), row("two", "a", { status: "running" })], "a");
+    h.reply(h.request(), [row("one", "a", { status: "running", codexSessionId: "resume-one" }), row("two", "a", { status: "running", codexSessionId: "resume-two" })], "a");
     await act(async () => { await Promise.resolve(); });
     const usageCalls = () => vi.mocked(h.rpc.sendCommand).mock.calls.map(([command]) => command).filter(command => command.type === "get_sessions_usage");
     expect(usageCalls()).toHaveLength(1);
@@ -148,6 +176,15 @@ describe("retirement reconciliation through actual hook callbacks", () => {
     visibility = "hidden"; act(() => document.dispatchEvent(new Event("visibilitychange")));
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
     expect(usageCalls()).toHaveLength(2);
+  });
+  it("refreshes when the visible session acquires a collector resume id without a timestamp change", async () => {
+    const h = setup(true, undefined, "one");
+    const selected = row("one", "a", { status: "running" });
+    h.reply(h.request(), [selected], "a"); await act(async () => {});
+    expect(h.rpc.sendCommand).not.toHaveBeenCalled();
+    h.publication({ ...selected, codexSessionId: "new-resume-id" }); await act(async () => {});
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(h.rpc.sendCommand).mock.calls[0][0]).toMatchObject({ type: "get_sessions_usage", payload: { sessionIds: ["one"] } });
   });
 
   it("applies create, status, rename, and remove publications without periodic list reads", () => {
@@ -216,10 +253,10 @@ describe("retirement reconciliation through actual hook callbacks", () => {
   it("resets state/tombstones and ignores captured callbacks on user-context switch", () => {
     const h = setup(true); h.publication(row("gone"), "removed"); h.publication(row("previous"));
     const oldResponse = [...h.responses][0]; const oldPub = h.subscriptions[0].listeners.get("publication")![0];
-    h.rerender({ userId: "other-user" }); expect(h.ids()).toEqual([]);
+    h.rerender({ userId: "other-user", selectedUsageView: null }); expect(h.ids()).toEqual([]);
     act(() => { oldResponse({ requestId: "old", success: true, data: { sessions: [row("leak")] } }); oldPub({ data: { type: "session_update", session: row("leak") } }); });
     h.publication(row("gone")); expect(h.ids()).toEqual(["gone"]);
-    h.rerender({ userId: null }); expect(h.ids()).toEqual([]);
+    h.rerender({ userId: null, selectedUsageView: null }); expect(h.ids()).toEqual([]);
   });
   it("optimistic expiry reconciles retained sessions without a reload", () => {
     const h = setup(true); h.reply(h.request(), [row("retained")], "a"); act(() => h.result.current.removeSession("retained")); expect(h.ids()).toEqual([]);
@@ -249,6 +286,27 @@ describe("retirement reconciliation through actual hook callbacks", () => {
     act(() => h.subscriptions[0].emit("subscribed", { recovered: false, offset: 0, epoch: "new-epoch" })); expect(count()).toBe(2);
     visibility = "hidden"; act(() => document.dispatchEvent(new Event("visibilitychange")));
     visibility = "visible"; act(() => document.dispatchEvent(new Event("visibilitychange"))); expect(count()).toBe(3);
+  });
+  it("does not read when the RPC channel reconnects after successful sessions recovery", () => {
+    const h = setup(true);
+    h.reply(h.request(), [row("keep")], "a");
+    act(() => {
+      h.subscribed.forEach(callback => callback());
+      h.subscriptions[0].emit("subscribed", { recovered: true, positioned: true, offset: 5, epoch: "epoch" });
+      h.subscribed.forEach(callback => callback());
+    });
+    expect(h.commands.filter(c => c.type === "list_sessions")).toHaveLength(1);
+    for (const context of [{ recovered: true, positioned: true, offset: 6, epoch: "changed" },
+      { recovered: true, positioned: true, offset: 3, epoch: "changed" }, { recovered: true, positioned: false, offset: 3, epoch: "changed" }]) {
+      act(() => h.subscriptions[0].emit("subscribed", context));
+    }
+    expect(h.commands.filter(c => c.type === "list_sessions")).toHaveLength(4);
+  });
+  it("retries the first list after security readiness when its first publication was rejected", () => {
+    const h = setup(true);
+    act(() => h.responses.forEach(callback => callback({ requestId: h.request(), success: false, data: { code: "approval_required" } })));
+    act(() => h.subscribed.forEach(callback => callback()));
+    expect(h.commands.filter(c => c.type === "list_sessions")).toHaveLength(2);
   });
   it("cleans up timers, listeners and stale callbacks on unmount", () => {
     const h = setup(true); const cb = [...h.responses][0]; h.unmount(); const count = h.commands.length;
@@ -502,7 +560,7 @@ describe("create result reconciliation boundaries", () => {
 
   it.each(["account switch", "unmount"])("rejects an old-context create response after %s", async boundary => {
     const h = pendingCreate();
-    if (boundary === "account switch") h.rerender({ userId: "other-user" }); else h.unmount();
+    if (boundary === "account switch") h.rerender({ userId: "other-user", selectedUsageView: null }); else h.unmount();
     await act(async () => { h.resolve(row("created")); await expect(h.pending).rejects.toThrow("context changed"); });
     expect(h.ids()).toEqual([]);
   });

@@ -2,12 +2,13 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { v4 as uuidv4 } from "uuid";
-import type { Command, SessionCard } from "@/types";
+import type { SessionCard } from "@/types";
 import { parseSessionBlock } from "@/types";
 import { accountChannel } from "@security/ledger/channels";
 import type { MessageClient, MessageSubscription } from "@/lib/message-client";
 import type { BridgeRpc } from "@/hooks/useBridgeRpc";
 import type { OverviewSnapshot, PlanItem, PlanView, SnapshotAttentionEvent, SnapshotCard, SnapshotEvent } from "@/components/SessionOverview";
+import { SESSION_BOARD_CHUNK_BYTES, SESSION_BOARD_INLINE_BYTES, SESSION_BOARD_MAX_BYTES, type SessionBoardManifest } from "../../../bridge/src/session-board-protocol";
 
 /** UI shape of the get_session_board reply: the one OverviewSnapshot mirror (components/SessionOverview). */
 export type SessionBoardSnapshot = OverviewSnapshot;
@@ -271,6 +272,28 @@ function position(value: { offset?: number; epoch?: string }): Position | null {
     ? { offset: value.offset!, epoch: value.epoch } : null;
 }
 
+function parseManifest(value: unknown, rootId: string): SessionBoardManifest | null {
+  if (!isRecord(value) || Object.keys(value).length !== 5 || value.type !== "session_board_chunks"
+    || typeof value.snapshotId !== "string" || !/^[a-f0-9]{64}$/.test(value.snapshotId) || value.rootId !== rootId
+    || !Number.isSafeInteger(value.totalBytes) || (value.totalBytes as number) <= SESSION_BOARD_INLINE_BYTES
+    || (value.totalBytes as number) > SESSION_BOARD_MAX_BYTES || value.chunkBytes !== SESSION_BOARD_CHUNK_BYTES) return null;
+  return value as unknown as SessionBoardManifest;
+}
+
+function decodeChunk(value: unknown, manifest: SessionBoardManifest, offset: number): Uint8Array | null {
+  const expectedBytes = Math.min(manifest.chunkBytes, manifest.totalBytes - offset);
+  if (!isRecord(value) || Object.keys(value).length !== 6 || value.type !== "session_board_chunk"
+    || value.snapshotId !== manifest.snapshotId || value.rootId !== manifest.rootId || value.offset !== offset
+    || value.totalBytes !== manifest.totalBytes || typeof value.data !== "string"
+    || value.data.length !== 4 * Math.ceil(expectedBytes / 3)
+    || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value.data)) return null;
+  try {
+    const decoded = atob(value.data);
+    if (decoded.length !== expectedBytes || btoa(decoded) !== value.data) return null;
+    return Uint8Array.from(decoded, character => character.charCodeAt(0));
+  } catch { return null; }
+}
+
 /** Push-driven Overview. RPC reads are reserved for entry, recovery, visibility and oversized publications. */
 export function useSessionBoard(
   sendCommand: BridgeRpc["sendCommand"],
@@ -297,19 +320,43 @@ export function useSessionBoard(
     let dirty = false;
     let revision = 0;
     let sub: MessageSubscription | null = null;
-    let seenSubscribed = false;
+    let initialReadRequested = false;
     let authoritativePosition: Position | null = null;
+    async function readSnapshot(started: number): Promise<SessionBoardSnapshot | null> {
+      const current = () => active && revision === started;
+      const response = await sendRef.current({ type: "get_session_board", payload: { bridgeId: bridgeId!, sessionId: sessionId! }, requestId: uuidv4() });
+      if (!current() || !response.success) return null;
+      const inline = parseSnapshot(response.data);
+      if (inline) return inline;
+      const manifest = parseManifest(response.data, sessionId!);
+      if (!manifest) return null;
+      const bytes = new Uint8Array(manifest.totalBytes);
+      for (let offset = 0; offset < manifest.totalBytes; offset += manifest.chunkBytes) {
+        if (!current()) return null;
+        const chunk = await sendRef.current({ type: "get_session_board", payload: {
+          bridgeId: bridgeId!, sessionId: sessionId!, snapshotId: manifest.snapshotId, offset,
+        }, requestId: uuidv4() });
+        if (!current() || !chunk.success) return null;
+        const decoded = decodeChunk(chunk.data, manifest, offset);
+        if (!decoded) return null;
+        bytes.set(decoded, offset);
+      }
+      const hash = await crypto.subtle.digest("SHA-256", bytes);
+      if (!current()) return null;
+      const snapshotId = Array.from(new Uint8Array(hash), byte => byte.toString(16).padStart(2, "0")).join("");
+      if (snapshotId !== manifest.snapshotId) return null;
+      return parseSnapshot(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)));
+    }
     async function fetchSnapshot(): Promise<void> {
       if (!active) return;
       if (busy) { dirty = true; return; }
+      initialReadRequested = true;
       busy = true;
       const started = revision;
       const readPosition = sub?.streamPosition?.() ?? recovery.current.position;
       try {
-        const command: Command = { type: "get_session_board", payload: { bridgeId: bridgeId!, sessionId: sessionId! }, requestId: uuidv4() };
-        const response = await sendRef.current(command);
-        if (!active || revision !== started || !response.success) return;
-        const parsed = parseSnapshot(response.data);
+        const parsed = await readSnapshot(started);
+        if (!active || revision !== started) return;
         if (parsed?.board.rootId === sessionId) {
           authoritativePosition = readPosition;
           setSnapshot(parsed);
@@ -352,18 +399,17 @@ export function useSessionBoard(
           const recovered = context.recovered === true && context.positioned !== false && !!next
             && !!previous && previous.epoch === next.epoch && next.offset >= previous.offset;
           recovery.current.position = next;
-          seenSubscribed = true;
           if (!recovered) { revision++; void fetchSnapshot(); }
         });
         sub.subscribe();
       } catch {
         // Old relays may not have the namespace yet. Initial/visibility reads still work.
         if (sub) { sub.removeAllListeners(); sub.unsubscribe(); client.removeSubscription(sub); sub = null; }
-        void fetchSnapshot();
       }
-    } else {
-      void fetchSnapshot();
     }
+    // A relay without this namespace rejects asynchronously and never emits
+    // `subscribed`. Loading Overview must not depend on that event.
+    if (!initialReadRequested) void fetchSnapshot();
     return () => {
       active = false;
       refreshRef.current = async () => {};

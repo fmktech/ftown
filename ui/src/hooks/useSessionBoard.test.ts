@@ -1,12 +1,14 @@
 // @vitest-environment jsdom
-import { act, cleanup, renderHook } from "@testing-library/react";
+import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createHash, webcrypto } from "node:crypto";
 import type { Command, CommandResponse, SessionCard } from "@/types";
 import type { MessageClient, MessageEvents, MessageSubscription } from "@/lib/message-client";
 import type { SnapshotCard } from "@/components/SessionOverview";
 import { parseBoardPublication, parseSnapshot, useSessionBoard, type SessionBoardSnapshot } from "./useSessionBoard";
+import { SESSION_BOARD_CHUNK_BYTES, SESSION_BOARD_MAX_BYTES, type SessionBoardManifest } from "../../../bridge/src/session-board-protocol";
 
-afterEach(() => { cleanup(); vi.useRealTimers(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 const card = (sessionId: string, state: SessionCard["state"] = "working", archived = false): SnapshotCard => ({
   ...(archived ? { archived: true } : {}),
@@ -74,7 +76,7 @@ function messageClient() {
         removeAllListeners: () => listeners.clear(),
         streamPosition: () => streamPosition,
         emit: (event: string, context: never) => {
-          const value = context as { offset?: number; epoch?: string; streamPosition?: { offset: number; epoch: string } };
+          const value = (context ?? {}) as { offset?: number; epoch?: string; streamPosition?: { offset: number; epoch: string } };
           const position = value.streamPosition ?? (typeof value.offset === "number" && typeof value.epoch === "string" ? { offset: value.offset, epoch: value.epoch } : null);
           if (position && (!streamPosition || position.epoch !== streamPosition.epoch || position.offset > streamPosition.offset)) streamPosition = position;
           listeners.get(event)?.(context);
@@ -174,6 +176,20 @@ describe("useSessionBoard", () => {
     const { result } = renderHook(() => useSessionBoard(send, "bridge", "manager", true, f.client, "user")); await act(async () => {});
     expect(result.current.snapshot).not.toBeNull(); await visible(); expect(send).toHaveBeenCalledTimes(2);
   });
+  it("loads initially and on visibility when namespace rejection arrives asynchronously without subscribed", async () => {
+    const f = messageClient();
+    f.client.newSubscription.mockImplementationOnce(() => {
+      const sub = { state: "subscribing", subscribe: vi.fn(() => queueMicrotask(() => { sub.state = "unsubscribed"; })),
+        unsubscribe: vi.fn(), on: vi.fn(), off: vi.fn(), removeAllListeners: vi.fn(), publish: vi.fn(), presence: vi.fn() };
+      return sub as unknown as ReturnType<typeof f.client.newSubscription>;
+    });
+    const send = vi.fn(async () => reply(snapshotValue()));
+    const { result } = renderHook(() => useSessionBoard(send, "bridge", "manager", true, f.client, "user"));
+    await act(async () => {});
+    expect(result.current.snapshot).toEqual(snapshotValue());
+    expect(send).toHaveBeenCalledTimes(1);
+    await visible(); expect(send).toHaveBeenCalledTimes(2);
+  });
   it("never overwrites a newer push with an older in-flight RPC response", async () => {
     const f = messageClient(); let resolve!: (value: CommandResponse) => void;
     const send = vi.fn(() => new Promise<CommandResponse>(r => { resolve = r; }));
@@ -225,5 +241,102 @@ describe("useSessionBoard", () => {
   it("does nothing without a target session", async () => {
     const send = vi.fn(async () => reply(snapshotValue()));
     renderHook(() => useSessionBoard(send, "bridge", null, true)); await act(async () => {}); expect(send).not.toHaveBeenCalled();
+  });
+});
+
+function chunkedSnapshot() {
+  vi.stubGlobal("crypto", webcrypto);
+  const snapshot = snapshotValue();
+  snapshot.attention[0].event.message = "🧭雪".repeat(55_000);
+  const bytes = Buffer.from(JSON.stringify(snapshot), "utf8");
+  const manifest: SessionBoardManifest = { type: "session_board_chunks", snapshotId: createHash("sha256").update(bytes).digest("hex"),
+    rootId: "manager", totalBytes: bytes.length, chunkBytes: SESSION_BOARD_CHUNK_BYTES };
+  const chunk = (offset: number) => ({ type: "session_board_chunk", snapshotId: manifest.snapshotId, rootId: manifest.rootId,
+    offset, totalBytes: manifest.totalBytes, data: bytes.subarray(offset, offset + manifest.chunkBytes).toString("base64") });
+  return { snapshot, bytes, manifest, chunk };
+}
+
+describe("oversized board snapshots", () => {
+  it("reassembles bounded UTF-8 byte chunks and verifies their SHA-256 before parsing", async () => {
+    const f = chunkedSnapshot();
+    const send = vi.fn(async (command: Command) => {
+      const payload = command.payload as { snapshotId?: string; offset?: number };
+      return reply(payload.snapshotId ? f.chunk(payload.offset!) : f.manifest);
+    });
+    const { result } = renderHook(() => useSessionBoard(send, "bridge", "manager", true));
+    await act(async () => {});
+    await waitFor(() => expect(result.current.snapshot?.board.rootId).toBe("manager"));
+    expect(result.current.snapshot).toEqual(f.snapshot);
+    const calls = send.mock.calls.map(([command]) => command.payload);
+    expect(calls).toHaveLength(1 + Math.ceil(f.bytes.length / SESSION_BOARD_CHUNK_BYTES));
+    expect(calls[1]).toEqual({ bridgeId: "bridge", sessionId: "manager", snapshotId: f.manifest.snapshotId, offset: 0 });
+    expect(calls[2]).toMatchObject({ offset: SESSION_BOARD_CHUNK_BYTES });
+  });
+
+  it.each([
+    { totalBytes: SESSION_BOARD_MAX_BYTES + 1 }, { totalBytes: 300_000.5 }, { chunkBytes: 60_001 },
+    { snapshotId: "A".repeat(64) }, { rootId: "another-root" }, { extra: true },
+  ])("rejects a malformed manifest without requesting chunks: %o", async invalid => {
+    const f = chunkedSnapshot(); const send = vi.fn(async () => reply({ ...f.manifest, ...invalid }));
+    const { result } = renderHook(() => useSessionBoard(send, "bridge", "manager", true));
+    await act(async () => {});
+    expect(result.current.snapshot).toBeNull(); expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["truncated", "offset", "root", "digest", "total", "base64"])("rejects an invalid %s chunk and stops the read", async invalid => {
+    const f = chunkedSnapshot();
+    const send = vi.fn(async (command: Command) => {
+      const payload = command.payload as { snapshotId?: string; offset?: number };
+      if (!payload.snapshotId) return reply(f.manifest);
+      const chunk = f.chunk(payload.offset!);
+      if (invalid === "truncated") chunk.data = f.bytes.subarray(0, SESSION_BOARD_CHUNK_BYTES - 1).toString("base64");
+      if (invalid === "offset") chunk.offset++;
+      if (invalid === "root") chunk.rootId = "other";
+      if (invalid === "digest") chunk.snapshotId = "0".repeat(64);
+      if (invalid === "total") chunk.totalBytes++;
+      if (invalid === "base64") chunk.data = chunk.data.slice(0, -1) + "!";
+      return reply(chunk);
+    });
+    const { result } = renderHook(() => useSessionBoard(send, "bridge", "manager", true));
+    await act(async () => {});
+    expect(result.current.snapshot).toBeNull(); expect(send).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects complete bytes whose digest does not match the manifest", async () => {
+    const f = chunkedSnapshot(); f.manifest.snapshotId = "0".repeat(64);
+    const send = vi.fn(async (command: Command) => {
+      const payload = command.payload as { snapshotId?: string; offset?: number };
+      return reply(payload.snapshotId ? f.chunk(payload.offset!) : f.manifest);
+    });
+    const { result } = renderHook(() => useSessionBoard(send, "bridge", "manager", true));
+    await act(async () => {});
+    expect(result.current.snapshot).toBeNull();
+    expect(send).toHaveBeenCalledTimes(1 + Math.ceil(f.bytes.length / SESSION_BOARD_CHUNK_BYTES));
+  });
+
+  it("cancels chunk assembly when a newer pushed snapshot arrives", async () => {
+    const f = chunkedSnapshot(); const messages = messageClient();
+    let resolve!: (response: CommandResponse) => void;
+    const send = vi.fn(async (command: Command) => (command.payload as { snapshotId?: string }).snapshotId
+      ? new Promise<CommandResponse>(done => { resolve = done; }) : reply(f.manifest));
+    const { result } = renderHook(() => useSessionBoard(send, "bridge", "manager", true, messages.client, "user"));
+    await act(async () => {});
+    expect(send).toHaveBeenCalledTimes(2);
+    const fresh = snapshotValue(); fresh.events[0].summary = "new live state";
+    await act(async () => { messages.sub.emit("publication", { data: push(fresh) }); resolve(reply(f.chunk(0))); });
+    expect(result.current.snapshot).toEqual(fresh); expect(send).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the last snapshot when an immutable chunk expires and retries only on the next visibility event", async () => {
+    const f = chunkedSnapshot(); let initial = true;
+    const send = vi.fn(async (command: Command): Promise<CommandResponse> => {
+      if (initial) { initial = false; return reply(snapshotValue()); }
+      if ((command.payload as { snapshotId?: string }).snapshotId) return { requestId: command.requestId, success: false, data: { code: "session_board_snapshot_unavailable" } };
+      return reply(f.manifest);
+    });
+    const { result } = renderHook(() => useSessionBoard(send, "bridge", "manager", true));
+    await act(async () => {}); await visible();
+    expect(result.current.snapshot).toEqual(snapshotValue()); expect(send).toHaveBeenCalledTimes(3);
+    await visible(); expect(send).toHaveBeenCalledTimes(5);
   });
 });

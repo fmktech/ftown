@@ -9,6 +9,37 @@ import type { InboxEntry } from './SessionInbox';
 import { PREVIEW_CSP } from '@/lib/session-preview';
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+it('reports usage visibility from the rendered terminal and keeps a closed preview from disabling Overview pushes', async () => {
+  class TestResizeObserver implements ResizeObserver {
+    constructor(private callback: ResizeObserverCallback) {}
+    observe(target: Element) { this.callback([{ target, contentRect: DOMRect.fromRect({ width: 900 }), borderBoxSize: [], contentBoxSize: [], devicePixelContentBoxSize: [] }], this); }
+    unobserve() {} disconnect() {}
+  }
+  vi.stubGlobal('ResizeObserver', TestResizeObserver);
+  const manager: Session = { id: 'manager', bridgeId: 'bridge', name: 'Manager', status: 'running', createdAt: '', updatedAt: '' };
+  const child: Session = { ...manager, id: 'child', name: 'Child', parentSessionId: 'manager' };
+  const onUsageVisibilityChange = vi.fn(); const sendCommand = vi.fn(async () => ({ requestId: 'r', success: false }));
+  const workspace = (desktop: boolean, mobileTab: 'overview' | 'terminal', visible = true) => <SessionWorkspace
+    session={manager} sessions={[manager, child]} client={null} userId="user" readable visible={visible} onUsageVisibilityChange={onUsageVisibilityChange}
+    sendCommand={sendCommand} securityGeneration={0} open={false} onClose={vi.fn()} isDesktop={desktop} mobileTab={mobileTab} onMobileTab={vi.fn()} onRefit={vi.fn()}>
+    <div>Terminal content</div>
+  </SessionWorkspace>;
+  const { rerender, unmount } = render(workspace(true, 'overview'));
+  await act(async () => {});
+  expect(onUsageVisibilityChange).toHaveBeenLastCalledWith('manager');
+  expect(sendCommand).toHaveBeenCalledWith(expect.objectContaining({ type: 'get_session_board' }));
+  rerender(workspace(false, 'overview'));
+  expect(onUsageVisibilityChange).toHaveBeenLastCalledWith(null);
+  rerender(workspace(false, 'terminal'));
+  expect(onUsageVisibilityChange).toHaveBeenLastCalledWith('manager');
+  rerender(workspace(false, 'terminal', false));
+  expect(onUsageVisibilityChange).toHaveBeenLastCalledWith(null);
+  const reads = sendCommand.mock.calls.length;
+  await act(async () => document.dispatchEvent(new Event('visibilitychange')));
+  expect(sendCommand).toHaveBeenCalledTimes(reads);
+  unmount(); expect(onUsageVisibilityChange).toHaveBeenLastCalledWith(null);
+});
 it('reports separator bounds consistently at Home and End for fractional pane limits', () => {
   class TestResizeObserver implements ResizeObserver {
     constructor(private callback: ResizeObserverCallback) {}

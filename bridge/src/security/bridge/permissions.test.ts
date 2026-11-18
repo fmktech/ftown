@@ -9,6 +9,22 @@ test('handoff is a control operation on one session', () => {
   assert.throws(() => classifyCommand('not_a_command'), { code: 'permission_denied' });
 });
 
+test('dashboard reads classify exact initial/chunk/summary payloads and deny malformed variants', () => {
+  const board = { bridgeId: 'bridge', sessionId: 'root' };
+  const chunk = { ...board, snapshotId: 'a'.repeat(64), offset: 60_000 };
+  for (const payload of [board, chunk]) assert.deepEqual(classifyCommand('get_session_board', payload), { permission: 'read', mutating: false, operation: 'get_session_board', sessionId: 'root' });
+  assert.deepEqual(classifyCommand('get_attention_summary', { bridgeId: 'bridge', sessionIds: ['running', 'pending'] }), { permission: 'read', mutating: false, operation: 'get_attention_summary', sessionId: null });
+  for (const payload of [null, {}, { sessionId: 'root' }, { ...board, extra: true }, { ...board, snapshotId: 'a'.repeat(64) }, { ...board, offset: 0 },
+    { ...chunk, offset: -1 }, { ...chunk, offset: 1 }, { ...chunk, snapshotId: 'A'.repeat(64) }]) {
+    assert.throws(() => classifyCommand('get_session_board', payload), { code: 'permission_denied' });
+  }
+  for (const payload of [null, [], {}, { bridgeId: 'bridge', sessionIds: null }, { bridgeId: 'bridge', sessionIds: ['../root'] },
+    { bridgeId: 'bridge', sessionIds: ['__proto__'] }, { bridgeId: 'bridge', sessionIds: ['constructor'] }, { bridgeId: 'bridge', sessionIds: ['prototype'] },
+    { bridgeId: 'bridge', sessionIds: Array(501).fill('root') }, { bridgeId: 'bridge', sessionIds: [], sessionId: 'root' }]) {
+    assert.throws(() => classifyCommand('get_attention_summary', payload), { code: 'permission_denied' });
+  }
+});
+
 test('reads cannot consume inboxes or register native wake targets, while POST history search remains read-only', () => {
   assert.equal(classifyHttp('GET', '/api/sessions/session/inbox').permission, 'control');
   assert.equal(classifyHttp('GET', '/api/sessions/session/inbox?peek=1').permission, 'read');

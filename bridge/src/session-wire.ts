@@ -18,3 +18,9 @@ export function toWireSession(session: Session): Session {
   const { env: _env, previewSource: _previewSource, pullRequestLinkId, pullRequestReviewGeneration: _derived, ...rest } = session;
   return { ...rest, ...(session.pullRequestUrl && pullRequestLinkId ? { pullRequestReviewGeneration: prReviewGeneration(pullRequestLinkId) } : {}) };
 }
+
+/** Dashboard lists and deltas load complete plans through the authoritative board snapshot. */
+export function toDashboardWireSession(session: Session): Omit<Session, 'plan'> {
+  const { plan: _plan, ...wire } = toWireSession(session);
+  return wire;
+}

@@ -13,7 +13,13 @@ class SecureSubscription implements MessageSubscription {
   private queue: Promise<void> = Promise.resolve();
   private streamEpoch = "";
   private receiving = (context: PublicationContext) => {
-    if (Number.isSafeInteger(context.offset) && this.streamEpoch) this.latestStreamPosition = { offset: context.offset, epoch: this.streamEpoch };
+    // Capture the broker epoch before decryption yields. A reconnect can move
+    // the raw subscription to another epoch while this packet is queued.
+    const epoch = this.streamEpoch;
+    if (Number.isSafeInteger(context.offset) && context.offset! >= 0 && epoch
+      && (!this.latestStreamPosition || this.latestStreamPosition.epoch !== epoch || context.offset! > this.latestStreamPosition.offset)) {
+      this.latestStreamPosition = { offset: context.offset!, epoch };
+    }
     this.queue = this.queue.then(async () => {
       for (const value of await this.owner.securityRuntime.receive(context.data, this.channel)) {
         if (value.application.route.kind === "response" && record(value.application.data) && typeof value.application.data.status === "number" && value.application.data.status >= 400) {
@@ -23,23 +29,26 @@ class SecureSubscription implements MessageSubscription {
         }
         if (!this.owner.observe(value.bridgeId, value.application)) continue;
         this.emit("publication", { data: value.application.data, info: { user: this.owner.userId },
-          ...(context.offset === undefined ? {} : { offset: context.offset }), ...(this.streamEpoch ? { epoch: this.streamEpoch } : {}) });
+          ...(context.offset === undefined ? {} : { offset: context.offset }), ...(epoch ? { epoch } : {}) });
       }
     }).catch(() => { /* Unauthenticated/plaintext packets never reach domain handlers. */ });
   };
   private latestStreamPosition: { offset: number; epoch: string } | null = null;
   private subscribed = (context: SubscribedContext) => {
     const position = context.streamPosition;
-    if (position && Number.isSafeInteger(position.offset) && typeof position.epoch === "string") {
+    if (position && Number.isSafeInteger(position.offset) && position.offset >= 0 && typeof position.epoch === "string" && position.epoch) {
       this.streamEpoch = position.epoch;
       this.latestStreamPosition = { offset: position.offset, epoch: position.epoch };
     }
-    this.emit("subscribed", {
+    const subscribed: MessageEvents["subscribed"] = {
       recovered: context.recovered,
       positioned: context.positioned,
       wasRecovering: context.wasRecovering,
       ...(position ? { offset: position.offset, epoch: position.epoch } : {}),
-    });
+    };
+    // Domain consumers see the same order as the raw stream, even if a prior
+    // publication is still being decrypted when recovery completes.
+    this.queue = this.queue.then(() => { this.emit("subscribed", subscribed); }).catch(() => {});
   };
   private joined = (context: MessageEvents["join"]) => this.emit("join", context);
   private left = (context: MessageEvents["leave"]) => this.emit("leave", context);
@@ -263,6 +272,9 @@ export class SecureMessageClient implements MessageClient {
     if (value.type === "session_update") {
       if (!record(value.session) || value.session.bridgeId !== bridgeId) return false;
       register(value.session);
+    }
+    if (value.type === "session_board_snapshot" || value.type === "session_board_changed" || value.type === "session_snapshot_required") {
+      if (value.bridgeId !== bridgeId) return false;
     }
     if (value.type === "command_response" && record(value.response)) {
       const response = value.response;

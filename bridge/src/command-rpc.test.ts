@@ -7,6 +7,8 @@ import { AttentionStore } from './attention-store.js';
 import { AccountSelectionError, PlanItemError } from './create-ftown-session.js';
 import { WorktreeError } from './coordination/contract-b.js';
 import type { Board, SessionCard, TreeEvent } from './coordination/contract.js';
+import { PLAN_LIMITS, type BoardSnapshot } from './coordination/contract-c.js';
+import { SESSION_BOARD_CHUNK_BYTES, type SessionBoardChunk, type SessionBoardManifest } from './session-board-protocol.js';
 import type { AttentionItem } from './attention-events.js';
 
 import type { CommandRpcDeps } from './command-rpc.js';
@@ -21,8 +23,11 @@ import { UpdateAdmission, UpdateResponseTicket } from './update-admission.js';
 import { UpdateEffects } from './update-effects.js';
 import type { BridgeUpdateCoordinator } from './bridge-update.js';
 import { BridgeSecurityError } from './security/bridge/errors.js';
-import type { BridgeSecurityService } from './security/bridge/security.js';
+import { BridgeSecurityService, applicationJson } from './security/bridge/security.js';
 import type { VerifiedApplication } from './security/protocol.js';
+import { generateEndpoint, open } from './security/crypto.js';
+import { LOCAL_RECOVERY_AUTHORITY } from './security/bridge/policy.js';
+import { ATTENTION_SUMMARY_MAX_BYTES, ATTENTION_SUMMARY_TOO_LARGE } from './attention-summary-protocol.js';
 import type { ModelRoutingService } from './quota/routing-service.js';
 import type { ModelRoutingSnapshot, SetModelRoutingResult } from './quota/types.js';
 
@@ -67,22 +72,131 @@ test('human answers store provenance and route fields flow through the attention
   assert.equal(projectedEscalated?.escalationNote, 'Parent unavailable'); assert.equal(projectedEscalated?.answeredBy, undefined);
 });
 
-test('get_attention_summary batches only running sessions with unresolved explicit attention', async t => {
+test('get_attention_summary batches live owner sessions with unresolved explicit attention', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'attention-summary-rpc-'));
   await mkdir(join(dir, 'one')); await mkdir(join(dir, 'two')); await mkdir(join(dir, 'stopped'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const attentionStore = new AttentionStore(id => join(dir, id));
   const item = await attentionStore.record('one', 'Notification', { notification_type: 'agent_needs_input', message: 'Needs a reply' });
+  await mkdir(join(dir, 'pending'));
+  const pending = await attentionStore.record('pending', 'Notification', { notification_type: 'agent_needs_input', message: 'Waiting to run' });
   await attentionStore.record('two', 'Notification', { notification_type: 'elicitation_dialog', message: 'not explicit' });
   const reads: string[] = [];
-  const sessions = new Map([['one', { id: 'one', bridgeId: 'owner', status: 'running' }], ['two', { id: 'two', bridgeId: 'owner', status: 'running' }], ['stopped', { id: 'stopped', bridgeId: 'owner', status: 'completed' }]]);
+  const sessions = new Map([['one', { id: 'one', bridgeId: 'owner', status: 'running' }], ['two', { id: 'two', bridgeId: 'owner', status: 'running' }], ['stopped', { id: 'stopped', bridgeId: 'owner', status: 'completed' }],
+    ['pending', { id: 'pending', bridgeId: 'owner', status: 'pending' }], ['foreign', { id: 'foreign', bridgeId: 'other', status: 'running' }]]);
   const responses: CommandResponse[] = [];
   const handler = createCommandHandler({ bridgeId: 'owner', attentionStore,
     sessionController: { get: async (id: string) => { reads.push(id); return sessions.get(id); } } as unknown as SessionController,
     publishCommandResponse: async response => { responses.push(response); } });
-  await handler({ type: 'get_attention_summary', requestId: 'summary', payload: { bridgeId: 'owner', sessionIds: ['one', 'two', 'stopped'] } } as unknown as Command);
-  assert.deepEqual(responses.at(-1)?.data, { summary: { one: { attention: item, sequence: item?.sequence } } });
-  assert.deepEqual(reads, ['one', 'two', 'stopped']);
+  await handler({ type: 'get_attention_summary', requestId: 'summary', payload: { bridgeId: 'owner', sessionIds: ['one', 'two', 'stopped', 'pending', 'foreign', 'missing', 'one'] } } as unknown as Command);
+  assert.deepEqual(responses.at(-1)?.data, { summary: { one: { attention: item, sequence: item?.sequence }, pending: { attention: pending, sequence: pending?.sequence } } });
+  assert.deepEqual(reads, ['one', 'two', 'stopped', 'pending', 'foreign', 'missing']);
+  const before = reads.length;
+  for (const payload of [null, [], {}, { bridgeId: 'owner', sessionIds: null }, { bridgeId: 'owner', sessionIds: ['__proto__'] }, { bridgeId: 'owner', sessionIds: ['a'.repeat(201)] },
+    { bridgeId: 'owner', sessionIds: ['one'], sessionId: 'one' }, { bridgeId: 'owner', sessionIds: Array(501).fill('one') }]) {
+    await handler({ type: 'get_attention_summary', requestId: 'invalid', payload } as Command);
+    assert.deepEqual(responses.at(-1)?.data, { code: 'invalid_attention_request' });
+  }
+  assert.equal(reads.length, before);
+});
+
+test('oversized attention summaries return a sealable split hint and legal smaller subsets preserve every notice', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'attention-summary-cap-'));
+  const ownerId = '7bac2a7f-c58e-4845-856f-8283fb07ad96';
+  const identity = await generateEndpoint(ownerId, 'bridge'), browser = await generateEndpoint(ownerId, 'browser');
+  const security = new BridgeSecurityService(identity, 'bridge', directory, { relayUserId: 'owner@example.test' });
+  t.after(async () => { await security.close(); await rm(directory, { recursive: true, force: true }); });
+  const invite = await security.policy.createInvitation(LOCAL_RECOVERY_AUTHORITY, { label: 'dashboard' });
+  await security.policy.consumeInvitation({ type: 'enroll', candidate: browser.endpoint, invitationId: invite.invitationId, invitationSecret: invite.secret, label: 'dashboard' });
+  const attentionStore = new AttentionStore(id => join(directory, id));
+  const sessionIds = Array.from({ length: 60 }, (_, n) => `session-${n}`);
+  const expected: Record<string, { attention: AttentionItem; sequence: number }> = {};
+  for (const id of sessionIds) {
+    await mkdir(join(directory, id));
+    const attention = await attentionStore.record(id, 'Notification', { notification_type: 'agent_needs_input', title: '界'.repeat(200), message: '界'.repeat(2000) });
+    assert.ok(attention); assert.equal(attention.title.length, 200); assert.equal(attention.message.length, 2000);
+    expected[id] = { attention, sequence: attention.sequence };
+  }
+  const principal = await security.policy.principal(browser.endpoint.id);
+  const verified = { principal } as VerifiedApplication;
+  const route = { transport: 'cloud' as const, channel: 'commands:rpc#owner@example.test', bridgeId: 'bridge', pairId: null };
+  const sealAndOpen = async (response: CommandResponse) => {
+    const packet = await security.sealTo(browser.endpoint.id, { type: 'application', route: { kind: 'response', requestId: response.requestId },
+      data: applicationJson({ type: 'command_response', response }), mcp: null }, route);
+    assert.ok(Buffer.byteLength(JSON.stringify(packet)) < 450_000);
+    const opened = await open(browser, identity.endpoint, packet, { ownerId, bridgeId: 'bridge', channel: route.channel, recipientId: browser.endpoint.id, purpose: 'application' });
+    return JSON.parse(new TextDecoder().decode(opened)).data.response as CommandResponse;
+  };
+  const unbounded: CommandResponse = { requestId: 'unbounded', success: true, data: { summary: expected } };
+  const json = JSON.stringify({ type: 'command_response', response: unbounded });
+  assert.ok(json.length < ATTENTION_SUMMARY_MAX_BYTES, 'character count would miss this legal multibyte payload');
+  assert.ok(Buffer.byteLength(json, 'utf8') > ATTENTION_SUMMARY_MAX_BYTES);
+  await assert.rejects(security.sealTo(browser.endpoint.id, { type: 'application', route: { kind: 'response', requestId: unbounded.requestId },
+    data: applicationJson({ type: 'command_response', response: unbounded }), mcp: null }, route), { code: 'capacity_exceeded' });
+  let requestNumber = 0;
+  const send = async (ids: string[]) => {
+    let response: CommandResponse | undefined;
+    await createCommandHandler({ bridgeId: 'bridge', security, attentionStore,
+      sessionController: { get: async (id: string) => ({ id, bridgeId: 'bridge', status: 'running' }) } as unknown as SessionController,
+      publishCommandResponse: async value => { response = value; },
+    })({ type: 'get_attention_summary', requestId: `summary-${requestNumber++}`, payload: { bridgeId: 'bridge', sessionIds: ids } }, verified);
+    assert.ok(response); return sealAndOpen(response);
+  };
+  const oversized = await send(sessionIds);
+  assert.equal(oversized.success, false); assert.deepEqual(oversized.data, { code: ATTENTION_SUMMARY_TOO_LARGE });
+  const combined: typeof expected = {};
+  for (const ids of [sessionIds.slice(0, 30), sessionIds.slice(30)]) {
+    const response = await send(ids); assert.equal(response.success, true);
+    Object.assign(combined, (response.data as { summary: typeof expected }).summary);
+  }
+  assert.deepEqual(combined, expected);
+  const empty = await send([]); assert.equal(empty.success, true); assert.deepEqual(empty.data, { summary: {} });
+});
+
+test('a maximum-plan dashboard list seals successfully while the authoritative board retains the full plan', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'dashboard-session-projection-'));
+  const ownerId = '7bac2a7f-c58e-4845-856f-8283fb07ad96';
+  const identity = await generateEndpoint(ownerId, 'bridge'), browser = await generateEndpoint(ownerId, 'browser');
+  const security = new BridgeSecurityService(identity, 'bridge', directory, { relayUserId: 'owner@example.test' });
+  t.after(async () => { await security.close(); await rm(directory, { recursive: true, force: true }); });
+  const invite = await security.policy.createInvitation(LOCAL_RECOVERY_AUTHORITY, { label: 'dashboard' });
+  await security.policy.consumeInvitation({ type: 'enroll', candidate: browser.endpoint, invitationId: invite.invitationId, invitationSecret: invite.secret, label: 'dashboard' });
+  const session: Session = { id: 'root', bridgeId: 'bridge', name: 'Manager', command: 'claude', status: 'running', createdAt: '', updatedAt: '',
+    plan: { seq: PLAN_LIMITS.items, items: Array.from({ length: PLAN_LIMITS.items }, (_, n) => ({ id: `p${n + 1}`,
+      title: '界'.repeat(PLAN_LIMITS.title), note: '界'.repeat(PLAN_LIMITS.note), after: [], priority: 2, state: 'todo', createdAt: '', updatedAt: '' })) } };
+  const expectedPlan = structuredClone(session.plan);
+  const board: Board = { rootId: 'root', cursor: 0, cards: [], rollup: { working: 0, blocked: 0, waiting_review: 0, done: 0, failed: 0, unset: 0 },
+    plan: { items: session.plan!.items, ready: [] } };
+  const principal = await security.policy.principal(browser.endpoint.id);
+  const route = { transport: 'cloud' as const, channel: 'commands:rpc#owner@example.test', bridgeId: 'bridge', pairId: null };
+  const verified = { principal } as VerifiedApplication;
+  let nextId = 0;
+  const source = { board: async () => board, events: { head: async () => 0, read: async () => ({ events: [], cursor: 0 }) }, openAttention: async () => [] };
+  const send = async (type: 'list_sessions' | 'get_session_board', payload: Record<string, unknown>) => {
+    const requestId = `projection-${nextId++}`; let result: CommandResponse | undefined;
+    await createCommandHandler({ bridgeId: 'bridge', security, sessionBoard: source,
+      sessionController: { list: async () => [session], get: async () => session } as unknown as SessionController,
+      publishCommandResponse: async response => { result = response; },
+    })({ type, requestId, payload }, verified);
+    const packet = await security.sealTo(browser.endpoint.id, { type: 'application', route: { kind: 'response', requestId },
+      data: applicationJson({ type: 'command_response', response: result }), mcp: null }, route);
+    assert.ok(Buffer.byteLength(JSON.stringify(packet)) < 450_000);
+    const opened = await open(browser, identity.endpoint, packet, { ownerId, bridgeId: 'bridge', channel: route.channel, recipientId: browser.endpoint.id, purpose: 'application' });
+    return JSON.parse(new TextDecoder().decode(opened)).data.response as CommandResponse;
+  };
+  const list = await send('list_sessions', { bridgeId: 'bridge' });
+  assert.equal(list.success, true);
+  const listed = (list.data as { sessions: Session[] }).sessions;
+  assert.equal(listed.length, 1); assert.equal(listed[0].id, 'root'); assert.equal('plan' in listed[0], false);
+  assert.deepEqual(session.plan, expectedPlan);
+  const manifest = (await send('get_session_board', { bridgeId: 'bridge', sessionId: 'root' })).data as SessionBoardManifest;
+  assert.equal(manifest.type, 'session_board_chunks');
+  const chunks: Buffer[] = [];
+  for (let offset = 0; offset < manifest.totalBytes; offset += SESSION_BOARD_CHUNK_BYTES) {
+    const result = await send('get_session_board', { bridgeId: 'bridge', sessionId: 'root', snapshotId: manifest.snapshotId, offset });
+    assert.equal(result.success, true); chunks.push(Buffer.from((result.data as SessionBoardChunk).data, 'base64'));
+  }
+  assert.deepEqual(JSON.parse(Buffer.concat(chunks).toString('utf8')).board.plan.items, expectedPlan!.items);
 });
 
 test('targeted update commands validate payloads and bind an accepted ticket to verified dispatch', async () => {
@@ -888,10 +1002,10 @@ test('get_session_board returns a read-only snapshot and rejects a bad payload',
 
   const missing = await send('missing', { bridgeId: 'bridge', sessionId: 'nope' });
   assert.equal(missing?.success, false);
-  assert.equal(missing?.error, 'Unknown session');
+  assert.deepEqual(missing?.data, { code: 'session_board_snapshot_unavailable' });
   const foreignSession = await send('foreign-session', { bridgeId: 'bridge', sessionId: 'other-bridge' });
   assert.equal(foreignSession?.success, false);
-  assert.equal(foreignSession?.error, 'Unknown session');
+  assert.deepEqual(foreignSession?.data, { code: 'session_board_snapshot_unavailable' });
 
   const before = responses.length;
   await handler({ type: 'get_session_board' as Command['type'], requestId: 'foreign', payload: { bridgeId: 'other', sessionId: 'root' } });
@@ -929,6 +1043,46 @@ test('get_session_board returns a read-only snapshot and rejects a bad payload',
   assert.equal(read, false);
   assert.equal(responses.at(-1)?.success, false);
   assert.equal((responses.at(-1)?.data as { code?: string } | undefined)?.code, 'permission_denied');
+});
+
+test('get_session_board chunks a maximum plan across per-command handlers and enforces live owner/read scope', async () => {
+  const responses: CommandResponse[] = []; let builds = 0, live = true, permitted = true, readChecks = 0;
+  const board: Board = { rootId: 'root', cursor: 0, cards: [], rollup: { working: 0, blocked: 0, waiting_review: 0, done: 0, failed: 0, unset: 0 },
+    plan: { ready: [], items: Array.from({ length: PLAN_LIMITS.items }, (_, n) => ({ id: `p${n + 1}`, title: '界'.repeat(PLAN_LIMITS.title), note: '界'.repeat(PLAN_LIMITS.note),
+      after: [], priority: 2, state: 'todo', createdAt: '', updatedAt: '' })) } };
+  const source = { board: async () => { builds++; return structuredClone(board); }, events: { head: async () => 0, read: async () => ({ events: [], cursor: 0 }) }, openAttention: async () => [] };
+  const security = { revalidate: async () => {}, policy: { revalidate: async () => { readChecks++; if (!permitted) throw new BridgeSecurityError('permission_denied'); } } } as unknown as BridgeSecurityService;
+  const deps: CommandRpcDeps = { bridgeId: 'bridge', security, sessionBoard: source,
+    sessionController: { get: async (id: string) => live ? { id, bridgeId: id === 'foreign-session' ? 'other' : 'bridge' } : null } as unknown as SessionController,
+    publishCommandResponse: async response => { responses.push(response); } };
+  let nextId = 0;
+  const send = async (payload: Record<string, unknown>, principal = 'browser') => {
+    const verified = { principal: { endpoint: { id: principal }, policyGeneration: 1 } } as VerifiedApplication;
+    await createCommandHandler(deps)({ type: 'get_session_board', requestId: `board-${nextId++}`, payload }, verified);
+    return responses.at(-1)!;
+  };
+  const initial = await send({ bridgeId: 'bridge', sessionId: 'root' });
+  assert.equal(initial.success, true);
+  const manifest = initial.data as SessionBoardManifest;
+  assert.equal(manifest.type, 'session_board_chunks'); assert.ok(manifest.totalBytes > 300_000);
+  const chunks: Buffer[] = [];
+  for (let offset = 0; offset < manifest.totalBytes; offset += SESSION_BOARD_CHUNK_BYTES) {
+    const response = await send({ bridgeId: 'bridge', sessionId: 'root', snapshotId: manifest.snapshotId, offset });
+    assert.equal(response.success, true);
+    chunks.push(Buffer.from((response.data as SessionBoardChunk).data, 'base64'));
+  }
+  assert.deepEqual(JSON.parse(Buffer.concat(chunks).toString('utf8')), { board, events: [], attention: [] } satisfies BoardSnapshot);
+  assert.equal(builds, 1); assert.ok(readChecks > chunks.length);
+  const request = { bridgeId: 'bridge', sessionId: 'root', snapshotId: manifest.snapshotId, offset: 0 };
+  for (const response of [await send(request, 'other-browser'), await send({ ...request, sessionId: 'child' }), await send({ ...request, sessionId: 'foreign-session' })]) {
+    assert.equal(response.success, false); assert.deepEqual(response.data, { code: 'session_board_snapshot_unavailable' });
+  }
+  for (const bad of [{ ...request, snapshotId: undefined }, { ...request, offset: -1 }, { ...request, offset: 1 }, { ...request, offset: 0.5 },
+    { ...request, snapshotId: 'A'.repeat(64) }, { ...request, extra: 1 }, { bridgeId: 'bridge', sessionId: 'root', snapshotId: manifest.snapshotId }]) {
+    const response = await send(bad); assert.deepEqual(response.data, { code: 'invalid_session_board_request' });
+  }
+  permitted = false; assert.deepEqual((await send(request)).data, { code: 'permission_denied' });
+  permitted = true; live = false; assert.deepEqual((await send(request)).data, { code: 'session_board_snapshot_unavailable' });
 });
 
 test('create_session forwards planItem and maps PlanItemError to a client error', async () => {

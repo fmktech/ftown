@@ -228,7 +228,7 @@ export class BridgeSecurityService implements Omit<BridgeSecurity, 'adoptAccount
         return classifyCommand(route.command, data);
       }
       const payload = object(data.payload ?? null);
-      const sessionId = route.command === 'get_attention_summary' ? null : (typeof payload.sessionId === 'string' ? payload.sessionId : null);
+      const sessionId = typeof payload.sessionId === 'string' ? payload.sessionId : null;
       if (data.type !== route.command || data.requestId !== route.requestId || payload.bridgeId !== this.bridgeId
         || sessionId !== route.sessionId) throw new BridgeSecurityError('wrong_context');
       return classifyCommand(route.command, payload);

@@ -3,7 +3,7 @@ import type { Centrifuge } from 'centrifuge';
 import type { EndpointIdentity, SecureApplication, SecureEnvelope } from '@security/protocol';
 import { generateEndpoint, open, seal } from '@security/crypto';
 import type { LedgerCheckpoint } from '@security/ledger/protocol';
-import { SecureEndpointRuntime, type LedgerBridgeAuthority } from './secure-endpoint-runtime';
+import { applicationJson, SecureEndpointRuntime, type LedgerBridgeAuthority } from './secure-endpoint-runtime';
 import { SecureMessageClient, type ReadyRetryPolicy } from './secure-message-client';
 
 const ownerId = '00000000-0000-4000-8000-000000000001';
@@ -58,6 +58,63 @@ async function ledgerSetup(allowed: () => boolean) {
 }
 
 describe('secure broker adapter', () => {
+  it('binds all dashboard snapshot publications to their encrypted sender bridge', async () => {
+    const f = await setup();
+    const publications = ['session_board_snapshot', 'session_board_changed', 'session_snapshot_required'];
+    for (const type of publications) {
+      const publicationChannel = type === 'session_snapshot_required' ? `sessions:updates#${userId}` : `session-board:updates#${userId}`;
+      const sub = f.client.getSubscription(publicationChannel) ?? f.client.newSubscription(publicationChannel);
+      const received = vi.fn(); sub.on('publication', received);
+      const raw = f.raw.subscriptions.get(publicationChannel)!;
+      const emit = raw.on.mock.calls.find(([event]) => event === 'publication')![1];
+      for (const bridgeId of ['bridge-b', 'bridge-a']) {
+        const now = Date.now();
+        const packet = await seal(f.a, f.browser.endpoint, { type: 'ftown_encrypted', version: 1, ownerId,
+          senderId: f.a.endpoint.id, recipientId: f.browser.endpoint.id, bridgeId: 'bridge-a', channel: publicationChannel,
+          purpose: 'application', messageId: crypto.randomUUID(), receiverEpoch: null, createdAt: now, expiresAt: now + 120000 },
+        new TextEncoder().encode(JSON.stringify({ type: 'application', route: { kind: 'publication' }, data: { type, bridgeId, rootId: 'manager' }, mcp: null })));
+        emit({ data: packet });
+      }
+      const flushed = new Promise<void>(resolve => { sub.on('subscribed', () => resolve()); });
+      raw.on.mock.calls.find(([event]) => event === 'subscribed')![1]({ recovered: false });
+      await flushed;
+      expect(received).toHaveBeenCalledTimes(1);
+      expect(received.mock.calls[0][0].data).toMatchObject({ type, bridgeId: 'bridge-a' });
+      sub.off('publication', received);
+    }
+    f.client.dispose(); f.runtime.dispose();
+  });
+
+  it('preserves epoch and callback order across a reconnect while decryption is deferred', async () => {
+    const f = await setup();
+    const publicationChannel = `session-board:updates#${userId}`;
+    const sub = f.client.newSubscription(publicationChannel);
+    const raw = f.raw.subscriptions.get(publicationChannel)!;
+    const publication = raw.on.mock.calls.find(([event]) => event === 'publication')![1];
+    const subscribed = raw.on.mock.calls.find(([event]) => event === 'subscribed')![1];
+    const seen: string[] = [];
+    sub.on('subscribed', context => { seen.push(`sub:${context.epoch}`); });
+    sub.on('publication', context => { seen.push(`pub:${context.epoch}:${context.offset}`); });
+    let release!: () => void;
+    const waiting = new Promise<void>(resolve => { release = resolve; });
+    let count = 0;
+    const receive = vi.spyOn(f.runtime, 'receive').mockImplementation(async () => {
+      if (++count === 1) await waiting;
+      return [{ bridgeId: 'bridge-a', application: { type: 'application', route: { kind: 'publication' },
+        data: applicationJson({ type: 'session_board_changed', bridgeId: 'bridge-a', rootId: 'manager' }), mcp: null } }];
+    });
+    subscribed({ recovered: false, positioned: true, streamPosition: { offset: 1, epoch: 'old' } });
+    publication({ data: {}, offset: 2 });
+    await vi.waitFor(() => expect(receive).toHaveBeenCalledTimes(1));
+    subscribed({ recovered: false, positioned: true, streamPosition: { offset: 0, epoch: 'new' } });
+    publication({ data: {}, offset: 1 });
+    expect(sub.streamPosition()).toEqual({ offset: 1, epoch: 'new' });
+    expect(seen).toEqual(['sub:old']);
+    release();
+    await vi.waitFor(() => expect(seen).toEqual(['sub:old', 'pub:old:2', 'sub:new', 'pub:new:1']));
+    f.client.dispose(); f.runtime.dispose();
+  });
+
   it('coordinates reentrant recoveries per bridge and ignores stale completion after disconnect', async () => {
     const raw = new RawClient(); raw.state = 'connected';
     const states = new Map([['a', 'offline'], ['b', 'ready']]);
