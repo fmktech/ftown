@@ -17,6 +17,18 @@ const require = createRequire(new URL('../package.json', import.meta.url));
 const { Centrifuge } = require('centrifuge');
 const WebSocket = require('ws');
 const jwt = require('jsonwebtoken');
+const subscriptionRequests = [];
+class ObservedWebSocket extends WebSocket {
+  send(data, ...options) {
+    for (const line of String(data).split('\n')) {
+      try {
+        const request = JSON.parse(line).subscribe;
+        if (request) subscriptionRequests.push({ channel: request.channel, recover: request.recover, offset: request.offset, epoch: request.epoch });
+      } catch { /* Non-JSON frames have no subscription metadata. */ }
+    }
+    return super.send(data, ...options);
+  }
+}
 const args = process.argv.slice(2);
 assert.ok(!args.length || (args.length === 2 && args[0] === '--archive'), 'Use --archive /path/to/official-platform-archive.tar.gz');
 const archive = args.length ? await readFile(resolve(args[1])) : null;
@@ -67,7 +79,7 @@ async function freePort() {
 const secret = randomBytes(32).toString('hex');
 function clientFor(port, owner, audience = HUB_JWT_AUDIENCE) {
   const token = jwt.sign({ sub: owner }, secret, { audience, expiresIn: '1m' });
-  const client = new Centrifuge(`ws://127.0.0.1:${port}/connection/websocket`, { token, websocket: WebSocket });
+  const client = new Centrifuge(`ws://127.0.0.1:${port}/connection/websocket`, { token, websocket: ObservedWebSocket });
   clients.add(client);
   return client;
 }
@@ -76,8 +88,9 @@ async function connect(client) {
   client.connect(); await bounded(ready, 'connection timeout');
 }
 const subscriptionContexts = new WeakMap();
-async function subscribe(client, channel, options = {}) {
+async function subscribe(client, channel, options = {}, onPublication) {
   const subscription = client.newSubscription(channel, options);
+  if (onPublication) subscription.on('publication', onPublication);
   const ready = new Promise((done, fail) => { subscription.once('subscribed', done); subscription.once('error', context => fail(new Error(`subscribe rejected ${context.error.code}`))); subscription.once('unsubscribed', context => fail(new Error(`subscribe rejected ${context.code}`))); });
   subscription.subscribe();
   try { subscriptionContexts.set(subscription, await bounded(ready, 'subscription timeout')); }
@@ -121,26 +134,53 @@ try {
   assert.ok((await bounded(subscription.history({ limit: 10 }), 'post-reconnect history timeout')).publications.some(item => item.data.text === payload.text));
 
   const publisher = clientFor(port, 'owner'); await connect(publisher);
+  await assert.rejects(publisher.publish('unconfigured-fixture:updates#owner', { type: 'fixture' }),
+    error => error?.code === 102, 'the pinned relay must identify an unknown namespace with numeric102');
   for (const channel of ['sessions:updates#owner', 'session-board:updates#owner']) {
-    const sub = await subscribe(owner, channel, { recoverable: true, positioned: true });
-    assert.equal(subscriptionContexts.get(sub).recoverable, true);
-    assert.equal(subscriptionContexts.get(sub).positioned, true);
+    await bounded(publisher.publish(channel, { type: 'fixture', revision: 0 }), 'prior dashboard history publish timeout');
+    const fresh = [];
+    const sub = await subscribe(owner, channel, { recoverable: true, positioned: true }, context => fresh.push(context));
+    const initial = subscriptionContexts.get(sub);
+    assert.equal(initial.recoverable, true);
+    assert.equal(initial.positioned, true);
+    assert.equal(initial.wasRecovering, false, 'a fresh subscription omits since');
+    assert.equal(initial.streamPosition.offset, 1, 'prior records are positioned without replay');
+    assert.ok(typeof initial.streamPosition.epoch === 'string' && initial.streamPosition.epoch.length > 0);
+    const initialPosition = { ...initial.streamPosition };
+    assert.deepEqual(fresh, [], 'fresh subscriptions must not replay prior history');
     await assert.rejects(subscribe(foreign, channel), /subscribe rejected/, 'foreign account must not subscribe to dashboard channels');
     const first = new Promise(done => sub.once('publication', done));
     await bounded(publisher.publish(channel, { type: 'fixture', revision: 1 }), 'dashboard publish timeout');
     const before = await bounded(first, 'first dashboard publication timeout');
-    assert.ok(before.offset > 0);
+    assert.equal(before.offset, initialPosition.offset + 1);
+    assert.deepEqual(fresh.map(context => context.data.revision), [1]);
+    const position = { offset: before.offset, epoch: initialPosition.epoch };
     owner.disconnect();
+    sub.unsubscribe(); owner.removeSubscription(sub);
     await bounded(publisher.publish(channel, { type: 'fixture', revision: 2 }), 'disconnected dashboard publish timeout');
-    const subscribed = new Promise(done => sub.once('subscribed', done));
-    const replay = new Promise(done => sub.once('publication', done));
-    await connect(owner);
-    const recovery = await bounded(subscribed, 'dashboard recovery timeout');
+    const replay = [];
+    let receiveReplay;
+    const replayedPublication = new Promise(resolve => { receiveReplay = resolve; });
+    const resubscription = subscribe(owner, channel, { recoverable: true, positioned: true, since: position }, context => {
+      replay.push(context); receiveReplay(context);
+    });
+    const [resumed] = await Promise.all([resubscription, connect(owner)]);
+    const recovery = subscriptionContexts.get(resumed);
     assert.equal(recovery.recovered, true);
     assert.equal(recovery.wasRecovering, true);
-    const recovered = await bounded(replay, 'recovered dashboard publication timeout');
+    assert.equal(recovery.streamPosition.epoch, position.epoch);
+    assert.ok(subscriptionRequests.some(request => request.channel === channel && request.recover === true
+      && request.offset === position.offset && request.epoch === position.epoch), 'resume must send the exact requested offset and epoch');
+    assert.equal(recovery.hasRecoveredPublications, true);
+    const recovered = await bounded(replayedPublication, 'recovered dashboard publication timeout');
+    assert.equal(recovered.offset, position.offset + 1);
     assert.equal(recovered.data.revision, 2);
-    assert.ok(recovered.offset > before.offset);
+    // Broker replies may describe the recovery start or the frontier after
+    // replay. The requested position and observed publication remain exact.
+    assert.ok(Number.isSafeInteger(recovery.streamPosition.offset) && recovery.streamPosition.offset >= position.offset
+      && recovery.streamPosition.offset <= recovered.offset, 'recovery context must remain within the requested and observed frontiers');
+    assert.deepEqual(replay.map(context => context.data.revision), [2]);
+    assert.equal(replay[0].offset, position.offset + 1);
   }
 
   // Raw publish-only namespaces retain their existing relay permissions. The
@@ -233,6 +273,7 @@ try {
   await bounded(exited, 'owned hub did not exit');
   console.log(JSON.stringify({ result: 'PASS', version: CENTRIFUGO_VERSION, verifiedArchiveAndCache: true, config0600: true,
     jwtAudience: true, ownerIsolation: true, publishHistoryReconnect: true, dashboardPositionedRecovery: true,
+    dashboardFreshSubscriptionSkipsHistory: true, unknownNamespace102: true,
     authenticatedApplicationBoundary: true, apiAdminDisabled: true, loopbackOnly: true }));
 } finally {
   clearTimeout(deadline);

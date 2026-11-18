@@ -77,3 +77,8 @@ export function isPermanentPublicationError(error: unknown): boolean {
   return [101, 102, 103, 104, 107].includes(Number(code))
     || code === 'permission_denied' || code === 'approval_required' || code === 'key_revoked';
 }
+
+/** Centrifugo's numeric unknown-channel refusal; policy failures do not establish namespace support. */
+export function isUnknownPublicationNamespace(error: unknown): boolean {
+  return !!error && typeof error === 'object' && 'code' in error && error.code === 102;
+}

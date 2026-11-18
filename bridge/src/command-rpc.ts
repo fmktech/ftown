@@ -111,6 +111,10 @@ function planItemFromPayload(payload: { planItem?: unknown }): string | undefine
   return typeof payload.planItem === 'string' && PLAN_ITEM_ID.test(payload.planItem) ? payload.planItem : undefined;
 }
 
+async function revalidateAttentionRead(deps: CommandRpcDeps, verified: VerifiedApplication | undefined): Promise<void> {
+  if (deps.security && verified) await deps.security.policy.revalidate(verified.principal, 'read');
+}
+
 async function handleGetSessionBoard(
   deps: CommandRpcDeps,
   command: Command,
@@ -441,6 +445,7 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
             || Object.keys(payload).some(key => !['bridgeId', 'sessionIds'].includes(key)))
             throw new AttentionError('invalid_attention_request', 'Invalid attention summary target', 400);
           if (!deps.attentionStore) throw new AttentionError('attention_not_ready', 'Attention store is not ready', 503);
+          await revalidateAttentionRead(deps, verified);
           const summary: Record<string, { attention: AttentionItem; sequence: number }> = {};
           for (const sessionId of Array.from(new Set(payload.sessionIds as string[]))) {
             const session = await sessionController.get(sessionId);
@@ -449,6 +454,7 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
             const snapshot = await deps.attentionStore.explicitSnapshot(sessionId);
             if (snapshot.attention) summary[sessionId] = { attention: snapshot.attention, sequence: snapshot.sequence };
           }
+          await revalidateAttentionRead(deps, verified);
           response = { requestId: command.requestId, success: true, data: { summary } };
           if (Buffer.byteLength(JSON.stringify({ type: 'command_response', response }), 'utf8') > ATTENTION_SUMMARY_MAX_BYTES) {
             throw new AttentionError(ATTENTION_SUMMARY_TOO_LARGE, 'Attention summary is too large; request fewer sessions.', 413);
