@@ -382,7 +382,8 @@ test('a failed link attempt backs off instead of retrying on every request', asy
     if (route.kind === 'http' && route.path === '/api/peers/link') { offers++; return { status: 403, body: { error: 'permission_denied' } }; }
     return echo(message);
   };
-  const links = new PeerLinks({ log: () => undefined, factory: () => new FakeConnection(), bridgeId: studio.bridgeId, endpointId: studio.endpoint.id,
+  const logged: string[] = [];
+  const links = new PeerLinks({ log: line => { logged.push(line); }, factory: () => new FakeConnection(), bridgeId: studio.bridgeId, endpointId: studio.endpoint.id,
     peers: () => studio.peerBridges(), execute: (packet, route) => executeSecurePacket(studio, packet, route, echo) });
   t.after(() => links.closeAll());
   const peers = new PeerControl(studio, relay(w, desk, serve), links);
@@ -391,4 +392,6 @@ test('a failed link attempt backs off instead of retrying on every request', asy
     assert.equal(await peers.linked('Desk'), false);
   }
   assert.equal(offers, 1);
+  // The one attempt says why it failed: nothing else reports it, the request itself succeeded over the relay.
+  assert.deepEqual(logged, ['[Peers] Direct link to Desk not opened: Link refused (403)']);
 });

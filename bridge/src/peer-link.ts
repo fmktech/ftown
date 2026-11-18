@@ -296,8 +296,11 @@ export class PeerLinks {
       const answer = await signal({ pairId, sdp: offer.sdp });
       if (typeof answer?.sdp !== 'string' || !answer.sdp || answer.sdp.length > MAX_LINK_SDP_CHARS) throw new Error('Invalid answer');
       pc.setRemoteDescription(answer.sdp, 'answer');
-      return await link.whenOpen();
-    } catch {
+      if (!await link.whenOpen()) throw new Error('the connection did not open');
+      return true;
+    } catch (error) {
+      // The request that asked for the link has already gone over the relay; the reason is only visible here.
+      this.log(`[Peers] Direct link to ${peer.label || peer.bridgeId} not opened: ${error instanceof Error ? error.message : String(error)}`);
       link?.close();
       return false;
     }
