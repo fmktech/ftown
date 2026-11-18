@@ -49,6 +49,7 @@ The executable configuration contract and its tests track all four files. This c
 - Independent non-author review: complete.
 - Focused E2E: live plan publication, child attention/answering, and external session create/rename/remove passed without a document reload. Existing desktop/mobile Overview scenarios and focused CRUD lifecycle also passed. The local run used the supported `http://localhost:3000` origin and isolated scratch services/database; cleanup completed.
 - A collapsed-section selector in the new E2E test was corrected after the rendered summary proved the push had arrived. No application assertion was weakened.
+- Latest main attention diagnostics were merged, independently reviewed, and checked with 100 focused tests, a fresh production build, live push/Overview tests, and the affected preview/reply E2E case. Scratch bridge `ftown harness status` passed. Desktop/mobile renders were reviewed.
 - PR CI remains pending.
 
 ## Steady-state request rate
