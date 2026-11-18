@@ -1,5 +1,7 @@
 import { accountChannel, sessionChannel } from "@security/ledger/channels";
 import type { SecureEndpointRuntime } from "../secure-endpoint-runtime";
+import type { ApplicationJson } from "@security/protocol";
+import type { DirectCommandRoute } from "./webrtc-peer";
 import {
   LOOPBACK_TIMEOUT_MS,
   WATCH_HEARTBEAT_MS,
@@ -92,6 +94,9 @@ export interface HybridTerminalTransportOptions {
 }
 
 type PeerStatus = 'connecting' | 'attached' | 'failed';
+
+/** A direct read that is not answered by then is repeated over the relay. */
+export const DIRECT_COMMAND_TIMEOUT_MS = 8_000;
 
 interface PeerEntry {
   peer: DirectPeerApi | null;
@@ -221,6 +226,9 @@ interface SessionEntry {
 export class HybridTerminalTransport implements TerminalTransportApi {
   private readonly client: CentrifugoClientLike;
   private readonly securityRuntime?: SecureEndpointRuntime;
+  /** Unanswered direct commands per peer, rejected together when that peer closes. */
+  private readonly directUnanswered = new WeakSet<DirectPeerApi>();
+  private readonly directWaiters = new WeakMap<DirectPeerApi, Set<(error: Error) => void>>();
   private readonly localOnly: boolean;
   private readonly userId: string;
   private readonly clientId: string;
@@ -431,6 +439,32 @@ export class HybridTerminalTransport implements TerminalTransportApi {
   }
 
   // --- ladder ------------------------------------------------------------
+
+  /**
+   * Sends one read-only command over the bridge's attached direct channel and resolves with the bridge's answer. Returns null when
+   * no direct channel is attached; rejects when the channel closes or does not answer in time. Either way the caller falls back to
+   * the relay, which is safe because only reads are sent here.
+   */
+  directCommand(bridgeId: string, route: DirectCommandRoute, data: unknown, timeoutMs = DIRECT_COMMAND_TIMEOUT_MS): Promise<ApplicationJson> | null {
+    const pe = this.peers.get(bridgeId);
+    const peer = pe?.status === 'attached' ? pe.peer : null;
+    if (!peer?.command || !peer.canCommand?.() || this.directUnanswered.has(peer)) return null;
+    let waiting = this.directWaiters.get(peer);
+    if (!waiting) {
+      const created = new Set<(error: Error) => void>();
+      waiting = created; this.directWaiters.set(peer, created);
+      peer.onClose(() => { for (const reject of [...created]) reject(new Error('Direct channel closed')); created.clear(); });
+    }
+    const waiters = waiting;
+    return new Promise<ApplicationJson>((resolve, reject) => {
+      const fail = (error: Error) => { clearTimeout(timer); waiters.delete(fail); reject(error); };
+      // One unanswered command is enough to stop using this channel for commands; terminal traffic has its own keepalive.
+      const timer = setTimeout(() => { this.directUnanswered.add(peer); fail(new Error('Direct command timed out')); }, timeoutMs);
+      waiters.add(fail);
+      peer.command!(route, data).then(value => { clearTimeout(timer); waiters.delete(fail); resolve(value); },
+        (error: unknown) => fail(error instanceof Error ? error : new Error('Direct command failed')));
+    });
+  }
 
   private ensurePeer(bridgeId: string): PeerEntry {
     const existing = this.peers.get(bridgeId);

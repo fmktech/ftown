@@ -1,4 +1,8 @@
 import { applicationJson, type SecureEndpointRuntime } from "../secure-endpoint-runtime";
+import type { ApplicationJson, ApplicationRoute } from "@security/protocol";
+import { FrameAssembler, isFrame } from "../../../../bridge/src/direct-transport/framing";
+
+export type DirectCommandRoute = Extract<ApplicationRoute, { kind: "command" }>;
 import {
   DIRECT_PROTOCOL_VERSION,
   LOOPBACK_TIMEOUT_MS,
@@ -50,6 +54,9 @@ export interface LoopbackPeerApi {
   sendResize(sessionId: string, cols: number, rows: number): void;
   close(): void;
   onClose(cb: () => void): void;
+  /** Whether the bridge announced that this channel answers read-only commands. */
+  canCommand?(): boolean;
+  command?(route: DirectCommandRoute, data: unknown): Promise<ApplicationJson>;
 }
 
 export type LoopbackPeerFactory = (opts: LoopbackPeerOptions) => LoopbackPeerApi;
@@ -73,6 +80,9 @@ export class LoopbackPeer implements LoopbackPeerApi {
   private readonly pairId = crypto.randomUUID();
   private readonly securityRuntime?: SecureEndpointRuntime;
   private incoming: Promise<void> = Promise.resolve();
+  private readonly assembler = new FrameAssembler();
+  /** Set when the bridge announces that this channel answers read-only commands. */
+  private commandsOffered = false;
   private outgoing: Promise<void> = Promise.resolve();
   private readonly wsFactory: WebSocketFactory;
 
@@ -148,7 +158,10 @@ export class LoopbackPeer implements LoopbackPeerApi {
   private onFrame(raw: unknown): void {
     this.incoming = this.incoming.then(async () => {
       if (this.closed || !this.securityRuntime || typeof raw !== 'string') return;
-      const packet: unknown = JSON.parse(raw);
+      // Large answers arrive as frames; anything else is one JSON envelope.
+      const whole = isFrame(raw) ? this.assembler.push(raw) : raw;
+      if (whole === null) return;
+      const packet: unknown = JSON.parse(whole);
       for (const delivered of await this.securityRuntime.receive(packet, this.secureChannel())) {
         if (this.closed) return;
         const app = delivered.application;
@@ -173,6 +186,9 @@ export class LoopbackPeer implements LoopbackPeerApi {
         break;
       case 'pong':
         this.missedPongs = 0;
+        break;
+      case 'capabilities':
+        this.commandsOffered = msg.commands === true;
         break;
       default:
         break;
@@ -216,6 +232,17 @@ export class LoopbackPeer implements LoopbackPeerApi {
         data: applicationJson(msg), mcp: null });
       if (!this.closed && this.ws && this.ws.readyState === WS_OPEN) this.ws.send(JSON.stringify(packet));
     }).catch(() => this.fail(new Error('Encrypted peer send failed')));
+  }
+
+  canCommand(): boolean { return this.commandsOffered && !this.closed; }
+
+  /** Sends one read-only command on this channel and resolves with the bridge's answer. */
+  command(route: DirectCommandRoute, data: unknown): Promise<ApplicationJson> {
+    if (this.closed || !this.securityRuntime) return Promise.reject(new Error('Direct channel closed'));
+    return this.securityRuntime.request(this.bridgeId, this.secureChannel(), route, data, async packet => {
+      if (!this.ws || this.ws.readyState !== WS_OPEN || this.closed) throw new Error('Direct channel closed');
+      this.ws.send(JSON.stringify(packet));
+    });
   }
 
   onClose(cb: () => void): void {

@@ -61,6 +61,23 @@ R7. Existing Centrifugo wire formats are unchanged. `seq` is added to direct-pat
 
 R8. No backwards compatibility shims. UI and bridge ship together.
 
+## Extension: read-only commands on the direct channel (bridge 0.30.43)
+
+The direct channel (WebRTC DataChannel or loopback WebSocket) also answers read-only dashboard commands, so they do not
+travel through the relay while a channel is attached. Everything above is unchanged.
+
+- Once the channel is authorized, a bridge that serves commands sends `{ kind: 'capabilities', commands: true }`. A client
+  sends commands on the channel only after receiving it; older clients ignore the frame, and against an older bridge the
+  client never hears it and keeps commands on the relay.
+- A command is a sealed application with a `command` route, bound to the channel's own name like terminal frames. The bridge
+  accepts only commands classified as reads; a command that changes something, or a connection setup / watch command, ends
+  the channel exactly as any other invalid frame does.
+- The answer is a sealed `response` for the request id. An answer larger than one DataChannel message is split into
+  `id.index.total.payload` text frames (`bridge/src/direct-transport/framing.ts`); a frame never starts with `{`.
+- The client gives the direct attempt its own request id. If the channel closes, answers something else, or does not answer
+  within 8 s, the client repeats the read over the relay under the original id. After one unanswered command it stops using
+  that channel for commands.
+
 ## Signaling wire types (over commands:rpc)
 
 Envelope rides the existing commands-channel publish format. New `type` values:

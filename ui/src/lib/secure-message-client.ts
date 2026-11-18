@@ -2,6 +2,8 @@ import type { Centrifuge, PublicationContext, SubscribedContext, Subscription } 
 import type { ApplicationRoute, EndpointDirectory, SecureApplication, SecurityCommand, SecurityCommandResults } from "@security/protocol";
 import { SecurityError } from "@security/crypto";
 import { accountChannel } from "@security/ledger/channels";
+import { classifyCommand } from "@security/bridge/permissions";
+import type { ApplicationJson } from "@security/protocol";
 import { UNRECOVERED_SUBSCRIBED_CONTEXT, type MessageClient, type MessageEvents, type MessageSubscription, type MessagePublishOptions } from "./message-client";
 import { applicationJson, SecureEndpointRuntime } from "./secure-endpoint-runtime";
 
@@ -86,6 +88,17 @@ export const READY_RETRY: ReadyRetryPolicy = { delaysMs: [500, 1000, 2000, 4000]
 const NEVER_RETRY = ["endpoint_revoked", "account_bridge_revoked", "account_device_revoked", "device_revoked", "key_changed", "wrong_context"];
 interface ReadyRetry { started: number; attempts: number; timer: ReturnType<typeof setTimeout> | null; exhausted: boolean }
 
+/** Sends one read-only command to a bridge over its direct channel; null when that bridge has no direct channel right now. */
+export type DirectCommandSender = (bridgeId: string, route: Extract<ApplicationRoute, { kind: "command" }>, data: unknown) => Promise<ApplicationJson> | null;
+/** Connection setup and terminal watch commands always use the relay: they are how a direct channel comes to exist. */
+const RELAY_ONLY = new Set(["terminal_watch", "terminal_unwatch", "webrtc_offer", "webrtc_answer", "webrtc_ice", "webrtc_close"]);
+/** Only reads go direct: an unanswered read can be repeated over the relay without changing anything twice. */
+export function isDirectRead(command: string, payload: unknown): boolean {
+  if (RELAY_ONLY.has(command)) return false;
+  try { const operation = classifyCommand(command, applicationJson(payload)); return operation.permission === "read" && !operation.mutating; }
+  catch { return false; }
+}
+
 /** The raw broker is private to this adapter, including signaling and terminal I/O. */
 export class SecureMessageClient implements MessageClient {
   readonly commandTimeoutMs = 40_000;
@@ -103,6 +116,26 @@ export class SecureMessageClient implements MessageClient {
   private stopLedgerObserver: (() => void) | undefined;
   private retries = new Map<string, ReadyRetry>();
   private readonly retry: ReadyRetryPolicy;
+  private direct: DirectCommandSender | null = null;
+  /** Read-only commands prefer this sender (a bridge's direct channel) and fall back to the relay. */
+  setDirectCommands(sender: DirectCommandSender | null): void { this.direct = sender; }
+  /** True when the bridge answered over its direct channel and the answer was delivered to the commands subscribers. */
+  private async viaDirect(bridgeId: string, route: Extract<ApplicationRoute, { kind: "command" }>, data: Record<string, unknown>): Promise<boolean> {
+    const payload = record(data.payload) ? data.payload : data;
+    if (!this.direct || !isDirectRead(route.command, payload)) return false;
+    // A separate request id: if this attempt goes unanswered, the relay attempt must not look like a replay of it.
+    const directId = crypto.randomUUID();
+    const attempt = this.direct(bridgeId, { ...route, requestId: directId }, { ...data, requestId: directId });
+    if (!attempt) return false;
+    let reply: ApplicationJson;
+    try { reply = await attempt; } catch { return false; }
+    if (this.closed || !record(reply) || reply.type !== "command_response" || !record(reply.response) || reply.response.requestId !== directId) return false;
+    const application: SecureApplication = { type: "application", route: { kind: "response", requestId: route.requestId },
+      data: applicationJson({ type: "command_response", response: { ...reply.response, requestId: route.requestId } }), mcp: null };
+    if (!this.observe(bridgeId, application)) return false;
+    this.getSubscription(accountChannel("commands:rpc", this.userId))?.emit("publication", { data: application.data, info: { user: this.userId } });
+    return true;
+  }
   constructor(private raw: Centrifuge, readonly userId: string, readonly securityRuntime: SecureEndpointRuntime, options: { retry?: ReadyRetryPolicy } = {}) {
     this.retry = options.retry ?? READY_RETRY;
     const commands = this.newSubscription(accountChannel("commands:rpc", userId));
@@ -227,8 +260,6 @@ export class SecureMessageClient implements MessageClient {
         const before = this.outbound.get(key) ?? Promise.resolve();
         const next = before.catch(() => {}).then(async () => {
         admit();
-        await this.ensureReady(bridgeId);
-        admit();
         const packet = record(value) ? value : {};
         const payload = record(packet.payload) ? packet.payload : packet;
         const terminal = channel.startsWith("terminal-input:");
@@ -238,6 +269,11 @@ export class SecureMessageClient implements MessageClient {
         const { type, ...frame } = packet;
         const data = terminal ? { ...frame, kind: type, sessionId: route.kind === "terminal" ? route.sessionId : "" }
           : record(packet.payload) ? { ...packet, payload: { ...packet.payload, bridgeId } } : { ...packet, bridgeId };
+        // A read the bridge answers on its direct channel never reaches the relay.
+        if (route.kind === "command" && typeof packet.requestId === "string" && await this.viaDirect(bridgeId, route, data)) return;
+        admit();
+        await this.ensureReady(bridgeId);
+        admit();
         const encrypted = await this.securityRuntime.sealApplication(bridgeId, channel, { type: "application", route, data: applicationJson(data), mcp: null });
         admit();
         this.securityRuntime.assertCanSend(bridgeId);

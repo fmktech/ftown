@@ -4,6 +4,9 @@ import { STUN_SERVERS } from './direct-transport/contract.js';
 import type { InboundTransportContext, SecureEnvelope } from './security/protocol.js';
 import type { LedgerBridge } from './security/ledger/protocol.js';
 import { parseSecureEnvelope } from './security/crypto.js';
+import { FrameAssembler, MAX_MESSAGE_CHARS, frameMessage } from './direct-transport/framing.js';
+
+export { FrameAssembler, frameMessage };
 
 /**
  * Direct bridge-to-bridge links.
@@ -25,12 +28,6 @@ export const PEER_LINK_LABEL = 'ftown-bridge';
 export const PEER_LINK_TRANSPORT = 'bridge-link' as const;
 export const peerLinkChannel = (receivingBridgeId: string, pairId: string): string => `direct:${PEER_LINK_TRANSPORT}:${receivingBridgeId}:${pairId}`;
 
-/** Chars of payload per DataChannel message; 4 bytes worst case each keeps a frame well under the ~256 KiB message limit. */
-const FRAME_CHARS = 32_000;
-/** Largest framed message; a sealed envelope is itself capped (MAX_ENVELOPE_BYTES), this only bounds reassembly. */
-const MAX_MESSAGE_CHARS = 640_000;
-const MAX_FRAMES = Math.ceil(MAX_MESSAGE_CHARS / FRAME_CHARS);
-const MAX_ASSEMBLIES = 32;
 const MAX_INBOUND_IN_FLIGHT = 32;
 const MAX_PENDING = 256;
 const MAX_LINKS = 32;
@@ -92,38 +89,6 @@ export interface PeerLinksOptions {
   factory?: LinkConnectionFactory;
   timings?: Partial<PeerLinkTimings>;
   log?: (message: string) => void;
-}
-
-/** Splits one message into `id.index.total.payload` frames. */
-export function frameMessage(message: string, id: string = randomUUID().replaceAll('-', '').slice(0, 16)): string[] {
-  const total = Math.max(1, Math.ceil(message.length / FRAME_CHARS));
-  const frames: string[] = [];
-  for (let index = 0; index < total; index++) frames.push(`${id}.${index}.${total}.${message.slice(index * FRAME_CHARS, (index + 1) * FRAME_CHARS)}`);
-  return frames;
-}
-
-/** Reassembles framed messages; throws on anything malformed or over the limits (the caller closes the link). */
-export class FrameAssembler {
-  private readonly parts = new Map<string, { total: number; next: number; chunks: string[] }>();
-  push(frame: string): string | null {
-    const match = /^([a-f0-9]{16})\.(\d{1,4})\.(\d{1,4})\./.exec(frame);
-    if (!match) throw new Error('Invalid frame');
-    const [header, id] = match; const index = Number(match[2]); const total = Number(match[3]);
-    const payload = frame.slice(header.length);
-    if (total < 1 || total > MAX_FRAMES || index >= total || payload.length > FRAME_CHARS) throw new Error('Invalid frame');
-    if (total === 1) { if (this.parts.has(id)) throw new Error('Invalid frame'); return payload; }
-    let entry = this.parts.get(id);
-    if (!entry) {
-      if (index !== 0 || this.parts.size >= MAX_ASSEMBLIES) throw new Error('Invalid frame');
-      entry = { total, next: 0, chunks: [] }; this.parts.set(id, entry);
-    }
-    // The channel is ordered and reliable, so the frames of one message arrive in order.
-    if (entry.total !== total || entry.next !== index) throw new Error('Invalid frame');
-    entry.chunks.push(payload); entry.next += 1;
-    if (entry.next < total) return null;
-    this.parts.delete(id);
-    return entry.chunks.join('');
-  }
 }
 
 interface Pending { resolve: (packet: SecureEnvelope) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }

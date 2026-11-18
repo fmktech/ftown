@@ -66,6 +66,8 @@ export function isWatchMessage(msg: { type?: string }): msg is WatchMessage {
 export type DirectMessage =
   | { kind: 'hello'; clientId: string; protocolVersion: number }
   | { kind: 'hello_ack'; bridgeId: string; protocolVersion: number }
+  /** Bridge → client, once the channel is authorized: what this channel offers beyond terminal frames. Unknown to older clients, which ignore it. */
+  | { kind: 'capabilities'; commands: boolean }
   | { kind: 'attach'; sessionId: string }
   | { kind: 'detach'; sessionId: string }
   /** Full serialized screen; resets the output stream for the session. */

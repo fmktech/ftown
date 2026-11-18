@@ -33,7 +33,7 @@ vi.mock("@/lib/secure-message-client", () => ({
   SecureMessageClient: class {
     request = vi.fn(async (command: unknown) => ({ requestId: (command as { requestId: string }).requestId, success: true, data: { echo: command } }));
     constructor(_raw: unknown, public userId: string) { mocks.secure.push(this); }
-    dispose() {} publish() { return Promise.resolve(); } getSubscription() { return null; }
+    dispose() {} setDirectCommands() {} publish() { return Promise.resolve(); } getSubscription() { return null; }
     newSubscription() {
       const handlers = new Map<string, (() => void)[]>();
       const commands = { state: "unsubscribed", handlers, on(event: string, handler: () => void) { handlers.set(event, [...(handlers.get(event) ?? []), handler]); }, off() {}, subscribe() {} };

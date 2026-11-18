@@ -4,6 +4,7 @@ import type { SecureApplication, SecureEnvelope } from '@security/protocol';
 import { SecureEndpointRuntime } from '../secure-endpoint-runtime';
 import { LoopbackPeer, type WebSocketLike } from './loopback-peer';
 import { LOOPBACK_TIMEOUT_MS, PING_INTERVAL_MS } from './contract';
+import { frameMessage } from '../../../../bridge/src/direct-transport/framing';
 
 const ownerId = '00000000-0000-4000-8000-000000000001';
 class Socket implements WebSocketLike {
@@ -107,5 +108,54 @@ describe('encrypted loopback peer', () => {
     await vi.advanceTimersByTimeAsync(PING_INTERVAL_MS);
     expect(f.socket.readyState).toBe(3); expect(closed).toHaveBeenCalledOnce(); expect(sibling.socket.readyState).toBe(1);
     sibling.peer.close(); f.runtime.dispose(); sibling.runtime.dispose();
+  });
+});
+
+describe('read commands on the encrypted loopback peer', () => {
+  const capabilities = (f: Awaited<ReturnType<typeof fixture>>) => f.respond({ type: 'application', mcp: null,
+    route: { kind: 'terminal', sessionId: '', frameType: 'capabilities', pairId: f.pairId }, data: { kind: 'capabilities', commands: true } }, 'application');
+  const route = (requestId: string) => ({ kind: 'command' as const, requestId, command: 'list_sessions', sessionId: null });
+
+  it('offers commands only after the bridge announces them', async () => {
+    const f = await fixture(); f.socket.open(); await f.connecting;
+    expect(f.peer.canCommand()).toBe(false);
+    await capabilities(f);
+    await vi.waitFor(() => expect(f.peer.canCommand()).toBe(true));
+    f.peer.close(); expect(f.peer.canCommand()).toBe(false); f.runtime.dispose();
+  });
+
+  it('seals a command for this channel and resolves with the bridge\'s answer', async () => {
+    const f = await fixture(); f.socket.open(); await f.connecting; await capabilities(f);
+    const answer = f.peer.command(route('read-one'), { type: 'list_sessions', requestId: 'read-one', payload: { bridgeId: 'bridge-one' } });
+    await vi.waitFor(() => expect(f.received).toHaveLength(1));
+    expect(f.received[0]).toMatchObject({ route: route('read-one'), data: { type: 'list_sessions', requestId: 'read-one' } });
+    expect(JSON.stringify(f.socket.sent)).not.toContain('list_sessions');
+    const reply = { type: 'command_response', response: { requestId: 'read-one', success: true, data: { sessions: [] } } };
+    await f.respond({ type: 'application', route: { kind: 'response', requestId: 'read-one' }, data: reply, mcp: null }, 'application', 'read-one');
+    await expect(answer).resolves.toEqual(reply);
+    f.peer.close(); f.runtime.dispose();
+  });
+
+  it('reassembles an answer that arrives in frames', async () => {
+    const f = await fixture(); f.socket.open(); await f.connecting; await capabilities(f);
+    const answer = f.peer.command(route('read-two'), { type: 'list_sessions', requestId: 'read-two', payload: { bridgeId: 'bridge-one' } });
+    await vi.waitFor(() => expect(f.received).toHaveLength(1));
+    const reply = { type: 'command_response', response: { requestId: 'read-two', success: true, data: { sessions: Array.from({ length: 400 }, (_, i) => ({ id: `s${i}`, title: 'x'.repeat(200) })) } } };
+    // Seal without delivering, then deliver the envelope as frames.
+    const original = f.socket.onmessage; let captured = '';
+    f.socket.onmessage = event => { captured = (event as { data: string }).data; };
+    await f.respond({ type: 'application', route: { kind: 'response', requestId: 'read-two' }, data: reply, mcp: null }, 'application', 'read-two');
+    f.socket.onmessage = original;
+    const frames = frameMessage(captured);
+    expect(frames.length).toBeGreaterThan(1);
+    for (const frame of frames) f.socket.onmessage?.({ data: frame });
+    await expect(answer).resolves.toEqual(reply);
+    f.peer.close(); f.runtime.dispose();
+  });
+
+  it('rejects a command on a closed peer', async () => {
+    const f = await fixture(); f.socket.open(); await f.connecting; f.peer.close();
+    await expect(f.peer.command(route('read-three'), {})).rejects.toThrow('Direct channel closed');
+    f.runtime.dispose();
   });
 });

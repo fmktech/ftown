@@ -689,6 +689,11 @@ program
     // terminal output/screen fan out to them directly, and to Centrifugo only when
     // the session has an unexpired remote watcher (R2). Signaling and watch
     // heartbeats ride the existing commands:rpc channel.
+    // Read-only dashboard commands arriving on a direct browser channel run through the same secure dispatch as the relay's.
+    const serveDirectCommand = async (message: VerifiedApplication): Promise<ApplicationJson> => {
+      if (!ready) throw new BridgeStartingError();
+      return localApiServer.dispatchSecure(message);
+    };
     const watchRegistry = new WatchRegistry();
     const directPeers = new DirectPeerManager({
       security,
@@ -701,6 +706,7 @@ program
       onInput: (sid, data) => { runner.write(sid, data); },
       onResize: (sid, cols, rows) => { handleClientResize(sid, cols, rows); },
       onAttach: (sid, deliver) => terminalOutput.attachScreen(sid, deliver),
+      onCommand: message => serveDirectCommand(message),
     });
     // Loopback WebSocket rung: same DirectMessage protocol as WebRTC, tunneled
     // over TCP on the existing 127.0.0.1 local API server. Bypasses VPN/endpoint
@@ -718,6 +724,7 @@ program
       onInput: (sid, data) => { runner.write(sid, data); },
       onResize: (sid, cols, rows) => { handleClientResize(sid, cols, rows); },
       onAttach: (sid, deliver) => terminalOutput.attachScreen(sid, deliver),
+      onCommand: message => serveDirectCommand(message),
     });
     const publishRouter = new PublishRouter({
       registry: watchRegistry,

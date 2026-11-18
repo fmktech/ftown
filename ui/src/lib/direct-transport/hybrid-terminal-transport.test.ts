@@ -110,6 +110,14 @@ class FakePeer implements WebRtcPeerLike {
     const cbs = this.closeCbs.splice(0);
     for (const cb of cbs) cb();
   }
+
+  /** Read-only commands: off unless a test turns them on; `answers` settles each call. */
+  commands = false;
+  commandCalls: Array<{ route: unknown; data: unknown; resolve: (value: unknown) => void; reject: (error: Error) => void }> = [];
+  canCommand(): boolean { return this.commands; }
+  command(route: unknown, data: unknown): Promise<never> {
+    return new Promise<never>((resolve, reject) => this.commandCalls.push({ route, data, resolve: resolve as (value: unknown) => void, reject }));
+  }
 }
 
 interface CentrifugoSubscriptionLike {
@@ -2247,5 +2255,52 @@ describe('cloud outage recovery with remembered loopback discovery', () => {
       transport.dispose();
       vi.useRealTimers();
     }
+  });
+});
+
+describe('HybridTerminalTransport direct commands', () => {
+  beforeEach(() => { vi.useFakeTimers(); FakePeer.instances = []; });
+  afterEach(() => { vi.useRealTimers(); });
+  const route = { kind: 'command' as const, requestId: 'r1', command: 'list_sessions', sessionId: null };
+  async function attached(commands: boolean) {
+    const made = makeTransport((opts) => new FakePeer(opts.bridgeId));
+    made.transport.subscribeTerminal('session-1', 'bridge-1', handlers());
+    await flush();
+    const peer = FakePeer.instances[0]; peer.commands = commands;
+    return { ...made, peer };
+  }
+
+  it('has no direct command path without an attached channel, or when the bridge did not announce one', async () => {
+    const { transport } = makeTransport((opts) => new FakePeer(opts.bridgeId));
+    expect(transport.directCommand('bridge-1', route, {})).toBeNull();
+    const silent = await attached(false);
+    expect(silent.transport.directCommand('bridge-1', route, {})).toBeNull();
+    expect(silent.transport.directCommand('bridge-2', route, {})).toBeNull();
+  });
+
+  it('resolves with the answer from the attached channel', async () => {
+    const { transport, peer } = await attached(true);
+    const answer = transport.directCommand('bridge-1', route, { type: 'list_sessions' });
+    expect(peer.commandCalls).toHaveLength(1);
+    peer.commandCalls[0].resolve({ ok: true });
+    await expect(answer).resolves.toEqual({ ok: true });
+  });
+
+  it('rejects every unanswered command at once when the channel closes', async () => {
+    const { transport, peer } = await attached(true);
+    const first = transport.directCommand('bridge-1', route, {})!; const second = transport.directCommand('bridge-1', route, {})!;
+    const outcomes = Promise.allSettled([first, second]);
+    peer.simulateClose();
+    expect((await outcomes).map(outcome => outcome.status)).toEqual(['rejected', 'rejected']);
+  });
+
+  it('stops using a channel for commands after one goes unanswered', async () => {
+    const { transport, peer } = await attached(true);
+    const answer = transport.directCommand('bridge-1', route, {})!;
+    const outcome = answer.then(() => 'answered', (error: Error) => error.message);
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(await outcome).toBe('Direct command timed out');
+    expect(transport.directCommand('bridge-1', route, {})).toBeNull();
+    expect(peer.commandCalls).toHaveLength(1);
   });
 });
