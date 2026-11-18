@@ -44,13 +44,14 @@ The executable configuration contract and its tests track all four files. This c
 - Full bridge unit suite: 3,565 passed, five skipped, zero failed. Subsequent dashboard projection checks: 85 passed, including maximum legal plan encryption and lossless board reconstruction; rebuilt successfully.
 - All four relay configurations passed upstream Centrifugo 6.10.2 `checkconfig`; configuration contract tests passed (21).
 - Isolated real-broker smoke: passed account subscription isolation, authenticated application filtering, and positioned session/board recovery; scratch hub cleaned up.
-- UI production build: passed on the final application source. Full unit suite: 2,341 passed; final adaptive attention-summary extension: 100 focused tests passed.
+- UI production build: passed on the final application source. Full unit suite: 2,358 passed; focused final hook suites: 103 attention tests and 97 session tests passed.
 - Attention summaries preflight their full response byte size. An explicit size response permits bounded client bisection; other failures do not enable that fallback.
 - Independent non-author review: complete.
 - Focused E2E: live plan publication, child attention/answering, and external session create/rename/remove passed without a document reload. Existing desktop/mobile Overview scenarios and focused CRUD lifecycle also passed. The local run used the supported `http://localhost:3000` origin and isolated scratch services/database; cleanup completed.
 - A collapsed-section selector in the new E2E test was corrected after the rendered summary proved the push had arrived. No application assertion was weakened.
 - Latest main attention diagnostics were merged, independently reviewed, and checked with 100 focused tests, a fresh production build, live push/Overview tests, and the affected preview/reply E2E case. Scratch bridge `ftown harness status` passed. Desktop/mobile renders were reviewed.
 - The first full CI E2E run exposed two reproducible races: separately delivered subscription callbacks invalidated a shared attention snapshot, and pre-attachment resize requests were lost during terminal resurrection. Both received causal regressions and scoped fixes. All five failed attention cases passed locally afterward, and the restart case passed three repetitions alongside the bounded full bridge suite (3,578 passed, five skipped). The attention hook's 103 focused tests, static check, production build, and independent review passed. CI results are tracked on the pull request.
+- Subsequent CI confirmed those six cases passed, but exposed a pending initial inventory read that did not resume when a later publisher completed security readiness. The existing runtime readiness event now resumes only pending reconciliation, with bounds and identity/visibility guards. Real-RPC regressions, nine repeated cold-start browser cases, live push, the final UI suite/build, and independent review passed before pushing the repair.
 
 ## Steady-state request rate
 
