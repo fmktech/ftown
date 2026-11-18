@@ -65,6 +65,8 @@ export async function renderRawLogToText(raw: string, cols = 120, rows = 40, scr
 
 export class TerminalManager {
   private readonly terminals: Map<string, ManagedTerminal> = new Map();
+  /** Fitted dimensions may precede the first PTY bytes; metadata never creates a terminal. */
+  private readonly pendingSizes = new Map<string, { cols: number; rows: number }>();
   private readonly scrollback: number;
   private readonly cols: number;
 
@@ -76,9 +78,11 @@ export class TerminalManager {
   private ensureTerminal(sessionId: string): ManagedTerminal {
     let managed = this.terminals.get(sessionId);
     if (!managed) {
+      const size = this.pendingSizes.get(sessionId);
+      this.pendingSizes.delete(sessionId);
       const terminal = new Terminal({
-        cols: this.cols,
-        rows: 40,
+        cols: size?.cols ?? this.cols,
+        rows: size?.rows ?? 40,
         scrollback: this.scrollback,
         allowProposedApi: true,
         theme: FTOWN_XTERM_THEME,
@@ -171,13 +175,21 @@ export class TerminalManager {
   }
 
   resize(sessionId: string, cols: number, rows: number): void {
+    if (!/^[A-Za-z0-9_-]{1,200}$/.test(sessionId) || !Number.isSafeInteger(cols) || !Number.isSafeInteger(rows) || cols < 1 || rows < 1) return;
     const managed = this.terminals.get(sessionId);
     if (managed) {
       managed.terminal.resize(cols, rows);
+    } else {
+      this.pendingSizes.delete(sessionId);
+      this.pendingSizes.set(sessionId, { cols, rows });
+      // Sessions that never produce output need only a small, bounded tuple;
+      // keep recent requests without allocating emulator buffers for them.
+      if (this.pendingSizes.size > 256) this.pendingSizes.delete(this.pendingSizes.keys().next().value!);
     }
   }
 
   destroy(sessionId: string): void {
+    this.pendingSizes.delete(sessionId);
     const managed = this.terminals.get(sessionId);
     if (managed) {
       managed.terminal.dispose();

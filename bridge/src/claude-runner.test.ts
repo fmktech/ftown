@@ -105,6 +105,75 @@ function controlledPty(pid: number) {
   return { process, writes, kills, exit: (code = 0) => exit({ exitCode: code }), data: (value: string) => data(value) };
 }
 
+describe('ProcessRunner pre-attachment dimensions', () => {
+  it('keeps the latest resize for an existing detached tmux session without claiming a PTY was resized', () => {
+    const sizes: Array<{ cols?: number; rows?: number }> = [];
+    const runner = new ProcessRunner({ spawn: (_file, _args, options) => { sizes.push({ cols: options?.cols, rows: options?.rows }); return controlledPty(1).process; } });
+    runner.hasTmuxSession = () => true;
+    assert.equal(runner.resize('restored', 100, 31), false);
+    assert.equal(runner.resize('restored', 126, 35), false);
+    assert.equal(runner.reattach('restored'), true);
+    assert.deepEqual(sizes, [{ cols: 126, rows: 35 }]);
+  });
+
+  it('applies a resize received during asynchronous tmux creation', async () => {
+    let finish!: () => void;
+    const sizes: Array<{ cols?: number; rows?: number }> = [];
+    const runner = new ProcessRunner({ createTmuxSession: () => new Promise<void>(resolve => { finish = resolve; }),
+      spawn: (_file, _args, options) => { sizes.push({ cols: options?.cols, rows: options?.rows }); return controlledPty(1).process; } });
+    runner.getPreferredRuntime = () => 'tmux';
+    runner.run('pending', 'harmless fake command');
+    assert.equal(runner.resize('pending', 126, 35), false);
+    finish(); await new Promise<void>(resolve => setImmediate(resolve));
+    assert.deepEqual(sizes, [{ cols: 126, rows: 35 }]);
+  });
+
+  it('ignores unknown sessions and invalid dimensions without replacing a valid pending resize', () => {
+    const sizes: Array<{ cols?: number; rows?: number }> = [];
+    const runner = new ProcessRunner({ spawn: (_file, _args, options) => { sizes.push({ cols: options?.cols, rows: options?.rows }); return controlledPty(sizes.length).process; } });
+    runner.hasTmuxSession = id => id === 'restored';
+    assert.equal(runner.resize('unknown', 90, 25), false);
+    runner.resize('restored', 126, 35);
+    for (const [cols, rows] of [[0, 35], [126, -1], [NaN, 35], [126, Infinity], [80.5, 35], [126, 2.5]]) assert.equal(runner.resize('restored', cols, rows), false);
+    assert.equal(runner.resize('../invalid', 80, 24), false);
+    runner.reattach('restored');
+    runner.hasTmuxSession = () => true;
+    runner.reattach('unknown');
+    assert.deepEqual(sizes, [{ cols: 126, rows: 35 }, { cols: 120, rows: 40 }]);
+  });
+
+  it('clears pending dimensions on shutdown and defaults reused sessions to their new generation', () => {
+    const sizes: Array<{ cols?: number; rows?: number }> = [];
+    const runner = new ProcessRunner({ spawn: (_file, _args, options) => { sizes.push({ cols: options?.cols, rows: options?.rows }); return controlledPty(sizes.length).process; } });
+    runner.hasTmuxSession = () => true;
+    runner.resize('restored', 126, 35); runner.stopAll(); runner.reattach('restored');
+    runner.getPreferredRuntime = () => 'direct';
+    runner.run('restored', 'harmless fake command');
+    assert.deepEqual(sizes, [{ cols: 120, rows: 40 }, { cols: 120, rows: 40 }]);
+  });
+
+  it('discards retained dimensions if the tmux session disappears before reattachment', () => {
+    const sizes: Array<{ cols?: number; rows?: number }> = [];
+    const runner = new ProcessRunner({ spawn: (_file, _args, options) => { sizes.push({ cols: options?.cols, rows: options?.rows }); return controlledPty(1).process; } });
+    runner.hasTmuxSession = () => true; runner.resize('restored', 126, 35);
+    runner.hasTmuxSession = () => false; assert.equal(runner.reattach('restored'), false);
+    runner.hasTmuxSession = () => true; runner.reattach('restored');
+    assert.deepEqual(sizes, [{ cols: 120, rows: 40 }]);
+  });
+
+  it('clears a stopped creation resize before later reattachment with the same ID', async () => {
+    let finish!: () => void;
+    const sizes: Array<{ cols?: number; rows?: number }> = [];
+    const runner = new ProcessRunner({ createTmuxSession: () => new Promise<void>(resolve => { finish = resolve; }),
+      spawn: (_file, _args, options) => { sizes.push({ cols: options?.cols, rows: options?.rows }); return controlledPty(1).process; } });
+    runner.getPreferredRuntime = () => 'tmux'; runner.hasTmuxSession = () => true;
+    (runner as unknown as { killTmuxSessionLogged: () => void }).killTmuxSessionLogged = () => {};
+    runner.run('restored', 'harmless fake command'); runner.resize('restored', 126, 35); runner.stop('restored');
+    finish(); await new Promise<void>(resolve => setImmediate(resolve));
+    runner.reattach('restored'); assert.deepEqual(sizes, [{ cols: 120, rows: 40 }]);
+  });
+});
+
 describe('ProcessRunner session generation ownership', () => {
   for (const runtime of ['direct', 'tmux'] as const) {
     it(`${runtime}: a current stop still force-kills an unresponsive process`, async () => {

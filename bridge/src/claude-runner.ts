@@ -124,6 +124,7 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
       return true;
     }
     if (!this.hasTmuxSession(sessionId)) {
+      this.lastSizes.delete(sessionId);
       return false;
     }
 
@@ -153,8 +154,16 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
   }
 
   resize(sessionId: string, cols: number, rows: number): boolean {
+    if (!/^[A-Za-z0-9_-]{1,200}$/.test(sessionId) || !Number.isSafeInteger(cols) || !Number.isSafeInteger(rows) || cols < 1 || rows < 1) return false;
     const proc = this.activeProcesses.get(sessionId);
+    const generation = this.generations.get(sessionId);
+    if (generation?.stopping || generation?.detachOnly) return false;
     if (!proc) {
+      // A browser can fit its terminal before startup resurrection attaches a
+      // client, or while tmux creation is pending. Keep its latest intent only
+      // for a real session; arbitrary unknown IDs must not grow this map.
+      if (generation || this.hasTmuxSession(sessionId)) this.lastSizes.set(sessionId, { cols, rows });
+      else this.lastSizes.delete(sessionId);
       return false;
     }
     proc.resize(cols, rows);
@@ -173,6 +182,7 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
     }
 
     if (!proc) {
+      this.lastSizes.delete(sessionId);
       // Orphaned tmux session with no attached client (e.g. failed reattach).
       if (!isTmux && isTmuxAvailable() && hasTmuxSession(sessionId)) {
         this.killTmuxSessionLogged(sessionId);
@@ -204,6 +214,7 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
   }
 
   stopAll(): void {
+    this.lastSizes.clear();
     for (const [sessionId, proc] of this.activeProcesses) {
       if (this.runtimes.get(sessionId) === 'tmux') {
         // Detach only — the tmux session keeps running and survives bridge restarts.
@@ -283,6 +294,7 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
       const wasStopping = generation.stopping;
       this.generations.delete(sessionId);
       this.runtimes.delete(sessionId);
+      this.lastSizes.delete(sessionId);
       console.error(`[ProcessRunner] Failed to create tmux session:`, err);
       if (!wasStopping) {
         this.emit('error', sessionId, err instanceof Error ? err : new Error(String(err)));
@@ -296,6 +308,7 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
     if (generation.stopping) {
       this.generations.delete(sessionId);
       this.runtimes.delete(sessionId);
+      this.lastSizes.delete(sessionId);
       this.killTmuxSessionLogged(sessionId);
       return;
     }
@@ -329,6 +342,7 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
       if (this.generations.get(sessionId) !== generation) return;
       this.generations.delete(sessionId);
       this.runtimes.delete(sessionId);
+      this.lastSizes.delete(sessionId);
       console.error(`[ProcessRunner] Failed to attach to tmux session:`, err);
       this.emit('error', sessionId, err instanceof Error ? err : new Error(String(err)));
       return;
@@ -352,6 +366,7 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
 
       if (generation.detachOnly) {
         this.generations.delete(sessionId);
+        this.lastSizes.delete(sessionId);
         return;
       }
 
