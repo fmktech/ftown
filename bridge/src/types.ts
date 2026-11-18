@@ -145,10 +145,11 @@ export interface Command {
   requestId: string;
 }
 
-export type CommandType = 'get_pull_request_review' | 'get_pull_request_review_chunk' | 'preview_chat_list' | 'preview_chat_send' | 'preview_chat_reply' | 'get_pull_request_statuses' | 'session_preview_status' | 'session_preview_chunk' | 'get_bridge_update' | 'update_bridge' | 'security_devices' | 'security_invite' | 'security_revoke' | 'ledger_head' | 'ledger_chain' | 'create_session' | 'stop_session' | 'list_sessions' | 'get_history' | 'dismiss_session_block' | 'retry_session' | 'send_message' | 'rename_session' | 'remove_session' | 'bridge_exec' | 'clear_terminal' | 'update_session_parent' | 'get_session_usage' | 'get_sessions_usage' | 'get_session_attention' | 'resolve_session_attention' | 'answer_session_attention' | 'get_session_board'
+export type CommandType = 'get_pull_request_review' | 'get_pull_request_review_chunk' | 'preview_chat_list' | 'preview_chat_send' | 'preview_chat_reply' | 'get_pull_request_statuses' | 'session_preview_status' | 'session_preview_chunk' | 'get_bridge_update' | 'update_bridge' | 'security_devices' | 'security_invite' | 'security_revoke' | 'ledger_head' | 'ledger_chain' | 'create_session' | 'stop_session' | 'list_sessions' | 'get_history' | 'dismiss_session_block' | 'retry_session' | 'send_message' | 'rename_session' | 'remove_session' | 'bridge_exec' | 'clear_terminal' | 'update_session_parent' | 'get_session_usage' | 'get_sessions_usage' | 'get_session_attention' | 'get_attention_summary' | 'resolve_session_attention' | 'answer_session_attention' | 'get_session_board'
   | 'get_model_routing' | 'set_model_routing' | 'get_accounts' | 'handoff_session' | 'list_native_sessions';
 
 export interface GetSessionAttentionPayload { bridgeId: string; sessionId: string }
+export interface GetAttentionSummaryPayload { bridgeId: string; sessionIds: string[] }
 export interface ResolveSessionAttentionPayload extends GetSessionAttentionPayload { eventId: string }
 export type { AnswerSessionAttentionPayload } from './attention-prompt-protocol.js';
 import type { AnswerSessionAttentionPayload } from './attention-prompt-protocol.js';
@@ -236,7 +237,7 @@ export interface GetSessionsUsagePayload {
   bridgeId?: string;
 }
 
-export type CommandPayload = SendSessionMessagePayload | GetPullRequestStatusesPayload | SessionPreviewStatusRequest | SessionPreviewChunkRequest | GetBridgeUpdatePayload | UpdateBridgePayload | GetSessionAttentionPayload | ResolveSessionAttentionPayload | AnswerSessionAttentionPayload | CreateSessionPayload | StopSessionPayload | HandoffSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | ClearTerminalPayload | UpdateSessionParentPayload | GetSessionUsagePayload | GetSessionsUsagePayload | Record<string, unknown>
+export type CommandPayload = SendSessionMessagePayload | GetPullRequestStatusesPayload | SessionPreviewStatusRequest | SessionPreviewChunkRequest | GetBridgeUpdatePayload | UpdateBridgePayload | GetSessionAttentionPayload | GetAttentionSummaryPayload | ResolveSessionAttentionPayload | AnswerSessionAttentionPayload | CreateSessionPayload | StopSessionPayload | HandoffSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | ClearTerminalPayload | UpdateSessionParentPayload | GetSessionUsagePayload | GetSessionsUsagePayload | Record<string, unknown>
   | import('./quota/types.js').GetModelRoutingPayload | import('./quota/types.js').SetModelRoutingPayload;
 
 export interface CommandResponse {

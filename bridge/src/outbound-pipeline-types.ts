@@ -35,6 +35,8 @@ export interface OutboundJob {
   /** Seals the publication for the readers of one policy snapshot. Called serially, in enqueue order. Each recipient is authorized
    *  again later, in its packet's send(). */
   prepare(): Promise<readonly OutboundPacket[]>;
+  /** Optional delivery acknowledgement for callers that must retry on a drop or packet failure. */
+  onSettled?(error?: unknown): void;
 }
 
 export interface OutboundLogger {

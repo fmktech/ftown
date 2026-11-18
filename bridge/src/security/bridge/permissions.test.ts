@@ -79,6 +79,7 @@ test('attention item routes classify ask, single-item read and keep ack/resolve 
     ['GET', '/api/sessions/session/attention/event-1/extra'],
   ]) assert.throws(() => classifyHttp(method, path), { code: 'permission_denied' }, `${method} ${path}`);
   assert.equal(classifyCommand('answer_session_attention', { sessionId: 'session' }).permission, 'control');
+  assert.equal(classifyCommand('get_attention_summary', { bridgeId: 'bridge', sessionIds: ['session'] }).permission, 'read');
 });
 
 test('actual operations determine permission and unknown methods/routes/frames deny by default', () => {

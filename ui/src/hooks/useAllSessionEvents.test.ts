@@ -143,14 +143,22 @@ function durableClient() {
   };
   return { client, publications, subscribed };
 }
-function durableSetup(handle: (command: Command) => Promise<CommandResponse> = async () => reply(saved)) {
+function durableSetup(handle: (command: Command) => Promise<CommandResponse> = async () => reply(saved), rows: Session[] = sessions) {
   const transport = durableClient();
   const reconnects = new Set<() => void>();
-  const rpc = { sendCommand: vi.fn(handle), onSubscribed: (callback: () => void) => {
+  const summaryReply = (attention: typeof saved | null, sequence = attention?.sequence ?? 1): CommandResponse => ({
+    requestId: "response", success: true, data: { summary: { agent: { attention, sequence } } },
+  });
+  const rpc = { sendCommand: vi.fn((command: Command) => command.type === "get_attention_summary"
+    ? handle(command).then(value => value.success && (value.data as Record<string, unknown>)?.summary
+      ? value : value.success && value.data && typeof value.data === "object"
+        ? summaryReply((value.data as { attention?: typeof saved | null }).attention ?? null, (value.data as { sequence?: number }).sequence)
+        : value)
+    : handle(command)), onSubscribed: (callback: () => void) => {
     reconnects.add(callback); return () => { reconnects.delete(callback); };
   } };
   const hook = renderHook(({ client, user, rows }) => useAllSessionEvents(client, rows, user, rpc), {
-    initialProps: { client: transport.client, user: "user", rows: sessions },
+    initialProps: { client: transport.client, user: "user", rows },
   });
   const publish = (eventName: string, data: Record<string, unknown> = {}) => {
     transport.publications.at(-1)!({ data: { type: "hook_event", eventName, data } });
@@ -158,19 +166,33 @@ function durableSetup(handle: (command: Command) => Promise<CommandResponse> = a
   const publishSaved = (item = saved) => publish("Notification", { notification_type: item.type, title: item.title,
     message: item.message, attentionId: item.id, attentionSequence: item.sequence, attentionCreatedAt: item.createdAt });
   return { ...hook, ...transport, rpc, publish, publishSaved,
-    current: () => hook.result.current.sessionActivity.get("agent"),
+    current: (id = "agent") => hook.result.current.sessionActivity.get(id),
     reconnect: () => { for (const callback of reconnects) callback(); } };
 }
 async function settle() { await act(async () => { await Promise.resolve(); }); }
 
 describe("durable explicit attention restoration", () => {
+  it("hydrates all sessions on one bridge with one batched summary read", async () => {
+    const rows = [sessions[0], { ...sessions[0], id: "agent-two" }];
+    const response: CommandResponse = { requestId: "summary", success: true, data: { summary: {
+      agent: { attention: saved, sequence: saved.sequence },
+      "agent-two": { attention: newer, sequence: newer.sequence },
+    } } };
+    const h = durableSetup(async () => response, rows);
+    await settle();
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(1);
+    expect(h.rpc.sendCommand.mock.calls[0][0].type).toBe("get_attention_summary");
+    expect(h.current("agent")?.attention?.attentionId).toBe(saved.id);
+    expect(h.current("agent-two")?.attention?.attentionId).toBe(newer.id);
+  });
+
   it("does not dispatch a queued old-owner read during replacement render before passive cleanup", async () => {
     const queued: Array<() => void> = [];
     const microtask = vi.spyOn(globalThis, "queueMicrotask").mockImplementation(callback => { queued.push(callback); });
     try {
       const old = durableClient(); const replacement = durableClient();
-      const oldRpc = { sendCommand: vi.fn(async () => reply(saved)), onSubscribed: () => () => {} };
-      const newRpc = { sendCommand: vi.fn(async () => reply(newer)), onSubscribed: () => () => {} };
+      const oldRpc = { sendCommand: vi.fn(async () => ({ requestId: "r", success: true, data: { summary: { agent: { attention: saved, sequence: 1 } } } })), onSubscribed: () => () => {} };
+      const newRpc = { sendCommand: vi.fn(async () => ({ requestId: "r", success: true, data: { summary: { agent: { attention: newer, sequence: 2 } } } })), onSubscribed: () => () => {} };
       const hook = renderHook(({ client, user, rpc }) => {
         const result = useAllSessionEvents(client, sessions, user, rpc);
         useLayoutEffect(() => { if (user === "other-user") queued.splice(0).forEach(callback => callback()); }, [user]);
@@ -190,7 +212,9 @@ describe("durable explicit attention restoration", () => {
   it("bounds eighty overlapping prompts to one pending and one trailing snapshot", async () => {
     const first = deferred(); const trailing = deferred();
     let reads = 0;
-    const h = durableSetup(() => ++reads === 1 ? first.promise : trailing.promise);
+    const h = durableSetup(command => command.type === "get_attention_summary"
+      ? ++reads === 1 ? first.promise : trailing.promise
+      : Promise.resolve(reply(null)));
     await settle();
     act(() => { for (let i = 0; i < 80; i++) h.publish("UserPromptSubmit"); });
     expect(h.rpc.sendCommand).toHaveBeenCalledTimes(1);
@@ -204,7 +228,9 @@ describe("durable explicit attention restoration", () => {
   it("coalesces startup subscription notifications and a burst of pending prompts", async () => {
     const first = deferred(); const trailing = deferred();
     let reads = 0;
-    const h = durableSetup(() => ++reads === 1 ? first.promise : trailing.promise);
+    const h = durableSetup(command => command.type === "get_attention_summary"
+      ? ++reads === 1 ? first.promise : trailing.promise
+      : Promise.resolve(reply(null)));
     act(() => h.subscribed[0]());
     await settle();
     expect(h.rpc.sendCommand).toHaveBeenCalledTimes(1);
@@ -226,7 +252,7 @@ describe("durable explicit attention restoration", () => {
     const h = durableSetup(() => ++reads === 1 ? first.promise : trailing.promise);
     await settle();
     act(() => h.reconnect());
-    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(1);
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(2);
     await act(async () => first.resolve(reply(saved)));
     expect(h.current()?.attention).toBeUndefined();
     expect(h.rpc.sendCommand).toHaveBeenCalledTimes(2);
@@ -277,8 +303,8 @@ describe("durable explicit attention restoration", () => {
     await settle();
     expect(first.current()?.attention).toMatchObject({ attentionId: saved.id, attentionSequence: 1,
       receivedAt: Date.parse(saved.createdAt), message: saved.message });
-    expect(first.rpc.sendCommand).toHaveBeenCalledWith(expect.objectContaining({ type: "get_session_attention",
-      payload: { bridgeId: "bridge", sessionId: "agent" } }));
+    expect(first.rpc.sendCommand).toHaveBeenCalledWith(expect.objectContaining({ type: "get_attention_summary",
+      payload: { bridgeId: "bridge", sessionIds: ["agent"] } }));
     first.unmount();
     const reopened = durableSetup();
     await settle();
@@ -329,7 +355,9 @@ describe("durable explicit attention restoration", () => {
 
   it("preserves a newer live request over a delayed snapshot and older duplicate", async () => {
     const read = deferred();
-    const h = durableSetup(() => read.promise);
+    const h = durableSetup(command => command.type === "get_attention_summary"
+      ? read.promise.then(value => ({ requestId: value.requestId, success: true, data: { summary: { agent: { attention: newer, sequence: 2 } } } }))
+      : Promise.resolve(reply(null)));
     act(() => h.publishSaved(newer));
     await act(async () => read.resolve(reply(saved)));
     act(() => h.publishSaved());
@@ -1002,6 +1030,12 @@ describe("parent routing applies live (phase B smoke)", () => {
       let inFlight = 0; let peak = 0;
       let barrier: Promise<void> = Promise.resolve();
       const rpc = { sendCommand: vi.fn(async (command: Command) => {
+        if (command.type === "get_attention_summary") {
+          inFlight += 1; peak = Math.max(peak, inFlight);
+          await barrier;
+          inFlight -= 1;
+          return { requestId: command.requestId, success: true, data: { summary: Object.fromEntries(rows.map(row => [row.id, { attention: null, sequence: 0 }])) } };
+        }
         if (command.type !== "get_session_attention") return reply(null);
         inFlight += 1; peak = Math.max(peak, inFlight);
         await barrier;
@@ -1009,10 +1043,11 @@ describe("parent routing applies live (phase B smoke)", () => {
         return reply(null);
       }), onSubscribed: () => () => {} };
       renderHook(() => useAllSessionEvents(client, rows, "user", rpc));
-      await act(async () => { await Promise.resolve(); }); // the ten mount reads
-      const readsOf = () => rpc.sendCommand.mock.calls.filter(([command]) => command.type === "get_session_attention").length;
+      await act(async () => { await Promise.resolve(); }); // one mount batch
+      const readsOf = () => rpc.sendCommand.mock.calls.filter(([command]) => command.type === "get_attention_summary").length;
       const afterMount = readsOf();
-      expect(afterMount).toBe(10);
+      expect(rpc.sendCommand.mock.calls.filter(([command]) => command.type === "get_attention_summary")).toHaveLength(1);
+      expect(afterMount).toBe(1);
       let release!: () => void;
       barrier = new Promise<void>(done => { release = done; });
       const publish = (sessionId: string) => publications.get(`events:${sessionId}#user`)!({ data: { type: "hook_event", eventName: "Notification",
@@ -1022,11 +1057,11 @@ describe("parent routing applies live (phase B smoke)", () => {
       });
       expect(readsOf()).toBe(afterMount); // debounced per session: nothing yet
       await act(async () => { await vi.advanceTimersByTimeAsync(200); });
-      expect(peak).toBe(4); // global concurrency cap: only four reads in flight
-      expect(readsOf()).toBe(afterMount + 4);
+      expect(peak).toBe(5); // one mount summary plus four event reads
+      expect(rpc.sendCommand.mock.calls.filter(([command]) => command.type === "get_session_attention").length).toBe(13);
       release();
       await act(async () => { for (let i = 0; i < 50; i++) await Promise.resolve(); });
-      expect(readsOf()).toBe(afterMount + 10); // one trailing read per session
+      expect(rpc.sendCommand.mock.calls.filter(([command]) => command.type === "get_session_attention").length).toBeGreaterThan(13);
     } finally { vi.useRealTimers(); }
   });
 });

@@ -27,6 +27,7 @@ import type { Ledger, LedgerGenesis, LedgerOperation, LedgerTransition, Signed }
 import { createSoftPasskey, type SoftPasskey } from '../ledger/testing.js';
 import { BridgeLedgerStore } from './ledger-store.js';
 import { createCommandHandler } from '../../command-rpc.js';
+import { AttentionStore } from '../../attention-store.js';
 import type { Command, CommandResponse } from '../../types.js';
 import { saveAccounts } from '../../accounts.js';
 
@@ -72,15 +73,16 @@ test('encrypted browser read commands dispatch account metadata and session list
     dispatched.push(message.application.route.kind === 'command' ? message.application.route.command : 'unexpected');
     let response: CommandResponse | undefined;
     await createCommandHandler({ bridgeId: 'bridge', security: f.security,
-      sessionController: { list: async () => [] } as unknown as SessionController,
+      sessionController: { list: async () => [], get: async () => null } as unknown as SessionController,
+      attentionStore: new AttentionStore(id => join(f.dir, id)),
       publishCommandResponse: async value => { response = value; },
     })(message.application.data as unknown as Command, message);
     return JSON.parse(JSON.stringify({ type: 'command_response', response }));
   });
   cloud.subscribeSecureCommands('owner@example.test', message => api.dispatchSecure(message));
-  const send = async (type: 'list_sessions' | 'get_accounts') => {
+  const send = async (type: 'list_sessions' | 'get_accounts' | 'get_attention_summary') => {
     const requestId = randomUUID();
-    const command: Command = { type, requestId, payload: { bridgeId: 'bridge' } };
+    const command: Command = { type, requestId, payload: type === 'get_attention_summary' ? { bridgeId: 'bridge', sessionIds: [] } : { bridgeId: 'bridge' } };
     const app: SecureApplication = { type: 'application', route: { kind: 'command', requestId, command: type, sessionId: null }, data: command, mcp: null };
     const response = new Promise<SecureEnvelope>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error(`No encrypted response for ${type}`)), 2000);
@@ -103,6 +105,10 @@ test('encrypted browser read commands dispatch account metadata and session list
     { id: 'coding', harness: 'codex', label: 'Coding subscription', isDefault: false },
   ] });
   assert.deepEqual(dispatched, ['list_sessions', 'get_accounts']);
+  const summary = await send('get_attention_summary');
+  assert.equal(summary.success, true);
+  assert.deepEqual(summary.data, { summary: {} });
+  assert.deepEqual(dispatched, ['list_sessions', 'get_accounts', 'get_attention_summary']);
 });
 
 test('browser control cannot register preview through encrypted HTTP and causes no session mutation', async t => {

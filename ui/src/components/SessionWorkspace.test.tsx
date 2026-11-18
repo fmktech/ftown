@@ -1402,7 +1402,7 @@ it('fetches the board snapshot while the Overview is visible and passes it throu
   const manager: Session = { id: 'manager', bridgeId: 'bridge', name: 'manager', status: 'running', createdAt: '', updatedAt: '', brief: { notes: [], updatedAt: '' } };
   const child: Session = { id: 'child', bridgeId: 'bridge', name: 'child', status: 'running', createdAt: '', updatedAt: '', parentSessionId: 'manager' };
   const workspace = (selected: Session, sessions: Session[]) => (
-    <SessionWorkspace session={selected} sessions={sessions} client={null} userId="user" readable={false} sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="terminal" onMobileTab={vi.fn()} onRefit={vi.fn()} idleSince={{ child: '2026-11-13T09:00:00.000Z' }}>
+    <SessionWorkspace session={selected} sessions={sessions} client={null} userId="user" readable={true} sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="terminal" onMobileTab={vi.fn()} onRefit={vi.fn()} idleSince={{ child: '2026-11-13T09:00:00.000Z' }}>
       <div>Terminal content</div>
     </SessionWorkspace>
   );
@@ -1416,14 +1416,14 @@ it('fetches the board snapshot while the Overview is visible and passes it throu
   rerender(workspace(manager, [manager, { ...child }]));
   await act(async () => {});
   expect(boardCalls).toHaveLength(1);
-  // A tree session update refetches and the snapshot reaches the overview.
+  // Tree session updates no longer trigger board RPC reads.
   rerender(workspace(manager, [manager, { ...child, updatedAt: '2026-11-13T09:35:00.000Z' }]));
   await act(async () => {});
-  expect(boardCalls).toHaveLength(2);
+  expect(boardCalls).toHaveLength(1);
   expect(within(await screen.findByRole('region', { name: 'events' })).getByText('events · 2')).toBeTruthy();
   // A session without children never fetches (its overview does not exist).
   const plain: Session = { id: 'plain', bridgeId: 'bridge', name: 'plain', status: 'running', createdAt: '', updatedAt: '' };
   rerender(workspace(plain, [plain]));
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 5)); });
-  expect(boardCalls).toHaveLength(2);
+  expect(boardCalls).toHaveLength(1);
 });

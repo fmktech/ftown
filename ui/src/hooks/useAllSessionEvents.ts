@@ -173,6 +173,10 @@ export function useAllSessionEvents(
   const stampedDebounce = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const readsInFlight = useRef(0);
   const readWaiters = useRef<Array<() => void>>([]);
+  const summaryStarted = useRef(new Set<string>());
+  const summaryAttempts = useRef(new Map<string, Promise<boolean>>());
+  const attentionHydration = useRef(new Map<string, Promise<void>>());
+  const unsupportedSummaryBridges = useRef(new Set<string>());
   const releaseRead = (): void => {
     const next = readWaiters.current.shift();
     if (next) next(); else readsInFlight.current -= 1;
@@ -181,6 +185,81 @@ export function useAllSessionEvents(
     if (readsInFlight.current < READ_LIMIT) { readsInFlight.current += 1; return Promise.resolve(releaseRead); }
     return new Promise(resolve => readWaiters.current.push(() => resolve(releaseRead)));
   };
+  const hydrateBridge = useCallback((bridgeId: string, resolving = false, readStamps?: Map<string, { read: number; observation: number }>): Promise<void> => {
+    const sessionsForBridge = sessionsRef.current.filter(row => row.bridgeId === bridgeId && row.status === "running");
+    if (!sessionsForBridge.length || !rpcRef.current || unsupportedSummaryBridges.current.has(bridgeId)) return Promise.resolve();
+    const existing = attentionHydration.current.get(bridgeId);
+    if (existing) return existing;
+    const target = rpcRef.current;
+    const user = userIdRef.current;
+    const activeClient = clientRef.current;
+    const readBySession = readStamps ?? new Map(sessionsForBridge.map(session => {
+      const read = reads.current.get(session.id) ?? 0;
+      return [session.id, { read, observation: observations.current.get(session.id) ?? 0 }] as const;
+    }));
+    const request = target.sendCommand({ type: "get_attention_summary", requestId: uuidv4(),
+      payload: { bridgeId, sessionIds: sessionsForBridge.map(session => session.id) } }).then(response => {
+      const summary = (response.data as { summary?: unknown } | undefined)?.summary;
+      if (!response.success || !summary || typeof summary !== "object" || Array.isArray(summary)) {
+        if (!response.success && response.error !== "Unknown command type: get_attention_summary"
+          && (response.data as { code?: unknown } | undefined)?.code !== "unknown_command") {
+          for (const session of sessionsForBridge) hydrate(session.id, true);
+          return;
+        }
+        unsupportedSummaryBridges.current.add(bridgeId);
+        for (const session of sessionsForBridge) void hydrate(session.id, resolving);
+        return;
+      }
+      if (userIdRef.current !== user || clientRef.current !== activeClient || rpcRef.current !== target) return;
+      for (const session of sessionsForBridge) {
+        const owner = subsRef.current.get(session.id);
+        const stamps = readBySession.get(session.id);
+        if (!Object.prototype.hasOwnProperty.call(summary, session.id)) {
+          if (owner && owner.client === activeClient && owner.user === user && stamps
+            && reads.current.get(session.id) === stamps.read && (observations.current.get(session.id) ?? 0) === stamps.observation) {
+            canonical.current.set(session.id, { sequence: 0, activeId: null });
+            setActivityMap(prev => {
+              if (subsRef.current.get(session.id) !== owner || reads.current.get(session.id) !== stamps.read
+                || (observations.current.get(session.id) ?? 0) !== stamps.observation) return prev;
+              const current = prev.get(session.id) ?? { activity: "idle" as const };
+              if (current.attention && !isDurableNotice(current.attention)) return prev;
+              return new Map(prev).set(session.id, { ...current, attention: undefined });
+            });
+          }
+          continue;
+        }
+        const item = (summary as Record<string, unknown>)[session.id];
+        const raw = item && typeof item === "object" ? item as Record<string, unknown> : { attention: null, sequence: 0 };
+        const snapshot = snapshotResponse({ sessionId: session.id, attention: raw.attention ?? null, sequence: raw.sequence }, session.id);
+        if (!owner || owner.client !== activeClient || owner.user !== user || !stamps || !snapshot
+          || reads.current.get(session.id) !== stamps.read || (observations.current.get(session.id) ?? 0) !== stamps.observation
+          || !sessionsRef.current.some(row => row.id === session.id && row.bridgeId === bridgeId && row.status === "running")) continue;
+        const known = canonical.current.get(session.id);
+        if (known && known.sequence > snapshot.sequence) continue;
+        const incoming = snapshot.attention && snapshot.attention.sequence > (dismissedThrough.current.get(session.id) ?? 0)
+          ? restoredNotice(snapshot.attention) : undefined;
+        canonical.current.set(session.id, { sequence: snapshot.sequence, activeId: snapshot.attention?.id ?? null });
+        setActivityMap(prev => {
+          if (userIdRef.current !== user || clientRef.current !== activeClient || subsRef.current.get(session.id) !== owner
+            || reads.current.get(session.id) !== stamps.read || (observations.current.get(session.id) ?? 0) !== stamps.observation) return prev;
+          const current = prev.get(session.id) ?? { activity: "idle" as const };
+          if (current.attention && !isDurableNotice(current.attention)) return prev;
+          let attention = incoming;
+          let kept = false;
+          if (!resolving && incoming?.attentionId && current.attention && isDurableNotice(current.attention)
+            && incoming.attentionId !== current.attention.attentionId && !isWithParentNotice(current.attention) && isWithParentNotice(incoming)) {
+            attention = current.attention; kept = true;
+            const yielded = yieldedItems.current.get(session.id) ?? new Set<string>();
+            yielded.add(incoming.attentionId); yieldedItems.current.set(session.id, yielded);
+          }
+          pruneYielded(session.id, snapshot.attention, kept ? undefined : incoming?.attentionId);
+          return new Map(prev).set(session.id, { ...current, attention });
+        });
+      }
+    }).finally(() => { if (attentionHydration.current.get(bridgeId) === request) attentionHydration.current.delete(bridgeId); });
+    attentionHydration.current.set(bridgeId, request);
+    return request;
+  }, []);
   clientRef.current = client;
   userIdRef.current = userId;
   rpcRef.current = rpc;
@@ -204,6 +283,31 @@ export function useAllSessionEvents(
       retries.current.set(sessionId, setTimeout(() => { retries.current.delete(sessionId); hydrate(sessionId, true); }, 2000));
     };
     try {
+      const summaryKey = `${session.bridgeId}:${owner.user}`;
+      if (!unsupportedSummaryBridges.current.has(session.bridgeId) && !summaryStarted.current.has(summaryKey)) {
+        summaryStarted.current.add(summaryKey);
+        const attempt = Promise.resolve().then(async () => {
+          const bridgeSessions = sessionsRef.current.filter(row => row.bridgeId === session.bridgeId && row.status === "running");
+          const allSessionsReady = bridgeSessions.every(row => subsRef.current.has(row.id));
+          if (!allSessionsReady) { summaryStarted.current.delete(summaryKey); return false; }
+          // Every session's subscription callback enters this shared attempt;
+          // capture a stamp for each after the microtask batch has started.
+          const readStamps = new Map(bridgeSessions.map(row => [row.id, {
+            read: reads.current.get(row.id) ?? 0,
+            observation: observations.current.get(row.id) ?? 0,
+          }] as const));
+          await hydrateBridge(session.bridgeId, resolving, readStamps);
+          return true;
+        });
+        summaryAttempts.current.set(summaryKey, attempt);
+        void attempt.finally(() => { if (summaryAttempts.current.get(summaryKey) === attempt) summaryAttempts.current.delete(summaryKey); });
+        if (await attempt) return;
+      } else if (!unsupportedSummaryBridges.current.has(session.bridgeId)) {
+        const attempt = summaryAttempts.current.get(summaryKey);
+        if (attempt && await attempt) return;
+        const inFlight = attentionHydration.current.get(session.bridgeId);
+        if (inFlight) { await inFlight; return; }
+      }
       const release = await acquireRead();
       try {
         const response = await rpcRef.current.sendCommand({ type: "get_session_attention", requestId: uuidv4(),
@@ -246,7 +350,7 @@ export function useAllSessionEvents(
         });
       } finally { release(); }
     } catch { retryOnce(); /* Older/offline bridges retain the existing live-only dashboard. */ }
-  }, []);
+  }, [hydrateBridge]);
 
   const hydrate: (sessionId: string, resolving?: boolean) => void = useCallback((sessionId: string, resolving = false) => {
     const pendingStamp = stampedDebounce.current.get(sessionId);
@@ -450,8 +554,24 @@ export function useAllSessionEvents(
 
   useEffect(() => rpc?.onSubscribed(() => {
     if (clientRef.current !== client || userIdRef.current !== userId) return;
-    for (const id of subsRef.current.keys()) void hydrate(id);
-  }), [rpc?.onSubscribed, client, userId, hydrate]);
+    const bridgeIds = new Set(Array.from(subsRef.current.keys()).flatMap(id => {
+      const row = sessionsRef.current.find(session => session.id === id && session.status === "running");
+      return row ? [row.bridgeId] : [];
+    }));
+    for (const bridgeId of bridgeIds) {
+      if (unsupportedSummaryBridges.current.has(bridgeId)) {
+        for (const [id, owner] of subsRef.current) if (owner.client === client && owner.user === userId
+          && sessionsRef.current.some(row => row.id === id && row.bridgeId === bridgeId && row.status === "running")) void hydrate(id, true);
+        continue;
+      }
+      for (const id of subsRef.current.keys()) if (sessionsRef.current.some(row => row.id === id && row.bridgeId === bridgeId && row.status === "running")) {
+        reads.current.set(id, (reads.current.get(id) ?? 0) + 1);
+      }
+      attentionHydration.current.delete(bridgeId);
+      summaryStarted.current.add(`${bridgeId}:${userId}`);
+      void hydrateBridge(bridgeId, true);
+    }
+  }), [rpc?.onSubscribed, client, userId, hydrate, hydrateBridge]);
 
   useEffect(() => {
     if (!client || !userId) return;

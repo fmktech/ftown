@@ -150,8 +150,7 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
   const previewVisible = showPreview && !attentionShown && view === 'preview';
   // Dashboard data for the board v3 Overview: one get_session_board snapshot of
   // this manager's tree, fetched only while the Overview tab is on screen.
-  const treeSessions = useMemo(() => (session ? [session, ...childSessions] : []), [session, childSessions]);
-  const { snapshot: boardSnapshot, refresh: refreshBoard } = useSessionBoard(sendCommand, session?.bridgeId ?? null, session?.id ?? null, view === 'overview', treeSessions);
+  const { snapshot: boardSnapshot } = useSessionBoard(sendCommand, session?.bridgeId ?? null, session?.id ?? null, open && readable && view === 'overview', client, userId);
   const sessionsById = useMemo(() => new Map(sessions.map(item => [item.id, item])), [sessions]);
   const childIds = useMemo(() => new Set(childSessions.map(item => item.id)), [childSessions]);
   // Items resolved through the panel stay hidden until the board snapshot catches up.
@@ -169,8 +168,7 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
     if (!eventId) return;
     setResolvedAttentionIds(current => new Set(current).add(eventId));
     if (openAttentionId === eventId) onOpenAttentionChange?.(null);
-    void refreshBoard();
-  }, [openAttentionId, onOpenAttentionChange, refreshBoard]);
+  }, [openAttentionId, onOpenAttentionChange]);
   const childAttentionItems = useMemo(() => mergeChildAttentionItems({ childIds, liveEntries: attentionEntries ?? [], snapshotAttention: boardSnapshot?.attention, sessionsById, excludeIds: resolvedAttentionIds }), [childIds, attentionEntries, boardSnapshot, sessionsById, resolvedAttentionIds]);
   const childAttention = onOpenAttentionChange && onDismissAttention && onReplyAttention && onAnswerAttention && onOpenSessionById
     ? {

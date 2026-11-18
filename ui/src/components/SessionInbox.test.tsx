@@ -169,7 +169,7 @@ it("shows the bridge's typed answer failures instead of a raw transport error", 
     .toEqual({ ok: false, message: "This computer is not ready to answer. Try again in a moment." });
 });
 it("offers only Dismiss and Open for a tracked item that carries no question and has no session left to reply to", () => {
-  const item = entry("first"); item.notice = { ...item.notice, attentionId: "att-1" }; item.session = session("first", { status: "stopped" });
+  const item = entry("first"); item.notice = { ...item.notice, attentionId: "att-1" }; item.session = session("first", { status: "completed" });
   render(<Fixture entries={[item]}/>); fireEvent.click(screen.getByRole("button", { name: /Inbox/ }));
   expect(screen.getByRole("button", { name: "Open session" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "Dismiss" })).toBeTruthy();

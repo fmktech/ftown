@@ -60,6 +60,7 @@ export interface CoordinationDeps {
   mail: CoordinationMailStore;
   publishSession: (s: Session) => void;
   now: () => number;
+  onBoardChanged?: (rootId: string) => void;
   onAttentionEscalated?: (sessionId: string, item: AttentionItem) => void;
   /** Optional factory seams for unit tests using *Api fakes. */
   createCards?: (deps: CardStoreDeps) => CardStoreApi;
@@ -160,6 +161,8 @@ export function createCoordination(deps: CoordinationDeps): Coordination {
         '[Coordination] Failed to emit tree event:',
         error instanceof Error ? error.message : String(error),
       );
+    } finally {
+      deps.onBoardChanged?.(rootOf(session));
     }
   }
 
@@ -248,6 +251,7 @@ export function createCoordination(deps: CoordinationDeps): Coordination {
     saveSession: (session) => deps.store.saveSession(session),
     now: deps.now,
     onChange: async (saved, previous) => {
+      deps.onBoardChanged?.(rootOf(saved));
       try {
         deps.publishSession(saved);
       } catch (error) {

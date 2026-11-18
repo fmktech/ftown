@@ -16,6 +16,7 @@ import type { Subscription, PublicationContext } from 'centrifuge';
 import { hostname } from 'node:os';
 
 import type { Command, CommandResponse, Session, BridgePresenceInfo } from './types.js';
+import type { BoardSnapshot } from './coordination/contract-c.js';
 import { toWireSession } from './session-wire.js';
 import {
   isSignalMessage,
@@ -196,7 +197,7 @@ export class CentrifugoClient {
     return () => { this.localListeners.delete(listener); };
   }
 
-  private publish(channel: string, data: Record<string, unknown>): Promise<void> {
+  private publish(channel: string, data: Record<string, unknown>, waitForDelivery = false): Promise<void> {
     for (const listener of this.localListeners) {
       try {
         listener(channel, data);
@@ -209,7 +210,10 @@ export class CentrifugoClient {
     // Disconnected updates are reconciled by the existing reconnect snapshot.
     if (!this.disabled && this.client.state === 'connected' && this.security) {
       const security = this.security;
-      this.outbound.enqueue({
+      let resolveDelivery: (() => void) | undefined;
+      let rejectDelivery: ((error: unknown) => void) | undefined;
+      const delivery = waitForDelivery ? new Promise<void>((resolve, reject) => { resolveDelivery = resolve; rejectDelivery = reject; }) : undefined;
+      const accepted = this.outbound.enqueue({
         label: `${channel.split(':')[0]}/${typeof data.type === 'string' ? data.type : 'unknown'}`,
         prepare: async () => {
           const packets = await security.sealPublication(channel, { type: 'application', route: { kind: 'publication' },
@@ -236,9 +240,13 @@ export class CentrifugoClient {
           }
           return out;
         },
+        ...(waitForDelivery ? { onSettled: (error?: unknown) => error === undefined ? resolveDelivery?.() : rejectDelivery?.(error) } : {}),
       });
+      if (!accepted) return waitForDelivery ? Promise.reject(new Error('Encrypted publication queue is full')) : Promise.resolve();
+      if (delivery) return delivery;
       return Promise.resolve();
     }
+    if (waitForDelivery && !this.disabled) return Promise.reject(new Error('Centrifugo is disconnected'));
     return Promise.resolve();
   }
 
@@ -292,6 +300,20 @@ export class CentrifugoClient {
       console.error(`[Centrifugo] Failed to publish session update to ${channel}:`, err);
       throw err;
     }
+  }
+
+  async publishSessionSnapshotRequired(userId: string, bridgeId: string): Promise<void> {
+    await this.publish(accountChannel('sessions:updates', userId), {
+      type: 'session_snapshot_required', bridgeId, timestamp: new Date().toISOString(),
+    }, true);
+  }
+
+  /** 300 kB plaintext leaves room for HPKE/base64 and headers under the 450 kB envelope cap. */
+  async publishSessionBoard(userId: string, bridgeId: string, rootId: string, snapshot: BoardSnapshot): Promise<void> {
+    const payload = { type: 'session_board_snapshot', bridgeId, rootId, snapshot };
+    const data = byteLen(JSON.stringify(payload)) <= MAX_PUBLISH_BYTES
+      ? payload : { type: 'session_board_changed', bridgeId, rootId };
+    await this.publish(accountChannel('session-board:updates', userId), data, true);
   }
 
   async publishTerminalData(userId: string, sessionId: string, data: string): Promise<void> {

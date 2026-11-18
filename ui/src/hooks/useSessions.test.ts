@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Centrifuge } from "centrifuge";
 import type { Command, CommandResponse, CreateSessionPayload, Session, ShellType } from "@/types";
 import type { BridgeRpc } from "./useBridgeRpc";
-import { useSessions, mergeSessionSnapshot } from "./useSessions";
+import { LIVE_USAGE_POLL_MS, useSessions, mergeSessionSnapshot } from "./useSessions";
 import { SessionList } from "@/components/SessionList";
 
 const row = (id: string, bridgeId = "a", extra: Partial<Session> = {}): Session => ({
@@ -16,16 +16,17 @@ function harness(immediate = false, commandTimeoutMs?: number) {
   const responses = new Set<(r: CommandResponse) => void>();
   const subscribed = new Set<() => void>();
   const subscriptions: Array<ReturnType<typeof subscription>> = [];
+  const subscriptionOptions: unknown[] = [];
   function subscription() {
     const listeners = new Map<string, Array<(data?: any) => void>>();
     return {
       on: vi.fn((event: string, cb: (data?: any) => void) => { listeners.set(event, [...(listeners.get(event) ?? []), cb]); }),
       emit: (event: string, data?: any) => listeners.get(event)?.forEach(cb => cb(data)),
       listeners,
-      subscribe: vi.fn(), unsubscribe: vi.fn(), removeAllListeners: vi.fn(() => listeners.clear()),
+      subscribe: vi.fn(function (this: ReturnType<typeof subscription>) { this.emit("subscribed", { recovered: false, offset: 0, epoch: "epoch" }); }), unsubscribe: vi.fn(), removeAllListeners: vi.fn(() => listeners.clear()),
     };
   }
-  const client = { commandTimeoutMs, getSubscription: () => null, newSubscription: () => { const s = subscription(); subscriptions.push(s); return s; }, removeSubscription: vi.fn() };
+  const client = { commandTimeoutMs, getSubscription: () => null, newSubscription: (_channel: string, options?: unknown) => { const s = subscription(); subscriptions.push(s); subscriptionOptions.push(options); return s; }, removeSubscription: vi.fn() };
   const commands: Command[] = [];
   const rpc: BridgeRpc = {
     publishCommand: vi.fn(c => { commands.push(c); }),
@@ -38,20 +39,21 @@ function harness(immediate = false, commandTimeoutMs?: number) {
   const reply = (id: string, sessions: unknown[], bridgeId?: string, success = true) => act(() => {
     responses.forEach(cb => cb({ requestId: id, success, data: { sessions, ...(bridgeId === undefined ? {} : { bridgeId }) } }));
   });
-  const recover = () => act(() => subscribed.forEach(cb => cb()));
+  const recover = (recovered = false) => act(() => subscriptions.at(-1)?.emit("subscribed", { recovered, offset: recovered ? 1 : 0, epoch: "epoch" }));
   const publication = (s: Session, status?: string) => act(() => subscriptions.at(-1)!.emit("publication", { data: { type: "session_update", session: { ...s, ...(status ? { status } : {}) } } }));
   const request = () => commands.filter(c => c.type === "list_sessions").at(-1)!.requestId;
-  return { client: client as unknown as Centrifuge, rpc, commands, responses, subscriptions, reply, recover, publication, request };
+  return { client: client as unknown as Centrifuge, rpc, commands, responses, subscriptions, subscriptionOptions, reply, recover, publication, request };
 }
 let visibility = "visible";
 beforeEach(() => { vi.useFakeTimers(); visibility = "visible"; Object.defineProperty(document, "visibilityState", { configurable: true, get: () => visibility }); localStorage.clear(); });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
-function setup(immediate = false, commandTimeoutMs?: number) {
+function setup(immediate = false, commandTimeoutMs?: number, usageView: string | null = null) {
   const h = harness(immediate, commandTimeoutMs);
-  const hook = renderHook(({ userId }) => useSessions(h.client, userId, h.rpc), { initialProps: { userId: "user" as string | null } });
+  const hook = renderHook(({ userId, selectedUsageView }) => useSessions(h.client, userId, h.rpc, selectedUsageView), { initialProps: { userId: "user" as string | null, selectedUsageView: usageView } });
   const refresh = () => act(() => hook.result.current.refreshSessions());
   const ids = () => hook.result.current.sessions.map(s => s.id);
-  return { ...h, ...hook, refresh, ids };
+  const setUsageView = (selectedUsageView: string | null) => hook.rerender({ userId: "user", selectedUsageView });
+  return { ...h, ...hook, refresh, ids, setUsageView };
 }
 describe("structured session creation through the actual hook", () => {
   const shellTypes: ShellType[] = ["claude", "cursor", "codex", "shell", "zai", "kimi", "opencode", "deepseek", "fireworks", "grok", "pi", "kimi-code", "muse", "antigravity"];
@@ -128,14 +130,52 @@ describe("session-list transport deadlines through the actual hook", () => {
 });
 
 describe("retirement reconciliation through actual hook callbacks", () => {
+  it("keeps usage interval at one minute", () => {
+    expect(LIVE_USAGE_POLL_MS).toBe(60_000);
+  });
+
+  it("reads usage immediately for only the visible selected running session and follows selection", async () => {
+    const h = setup(true, undefined, "one");
+    h.reply(h.request(), [row("one", "a", { status: "running" }), row("two", "a", { status: "running" })], "a");
+    await act(async () => { await Promise.resolve(); });
+    const usageCalls = () => vi.mocked(h.rpc.sendCommand).mock.calls.map(([command]) => command).filter(command => command.type === "get_sessions_usage");
+    expect(usageCalls()).toHaveLength(1);
+    expect(usageCalls()[0].payload).toMatchObject({ bridgeId: "a", sessionIds: ["one"] });
+    h.setUsageView("two");
+    await act(async () => { await Promise.resolve(); });
+    expect(usageCalls()).toHaveLength(2);
+    expect(usageCalls()[1].payload).toMatchObject({ bridgeId: "a", sessionIds: ["two"] });
+    visibility = "hidden"; act(() => document.dispatchEvent(new Event("visibilitychange")));
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(usageCalls()).toHaveLength(2);
+  });
+
+  it("applies create, status, rename, and remove publications without periodic list reads", () => {
+    const h = setup();
+    const listReads = () => h.commands.filter(command => command.type === "list_sessions").length;
+    expect(listReads()).toBe(1); // initial subscription requests its authoritative snapshot
+    const created = row("pushed", "a", { status: "running", name: "before" });
+    h.publication(created);
+    expect(h.result.current.sessions).toEqual([created]);
+    h.publication({ ...created, status: "completed", updatedAt: "2026-11-18T00:01:00.000Z" });
+    expect(h.result.current.sessions[0]).toMatchObject({ id: "pushed", status: "completed" });
+    h.publication({ ...created, name: "renamed", updatedAt: "2026-11-18T00:02:00.000Z" });
+    expect(h.result.current.sessions[0]).toMatchObject({ id: "pushed", name: "renamed" });
+    h.publication(created, "removed");
+    expect(h.ids()).toEqual([]);
+    expect(listReads()).toBe(1);
+    act(() => vi.advanceTimersByTime(60_000));
+    expect(listReads()).toBe(1);
+  });
+
   it("heals missed self/parent removal on reconnect with empty owner and isolates offline owners", () => {
     const h = setup(true); h.reply(h.request(), [row("self"), row("parent-child")], "a");
     h.reply(h.request(), [row("offline", "b")], "b");
-    h.recover(); h.reply(h.request(), [], "a"); expect(h.ids()).toEqual(["offline"]);
+    h.recover(false); h.reply(h.request(), [], "a"); expect(h.ids()).toEqual(["offline"]);
   });
-  it("heals missed removal through visible periodic refresh", () => {
+  it("does not issue blind list reads while visible", () => {
     const h = setup(true); h.reply(h.request(), [row("retired")], "a");
-    act(() => vi.advanceTimersByTime(15_000)); h.reply(h.request(), [], "a"); expect(h.ids()).toEqual([]);
+    act(() => vi.advanceTimersByTime(120_000)); expect(h.commands.filter(c => c.type === "list_sessions")).toHaveLength(1); expect(h.ids()).toEqual(["retired"]);
   });
   it("retains normal completed sessions", () => {
     const h = setup(true); h.reply(h.request(), [row("done")], "a"); h.refresh(); h.reply(h.request(), [row("done")], "a"); expect(h.ids()).toEqual(["done"]);
@@ -201,12 +241,14 @@ describe("retirement reconciliation through actual hook callbacks", () => {
     act(() => h.responses.forEach(cb => cb({ requestId: h.commands.at(-1)!.requestId, success: true, data: { removed: false } })));
     act(() => vi.advanceTimersByTime(12_000)); h.reply(h.request(), [row("keep")], "a"); expect(h.ids()).toEqual(["keep"]);
   });
-  it("recovers independently on session subscription, coalesces simultaneous triggers, and avoids hidden churn", () => {
+  it("reloads only on failed recovery and visibility return", () => {
     const h = setup(true); const count = () => h.commands.filter(c => c.type === "list_sessions").length;
-    const initial = count(); act(() => h.subscriptions[0].emit("subscribed")); expect(count()).toBe(initial);
-    act(() => vi.advanceTimersByTime(1)); act(() => h.subscriptions[0].emit("subscribed")); expect(count()).toBe(initial + 1);
-    visibility = "hidden"; act(() => vi.advanceTimersByTime(30_000)); expect(count()).toBe(initial + 1);
-    visibility = "visible"; act(() => document.dispatchEvent(new Event("visibilitychange"))); expect(count()).toBe(initial + 2);
+    expect(h.subscriptionOptions[0]).toMatchObject({ recoverable: true, positioned: true, since: { offset: 0, epoch: "" } });
+    expect(count()).toBe(1);
+    act(() => h.subscriptions[0].emit("subscribed", { recovered: true, positioned: true, wasRecovering: true, offset: 1, epoch: "epoch" })); expect(count()).toBe(1);
+    act(() => h.subscriptions[0].emit("subscribed", { recovered: false, offset: 0, epoch: "new-epoch" })); expect(count()).toBe(2);
+    visibility = "hidden"; act(() => document.dispatchEvent(new Event("visibilitychange")));
+    visibility = "visible"; act(() => document.dispatchEvent(new Event("visibilitychange"))); expect(count()).toBe(3);
   });
   it("cleans up timers, listeners and stale callbacks on unmount", () => {
     const h = setup(true); const cb = [...h.responses][0]; h.unmount(); const count = h.commands.length;
@@ -225,7 +267,7 @@ describe("retirement reconciliation through actual hook callbacks", () => {
       h.commands.push(c);
       if (c.type === "list_sessions") h.responses.forEach(cb => cb({ requestId: c.requestId, success: true, data: { bridgeId: "a", sessions: [] } }));
     });
-    h.recover(); expect(h.ids()).toEqual([]);
+    h.recover(false); expect(h.ids()).toEqual([]);
   });
   it("bounds request records even with a flood of unanswered refreshes", () => {
     const h = setup(true); const evicted = h.request(); h.reply(evicted, [row("keep")]);
@@ -259,10 +301,10 @@ describe("retirement reconciliation through actual hook callbacks", () => {
     expect(h.result.current.sessions[0].usage).toEqual(usage);
   });
   it("live usage observations protect membership and fields from an in-flight snapshot", async () => {
-    const h = setup(true); h.reply(h.request(), [row("running", "a", { status: "running", codexSessionId: "scratch-codex" })], "a"); h.refresh(); const inflight = h.request();
+    const h = setup(true, undefined, "running"); h.reply(h.request(), [row("running", "a", { status: "running", codexSessionId: "scratch-codex" })], "a"); h.refresh(); const inflight = h.request();
     const usage = { inputTokens: 9, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 9, models: [], harness: "codex", collectedAt: "2026-09-30T12:00:00Z" };
     vi.mocked(h.rpc.sendCommand).mockImplementation(async c => ({ requestId: c.requestId, success: true, data: { usages: { running: usage } } }));
-    await act(async () => { vi.advanceTimersByTime(1_000); await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
     h.reply(inflight, [], "a"); expect(h.ids()).toEqual(["running"]); expect(h.result.current.sessions[0].usage).toEqual(usage);
   });
 

@@ -33,8 +33,7 @@ export type { BridgeExecResponse } from "@/hooks/useBridgeRpc";
 const REMOVED_TOMBSTONE_MS = 12_000;
 const LIST_REPLY_WINDOW_MS = 30_000;
 const MAX_LIST_REQUESTS = 64;
-const LIVE_USAGE_POLL_MS = 15_000;
-const LIVE_USAGE_COALESCE_MS = 1_000;
+export const LIVE_USAGE_POLL_MS = 60_000;
 
 function isSessionUsage(value: unknown): value is SessionUsage {
   if (typeof value !== "object" || value === null) return false;
@@ -115,9 +114,10 @@ export function mergeSessionSnapshot(current: Session | undefined, incoming: Ses
 }
 
 interface SessionUpdateMessage {
-  type: 'session_update';
-  session: Session;
-  timestamp: string;
+  type: 'session_update'; session: Session; timestamp: string;
+}
+interface SessionSnapshotRequiredMessage {
+  type: 'session_snapshot_required'; bridgeId: string; timestamp: string;
 }
 
 export interface CreateSessionOptions {
@@ -179,7 +179,8 @@ interface UseSessionsResult {
 export function useSessions(
   client: MessageClient | null,
   userId: string | null,
-  rpc: BridgeRpc
+  rpc: BridgeRpc,
+  usageViewSessionId: string | null = null,
 ): UseSessionsResult {
   const [sessions, setSessions] = useState<Session[]>([]);
   const sessionsSubRef = useRef<MessageSubscription | null>(null);
@@ -190,6 +191,8 @@ export function useSessions(
   const optimisticRef = useRef(new Map<string, { expiry: number; bridgeId?: string }>());
   const observationsRef = useRef(new Map<string, number>());
   const mutationRef = useRef(0);
+  const sessionPositionRef = useRef({ offset: 0, epoch: "" });
+  const sessionNeedsSnapshotRef = useRef(true);
   const requestListRef = useRef<(coalesce?: boolean) => void>(() => {});
   const removeRef = useRef<(id: string, optimistic: boolean, command: Command) => void>(() => {});
   const { publishCommand, sendCommand, onResponse, onSubscribed } = rpc;
@@ -215,6 +218,8 @@ export function useSessions(
     mutationRef.current = 0;
     usageGenerationRef.current += 1;
     usageRequestsRef.current.clear();
+    sessionPositionRef.current = { offset: 0, epoch: "" };
+    sessionNeedsSnapshotRef.current = true;
     updateSessions(() => []);
   }, [userId, updateSessions]);
 
@@ -336,16 +341,30 @@ export function useSessions(
         return [...merged.values()];
       });
     });
-    const unregisterSubscribed = onSubscribed(() => requestList(true));
+    // RPC readiness may lag the sessions subscription (e.g. first security
+    // enrollment). Retry the initial snapshot when its command transport is
+    // actually ready, and after each RPC resubscribe/reconnect.
+    const unregisterSubscribed = onSubscribed(() => {
+      if (active && document.visibilityState !== "hidden") requestList(true);
+    });
     let sessionsSub: MessageSubscription | null = null;
     if (client) {
       const channel = accountChannel("sessions:updates", userId);
       const existing = client.getSubscription(channel);
       if (existing) { existing.removeAllListeners(); existing.unsubscribe(); client.removeSubscription(existing); }
-      sessionsSub = client.newSubscription(channel);
+      sessionsSub = client.newSubscription(channel, { since: sessionPositionRef.current, recoverable: true, positioned: true });
       sessionsSub.on("publication", ctx => {
         if (!active) return;
-        const data = ctx.data as SessionUpdateMessage;
+        if (typeof ctx.offset === "number" && typeof ctx.epoch === "string") sessionPositionRef.current = { offset: ctx.offset, epoch: ctx.epoch };
+        const data = ctx.data as SessionUpdateMessage | SessionSnapshotRequiredMessage;
+        if (data?.type === "session_snapshot_required") {
+          sessionNeedsSnapshotRef.current = true;
+          if (document.visibilityState !== "hidden") {
+            requestList(true);
+            sessionNeedsSnapshotRef.current = false;
+          }
+          return;
+        }
         if (data?.type !== "session_update" || !data.session || typeof data.session.id !== "string") return;
         if ((data.session.status as string) === "removed") {
           confirm(data.session.id);
@@ -362,21 +381,32 @@ export function useSessions(
           });
         }
       });
-      sessionsSub.on("subscribed", () => { if (active) requestList(true); });
+      sessionsSub.on("subscribed", context => {
+        if (!active) return;
+        const recovered = context?.recovered === true;
+        if (typeof context?.offset === "number" && typeof context.epoch === "string") sessionPositionRef.current = { offset: context.offset, epoch: context.epoch };
+        if (document.visibilityState === "hidden") {
+          sessionNeedsSnapshotRef.current = true;
+        } else if (sessionNeedsSnapshotRef.current || !recovered) {
+          sessionNeedsSnapshotRef.current = false;
+          requestList(false);
+        }
+      });
       sessionsSubRef.current = sessionsSub;
       sessionsSub.subscribe();
     }
-    const periodic = window.setInterval(() => {
-      pruneRequests();
-      if (document.visibilityState !== "hidden") requestList(true);
-    }, LIVE_USAGE_POLL_MS);
-    const visible = () => { if (document.visibilityState === "visible") requestList(true); };
+    const expiryTimer = window.setInterval(pruneRequests, 5_000);
+    const visible = () => {
+      if (document.visibilityState !== "visible") { sessionNeedsSnapshotRef.current = true; return; }
+      requestList(false);
+      sessionNeedsSnapshotRef.current = false;
+    };
     document.addEventListener("visibilitychange", visible);
     return () => {
       active = false;
       usageGenerationRef.current += 1;
       unregisterResponse(); unregisterSubscribed();
-      window.clearInterval(periodic);
+      window.clearInterval(expiryTimer);
       clearTimeout(coalescingTimer);
       document.removeEventListener("visibilitychange", visible);
       for (const removal of removals.values()) clearTimeout(removal.timer);
@@ -388,9 +418,11 @@ export function useSessions(
     };
   }, [client, userId, onResponse, onSubscribed, publishCommand, updateSessions]);
 
-  const pollLiveUsage = useCallback(async () => {
+  const pollLiveUsage = useCallback(async (enabled: boolean) => {
+    if (!enabled) return;
     if (!userId || (typeof document !== "undefined" && document.visibilityState === "hidden")) return;
-    const batches = buildUsagePollBatches(sessionsRef.current);
+    const selected = sessionsRef.current.filter(session => session.id === usageViewSessionId && session.status === "running");
+    const batches = buildUsagePollBatches(selected);
     await Promise.all(batches.map(async (batch) => {
       const requestKey = `${batch.bridgeId}:${batch.sessionIds.join("|")}`;
       if (usageRequestsRef.current.has(requestKey)) return;
@@ -421,30 +453,25 @@ export function useSessions(
         usageRequestsRef.current.delete(requestKey);
       }
     }));
-  }, [userId, sendCommand, updateSessions]);
+  }, [userId, sendCommand, updateSessions, usageViewSessionId]);
 
-  const usagePollKey = JSON.stringify(buildUsagePollBatches(sessions));
-
+  const usageTarget = sessions.find(session => session.id === usageViewSessionId);
   useEffect(() => {
-    if (!userId || usagePollKey === "[]") return;
-    const timeout = window.setTimeout(() => void pollLiveUsage(), LIVE_USAGE_COALESCE_MS);
-    return () => window.clearTimeout(timeout);
-  }, [userId, usagePollKey, pollLiveUsage]);
-
-  useEffect(() => {
-    if (!userId) return;
-    const interval = window.setInterval(() => void pollLiveUsage(), LIVE_USAGE_POLL_MS);
+    if (!userId || usageViewSessionId === null) return;
+    if (usageTarget?.status !== "running") return;
+    if (document.visibilityState !== "hidden") void pollLiveUsage(true);
+    const interval = window.setInterval(() => void pollLiveUsage(true), LIVE_USAGE_POLL_MS);
     return () => window.clearInterval(interval);
-  }, [userId, pollLiveUsage]);
+  }, [userId, pollLiveUsage, usageViewSessionId, usageTarget?.bridgeId, usageTarget?.status]);
 
   useEffect(() => {
     if (!userId) return;
     const refreshWhenVisible = () => {
-      if (document.visibilityState === "visible") void pollLiveUsage();
+      if (document.visibilityState === "visible" && usageViewSessionId !== null) void pollLiveUsage(true);
     };
     document.addEventListener("visibilitychange", refreshWhenVisible);
     return () => document.removeEventListener("visibilitychange", refreshWhenVisible);
-  }, [userId, pollLiveUsage]);
+  }, [userId, pollLiveUsage, usageViewSessionId]);
 
   const createSession = useCallback(
     (prompt: string, options?: CreateSessionOptions): Promise<Session> => {

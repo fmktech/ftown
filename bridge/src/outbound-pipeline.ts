@@ -114,7 +114,7 @@ export const createOutboundPipeline: CreateOutboundPipeline = ({ logger }) => {
     }
   };
 
-  const sendPacket = (label: string, packet: OutboundPacket): void => {
+  const sendPacket = (label: string, packet: OutboundPacket): Promise<void> => {
     const bytes = Number.isFinite(packet.bytes) && packet.bytes > 0 ? packet.bytes : 0;
     inFlightPackets += 1;
     inFlightBytes += bytes;
@@ -130,9 +130,10 @@ export const createOutboundPipeline: CreateOutboundPipeline = ({ logger }) => {
     } catch (err) {
       reply = Promise.reject(err);
     }
-    reply.then(settle, (err: unknown) => {
+    return reply.then(() => { settle(); }, (err: unknown) => {
       settle();
       safeRecordFailure(label, err);
+      throw err;
     });
   };
 
@@ -152,12 +153,19 @@ export const createOutboundPipeline: CreateOutboundPipeline = ({ logger }) => {
       packets = prepared;
     } catch (err) {
       safeRecordFailure(job.label, err);
+      try { job.onSettled?.(err); } catch { /* callbacks must never break the sender */ }
+      return;
     }
+    const sent: Promise<void>[] = [];
     for (const packet of packets) {
       const bytes = Number.isFinite(packet.bytes) && packet.bytes > 0 ? packet.bytes : 0;
       if (!hasRoom(bytes)) await waitForRoom(bytes);
-      sendPacket(job.label, packet);
+      sent.push(sendPacket(job.label, packet));
     }
+    void Promise.allSettled(sent).then(results => {
+      const failed = results.find(result => result.status === 'rejected');
+      try { job.onSettled?.(failed?.status === 'rejected' ? failed.reason : undefined); } catch { /* callbacks must never break the sender */ }
+    });
   };
 
   const run = async (): Promise<void> => {

@@ -20,8 +20,8 @@ import { PR_REVIEW_CHUNK_BYTES } from './pull-request-review-protocol.js';
 import { InvalidShellTypeError, normalizeShellType, type ShellType } from './harness-registry.js';
 import { AccountSelectionError, PlanItemError, WorkingDirMissingError } from './create-ftown-session.js';
 import { WorktreeError } from './coordination/contract-b.js';
-import { BOARD_SNAPSHOT_EVENTS, type BoardSnapshot } from './coordination/contract-c.js';
-import type { BoardQuery, TreeEvent, TreeEventLogApi } from './coordination/contract.js';
+import { buildSessionBoardSnapshot, type SessionBoardSource } from './session-board-snapshot.js';
+export type { SessionBoardSource } from './session-board-snapshot.js';
 import type { AttentionItem } from './attention-events.js';
 import { AUTOMATION_REMOVED_CODE, AUTOMATION_REMOVED_MESSAGE, AutomationRemovedError, RETIRED_AUTOMATION_COMMANDS } from './retired-automation.js';
 import type { SessionController } from './session-controller.js';
@@ -99,28 +99,10 @@ export interface CommandRpcDeps {
   publishCommandResponse: (response: CommandResponse, verified?: VerifiedApplication) => Promise<void>;
 }
 
-/** Reads used to build a BoardSnapshot. Must not mutate sessions, plans, or attention. */
-export interface SessionBoardSource {
-  board(query: BoardQuery): Promise<BoardSnapshot['board']>;
-  events: Pick<TreeEventLogApi, 'head' | 'read'>;
-  openAttention(sessionId: string): Promise<AttentionItem[]>;
-}
-
 const PLAN_ITEM_ID = /^p\d{1,6}$/;
 
 function planItemFromPayload(payload: { planItem?: unknown }): string | undefined {
   return typeof payload.planItem === 'string' && PLAN_ITEM_ID.test(payload.planItem) ? payload.planItem : undefined;
-}
-
-async function newestRootEvents(
-  events: Pick<TreeEventLogApi, 'head' | 'read'>,
-  rootId: string,
-): Promise<TreeEvent[]> {
-  const head = await events.head(rootId);
-  if (head <= 0) return [];
-  const since = Math.max(0, head - Math.max(BOARD_SNAPSHOT_EVENTS, 500));
-  const page = await events.read(rootId, { since, limit: 500 });
-  return page.events.slice(-BOARD_SNAPSHOT_EVENTS);
 }
 
 async function handleGetSessionBoard(
@@ -149,25 +131,7 @@ async function handleGetSessionBoard(
   }
   const session = await deps.sessionController.get(payload.sessionId);
   if (!session || session.bridgeId !== deps.bridgeId) throw new Error('Unknown session');
-  const board = await deps.sessionBoard.board({ sessionId: payload.sessionId, all: true });
-  const events = await newestRootEvents(deps.sessionBoard.events, board.rootId);
-  const attention: BoardSnapshot['attention'] = [];
-  for (const card of board.cards) {
-    if (card.archived) continue;
-    try {
-      const items = await deps.sessionBoard.openAttention(card.sessionId);
-      for (const event of items) {
-        if (event.resolvedAt) continue;
-        attention.push({ sessionId: card.sessionId, event });
-      }
-    } catch (error) {
-      console.warn(
-        '[Bridge] Could not read child attention for board snapshot:',
-        error instanceof Error ? error.message : error,
-      );
-    }
-  }
-  const snapshot: BoardSnapshot = { board, events, attention };
+  const snapshot = await buildSessionBoardSnapshot(deps.sessionBoard, payload.sessionId);
   return { requestId: command.requestId, success: true, data: snapshot };
 }
 
@@ -449,6 +413,24 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
           response = { requestId: command.requestId, success: true, data: { sessionId: payload.sessionId, ...snapshot } };
           break;
         }
+        case 'get_attention_summary': {
+          const payload = command.payload as Record<string, unknown>;
+          if (payload.bridgeId !== bridgeId || !Array.isArray(payload.sessionIds) || payload.sessionIds.length > 500
+            || payload.sessionIds.some(id => typeof id !== 'string' || !/^[A-Za-z0-9_-]+$/.test(id))
+            || Object.keys(payload).some(key => !['bridgeId', 'sessionIds'].includes(key)))
+            throw new AttentionError('invalid_attention_request', 'Invalid attention summary target', 400);
+          if (!deps.attentionStore) throw new AttentionError('attention_not_ready', 'Attention store is not ready', 503);
+          const summary: Record<string, { attention: AttentionItem; sequence: number }> = {};
+          for (const sessionId of Array.from(new Set(payload.sessionIds as string[]))) {
+            const session = await sessionController.get(sessionId);
+            if (!session || session.bridgeId !== bridgeId) continue;
+            if (session.status !== 'running') continue;
+            const snapshot = await deps.attentionStore.explicitSnapshot(sessionId);
+            if (snapshot.attention) summary[sessionId] = { attention: snapshot.attention, sequence: snapshot.sequence };
+          }
+          response = { requestId: command.requestId, success: true, data: { summary } };
+          break;
+        }
         case 'answer_session_attention': {
           const payload = command.payload as Record<string, unknown>;
           if (!payload || typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).sort().join(',') !== 'answers,bridgeId,eventId,sessionId'
@@ -458,6 +440,7 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
           if (!session || session.bridgeId !== bridgeId) throw new AttentionError('session_unavailable', 'This session is no longer available', 404);
           if (!deps.attentionStore) throw new AttentionError('attention_not_ready', 'Attention store is not ready', 503);
           const { item, snapshot, waiterLive } = await deps.attentionStore.answer(payload.sessionId, payload.eventId, payload.answers, undefined, { kind: 'human' });
+          try { deps.publishAttentionChanged?.(payload.sessionId); } catch (err) { console.warn('[Bridge] Could not publish answered attention:', err instanceof Error ? err.message : err); }
           let delivery: AttentionAnswerDelivery;
           if (item.prompt?.channel === 'hook' || waiterLive) delivery = 'waiter';
           else {

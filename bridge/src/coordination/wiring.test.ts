@@ -1,3 +1,5 @@
+import { createSessionBoardPublisher, type SessionBoardSource } from '../session-board-snapshot.js';
+import { TREE_EVENT_KINDS } from './contract.js';
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Activity, AttentionItem } from '../attention-events.js';
@@ -177,6 +179,7 @@ class FakeBoardService implements BoardServiceApi {
 
 function createHarness(options?: {
   createPlan?: CoordinationDeps['createPlan'];
+  onBoardChanged?: CoordinationDeps['onBoardChanged'];
   listArchived?: boolean;
 }) {
   const sessions = new Map<string, Session>();
@@ -242,6 +245,7 @@ function createHarness(options?: {
       published.push(structuredClone(s));
     },
     now: () => nowMs,
+    onBoardChanged: options?.onBoardChanged,
     onAttentionEscalated: (sessionId, item) => {
       escalatedCallbacks.push({ sessionId, item });
     },
@@ -922,4 +926,84 @@ describe('coordination wiring', () => {
     const failedEvents = failing.fakeEvents.byRoot.get('root-1') ?? [];
     assert.equal(failedEvents.filter((event) => event.kind === 'removed').length, 1);
   });
+});
+
+
+describe('board push sources', () => {
+  it('schedules the root after every tree event category', async () => {
+    for (const kind of TREE_EVENT_KINDS) {
+      const changed: string[] = [];
+      const h = createHarness({ onBoardChanged: root => changed.push(root) });
+      await h.coord.emit(makeSession('child', { parentSessionId: 'root' }), kind, 'changed');
+      assert.deepEqual(changed, ['root'], kind);
+    }
+  });
+  it('schedules progress-only card changes and card clearing without status events', async () => {
+    const changed: string[] = [];
+    const h = createHarness({ onBoardChanged: root => changed.push(root) });
+    h.sessions.set('child', makeSession('child', { parentSessionId: 'root', card: { state: 'working', headline: 'work', updatedAt: 'now' } }));
+    await h.coord.cards.set('child', { progress: { done: 1, total: 2 } });
+    await h.coord.cards.clear('child');
+    assert.deepEqual(changed, ['root', 'root']);
+  });
+  it('schedules persisted plan additions and patches', async () => {
+    const changed: string[] = [];
+    const h = createHarness({ onBoardChanged: root => changed.push(root) });
+    h.sessions.set('root', makeSession('root'));
+    const item = await h.coord.plan.add('root', { title: 'planned' });
+    await h.coord.plan.patch('root', item.id, { title: 'revised' });
+    assert.deepEqual(changed, ['root', 'root']);
+  });
+});
+
+const drainBoard = async () => { for (let n = 0; n < 20; n++) await Promise.resolve(); };
+function publisherHarness() {
+  let headline = 'first';
+  const reads: string[] = [];
+  const published: Array<{ rootId: string; headline: string }> = [];
+  const source: SessionBoardSource = {
+    board: async ({ sessionId }) => {
+      reads.push(sessionId);
+      return { rootId: sessionId, cursor: 0, cards: [], rollup: { working: 0, blocked: 0, waiting_review: 0, done: 0, failed: 0, unset: 0 },
+        plan: { items: [{ id: 'p1', title: headline, after: [], priority: 2, state: 'todo', createdAt: 'now', updatedAt: 'now' }], ready: ['p1'] } };
+    },
+    events: { head: async () => 0, read: async () => ({ events: [], cursor: 0 }) },
+    openAttention: async () => [],
+  };
+  const publisher = createSessionBoardPublisher({ source, userId: 'user',
+    loadSession: async id => makeSession(id, { parentSessionId: 'root' }),
+    publish: async (rootId, snapshot) => { published.push({ rootId, headline: snapshot.board.plan!.items[0].title }); },
+  });
+  return { publisher, reads, published, change: () => { headline = 'latest'; } };
+}
+it('coalesces bursts for one second, builds newest snapshot and skips unchanged payloads', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const h = publisherHarness(); t.after(() => h.publisher.stop());
+  h.publisher.schedule('root'); h.publisher.schedule('root'); h.change();
+  t.mock.timers.tick(999); await drainBoard(); assert.equal(h.reads.length, 0);
+  t.mock.timers.tick(1); await drainBoard(); assert.deepEqual(h.published, [{ rootId: 'root', headline: 'latest' }]);
+  h.publisher.schedule('root'); t.mock.timers.tick(1000); await drainBoard();
+  assert.equal(h.reads.length, 2); assert.equal(h.published.length, 1);
+  h.publisher.schedule('root'); h.publisher.stop(); t.mock.timers.tick(1000); await drainBoard();
+  assert.equal(h.reads.length, 2);
+});
+for (const source of ['session', 'removed', 'AttentionSnapshot', 'PreToolUse', 'Notification', 'Stop']) {
+  it(`schedules board publication from ${source} publications`, async t => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const h = publisherHarness(); t.after(() => h.publisher.stop());
+    if (source === 'session' || source === 'removed') {
+      h.publisher.observePublication('sessions:updates#user', { type: 'session_update', session: { id: 'child', parentSessionId: 'root', status: source } });
+    } else h.publisher.observePublication('events:child#user', { type: 'hook_event', eventName: source });
+    await drainBoard(); t.mock.timers.tick(1000); await drainBoard();
+    assert.equal(h.published[0]?.rootId, 'root');
+  });
+}
+
+it('reconciles unchanged snapshots after cloud reconnect, including terminal roots', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const h = publisherHarness(); t.after(() => h.publisher.stop());
+  h.publisher.schedule('completed-root'); t.mock.timers.tick(1000); await drainBoard();
+  h.publisher.reconcile(['completed-root']); t.mock.timers.tick(1000); await drainBoard();
+  assert.equal(h.published.length, 2);
+  assert.deepEqual(h.published[0], h.published[1]);
 });

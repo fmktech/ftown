@@ -43,6 +43,7 @@ import { createRealModelRoutingService } from './quota/routing-service.js';
 import { PullRequestStatusService } from './pull-request-status.js';
 import { createPrReviewService } from './pull-request-review.js';
 import { PullRequestEventWatcher } from './pull-request-events.js';
+import { createSessionBoardPublisher, type SessionBoardSource } from './session-board-snapshot.js';
 import { createCoordination } from './coordination/wiring.js';
 import { removeFtownSession } from './remove-ftown-session.js';
 import { SessionResurrection, shouldResurrectStoredSession } from './session-resurrection.js';
@@ -646,6 +647,11 @@ program
         // unchanged.
         const RESYNC_CHUNK = 10;
         const sessions = await store.listSessions();
+        boardPublisher.reconcile(new Set(sessions.map(session => session.parentSessionId ?? session.id)));
+        // The browser can remain connected while this bridge is offline, so
+        // its own channel recovery cannot reveal mutations the bridge never
+        // published. Tell it to reconcile the authoritative session list.
+        await centrifugo.publishSessionSnapshotRequired(userId, bridgeId);
         const live = sessions.filter(
           (session) => session.status === 'running' || session.status === 'pending',
         );
@@ -801,10 +807,22 @@ program
       mail: mailStore,
       publishSession: (session) => { void centrifugo.publishSessionUpdate(userId, session); },
       now: Date.now,
+      onBoardChanged: (rootId) => boardPublisher.schedule(rootId),
       onAttentionEscalated: (sessionId, item) => {
         localApiServer.publishHumanAttention(sessionId, item);
       },
     });
+    const sessionBoard: SessionBoardSource = {
+      board: (query) => coordination.board.board(query),
+      events: coordination.events,
+      openAttention: (sessionId) => openBoardAttention(attentionStore, sessionId),
+    };
+    const boardPublisher = createSessionBoardPublisher({
+      source: sessionBoard, userId,
+      loadSession: (id) => store.loadSession(id),
+      publish: (rootId, snapshot) => centrifugo.publishSessionBoard(userId, bridgeId, rootId, snapshot),
+    });
+    const stopBoardObserver = centrifugo.onLocalPublication(boardPublisher.observePublication);
     localApiServer.setCoordination(coordination);
     const stopPushSessionObserver = centrifugo.onLocalPublication((channel, data) => {
       if (channel !== `sessions:updates#${userId}` || !data || typeof data !== 'object') return;
@@ -1100,13 +1118,8 @@ program
       let result: CommandResponse | undefined;
       await createCommandHandler({ bridgeId, security, sessionController, attentionStore, updates, updateEffects, pullRequestStatuses, pullRequestReview,
         modelRouting: () => modelRouting,
-        sessionBoard: {
-          board: (query) => coordination.board.board(query),
-          // Read when get_session_board asks. An eager property would touch
-          // coordination while every other command is building its handler.
-          get events() { return coordination.events; },
-          openAttention: (sessionId) => openBoardAttention(attentionStore, sessionId),
-        },
+        // Commands may arrive during bootstrap; only board reads resolve this late-bound source.
+        get sessionBoard() { return sessionBoard; },
         enqueueSessionMessage: (session, message) => localApiServer.enqueueSessionMessage(session, message),
         acceptSessionMail: (session, body) => localApiServer.acceptSessionMail(session, body),
         handoffSession: runHandoff,
@@ -1185,6 +1198,8 @@ program
           await pullRequestEvents.stop();
           attentionStore.stopNotifications();
           stopPushSessionObserver();
+          stopBoardObserver();
+          boardPublisher.stop();
           pushNotifier?.stop();
           ledgerRelay?.stop();
           accountRegistrar?.stop();

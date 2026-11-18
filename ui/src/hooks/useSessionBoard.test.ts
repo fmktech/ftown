@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Command, CommandResponse, Session, SessionCard } from "@/types";
+import type { Command, CommandResponse, SessionCard } from "@/types";
+import type { MessageClient, MessageEvents, MessageSubscription } from "@/lib/message-client";
 import type { SnapshotCard } from "@/components/SessionOverview";
-import { BOARD_POLL_MS, parseSnapshot, treeUpdateKey, useSessionBoard, type SessionBoardSnapshot } from "./useSessionBoard";
+import { parseBoardPublication, parseSnapshot, useSessionBoard, type SessionBoardSnapshot } from "./useSessionBoard";
 
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 
@@ -26,11 +27,6 @@ const snapshotValue = (): SessionBoardSnapshot => ({
   },
   events: [{ seq: 1, ts: "2026-11-13T09:30:00.000Z", sessionId: "child-1", sessionName: "child-1", kind: "status", summary: "working: row" }],
   attention: [{ sessionId: "child-1", event: { id: "a1", title: "Need input", message: "hello", route: "human" } }],
-});
-
-const session = (id: string, overrides: Partial<Session> = {}): Session => ({
-  id, bridgeId: "bridge", name: id, status: "running", createdAt: "2026-11-13T09:00:00.000Z", updatedAt: "2026-11-13T09:00:00.000Z",
-  ...overrides,
 });
 
 const reply = (data: unknown): CommandResponse => ({ requestId: "r", success: true, data });
@@ -65,159 +61,169 @@ describe("parseSnapshot", () => {
   });
 });
 
-describe("treeUpdateKey", () => {
-  it("changes when a tree session updates", () => {
-    const base = treeUpdateKey([session("child-1"), session("child-2")]);
-    expect(treeUpdateKey([session("child-1"), session("child-2")])).toBe(base);
-    expect(treeUpdateKey([session("child-1", { updatedAt: "2026-11-13T09:05:00.000Z" }), session("child-2")])).not.toBe(base);
-    expect(treeUpdateKey([session("child-1"), session("child-2", { status: "completed" })])).not.toBe(base);
-    expect(treeUpdateKey([session("child-1"), session("child-2", { card: { state: "done", headline: "x", updatedAt: "2026-11-13T09:06:00.000Z" } })])).not.toBe(base);
-    expect(treeUpdateKey([session("child-1")])).not.toBe(base);
+
+function messageClient() {
+  const subscriptions: Array<MessageSubscription & { emit<E extends keyof MessageEvents>(event: E, context: MessageEvents[E]): void }> = [];
+  let streamPosition: { offset: number; epoch: string } | null = null;
+  const client = {
+    newSubscription: vi.fn((_channel: string, _options?: unknown) => {
+      const listeners = new Map<string, (context: never) => void>();
+      const sub = {
+        state: "subscribed", subscribe: vi.fn(() => sub.emit("subscribed", { recovered: false, positioned: true, offset: 0, epoch: "epoch" } as never)), unsubscribe: vi.fn(), publish: vi.fn(), presence: vi.fn(),
+        on: (event: string, listener: (context: never) => void) => { listeners.set(event, listener); }, off: vi.fn(),
+        removeAllListeners: () => listeners.clear(),
+        streamPosition: () => streamPosition,
+        emit: (event: string, context: never) => {
+          const value = context as { offset?: number; epoch?: string; streamPosition?: { offset: number; epoch: string } };
+          const position = value.streamPosition ?? (typeof value.offset === "number" && typeof value.epoch === "string" ? { offset: value.offset, epoch: value.epoch } : null);
+          if (position && (!streamPosition || position.epoch !== streamPosition.epoch || position.offset > streamPosition.offset)) streamPosition = position;
+          listeners.get(event)?.(context);
+        },
+      } as unknown as typeof subscriptions[number];
+      subscriptions.push(sub); return sub;
+    }),
+    getSubscription: vi.fn(() => null), removeSubscription: vi.fn(),
+  } satisfies MessageClient;
+  return { client, subscriptions, get sub() { return subscriptions.at(-1)!; } };
+}
+const push = (snapshot = snapshotValue(), bridgeId = "bridge", rootId = "manager") => ({ type: "session_board_snapshot", bridgeId, rootId, snapshot });
+const visible = async () => { await act(async () => { document.dispatchEvent(new Event("visibilitychange")); }); };
+
+describe("parseBoardPublication", () => {
+  it("strictly parses snapshots and markers and rejects root mismatch/extra fields", () => {
+    expect(parseBoardPublication(push())).toEqual(push());
+    expect(parseBoardPublication({ type: "session_board_changed", bridgeId: "bridge", rootId: "manager" })).not.toBeNull();
+    for (const value of [null, {}, { ...push(), rootId: "wrong" }, { ...push(), extra: true }, { ...push(), snapshot: {} },
+      { type: "session_board_changed", bridgeId: "bridge", rootId: "manager", snapshot: snapshotValue() }]) expect(parseBoardPublication(value)).toBeNull();
   });
 });
 
 describe("useSessionBoard", () => {
-  it("fetches on mount while enabled and stores the parsed snapshot", async () => {
+  it("reads initially and never polls at idle", async () => {
+    vi.useFakeTimers();
     const send = vi.fn(async (_command: Command) => reply(snapshotValue()));
-    const { result } = renderHook(() => useSessionBoard(send, "bridge", "manager", true));
+    const f = messageClient();
+    const { result } = renderHook(() => useSessionBoard(send, "bridge", "manager", true, f.client, "user"));
     await act(async () => {});
-    expect(send).toHaveBeenCalledTimes(1);
-    expect(send.mock.calls[0][0].type).toBe("get_session_board");
+    expect(result.current.snapshot).toEqual(snapshotValue());
     expect(send.mock.calls[0][0].payload).toEqual({ bridgeId: "bridge", sessionId: "manager" });
-    expect(result.current.snapshot?.board.rootId).toBe("manager");
-    expect(result.current.snapshot?.attention[0].sessionId).toBe("child-1");
-  });
-
-  it("never fetches while disabled", async () => {
-    vi.useFakeTimers();
-    const send = vi.fn(async (_command: Command) => reply(snapshotValue()));
-    const { result, rerender } = renderHook(({ enabled }) => useSessionBoard(send, "bridge", "manager", enabled), { initialProps: { enabled: false } });
-    await act(async () => {});
-    expect(send).not.toHaveBeenCalled();
-    expect(result.current.snapshot).toBeNull();
-    rerender({ enabled: true });
-    await act(async () => {});
-    expect(send).toHaveBeenCalledTimes(1);
-    rerender({ enabled: false });
-    await act(async () => { await vi.advanceTimersByTimeAsync(BOARD_POLL_MS * 3); });
+    expect(f.client.newSubscription).toHaveBeenCalledWith("session-board:updates#user", { since: { offset: 0, epoch: "" }, recoverable: true, positioned: true });
+    await act(async () => { await vi.advanceTimersByTimeAsync(300_000); });
     expect(send).toHaveBeenCalledTimes(1);
   });
-
-  it("polls every 15 s while enabled and the document is visible", async () => {
-    vi.useFakeTimers();
-    const send = vi.fn(async (_command: Command) => reply(snapshotValue()));
-    renderHook(() => useSessionBoard(send, "bridge", "manager", true));
+  it("subscribes and reads only while enabled, cleaning up when leaving Overview", async () => {
+    const f = messageClient(); const send = vi.fn(async () => reply(snapshotValue()));
+    const { rerender, result } = renderHook(({ enabled }) => useSessionBoard(send, "bridge", "manager", enabled, f.client, "user"), { initialProps: { enabled: false } });
+    expect(send).not.toHaveBeenCalled(); expect(f.client.newSubscription).not.toHaveBeenCalled();
+    rerender({ enabled: true }); await act(async () => {});
+    const sub = f.sub; rerender({ enabled: false }); await visible();
+    expect(sub.unsubscribe).toHaveBeenCalledOnce(); expect(f.client.removeSubscription).toHaveBeenCalledWith(sub);
+    expect(send).toHaveBeenCalledTimes(1); expect(result.current.snapshot).not.toBeNull();
+  });
+  it("applies snapshots without reads and filters wrong bridge/root or malformed pushes", async () => {
+    const f = messageClient(); const send = vi.fn(async () => reply(snapshotValue()));
+    const { result } = renderHook(() => useSessionBoard(send, "bridge", "manager", true, f.client, "user"));
     await act(async () => {});
-    expect(send).toHaveBeenCalledTimes(1);
-    await act(async () => { await vi.advanceTimersByTimeAsync(BOARD_POLL_MS - 1); });
-    expect(send).toHaveBeenCalledTimes(1);
-    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    const fresh = snapshotValue(); fresh.board.cards[0].name = "new name";
+    await act(async () => { f.sub.emit("publication", { data: push(fresh) }); });
+    expect(result.current.snapshot?.board.cards[0].name).toBe("new name");
+    await act(async () => {
+      f.sub.emit("publication", { data: push(snapshotValue(), "other") });
+      f.sub.emit("publication", { data: push(snapshotValue(), "bridge", "other") });
+      f.sub.emit("publication", { data: { ...push(), snapshot: {} } });
+    });
+    expect(result.current.snapshot?.board.cards[0].name).toBe("new name"); expect(send).toHaveBeenCalledTimes(1);
+  });
+  it("reads on unrecovered/position-lost subscriptions but avoids reads on recovered reconnect", async () => {
+    const f = messageClient(); const send = vi.fn(async () => reply(snapshotValue()));
+    const { result } = renderHook(() => useSessionBoard(send, "bridge", "manager", true, f.client, "user"));
+    await act(async () => {});
+    await act(async () => { f.sub.emit("subscribed", { recovered: false, positioned: true, offset: 1, epoch: "e" }); });
     expect(send).toHaveBeenCalledTimes(2);
-    await act(async () => { await vi.advanceTimersByTimeAsync(BOARD_POLL_MS * 2); });
-    expect(send).toHaveBeenCalledTimes(4);
+    const fresh = snapshotValue(); fresh.events[0].summary = "recovered event";
+    await act(async () => {
+      f.sub.emit("subscribed", { recovered: true, positioned: true, offset: 2, epoch: "e" });
+      f.sub.emit("publication", { data: push(fresh), offset: 2 });
+    });
+    expect(result.current.snapshot?.events[0].summary).toBe("recovered event"); expect(send).toHaveBeenCalledTimes(2);
+    for (const context of [undefined as unknown as MessageEvents["subscribed"], { recovered: true }, { recovered: true, offset: 3, epoch: "new" }, { recovered: false, offset: 4, epoch: "new" }]) {
+      await act(async () => { f.sub.emit("subscribed", context); });
+    }
+    expect(send).toHaveBeenCalledTimes(6);
   });
-
-  it("keeps the 15 s poll running while tree updates arrive between polls", async () => {
-    vi.useFakeTimers();
-    const send = vi.fn(async (_command: Command) => reply(snapshotValue()));
-    const { rerender } = renderHook(({ tree }) => useSessionBoard(send, "bridge", "manager", true, tree), { initialProps: { tree: [session("child-1")] } });
-    await act(async () => {});
-    expect(send).toHaveBeenCalledTimes(1);
-    // Updates at t=5s and t=10s.
-    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
-    rerender({ tree: [session("child-1", { updatedAt: "2026-11-13T09:05:00.000Z" })] });
-    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
-    rerender({ tree: [session("child-1", { updatedAt: "2026-11-13T09:10:00.000Z" })] });
-    await act(async () => {});
-    expect(send).toHaveBeenCalledTimes(3);
-    // No update at t=15s, yet the untouched interval still fires there.
-    await act(async () => { await vi.advanceTimersByTimeAsync(4_999); });
-    expect(send).toHaveBeenCalledTimes(3);
-    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
-    expect(send).toHaveBeenCalledTimes(4);
+  it("persists offset and epoch for the next subscription", async () => {
+    const f = messageClient(); const send = vi.fn(async () => reply(snapshotValue()));
+    const { rerender } = renderHook(({ enabled }) => useSessionBoard(send, "bridge", "manager", enabled, f.client, "user"), { initialProps: { enabled: true } });
+    await act(async () => { f.sub.emit("subscribed", { offset: 3, epoch: "epoch" }); });
+    await act(async () => { f.sub.emit("publication", { data: push(), offset: 4 }); });
+    rerender({ enabled: false }); rerender({ enabled: true }); await act(async () => {});
+    expect(f.client.newSubscription).toHaveBeenLastCalledWith("session-board:updates#user", { since: { offset: 4, epoch: "epoch" }, recoverable: true, positioned: true });
   });
-
-  it("refetches when a session in the tree updates", async () => {
+  it("reads on visibility return and matching oversized markers only", async () => {
+    const f = messageClient(); const send = vi.fn(async () => reply(snapshotValue()));
+    renderHook(() => useSessionBoard(send, "bridge", "manager", true, f.client, "user")); await act(async () => {});
+    await visible(); expect(send).toHaveBeenCalledTimes(2);
+    await act(async () => { f.sub.emit("publication", { data: { type: "session_board_changed", bridgeId: "bridge", rootId: "other" } }); });
+    expect(send).toHaveBeenCalledTimes(2);
+    await act(async () => { f.sub.emit("publication", { data: { type: "session_board_changed", bridgeId: "bridge", rootId: "manager" } }); });
+    expect(send).toHaveBeenCalledTimes(3);
+  });
+  it("keeps initial and visibility reads working when an old relay rejects the new channel", async () => {
+    const f = messageClient(); f.client.newSubscription.mockImplementation(() => { throw new Error("unknown channel namespace"); });
     const send = vi.fn(async () => reply(snapshotValue()));
-    const initial = [session("child-1"), session("child-2")];
-    const { rerender } = renderHook(({ tree }) => useSessionBoard(send, "bridge", "manager", true, tree), { initialProps: { tree: initial } });
-    await act(async () => {});
-    expect(send).toHaveBeenCalledTimes(1);
-    // Same content, new array: no refetch.
-    rerender({ tree: [...initial] });
-    await act(async () => {});
-    expect(send).toHaveBeenCalledTimes(1);
-    rerender({ tree: [session("child-1", { updatedAt: "2026-11-13T09:09:00.000Z" }), session("child-2")] });
-    await act(async () => {});
-    expect(send).toHaveBeenCalledTimes(2);
+    const { result } = renderHook(() => useSessionBoard(send, "bridge", "manager", true, f.client, "user")); await act(async () => {});
+    expect(result.current.snapshot).not.toBeNull(); await visible(); expect(send).toHaveBeenCalledTimes(2);
   });
-
-  it("drops a stale response after the fetch epoch is superseded", async () => {
-    const pending: Array<(response: CommandResponse) => void> = [];
-    const send = vi.fn((command: Command): Promise<CommandResponse> => new Promise(resolve => pending.push(resolve)));
-    const { rerender, result } = renderHook(({ tree }) => useSessionBoard(send, "bridge", "manager", true, tree), { initialProps: { tree: [session("child-1")] } });
-    await act(async () => {});
-    expect(pending).toHaveLength(1);
-    rerender({ tree: [session("child-1", { updatedAt: "2026-11-13T09:10:00.000Z" })] });
-    await act(async () => {});
-    // The rerender landed while the first fetch was in flight: it queues one follow-up.
-    expect(send).toHaveBeenCalledTimes(1);
-    const stale = snapshotValue();
-    const fresh = { ...snapshotValue(), board: { ...snapshotValue().board, rootId: "fresh" } };
-    await act(async () => { pending[0](reply(stale)); });
-    // The first request resolved late with its snapshot; it must be ignored…
-    expect(result.current.snapshot).toBeNull();
-    // …and its completion issues the queued follow-up fetch.
-    expect(pending).toHaveLength(2);
-    await act(async () => { pending[1](reply(fresh)); });
-    expect(result.current.snapshot?.board.rootId).toBe("fresh");
+  it("never overwrites a newer push with an older in-flight RPC response", async () => {
+    const f = messageClient(); let resolve!: (value: CommandResponse) => void;
+    const send = vi.fn(() => new Promise<CommandResponse>(r => { resolve = r; }));
+    const { result } = renderHook(() => useSessionBoard(send, "bridge", "manager", true, f.client, "user"));
+    const fresh = snapshotValue(); fresh.board.cards[0].name = "pushed";
+    await act(async () => { f.sub.emit("publication", { data: push(fresh) }); resolve(reply(snapshotValue())); });
+    expect(result.current.snapshot?.board.cards[0].name).toBe("pushed");
   });
-
-  it("coalesces updates that arrive while a fetch is in flight into one follow-up fetch", async () => {
-    const pending: Array<(response: CommandResponse) => void> = [];
-    const send = vi.fn((command: Command): Promise<CommandResponse> => new Promise(resolve => pending.push(resolve)));
-    const { rerender } = renderHook(({ tree }) => useSessionBoard(send, "bridge", "manager", true, tree), { initialProps: { tree: [session("child-1")] } });
+  it("ignores a delayed recovered snapshot at or behind the authoritative stream position", async () => {
+    const f = messageClient(); const send = vi.fn(async () => reply(snapshotValue()));
+    const { result } = renderHook(() => useSessionBoard(send, "bridge", "manager", true, f.client, "user"));
     await act(async () => {});
-    rerender({ tree: [session("child-1", { updatedAt: "2026-11-13T09:11:00.000Z" })] });
-    rerender({ tree: [session("child-1", { updatedAt: "2026-11-13T09:12:00.000Z" })] });
-    await act(async () => {});
-    // Two epochs supersede each other while busy; only one follow-up request is queued.
-    expect(send).toHaveBeenCalledTimes(1);
-    await act(async () => { pending[0](reply(snapshotValue())); });
-    expect(send).toHaveBeenCalledTimes(2);
+    await act(async () => { f.sub.emit("subscribed", { recovered: true, positioned: true, offset: 10, epoch: "epoch" }); });
+    await visible();
+    const stale = snapshotValue(); stale.board.cards[0].name = "stale replay";
+    await act(async () => { f.sub.emit("publication", { data: push(stale), offset: 9 }); });
+    expect(result.current.snapshot?.board.cards[0].name).not.toBe("stale replay");
+    const fresh = snapshotValue(); fresh.board.cards[0].name = "newer live push";
+    await act(async () => { f.sub.emit("publication", { data: push(fresh), offset: 11 }); });
+    expect(result.current.snapshot?.board.cards[0].name).toBe("newer live push");
   });
-
-  it("keeps the previous snapshot when the command fails or the reply is junk", async () => {
-    vi.useFakeTimers();
-    let next = reply(snapshotValue());
-    const send = vi.fn(async (_command: Command) => next);
-    const { result } = renderHook(() => useSessionBoard(send, "bridge", "manager", true));
-    await act(async () => {});
-    expect(result.current.snapshot?.board.rootId).toBe("manager");
-    next = { requestId: "r", success: false, error: "unknown_command" };
-    await act(async () => { await vi.advanceTimersByTimeAsync(BOARD_POLL_MS + 1); });
-    expect(result.current.snapshot?.board.rootId).toBe("manager");
-    next = reply({ nope: true });
-    await act(async () => { await vi.advanceTimersByTimeAsync(BOARD_POLL_MS + 1); });
-    expect(result.current.snapshot?.board.rootId).toBe("manager");
+  it("coalesces marker requests during an in-flight read and ignores the superseded response", async () => {
+    const f = messageClient(); const pending: Array<(value: CommandResponse) => void> = [];
+    const send = vi.fn(() => new Promise<CommandResponse>(resolve => pending.push(resolve)));
+    const { result } = renderHook(() => useSessionBoard(send, "bridge", "manager", true, f.client, "user"));
+    await act(async () => {
+      for (let n = 0; n < 2; n++) f.sub.emit("publication", { data: { type: "session_board_changed", bridgeId: "bridge", rootId: "manager" } });
+      pending[0](reply(snapshotValue()));
+    });
+    expect(result.current.snapshot).toBeNull(); expect(send).toHaveBeenCalledTimes(2);
+    await act(async () => { pending[1](reply(snapshotValue())); }); expect(result.current.snapshot).not.toBeNull();
   });
-
-  it("clears the snapshot when the selected session changes", async () => {
-    const send = vi.fn(async (_command: Command) => reply(snapshotValue()));
-    const { result, rerender } = renderHook(({ id }) => useSessionBoard(send, "bridge", id, true), { initialProps: { id: "manager" } });
-    await act(async () => {});
-    expect(result.current.snapshot).not.toBeNull();
+  it("clears the previous root and rejects delayed replies after target changes or unmount", async () => {
+    const pending: Array<(value: CommandResponse) => void> = [];
+    const send = vi.fn(() => new Promise<CommandResponse>(resolve => pending.push(resolve)));
+    const { result, rerender, unmount } = renderHook(({ id }) => useSessionBoard(send, "bridge", id, true), { initialProps: { id: "manager" } });
     rerender({ id: "other" });
-    await act(async () => {});
-    expect(send).toHaveBeenCalledTimes(2);
-    expect(send.mock.calls[1][0].payload).toEqual({ bridgeId: "bridge", sessionId: "other" });
-    expect(result.current.snapshot).not.toBeNull();
+    await act(async () => { pending[0](reply(snapshotValue())); }); expect(result.current.snapshot).toBeNull();
+    const other = snapshotValue(); other.board.rootId = "other";
+    await act(async () => { pending[1](reply(other)); }); expect(result.current.snapshot?.board.rootId).toBe("other");
+    unmount();
   });
-
-  it("does nothing without a session", async () => {
-    const send = vi.fn(async (_command: Command) => reply(snapshotValue()));
-    renderHook(() => useSessionBoard(send, "bridge", null, true));
-    await act(async () => {});
-    expect(send).not.toHaveBeenCalled();
+  it("preserves the last snapshot on command error or malformed response", async () => {
+    let next = reply(snapshotValue()); const send = vi.fn(async () => next);
+    const { result } = renderHook(() => useSessionBoard(send, "bridge", "manager", true)); await act(async () => {});
+    next = { requestId: "r", success: false }; await visible(); expect(result.current.snapshot).not.toBeNull();
+    next = reply({ nope: true }); await visible(); expect(result.current.snapshot).not.toBeNull();
+  });
+  it("does nothing without a target session", async () => {
+    const send = vi.fn(async () => reply(snapshotValue()));
+    renderHook(() => useSessionBoard(send, "bridge", null, true)); await act(async () => {}); expect(send).not.toHaveBeenCalled();
   });
 });

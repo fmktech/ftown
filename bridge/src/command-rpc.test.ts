@@ -33,7 +33,9 @@ test('human answers store provenance and route fields flow through the attention
   const attentionStore = new AttentionStore(id => join(dir, id));
   const question = { question: 'Pick', options: [{ label: 'A' }, { label: 'B' }], multiSelect: false, allowText: false };
   const responses: CommandResponse[] = [];
+  const attentionChanges: string[] = [];
   const handler = createCommandHandler({ bridgeId: 'owner', attentionStore,
+    publishAttentionChanged: id => { attentionChanges.push(id); },
     sessionController: { get: async (id: string) => id === 'session' ? { id, bridgeId: 'owner' } : null } as unknown as SessionController,
     publishCommandResponse: async response => { responses.push(response); } });
   const ask = () => attentionStore.record('session', 'Notification', { notification_type: 'agent_needs_input', message: 'Q' }, { prompt: { channel: 'mail', questions: [question] } });
@@ -52,6 +54,7 @@ test('human answers store provenance and route fields flow through the attention
   assert.equal(responses.at(-1)?.success, true);
   const answered = await attentionStore.waitForItem('session', routed.id, 0);
   assert.equal(answered.resolution, 'answered');
+  assert.deepEqual(attentionChanges, ['session']);
   assert.deepEqual(answered.answeredBy, { kind: 'human' });
   assert.equal(answered.route, 'parent'); assert.equal(answered.routedTo, 'parent');
 
@@ -62,6 +65,24 @@ test('human answers store provenance and route fields flow through the attention
   assert.equal(projectedEscalated?.id, escalated.id);
   assert.equal(projectedEscalated?.route, 'human'); assert.equal(projectedEscalated?.escalatedAt, '2026-01-02T00:00:00.000Z');
   assert.equal(projectedEscalated?.escalationNote, 'Parent unavailable'); assert.equal(projectedEscalated?.answeredBy, undefined);
+});
+
+test('get_attention_summary batches only running sessions with unresolved explicit attention', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'attention-summary-rpc-'));
+  await mkdir(join(dir, 'one')); await mkdir(join(dir, 'two')); await mkdir(join(dir, 'stopped'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const attentionStore = new AttentionStore(id => join(dir, id));
+  const item = await attentionStore.record('one', 'Notification', { notification_type: 'agent_needs_input', message: 'Needs a reply' });
+  await attentionStore.record('two', 'Notification', { notification_type: 'elicitation_dialog', message: 'not explicit' });
+  const reads: string[] = [];
+  const sessions = new Map([['one', { id: 'one', bridgeId: 'owner', status: 'running' }], ['two', { id: 'two', bridgeId: 'owner', status: 'running' }], ['stopped', { id: 'stopped', bridgeId: 'owner', status: 'completed' }]]);
+  const responses: CommandResponse[] = [];
+  const handler = createCommandHandler({ bridgeId: 'owner', attentionStore,
+    sessionController: { get: async (id: string) => { reads.push(id); return sessions.get(id); } } as unknown as SessionController,
+    publishCommandResponse: async response => { responses.push(response); } });
+  await handler({ type: 'get_attention_summary', requestId: 'summary', payload: { bridgeId: 'owner', sessionIds: ['one', 'two', 'stopped'] } } as unknown as Command);
+  assert.deepEqual(responses.at(-1)?.data, { summary: { one: { attention: item, sequence: item?.sequence } } });
+  assert.deepEqual(reads, ['one', 'two', 'stopped']);
 });
 
 test('targeted update commands validate payloads and bind an accepted ticket to verified dispatch', async () => {

@@ -2,13 +2,12 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { v4 as uuidv4 } from "uuid";
-import type { Command, Session, SessionCard } from "@/types";
+import type { Command, SessionCard } from "@/types";
 import { parseSessionBlock } from "@/types";
+import { accountChannel } from "@security/ledger/channels";
+import type { MessageClient, MessageSubscription } from "@/lib/message-client";
 import type { BridgeRpc } from "@/hooks/useBridgeRpc";
 import type { OverviewSnapshot, PlanItem, PlanView, SnapshotAttentionEvent, SnapshotCard, SnapshotEvent } from "@/components/SessionOverview";
-
-/** Snapshot refresh interval while the Overview is visible. */
-export const BOARD_POLL_MS = 15_000;
 
 /** UI shape of the get_session_board reply: the one OverviewSnapshot mirror (components/SessionOverview). */
 export type SessionBoardSnapshot = OverviewSnapshot;
@@ -249,84 +248,129 @@ export function parseSnapshot(value: unknown): SessionBoardSnapshot | null {
   return { board, events, attention };
 }
 
-/** Cheap change key over the tree's sessions: changes whenever any row's id, timestamps, status, name or card updates. */
-export function treeUpdateKey(sessions: ReadonlyArray<Session>): string {
-  return JSON.stringify(sessions.map(session => [session.id, session.updatedAt, session.status, session.name, session.card?.state, session.card?.updatedAt]));
+type BoardPublication =
+  | { type: "session_board_snapshot"; bridgeId: string; rootId: string; snapshot: SessionBoardSnapshot }
+  | { type: "session_board_changed"; bridgeId: string; rootId: string };
+
+/** Reject partial payloads and mismatched snapshot roots before applying any state. */
+export function parseBoardPublication(value: unknown): BoardPublication | null {
+  if (!isRecord(value) || typeof value.bridgeId !== "string" || !value.bridgeId
+    || typeof value.rootId !== "string" || !value.rootId) return null;
+  if (value.type === "session_board_changed" && Object.keys(value).length === 3) {
+    return { type: value.type, bridgeId: value.bridgeId, rootId: value.rootId };
+  }
+  if (value.type !== "session_board_snapshot" || Object.keys(value).length !== 4) return null;
+  const snapshot = parseSnapshot(value.snapshot);
+  if (!snapshot || snapshot.board.rootId !== value.rootId) return null;
+  return { type: value.type, bridgeId: value.bridgeId, rootId: value.rootId, snapshot };
 }
 
-/**
- * Dashboard data for the board v3 Overview: one `get_session_board` snapshot of
- * the selected manager's tree. Fetches on mount, whenever a session in that
- * tree updates (cheap key over `treeSessions`), and every 15 s while enabled —
- * never while disabled. A response for a superseded fetch is dropped.
- */
+type Position = { offset: number; epoch: string };
+function position(value: { offset?: number; epoch?: string }): Position | null {
+  return Number.isSafeInteger(value.offset) && value.offset! >= 0 && typeof value.epoch === "string" && value.epoch.length > 0
+    ? { offset: value.offset!, epoch: value.epoch } : null;
+}
+
+/** Push-driven Overview. RPC reads are reserved for entry, recovery, visibility and oversized publications. */
 export function useSessionBoard(
   sendCommand: BridgeRpc["sendCommand"],
   bridgeId: string | null,
   sessionId: string | null,
   enabled: boolean,
-  treeSessions?: ReadonlyArray<Session>,
+  client: MessageClient | null = null,
+  userId = "",
 ): { snapshot: SessionBoardSnapshot | null; refresh: () => Promise<void> } {
   const [snapshot, setSnapshot] = useState<SessionBoardSnapshot | null>(null);
   const sendRef = useRef(sendCommand);
   sendRef.current = sendCommand;
-  const targetRef = useRef({ bridgeId, sessionId });
-  targetRef.current = { bridgeId, sessionId };
-  const epochRef = useRef(0);
-  /** The epoch of the latest started fetch cycle (an update effect run); a superseded one may not refetch. */
-  const activeEpochRef = useRef(0);
-  const busyRef = useRef(false);
-  const dirtyRef = useRef(false);
+  const refreshRef = useRef<() => Promise<void>>(async () => {});
+  const refresh = useCallback(() => refreshRef.current(), []);
+  const recovery = useRef<{ key: string; position: Position | null }>({ key: "", position: null });
+  const key = JSON.stringify([userId, bridgeId, sessionId]);
 
-  const fetch = useCallback(async () => {
-    if (busyRef.current) { dirtyRef.current = true; return; }
-    busyRef.current = true;
-    const epoch = epochRef.current;
-    const target = targetRef.current;
-    try {
-      const command: Command = {
-        type: "get_session_board",
-        payload: { bridgeId: target.bridgeId ?? "", sessionId: target.sessionId ?? "" },
-        requestId: uuidv4(),
-      };
-      const response = await sendRef.current(command);
-      if (epochRef.current !== epoch) return;
-      if (!response.success) return; // keep the previous snapshot; the next poll retries
-      const parsed = parseSnapshot(response.data);
-      if (parsed) setSnapshot(parsed);
-    } catch {
-      // Offline or an older bridge without the command: keep the previous snapshot.
-    } finally {
-      busyRef.current = false;
-      // An update that arrived while this fetch was in flight is refetched once,
-      // but only while the fetch cycle it belongs to is still the active one.
-      if (dirtyRef.current && epochRef.current === activeEpochRef.current) {
-        dirtyRef.current = false;
-        void fetch();
+  useEffect(() => { setSnapshot(null); }, [key]);
+  useEffect(() => {
+    if (!enabled || !bridgeId || !sessionId) return;
+    if (recovery.current.key !== key) recovery.current = { key, position: null };
+    let active = true;
+    let busy = false;
+    let dirty = false;
+    let revision = 0;
+    let sub: MessageSubscription | null = null;
+    let seenSubscribed = false;
+    let authoritativePosition: Position | null = null;
+    async function fetchSnapshot(): Promise<void> {
+      if (!active) return;
+      if (busy) { dirty = true; return; }
+      busy = true;
+      const started = revision;
+      const readPosition = sub?.streamPosition?.() ?? recovery.current.position;
+      try {
+        const command: Command = { type: "get_session_board", payload: { bridgeId: bridgeId!, sessionId: sessionId! }, requestId: uuidv4() };
+        const response = await sendRef.current(command);
+        if (!active || revision !== started || !response.success) return;
+        const parsed = parseSnapshot(response.data);
+        if (parsed?.board.rootId === sessionId) {
+          authoritativePosition = readPosition;
+          setSnapshot(parsed);
+        }
+      } catch { /* Offline/older bridge: preserve the last valid snapshot. */ }
+      finally {
+        busy = false;
+        if (active && dirty) { dirty = false; void fetchSnapshot(); }
       }
     }
-  }, []);
+    refreshRef.current = fetchSnapshot;
+    const onVisible = () => {
+      if (document.visibilityState !== "hidden") { revision++; void fetchSnapshot(); }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    if (client && userId) {
+      try {
+        const channel = accountChannel("session-board:updates", userId);
+        sub = client.newSubscription(channel, {
+          since: recovery.current.position ?? { offset: 0, epoch: "" },
+          recoverable: true, positioned: true,
+        });
+        sub.on("publication", context => {
+          if (!active) return;
+          const next = position({ offset: context.offset, epoch: context.epoch ?? recovery.current.position?.epoch });
+          const current = recovery.current.position;
+          if (next && (!current || next.epoch !== current.epoch || next.offset > current.offset)) recovery.current.position = next;
+          if (next && authoritativePosition && next.epoch === authoritativePosition.epoch
+            && next.offset <= authoritativePosition.offset) return;
+          const publication = parseBoardPublication(context.data);
+          if (!publication || publication.bridgeId !== bridgeId || publication.rootId !== sessionId) return;
+          revision++;
+          if (publication.type === "session_board_snapshot") setSnapshot(publication.snapshot);
+          else void fetchSnapshot();
+        });
+        sub.on("subscribed", (context = {}) => {
+          if (!active) return;
+          const next = position(context);
+          const previous = recovery.current.position;
+          const recovered = context.recovered === true && context.positioned !== false && !!next
+            && !!previous && previous.epoch === next.epoch && next.offset >= previous.offset;
+          recovery.current.position = next;
+          seenSubscribed = true;
+          if (!recovered) { revision++; void fetchSnapshot(); }
+        });
+        sub.subscribe();
+      } catch {
+        // Old relays may not have the namespace yet. Initial/visibility reads still work.
+        if (sub) { sub.removeAllListeners(); sub.unsubscribe(); client.removeSubscription(sub); sub = null; }
+        void fetchSnapshot();
+      }
+    } else {
+      void fetchSnapshot();
+    }
+    return () => {
+      active = false;
+      refreshRef.current = async () => {};
+      document.removeEventListener("visibilitychange", onVisible);
+      if (sub && client) { sub.removeAllListeners(); sub.unsubscribe(); client.removeSubscription(sub); }
+    };
+  }, [enabled, bridgeId, sessionId, client, userId, key]);
 
-  // A new tree starts empty: never show the previous manager's snapshot while loading.
-  useEffect(() => { setSnapshot(null); }, [bridgeId, sessionId]);
-
-  const updateKey = treeSessions ? treeUpdateKey(treeSessions) : "";
-  // Fetch on mount, on identity change, and whenever a session in the tree updates.
-  useEffect(() => {
-    if (!enabled || !bridgeId || !sessionId) return;
-    epochRef.current += 1;
-    activeEpochRef.current = epochRef.current;
-    void fetch();
-  }, [enabled, bridgeId, sessionId, updateKey, fetch]);
-
-  // Independent poll: frequent tree updates must not keep resetting it.
-  useEffect(() => {
-    if (!enabled || !bridgeId || !sessionId) return;
-    const timer = setInterval(() => {
-      if (typeof document === "undefined" || document.visibilityState !== "hidden") void fetch();
-    }, BOARD_POLL_MS);
-    return () => clearInterval(timer);
-  }, [enabled, bridgeId, sessionId, fetch]);
-
-  return { snapshot, refresh: fetch };
+  return { snapshot, refresh };
 }

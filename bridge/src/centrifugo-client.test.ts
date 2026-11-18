@@ -321,3 +321,20 @@ test('publishLedgerAnnouncement publishes the announcement on the subscribed led
   const disabled = new CentrifugoClient('ws://127.0.0.1:1/unused', '', async () => '', { disabled: true, onLedgerMessage: () => {} });
   await assert.rejects(disabled.publishLedgerAnnouncement(ANNOUNCE_ACCOUNT, f.announcement), /Ledger channel not subscribed/);
 });
+
+
+test('board snapshots and oversized markers use the shared encrypted publication pipeline', async t => {
+  const f = await publishFixture(t, 1);
+  f.state.replyMs = () => 0;
+  const snapshot = { board: { rootId: 'root', cursor: 0, cards: [], rollup: {} }, events: [], attention: [] } as unknown as import('./coordination/contract-c.js').BoardSnapshot;
+  await f.client.publishSessionBoard(email, 'bridge', 'root', snapshot);
+  const large = structuredClone(snapshot);
+  large.events = [{ summary: '🦋'.repeat(80_000) }] as typeof large.events;
+  await f.client.publishSessionBoard(email, 'bridge', 'root', large);
+  await settleLong(() => f.published.length === 2 && f.state.inFlight === 0);
+  assert.deepEqual(f.sealedTags.map(value => JSON.parse(value)), [
+    { type: 'session_board_snapshot', bridgeId: 'bridge', rootId: 'root', snapshot },
+    { type: 'session_board_changed', bridgeId: 'bridge', rootId: 'root' },
+  ]);
+  assert.deepEqual(f.published.map(p => p.channel), [`session-board:updates#${email}`, `session-board:updates#${email}`]);
+});

@@ -3,7 +3,7 @@ import { BridgeSecurityError } from './errors.js';
 
 export interface OperationPermission { permission: EndpointPermission; mutating: boolean; operation: string; sessionId: string | null }
 const session = /^[A-Za-z0-9_-]+$/;
-const readCommands = new Set(['get_pull_request_statuses', 'session_preview_status', 'session_preview_chunk', 'get_bridge_update', 'list_sessions', 'get_history', 'get_session_usage', 'get_sessions_usage', 'get_session_attention',
+const readCommands = new Set(['get_pull_request_statuses', 'session_preview_status', 'session_preview_chunk', 'get_bridge_update', 'list_sessions', 'get_history', 'get_session_usage', 'get_sessions_usage', 'get_session_attention', 'get_attention_summary',
   'ledger_head', 'ledger_chain',
   'get_model_routing', 'get_accounts', 'get_session_board', 'list_native_sessions']);
 const controlCommands = new Set(['update_bridge', 'create_session', 'stop_session', 'dismiss_session_block', 'retry_session', 'handoff_session', 'send_message', 'rename_session', 'remove_session',
