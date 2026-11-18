@@ -216,12 +216,13 @@ export class WebRtcPeer implements WebRtcPeerApi {
   }
 
   private addIce(payload: string): void {
-    let candidate: RTCIceCandidateInit;
+    let candidate: RTCIceCandidateInit | null;
     try {
-      candidate = JSON.parse(payload) as RTCIceCandidateInit;
+      candidate = toIceCandidateInit(JSON.parse(payload));
     } catch {
       return;
     }
+    if (!candidate) return;
     if (!this.pc || !this.remoteSet) {
       this.pendingIce.push(candidate);
       return;
@@ -328,4 +329,24 @@ export class WebRtcPeer implements WebRtcPeerApi {
     this.settled = true;
     this.rejectConnect?.(err);
   }
+}
+
+/**
+ * The bridge (node-datachannel) trickles `{ candidate: 'a=candidate:…', mid }`, while addIceCandidate needs an RTCIceCandidateInit
+ * with `sdpMid` or `sdpMLineIndex`: with neither it throws, which silently dropped every bridge candidate. Without the bridge's own
+ * addresses ICE then only worked when the bridge could reach the browser first (it had to resolve Chrome's mDNS `.local` candidate),
+ * so a Linux bridge on the same LAN never paired. Accepts both shapes; null for anything that is not a candidate.
+ */
+export function toIceCandidateInit(value: unknown): RTCIceCandidateInit | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const input = value as Record<string, unknown>;
+  if (typeof input.candidate !== 'string') return null;
+  const init: RTCIceCandidateInit = { candidate: input.candidate.startsWith('a=') ? input.candidate.slice(2) : input.candidate };
+  const mid = typeof input.sdpMid === 'string' ? input.sdpMid : typeof input.mid === 'string' && input.mid ? input.mid : null;
+  if (mid !== null) init.sdpMid = mid;
+  if (typeof input.sdpMLineIndex === 'number') init.sdpMLineIndex = input.sdpMLineIndex;
+  // The direct transport negotiates exactly one m-line (the data channel).
+  if (init.sdpMid === undefined && init.sdpMLineIndex === undefined) init.sdpMLineIndex = 0;
+  if (typeof input.usernameFragment === 'string') init.usernameFragment = input.usernameFragment;
+  return init;
 }
