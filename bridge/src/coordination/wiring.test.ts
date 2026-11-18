@@ -956,7 +956,12 @@ describe('board push sources', () => {
   });
 });
 
-const drainBoard = async () => { for (let n = 0; n < 20; n++) await Promise.resolve(); };
+const drainBoard = async () => {
+  for (let turn = 0; turn < 3; turn++) {
+    for (let n = 0; n < 20; n++) await Promise.resolve();
+    await new Promise<void>(resolve => setImmediate(resolve));
+  }
+};
 function publisherHarness() {
   let headline = 'first';
   const reads: string[] = [];

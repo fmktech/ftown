@@ -3,7 +3,7 @@ import type { AttentionItem } from './attention-events.js';
 import { BOARD_SNAPSHOT_EVENTS, type BoardSnapshot } from './coordination/contract-c.js';
 import type { BoardQuery, TreeEvent, TreeEventLogApi } from './coordination/contract.js';
 import type { Session } from './types.js';
-import { isPermanentPublicationError } from './outbound-pipeline-types.js';
+import { isPermanentPublicationError, isUnknownPublicationNamespace } from './outbound-pipeline-types.js';
 
 /** Reads used to build a BoardSnapshot. Must not mutate sessions, plans, or attention. */
 export interface SessionBoardSource {
@@ -45,6 +45,15 @@ export async function buildSessionBoardSnapshot(source: SessionBoardSource, sess
   return { board, events, attention };
 }
 
+/** A live child still needs its parent's board even when that parent has finished. */
+export function liveSessionBoardRoots(sessions: Iterable<Pick<Session, 'id' | 'parentSessionId' | 'bridgeId' | 'status'>>, bridgeId: string): Set<string> {
+  const roots = new Set<string>();
+  for (const session of sessions) {
+    if (session.bridgeId === bridgeId && (session.status === 'running' || session.status === 'pending')) roots.add(session.parentSessionId ?? session.id);
+  }
+  return roots;
+}
+
 /** One bounded pending job per root. Changes during a build run in a later batch. */
 export function createSessionBoardPublisher(deps: {
   source: SessionBoardSource;
@@ -56,6 +65,8 @@ export function createSessionBoardPublisher(deps: {
   initialSessions?: Iterable<Pick<Session, 'id' | 'parentSessionId'>>;
 }) {
   const pending = new Map<string, ReturnType<typeof setTimeout>>();
+  const ready = new Set<string>();
+  const deferred = new Set<string>();
   const running = new Set<string>();
   const dirty = new Set<string>();
   const retries = new Map<string, number>();
@@ -65,11 +76,30 @@ export function createSessionBoardPublisher(deps: {
   const previous = new Map<string, string>();
   let stopped = false;
   let reconciliation = 0;
+  let capability: 'unknown' | 'available' | 'unavailable' = 'unknown';
+  let continuation: ReturnType<typeof setImmediate> | undefined;
+  function publishingEnabled(): boolean { return !stopped && capability !== 'unavailable'; }
+  function cancelPending(): void {
+    for (const timer of pending.values()) clearTimeout(timer);
+    pending.clear(); ready.clear(); dirty.clear(); retries.clear();
+  }
+  function drain(): void {
+    if (stopped || capability === 'unavailable' || continuation) return;
+    // Negotiate one namespace publication at a time; after success, a small
+    // ACK-bounded window also keeps large reconnects out of the shared queue.
+    const limit = capability === 'unknown' ? 1 : 2;
+    while (ready.size > 0 && running.size < limit) {
+      const rootId = ready.values().next().value!;
+      ready.delete(rootId);
+      running.add(rootId);
+      void flush(rootId);
+    }
+  }
+  function continueLater(): void {
+    if (stopped || continuation || capability === 'unavailable') return;
+    continuation = setImmediate(() => { continuation = undefined; drain(); });
+  }
   async function flush(rootId: string): Promise<void> {
-    pending.delete(rootId);
-    if (stopped) return;
-    if (running.has(rootId)) { dirty.add(rootId); return; }
-    running.add(rootId);
     const generation = reconciliation;
     let retry = false;
     let deliveryStarted = false;
@@ -78,12 +108,14 @@ export function createSessionBoardPublisher(deps: {
       // A former root can now be a child. Never label its new parent's data
       // with the old root ID, and do not retry deleted roots indefinitely.
       if (snapshot.board.rootId !== rootId) return;
+      if (!publishingEnabled() || generation !== reconciliation) return;
       const serialized = JSON.stringify(snapshot);
       const digest = createHash('sha256').update(serialized).digest('hex');
       if (!stopped && previous.get(rootId) !== digest) {
         deliveryStarted = true;
         await deps.publish(rootId, snapshot);
-        if (!stopped && generation === reconciliation) {
+        if (publishingEnabled() && generation === reconciliation) {
+          capability = 'available';
           previous.delete(rootId);
           previous.set(rootId, digest);
           if (previous.size > 256) previous.delete(previous.keys().next().value!);
@@ -91,27 +123,41 @@ export function createSessionBoardPublisher(deps: {
       }
       retries.delete(rootId);
     } catch (error) {
-      console.warn('[Bridge] Could not publish board snapshot:', error instanceof Error ? error.message : error);
-      // Unknown namespace on an older relay is permanent until configuration
-      // changes. Never leave an idle retry loop running against that relay.
-      retry = deliveryStarted && !isPermanentPublicationError(error);
+      if (deliveryStarted && generation === reconciliation && isUnknownPublicationNamespace(error)) {
+        if (capability !== 'unavailable') console.warn('[Bridge] Board publication namespace is unavailable until reconnect');
+        capability = 'unavailable';
+        for (const root of [...pending.keys(), ...ready, ...dirty, ...running]) deferred.add(root);
+        cancelPending();
+      } else if (!stopped && capability !== 'unavailable') {
+        console.warn('[Bridge] Could not publish board snapshot:', error instanceof Error ? error.message : error);
+      }
+      retry = deliveryStarted && generation === reconciliation && capability !== 'unavailable' && !isPermanentPublicationError(error);
       if (retry && !stopped) retries.set(rootId, Math.min(5, (retries.get(rootId) ?? 0) + 1));
       else retries.delete(rootId);
     } finally {
       running.delete(rootId);
       const changed = dirty.delete(rootId);
       if (changed || retry) schedule(rootId);
+      continueLater();
     }
   }
   function schedule(rootId: string): void {
-    if (stopped || pending.has(rootId)) return;
+    if (stopped) return;
+    if (capability === 'unavailable') { deferred.add(rootId); return; }
+    if (pending.has(rootId) || ready.has(rootId)) return;
     if (running.has(rootId)) { dirty.add(rootId); return; }
     const delay = retries.has(rootId) ? Math.min(30_000, 1000 * 2 ** ((retries.get(rootId) ?? 1) - 1)) : deps.debounceMs ?? 1000;
-    const timer = setTimeout(() => { void flush(rootId); }, delay);
+    const timer = setTimeout(() => {
+      pending.delete(rootId);
+      if (stopped || capability === 'unavailable') return;
+      ready.add(rootId);
+      drain();
+    }, delay);
     timer.unref?.();
     pending.set(rootId, timer);
   }
   async function sessionChanged(sessionId: string): Promise<void> {
+    if (stopped) return;
     try {
       const session = await deps.loadSession(sessionId);
       if (session) schedule(session.parentSessionId ?? session.id);
@@ -138,15 +184,22 @@ export function createSessionBoardPublisher(deps: {
     schedule, observePublication,
     /** Cloud writes are best-effort; reconnect must retry even byte-identical local snapshots. */
     reconcile(rootIds: Iterable<string>) {
+      // A stopped root can still have a real card/plan/attention mutation. The
+      // sweep adds only live roots, but must not discard work already observed.
+      const roots = new Set([...rootIds, ...deferred, ...pending.keys(), ...ready, ...dirty, ...running]);
       reconciliation += 1;
+      capability = 'unknown';
+      cancelPending();
+      deferred.clear();
       previous.clear();
-      retries.clear();
-      for (const rootId of rootIds) schedule(rootId);
+      for (const rootId of roots) schedule(rootId);
     },
     stop() {
       stopped = true;
-      for (const timer of pending.values()) clearTimeout(timer);
-      pending.clear(); dirty.clear(); previous.clear(); retries.clear(); sessionRoots.clear();
+      cancelPending();
+      if (continuation) clearImmediate(continuation);
+      continuation = undefined;
+      previous.clear(); sessionRoots.clear(); deferred.clear();
     },
   };
 }

@@ -58,6 +58,16 @@ async function ledgerSetup(allowed: () => boolean) {
 }
 
 describe('secure broker adapter', () => {
+  it('forwards fresh positioned subscriptions without since and preserves an exact known resume position', async () => {
+    const f = await setup();
+    const subscribe = vi.spyOn(f.raw, 'newSubscription');
+    f.client.newSubscription(`session-board:updates#${userId}`, { recoverable: true, positioned: true });
+    expect(subscribe).toHaveBeenLastCalledWith(`session-board:updates#${userId}`, { recoverable: true, positioned: true });
+    f.client.newSubscription(`sessions:updates#${userId}`, { recoverable: true, positioned: true, since: { offset: 17, epoch: 'known-epoch' } });
+    expect(subscribe).toHaveBeenLastCalledWith(`sessions:updates#${userId}`, { recoverable: true, positioned: true, since: { offset: 17, epoch: 'known-epoch' } });
+    f.client.dispose(); f.runtime.dispose();
+  });
+
   it('binds all dashboard snapshot publications to their encrypted sender bridge', async () => {
     const f = await setup();
     const publications = ['session_board_snapshot', 'session_board_changed', 'session_snapshot_required'];

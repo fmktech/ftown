@@ -78,3 +78,25 @@ test('snapshots above the maximum fail explicitly without evicting valid data', 
   assert.throws(() => cache.store('large', snapshot(Math.ceil(SESSION_BOARD_MAX_BYTES / 3))), { code: 'session_board_snapshot_too_large', status: 413 });
   assert.ok(cache.chunk('scope', valid.snapshotId, 0).data);
 });
+
+test('retained snapshots expire passively without another read and leave no recurring idle timer', t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+  const schedule = t.mock.method(globalThis, 'setTimeout');
+  const cache = createSessionBoardCache();
+  cache.store('scope', maximumPlanSnapshot());
+  assert.equal(cache.size, 1); assert.ok(cache.retainedBytes > 300_000); assert.equal(schedule.mock.callCount(), 1);
+  t.mock.timers.tick(SESSION_BOARD_CACHE_TTL_MS - 1); assert.equal(cache.size, 1);
+  t.mock.timers.tick(1); assert.equal(cache.size, 0); assert.equal(cache.retainedBytes, 0);
+  t.mock.timers.tick(SESSION_BOARD_CACHE_TTL_MS * 3); assert.equal(schedule.mock.callCount(), 1);
+});
+
+test('one expiry timer follows the earliest retained entry and reschedules only for remaining snapshots', t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+  const schedule = t.mock.method(globalThis, 'setTimeout');
+  const cache = createSessionBoardCache();
+  cache.store('one', maximumPlanSnapshot());
+  t.mock.timers.tick(1000); cache.store('two', maximumPlanSnapshot());
+  assert.equal(cache.size, 2); assert.equal(schedule.mock.callCount(), 1);
+  t.mock.timers.tick(SESSION_BOARD_CACHE_TTL_MS - 1000); assert.equal(cache.size, 1); assert.equal(schedule.mock.callCount(), 2);
+  t.mock.timers.tick(1000); assert.equal(cache.size, 0); assert.equal(cache.retainedBytes, 0); assert.equal(schedule.mock.callCount(), 2);
+});

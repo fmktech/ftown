@@ -124,10 +124,11 @@ function deferred() {
   const promise = new Promise<CommandResponse>(done => { resolve = done; });
   return { promise, resolve };
 }
-function durableClient() {
+function durableClient(sessionSnapshotBridgeId?: string) {
   const publications: Array<(event: MessageEvents["publication"]) => void> = [];
   const subscribed: Array<() => void> = [];
   const client: MessageClient = {
+    ...(sessionSnapshotBridgeId === undefined ? {} : { sessionSnapshotBridgeId }),
     getSubscription: () => null, removeSubscription: () => {},
     newSubscription: () => {
       const sub: MessageSubscription = {
@@ -145,8 +146,8 @@ function durableClient() {
   };
   return { client, publications, subscribed };
 }
-function durableSetup(handle: (command: Command) => Promise<CommandResponse> = async () => reply(saved), rows: Session[] = sessions) {
-  const transport = durableClient();
+function durableSetup(handle: (command: Command) => Promise<CommandResponse> = async () => reply(saved), rows: Session[] = sessions, sessionSnapshotBridgeId?: string) {
+  const transport = durableClient(sessionSnapshotBridgeId);
   const reconnects = new Set<() => void>();
   const summaryReply = (attention: typeof saved | null, sequence = attention?.sequence ?? 1): CommandResponse => ({
     requestId: "response", success: true, data: { summary: { agent: { attention, sequence } } },
@@ -409,6 +410,43 @@ describe("durable explicit attention restoration", () => {
     expect(h.current("agent-two")?.attention?.attentionId).toBe(saved.id);
     for (const callback of h.subscribed) act(() => callback());
     await settle(); expect(h.rpc.sendCommand).toHaveBeenCalledTimes(3);
+  });
+
+  it("probes a same-bridge loopback invalid_command once before hydrating legacy attention", async () => {
+    const rows = [sessions[0], { ...sessions[0], id: "agent-two" }];
+    const h = durableSetup(async command => command.type === "get_attention_summary"
+      ? { requestId: command.requestId, success: false, error: "Encrypted request rejected", data: { code: "invalid_command" } }
+      : { requestId: command.requestId, success: true, data: { sessionId: (command.payload as { sessionId: string }).sessionId, attention: saved, sequence: saved.sequence } }, rows, sessions[0].bridgeId);
+    await settle();
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(3);
+    expect(h.current()?.attention?.attentionId).toBe(saved.id);
+    expect(h.current("agent-two")?.attention?.attentionId).toBe(saved.id);
+    expect(h.rpc.sendCommand.mock.calls.filter(([command]) => command.type === "get_session_attention").map(([command]) => (command.payload as { sessionId: string }).sessionId)).toEqual(["agent", "agent-two"]);
+  });
+
+  it("does not fan out or repeat a denied loopback invalid_command compatibility probe", async () => {
+    const rows = [sessions[0], { ...sessions[0], id: "agent-two" }];
+    const h = durableSetup(async command => ({ requestId: command.requestId, success: false,
+      error: "Encrypted request rejected", data: { code: command.type === "get_attention_summary" ? "invalid_command" : "permission_denied" } }), rows, sessions[0].bridgeId);
+    await settle();
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(2);
+    act(() => h.reconnect()); await settle();
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(3);
+    expect(h.rpc.sendCommand.mock.calls.filter(([command]) => command.type === "get_session_attention")).toHaveLength(1);
+    expect(h.current()?.attention).toBeUndefined();
+  });
+
+  it.each([
+    { localBridge: undefined, error: "Encrypted request rejected", code: "invalid_command" },
+    { localBridge: "other-bridge", error: "Encrypted request rejected", code: "invalid_command" },
+    { localBridge: sessions[0].bridgeId, error: "Other failure", code: "invalid_command" },
+    { localBridge: sessions[0].bridgeId, error: "Encrypted request rejected", code: "invalid_envelope" },
+  ])("does not downgrade an unrelated or malformed invalid_command failure: %o", async value => {
+    const h = durableSetup(async command => ({ requestId: command.requestId, success: false, error: value.error, data: { code: value.code } }), sessions, value.localBridge);
+    await settle();
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(1);
+    expect(h.rpc.sendCommand.mock.calls[0][0].type).toBe("get_attention_summary");
+    expect(h.current()?.attention).toBeUndefined();
   });
 
   it.each(["denied", "malformed"])("does not fan out or repeat a %s legacy compatibility probe", async failure => {

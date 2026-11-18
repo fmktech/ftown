@@ -159,7 +159,13 @@ export function SessionWorkspace({ session, client, userId, readable, visible = 
   useEffect(() => () => { onUsageVisibilityChange?.(null); }, [onUsageVisibilityChange]);
   // Dashboard data for the board v3 Overview: one get_session_board snapshot of
   // this manager's tree, fetched only while the Overview tab is on screen.
-  const { snapshot: boardSnapshot } = useSessionBoard(sendCommand, session?.bridgeId ?? null, session?.id ?? null, visible && readable && view === 'overview', client, userId);
+  const boardTreeChangeKey = useMemo(() => JSON.stringify((session ? [session, ...childSessions] : [])
+    .filter(item => item.bridgeId === session?.bridgeId)
+    .sort((left, right) => left.id.localeCompare(right.id))
+    .map(item => [item.bridgeId, item.id, item.parentSessionId, item.name, item.status, item.updatedAt,
+      item.card?.updatedAt, item.brief?.updatedAt, item.plan?.seq, item.preview, item.model, item.shellType,
+      item.pullRequestUrl, item.pullRequestReviewGeneration, item.requireGreenPr, item.block?.transitionKey])), [session, childSessions]);
+  const { snapshot: boardSnapshot, refreshIfUnsupported: refreshLegacyBoard } = useSessionBoard(sendCommand, session?.bridgeId ?? null, session?.id ?? null, visible && readable && view === 'overview', client, userId, boardTreeChangeKey);
   const sessionsById = useMemo(() => new Map(sessions.map(item => [item.id, item])), [sessions]);
   const childIds = useMemo(() => new Set(childSessions.map(item => item.id)), [childSessions]);
   // Items resolved through the panel stay hidden until the board snapshot catches up.
@@ -173,11 +179,12 @@ export function SessionWorkspace({ session, client, userId, readable, visible = 
     });
   }, [boardSnapshot, resolvedAttentionIds]);
   const markAttentionResolved = useCallback((entry: InboxEntry) => {
+    refreshLegacyBoard();
     const eventId = entry.notice.attentionId;
     if (!eventId) return;
     setResolvedAttentionIds(current => new Set(current).add(eventId));
     if (openAttentionId === eventId) onOpenAttentionChange?.(null);
-  }, [openAttentionId, onOpenAttentionChange]);
+  }, [openAttentionId, onOpenAttentionChange, refreshLegacyBoard]);
   const childAttentionItems = useMemo(() => mergeChildAttentionItems({ childIds, liveEntries: attentionEntries ?? [], snapshotAttention: boardSnapshot?.attention, sessionsById, excludeIds: resolvedAttentionIds }), [childIds, attentionEntries, boardSnapshot, sessionsById, resolvedAttentionIds]);
   const childAttention = onOpenAttentionChange && onDismissAttention && onReplyAttention && onAnswerAttention && onOpenSessionById
     ? {

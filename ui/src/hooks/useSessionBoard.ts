@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { v4 as uuidv4 } from "uuid";
 import type { SessionCard } from "@/types";
 import { parseSessionBlock } from "@/types";
@@ -294,7 +294,7 @@ function decodeChunk(value: unknown, manifest: SessionBoardManifest, offset: num
   } catch { return null; }
 }
 
-/** Push-driven Overview. RPC reads are reserved for entry, recovery, visibility and oversized publications. */
+/** Push-driven Overview, with event-triggered invalidation for bridges without board delivery. */
 export function useSessionBoard(
   sendCommand: BridgeRpc["sendCommand"],
   bridgeId: string | null,
@@ -302,26 +302,51 @@ export function useSessionBoard(
   enabled: boolean,
   client: MessageClient | null = null,
   userId = "",
-): { snapshot: SessionBoardSnapshot | null; refresh: () => Promise<void> } {
+  treeChangeKey = "",
+): { snapshot: SessionBoardSnapshot | null; refresh: () => Promise<void>; refreshIfUnsupported: () => void } {
   const [snapshot, setSnapshot] = useState<SessionBoardSnapshot | null>(null);
   const sendRef = useRef(sendCommand);
   sendRef.current = sendCommand;
   const refreshRef = useRef<() => Promise<void>>(async () => {});
   const refresh = useCallback(() => refreshRef.current(), []);
-  const recovery = useRef<{ key: string; position: Position | null }>({ key: "", position: null });
+  const recovery = useRef<{ key: string; client: MessageClient | null; position: Position | null }>({ key: "", client: null, position: null });
   const key = JSON.stringify([userId, bridgeId, sessionId]);
+  const owner = useMemo(() => ({}), [key, client, enabled]);
+  const fallbackRef = useRef<{ owner: object; request: () => void } | null>(null);
+  const refreshIfUnsupported = useCallback(() => {
+    if (fallbackRef.current?.owner === owner) fallbackRef.current.request();
+  }, [owner]);
+  const previousTree = useRef({ owner, key: treeChangeKey });
 
   useEffect(() => { setSnapshot(null); }, [key]);
   useEffect(() => {
     if (!enabled || !bridgeId || !sessionId) return;
-    if (recovery.current.key !== key) recovery.current = { key, position: null };
+    if (recovery.current.key !== key || recovery.current.client !== client) recovery.current = { key, client, position: null };
     let active = true;
     let busy = false;
-    let dirty = false;
+    let dirty: "fallback" | "required" | null = null;
     let revision = 0;
     let sub: MessageSubscription | null = null;
     let initialReadRequested = false;
     let authoritativePosition: Position | null = null;
+    let pushSupported = false;
+    let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
+    const cancelFallback = () => {
+      if (fallbackTimer !== null) { clearTimeout(fallbackTimer); fallbackTimer = null; }
+      if (dirty === "fallback") dirty = null;
+    };
+    const needsFallback = () => !pushSupported || sub?.state !== "subscribed";
+    const requestFallback = () => {
+      if (!active || document.visibilityState === "hidden" || !needsFallback()) return;
+      if (fallbackTimer !== null) return;
+      fallbackTimer = setTimeout(() => {
+        fallbackTimer = null;
+        if (!active || document.visibilityState === "hidden" || !needsFallback()) return;
+        revision++;
+        void fetchSnapshot(true);
+      }, 100);
+    };
+    fallbackRef.current = { owner, request: requestFallback };
     async function readSnapshot(started: number): Promise<SessionBoardSnapshot | null> {
       const current = () => active && revision === started;
       const response = await sendRef.current({ type: "get_session_board", payload: { bridgeId: bridgeId!, sessionId: sessionId! }, requestId: uuidv4() });
@@ -347,9 +372,10 @@ export function useSessionBoard(
       if (snapshotId !== manifest.snapshotId) return null;
       return parseSnapshot(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)));
     }
-    async function fetchSnapshot(): Promise<void> {
+    async function fetchSnapshot(fallback = false): Promise<void> {
       if (!active) return;
-      if (busy) { dirty = true; return; }
+      if (!fallback) cancelFallback();
+      if (busy) { if (!fallback || dirty !== "required") dirty = fallback ? "fallback" : "required"; return; }
       initialReadRequested = true;
       busy = true;
       const started = revision;
@@ -364,11 +390,16 @@ export function useSessionBoard(
       } catch { /* Offline/older bridge: preserve the last valid snapshot. */ }
       finally {
         busy = false;
-        if (active && dirty) { dirty = false; void fetchSnapshot(); }
+        if (active && dirty) {
+          const fallback = dirty === "fallback";
+          dirty = null;
+          if (!fallback || document.visibilityState !== "hidden" && needsFallback()) void fetchSnapshot(fallback);
+        }
       }
     }
     refreshRef.current = fetchSnapshot;
     const onVisible = () => {
+      cancelFallback();
       if (document.visibilityState !== "hidden") { revision++; void fetchSnapshot(); }
     };
     document.addEventListener("visibilitychange", onVisible);
@@ -376,7 +407,7 @@ export function useSessionBoard(
       try {
         const channel = accountChannel("session-board:updates", userId);
         sub = client.newSubscription(channel, {
-          since: recovery.current.position ?? { offset: 0, epoch: "" },
+          ...(recovery.current.position ? { since: recovery.current.position } : {}),
           recoverable: true, positioned: true,
         });
         sub.on("publication", context => {
@@ -388,18 +419,21 @@ export function useSessionBoard(
             && next.offset <= authoritativePosition.offset) return;
           const publication = parseBoardPublication(context.data);
           if (!publication || publication.bridgeId !== bridgeId || publication.rootId !== sessionId) return;
+          pushSupported = true;
+          cancelFallback();
           revision++;
           if (publication.type === "session_board_snapshot") setSnapshot(publication.snapshot);
           else void fetchSnapshot();
         });
         sub.on("subscribed", (context = {}) => {
           if (!active) return;
+          pushSupported = false;
           const next = position(context);
           const previous = recovery.current.position;
           const recovered = context.recovered === true && context.positioned !== false && !!next
             && !!previous && previous.epoch === next.epoch && next.offset >= previous.offset;
           recovery.current.position = next;
-          if (!recovered) { revision++; void fetchSnapshot(); }
+          if (!recovered) { cancelFallback(); revision++; void fetchSnapshot(); }
         });
         sub.subscribe();
       } catch {
@@ -412,11 +446,19 @@ export function useSessionBoard(
     if (!initialReadRequested) void fetchSnapshot();
     return () => {
       active = false;
+      cancelFallback();
+      if (fallbackRef.current?.owner === owner) fallbackRef.current = null;
       refreshRef.current = async () => {};
       document.removeEventListener("visibilitychange", onVisible);
       if (sub && client) { sub.removeAllListeners(); sub.unsubscribe(); client.removeSubscription(sub); }
     };
-  }, [enabled, bridgeId, sessionId, client, userId, key]);
+  }, [enabled, bridgeId, sessionId, client, userId, key, owner]);
 
-  return { snapshot, refresh };
+  useEffect(() => {
+    const previous = previousTree.current;
+    previousTree.current = { owner, key: treeChangeKey };
+    if (previous.owner === owner && previous.key !== treeChangeKey) refreshIfUnsupported();
+  }, [owner, treeChangeKey, refreshIfUnsupported]);
+
+  return { snapshot, refresh, refreshIfUnsupported };
 }

@@ -396,12 +396,22 @@ describe("retirement reconciliation through actual hook callbacks", () => {
   });
   it("reloads only on failed recovery and visibility return", () => {
     const h = setup(true); const count = () => h.commands.filter(c => c.type === "list_sessions").length;
-    expect(h.subscriptionOptions[0]).toMatchObject({ recoverable: true, positioned: true, since: { offset: 0, epoch: "" } });
+    expect(h.subscriptionOptions[0]).toEqual({ recoverable: true, positioned: true });
     expect(count()).toBe(1);
     act(() => h.subscriptions[0].emit("subscribed", { recovered: true, positioned: true, wasRecovering: true, offset: 1, epoch: "epoch" })); expect(count()).toBe(1);
     act(() => h.subscriptions[0].emit("subscribed", { recovered: false, offset: 0, epoch: "new-epoch" })); expect(count()).toBe(2);
     visibility = "hidden"; act(() => document.dispatchEvent(new Event("visibilitychange")));
     visibility = "visible"; act(() => document.dispatchEvent(new Event("visibilitychange"))); expect(count()).toBe(3);
+  });
+  it("resumes an exact known sessions position when its subscription is recreated", () => {
+    const h = setup(true);
+    act(() => h.subscriptions[0].emit("publication", { data: { type: "session_update", session: row("latest") }, offset: 7, epoch: "known-epoch" }));
+    const publish = h.rpc.publishCommand;
+    h.rpc.publishCommand = command => publish(command);
+    h.rerender({ userId: "user", selectedUsageView: null });
+    expect(h.subscriptionOptions[1]).toEqual({ recoverable: true, positioned: true, since: { offset: 7, epoch: "known-epoch" } });
+    h.rerender({ userId: "other-user", selectedUsageView: null });
+    expect(h.subscriptionOptions[2]).toEqual({ recoverable: true, positioned: true });
   });
   it("does not read when the RPC channel reconnects after successful sessions recovery", () => {
     const h = setup(true);

@@ -8,7 +8,7 @@ import type { SnapshotCard } from "@/components/SessionOverview";
 import { parseBoardPublication, parseSnapshot, useSessionBoard, type SessionBoardSnapshot } from "./useSessionBoard";
 import { SESSION_BOARD_CHUNK_BYTES, SESSION_BOARD_MAX_BYTES, type SessionBoardManifest } from "../../../bridge/src/session-board-protocol";
 
-afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 const card = (sessionId: string, state: SessionCard["state"] = "working", archived = false): SnapshotCard => ({
   ...(archived ? { archived: true } : {}),
@@ -109,7 +109,7 @@ describe("useSessionBoard", () => {
     await act(async () => {});
     expect(result.current.snapshot).toEqual(snapshotValue());
     expect(send.mock.calls[0][0].payload).toEqual({ bridgeId: "bridge", sessionId: "manager" });
-    expect(f.client.newSubscription).toHaveBeenCalledWith("session-board:updates#user", { since: { offset: 0, epoch: "" }, recoverable: true, positioned: true });
+    expect(f.client.newSubscription).toHaveBeenCalledWith("session-board:updates#user", { recoverable: true, positioned: true });
     await act(async () => { await vi.advanceTimersByTimeAsync(300_000); });
     expect(send).toHaveBeenCalledTimes(1);
   });
@@ -241,6 +241,145 @@ describe("useSessionBoard", () => {
   it("does nothing without a target session", async () => {
     const send = vi.fn(async () => reply(snapshotValue()));
     renderHook(() => useSessionBoard(send, "bridge", null, true)); await act(async () => {}); expect(send).not.toHaveBeenCalled();
+  });
+
+  it("debounces legacy tree invalidations without an idle retry or reads for unchanged keys", async () => {
+    vi.useFakeTimers();
+    const f = messageClient(); let next = snapshotValue();
+    const send = vi.fn(async () => reply(next));
+    const { result, rerender } = renderHook(({ tree }) => useSessionBoard(send, "bridge", "manager", true, f.client, "user", tree), { initialProps: { tree: "initial" } });
+    await act(async () => {});
+    rerender({ tree: "initial" });
+    rerender({ tree: "changed" });
+    rerender({ tree: "changed-again" });
+    next = snapshotValue(); next.events[0].summary = "legacy update";
+    await act(async () => { await vi.advanceTimersByTimeAsync(99); });
+    expect(send).toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(result.current.snapshot?.events[0].summary).toBe("legacy update");
+    await act(async () => { await vi.advanceTimersByTimeAsync(300_000); });
+    expect(send).toHaveBeenCalledTimes(2);
+  });
+
+  it("requires a valid matching push to cancel fallback and uses fallback again when delivery is unhealthy", async () => {
+    vi.useFakeTimers();
+    const f = messageClient(); const send = vi.fn(async () => reply(snapshotValue()));
+    const { result, rerender } = renderHook(({ tree }) => useSessionBoard(send, "bridge", "manager", true, f.client, "user", tree), { initialProps: { tree: "initial" } });
+    await act(async () => {});
+    rerender({ tree: "first" });
+    await act(async () => {
+      f.sub.emit("publication", { data: push(snapshotValue(), "other") });
+      f.sub.emit("publication", { data: push(snapshotValue(), "bridge", "other") });
+      f.sub.emit("publication", { data: { ...push(), snapshot: {} } });
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    expect(send).toHaveBeenCalledTimes(2);
+    rerender({ tree: "second" });
+    await act(async () => { f.sub.emit("publication", { data: push(), offset: 1, epoch: "epoch" }); });
+    rerender({ tree: "third" });
+    act(() => result.current.refreshIfUnsupported());
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(send).toHaveBeenCalledTimes(2);
+    f.sub.state = "unsubscribed";
+    rerender({ tree: "offline" });
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(send).toHaveBeenCalledTimes(3);
+    f.sub.state = "subscribed";
+    await act(async () => { f.sub.emit("subscribed", { recovered: true, positioned: true, offset: 1, epoch: "epoch" }); });
+    rerender({ tree: "after-reconnect" });
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(send).toHaveBeenCalledTimes(4);
+  });
+
+  it("does not establish live delivery from a replay superseded by the RPC stream fence", async () => {
+    vi.useFakeTimers();
+    const f = messageClient(); const send = vi.fn(async () => reply(snapshotValue()));
+    const { rerender } = renderHook(({ tree }) => useSessionBoard(send, "bridge", "manager", true, f.client, "user", tree), { initialProps: { tree: "initial" } });
+    await act(async () => { f.sub.emit("subscribed", { recovered: true, positioned: true, offset: 10, epoch: "epoch" }); });
+    await visible();
+    const before = send.mock.calls.length;
+    rerender({ tree: "changed" });
+    await act(async () => {
+      f.sub.emit("publication", { data: push(), offset: 9, epoch: "epoch" });
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    expect(send).toHaveBeenCalledTimes(before + 1);
+  });
+
+  it("preserves a legacy tree invalidation delivered before a recovered subscription callback", async () => {
+    vi.useFakeTimers();
+    const f = messageClient(); const send = vi.fn(async () => reply(snapshotValue()));
+    const { rerender } = renderHook(({ tree }) => useSessionBoard(send, "bridge", "manager", true, f.client, "user", tree), { initialProps: { tree: "initial" } });
+    await act(async () => {});
+    rerender({ tree: "changed-before-recovery" });
+    await act(async () => {
+      f.sub.emit("subscribed", { recovered: true, positioned: true, offset: 0, epoch: "epoch" });
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    expect(send).toHaveBeenCalledTimes(2);
+  });
+
+  it("bounds fallback delay during a sustained stream of relevant tree changes", async () => {
+    vi.useFakeTimers();
+    const f = messageClient(); const send = vi.fn(async () => reply(snapshotValue()));
+    const { rerender } = renderHook(({ tree }) => useSessionBoard(send, "bridge", "manager", true, f.client, "user", tree), { initialProps: { tree: "initial" } });
+    await act(async () => {});
+    rerender({ tree: "first" });
+    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+    rerender({ tree: "second" });
+    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+    expect(send).toHaveBeenCalledTimes(2);
+  });
+
+  it("cancels a fallback queued behind an RPC when a matching snapshot wins", async () => {
+    vi.useFakeTimers();
+    const f = messageClient(); let resolve!: (response: CommandResponse) => void;
+    const send = vi.fn(() => new Promise<CommandResponse>(done => { resolve = done; }));
+    const { result, rerender } = renderHook(({ tree }) => useSessionBoard(send, "bridge", "manager", true, f.client, "user", tree), { initialProps: { tree: "initial" } });
+    rerender({ tree: "changed" });
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    const fresh = snapshotValue(); fresh.events[0].summary = "live";
+    await act(async () => { f.sub.emit("publication", { data: push(fresh), offset: 1, epoch: "epoch" }); resolve(reply(snapshotValue())); });
+    expect(result.current.snapshot).toEqual(fresh);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("rechecks document visibility before starting a fallback queued behind an RPC", async () => {
+    vi.useFakeTimers();
+    const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    let resolve!: (response: CommandResponse) => void;
+    const send = vi.fn(() => new Promise<CommandResponse>(done => { resolve = done; }));
+    const { rerender } = renderHook(({ tree }) => useSessionBoard(send, "bridge", "manager", true, null, "user", tree), { initialProps: { tree: "initial" } });
+    rerender({ tree: "changed" });
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    visibility.mockReturnValue("hidden");
+    await act(async () => resolve(reply(snapshotValue())));
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("fences fallback callbacks and timers across targets, hidden documents and disabled Overview", async () => {
+    vi.useFakeTimers();
+    const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    const send = vi.fn(async (command: Command) => { const value = snapshotValue(); value.board.rootId = (command.payload as { sessionId: string }).sessionId; return reply(value); });
+    const { result, rerender, unmount } = renderHook(({ id, enabled, tree }) => useSessionBoard(send, "bridge", id, enabled, null, "user", tree), { initialProps: { id: "manager", enabled: true, tree: "initial" } });
+    await act(async () => {});
+    const oldAction = result.current.refreshIfUnsupported;
+    rerender({ id: "manager", enabled: true, tree: "changed" });
+    rerender({ id: "other", enabled: true, tree: "new-root" });
+    await act(async () => {});
+    act(() => oldAction());
+    visibility.mockReturnValue("hidden");
+    act(() => result.current.refreshIfUnsupported());
+    rerender({ id: "other", enabled: true, tree: "hidden-change" });
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(send).toHaveBeenCalledTimes(2);
+    visibility.mockReturnValue("visible");
+    act(() => result.current.refreshIfUnsupported());
+    rerender({ id: "other", enabled: false, tree: "leave-overview" });
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(send).toHaveBeenCalledTimes(2);
+    unmount();
   });
 });
 

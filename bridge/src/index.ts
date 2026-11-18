@@ -43,7 +43,7 @@ import { createRealModelRoutingService } from './quota/routing-service.js';
 import { PullRequestStatusService } from './pull-request-status.js';
 import { createPrReviewService } from './pull-request-review.js';
 import { PullRequestEventWatcher } from './pull-request-events.js';
-import { createSessionBoardPublisher, type SessionBoardSource } from './session-board-snapshot.js';
+import { createSessionBoardPublisher, liveSessionBoardRoots, type SessionBoardSource } from './session-board-snapshot.js';
 import { createCoordination } from './coordination/wiring.js';
 import { removeFtownSession } from './remove-ftown-session.js';
 import { SessionResurrection, shouldResurrectStoredSession } from './session-resurrection.js';
@@ -655,7 +655,7 @@ program
         // unchanged.
         const RESYNC_CHUNK = 10;
         const sessions = (await store.listSessions()).filter(session => session.bridgeId === bridgeId);
-        const roots = new Set(sessions.map(session => session.parentSessionId ?? session.id));
+        const roots = liveSessionBoardRoots(sessions, bridgeId);
         if (boardPublisher) boardPublisher.reconcile(roots);
         else for (const rootId of roots) bootstrapBoardRoots.add(rootId);
         // The browser can remain connected while this bridge is offline, so

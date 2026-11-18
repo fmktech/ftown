@@ -163,7 +163,7 @@ export class SecureMessageClient implements MessageClient {
       }).catch(() => {});
   };
   private disconnected = () => { this.generation++; this.handshakes.clear(); this.recovering.clear(); this.securityRuntime.disconnected(); };
-  newSubscription(channel: string, options?: { since: { offset: number; epoch: string }; recoverable?: boolean; positioned?: boolean }): SecureSubscription {
+  newSubscription(channel: string, options?: { since?: { offset: number; epoch: string }; recoverable?: boolean; positioned?: boolean }): SecureSubscription {
     if (this.subscriptions.has(channel)) throw new Error(`Duplicate subscription: ${channel}`);
     const raw = this.raw.getSubscription(channel) ?? this.raw.newSubscription(channel, options);
     const sub = new SecureSubscription(channel, raw, this); this.subscriptions.set(channel, sub); return sub;

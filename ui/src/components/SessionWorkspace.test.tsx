@@ -3,12 +3,12 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { afterEach, expect, it, vi } from 'vitest';
 import { useLayoutEffect, useState, type ReactNode } from 'react';
 import type { Command, CommandResponse, Session } from '@/types';
-import type { MessageClient } from '@/lib/message-client';
+import type { MessageClient, MessageEvents, MessageSubscription } from '@/lib/message-client';
 import { SessionWorkspace } from './SessionWorkspace';
 import type { InboxEntry } from './SessionInbox';
 import { PREVIEW_CSP } from '@/lib/session-preview';
 
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
 it('reports usage visibility from the rendered terminal and keeps a closed preview from disabling Overview pushes', async () => {
   class TestResizeObserver implements ResizeObserver {
@@ -1447,14 +1447,91 @@ it('fetches the board snapshot while the Overview is visible and passes it throu
   rerender(workspace(manager, [manager, { ...child }]));
   await act(async () => {});
   expect(boardCalls).toHaveLength(1);
-  // Tree session updates no longer trigger board RPC reads.
+  vi.useFakeTimers();
+  // A legacy bridge without board publications refreshes on relevant tree changes.
   rerender(workspace(manager, [manager, { ...child, updatedAt: '2026-11-13T09:35:00.000Z' }]));
-  await act(async () => {});
-  expect(boardCalls).toHaveLength(1);
-  expect(within(await screen.findByRole('region', { name: 'events' })).getByText('events · 2')).toBeTruthy();
+  await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+  expect(boardCalls).toHaveLength(2);
+  const updatedChild = { ...child, updatedAt: '2026-11-13T09:35:00.000Z' };
+  const unrelated = { ...child, id: 'unrelated', parentSessionId: 'other-manager', updatedAt: 'later' };
+  rerender(workspace(manager, [manager, { ...updatedChild, usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 2, models: [], harness: 'claude', collectedAt: 'now' } }, unrelated]));
+  await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+  expect(boardCalls).toHaveLength(2);
+  const updatedManager = { ...manager, updatedAt: '2026-11-13T09:36:00.000Z' };
+  rerender(workspace(updatedManager, [updatedManager, updatedChild]));
+  await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+  expect(boardCalls).toHaveLength(3);
+  const newChild = { ...child, id: 'new-child' };
+  rerender(workspace(updatedManager, [updatedManager, updatedChild, newChild]));
+  await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+  expect(boardCalls).toHaveLength(4);
+  rerender(workspace(updatedManager, [updatedManager, updatedChild]));
+  await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+  expect(boardCalls).toHaveLength(5);
+  expect(within(screen.getByRole('region', { name: 'events' })).getByText('events · 2')).toBeTruthy();
   // A session without children never fetches (its overview does not exist).
   const plain: Session = { id: 'plain', bridgeId: 'bridge', name: 'plain', status: 'running', createdAt: '', updatedAt: '' };
   rerender(workspace(plain, [plain]));
-  await act(async () => { await new Promise(resolve => setTimeout(resolve, 5)); });
-  expect(boardCalls).toHaveLength(1);
+  await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+  expect(boardCalls).toHaveLength(5);
+});
+
+it.each((['answer', 'reply', 'dismiss'] as const).flatMap(action =>
+  (['legacy', 'failure', 'push', 'hidden', 'leave-overview'] as const).map(delivery => ({ action, delivery }))))
+('refreshes legacy Overview after successful $action only while needed and visible ($delivery)', async ({ action, delivery }) => {
+  vi.useFakeTimers();
+  resizeTo(520);
+  const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+  const manager: Session = { id: 'manager', bridgeId: 'bridge', name: 'Manager', status: 'running', createdAt: '', updatedAt: '' };
+  const child: Session = { ...manager, id: 'child', name: 'Child', parentSessionId: manager.id };
+  const entry: InboxEntry = { ...itemFor('request'), session: child,
+    notice: { ...itemFor('request').notice, ...(action === 'answer' ? { prompt: { channel: 'mail' as const,
+      questions: [{ question: 'Which path?', options: [{ label: 'Safe' }], multiSelect: false, allowText: false }] } } : {}) } };
+  const snapshot = { board: { rootId: manager.id, cards: [] }, events: [], attention: [] };
+  const send = vi.fn(async (command: Command): Promise<CommandResponse> => ({ requestId: command.requestId, success: true, data: snapshot }));
+  let publication: (context: MessageEvents['publication']) => void = () => {};
+  const client: MessageClient = {
+    getSubscription: () => null, removeSubscription: vi.fn(),
+    newSubscription: () => {
+      const sub: MessageSubscription = { state: 'subscribed', subscribe: () => {}, unsubscribe: () => {}, publish: async () => {},
+        presence: async () => ({ clients: {} }), off: () => sub, removeAllListeners: () => {},
+        on: <K extends keyof MessageEvents>(event: K, listener: (context: MessageEvents[K]) => void) => {
+          if (event === 'publication') publication = listener as typeof publication;
+          return sub;
+        } };
+      return sub;
+    },
+  };
+  let complete!: () => void;
+  const pending = new Promise<void>(resolve => { complete = resolve; });
+  const onDismiss = vi.fn(async () => { await pending; if (delivery === 'failure') throw new Error('Dismiss refused'); });
+  const onReply = vi.fn(async () => { await pending; if (delivery === 'failure') throw new Error('Reply refused'); });
+  const onAnswer = vi.fn(async () => {
+    await pending;
+    return delivery === 'failure' ? { ok: false, code: 'permission_denied', message: 'Answer refused' } as const : { ok: true, message: 'Answered' } as const;
+  });
+  render(<SessionWorkspace session={manager} sessions={[manager, child]} client={client} userId="user" readable sendCommand={send}
+    securityGeneration={0} open={false} onClose={vi.fn()} isDesktop mobileTab="terminal" onMobileTab={vi.fn()} onRefit={vi.fn()}
+    attentionEntries={[entry]} openAttentionId="request" onOpenAttentionChange={vi.fn()} onDismissAttention={onDismiss}
+    onReplyAttention={onReply} onAnswerAttention={onAnswer} onOpenSessionById={vi.fn()}><div>Terminal</div></SessionWorkspace>);
+  await act(async () => {});
+  const panel = screen.getByRole('region', { name: 'Child attention requests' });
+  if (action === 'answer') {
+    fireEvent.click(within(panel).getByLabelText('Safe'));
+    fireEvent.click(within(panel).getByRole('button', { name: 'Send answer' }));
+    expect(onAnswer).toHaveBeenCalledOnce();
+  } else if (action === 'reply') {
+    fireEvent.change(within(panel).getByLabelText('Reply to Child'), { target: { value: 'Continue' } });
+    fireEvent.click(within(panel).getByRole('button', { name: 'Send reply' }));
+    expect(onReply).toHaveBeenCalledOnce();
+  } else {
+    fireEvent.click(within(panel).getByRole('button', { name: 'Dismiss' }));
+    expect(onDismiss).toHaveBeenCalledOnce();
+  }
+  if (delivery === 'push') act(() => publication({ data: { type: 'session_board_snapshot', bridgeId: manager.bridgeId, rootId: manager.id, snapshot } }));
+  if (delivery === 'hidden') visibility.mockReturnValue('hidden');
+  if (delivery === 'leave-overview') fireEvent.click(screen.getByRole('tab', { name: 'Terminal' }));
+  await act(async () => { complete(); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+  expect(send).toHaveBeenCalledTimes(delivery === 'legacy' ? 2 : 1);
 });

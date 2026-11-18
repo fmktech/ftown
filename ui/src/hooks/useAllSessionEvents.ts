@@ -263,6 +263,9 @@ export function useAllSessionEvents(
     const send = rpcRef.current.sendCommand;
     const user = userIdRef.current;
     const activeClient = clientRef.current;
+    const legacyLoopbackRejection = (response: CommandResponse): boolean => !response.success
+      && activeClient?.sessionSnapshotBridgeId === bridgeId && response.error === "Encrypted request rejected"
+      && (response.data as { code?: unknown } | undefined)?.code === "invalid_command";
     const retrySummaryOnce = () => {
       if (summaryRetried.current.has(bridgeId) || !sessionsForBridge.some(session => {
         const attention = activityRef.current.get(session.id)?.attention;
@@ -334,7 +337,7 @@ export function useAllSessionEvents(
         if (results.some(result => result.response.success || !result.legacyEligible)) return;
         const compatibility = (result: CommandResponse): "denied" | "unsupported" | null => {
           const code = (result.data as { code?: unknown } | undefined)?.code;
-          if (code === "permission_denied") return "denied";
+          if (code === "permission_denied" || legacyLoopbackRejection(result)) return "denied";
           return code === "unknown_command" || code === "unsupported_command" || result.error === "Unknown command type: get_attention_summary" ? "unsupported" : null;
         };
         const kind = compatibility(failed.response);
@@ -359,7 +362,7 @@ export function useAllSessionEvents(
         const code = (response.data as { code?: unknown } | undefined)?.code;
         // Older encrypted bridges reject unknown commands at their permission
         // allowlist. Verify one known read before enabling legacy hydration.
-        if (!response.success && code === "permission_denied") {
+        if (!response.success && (code === "permission_denied" || legacyLoopbackRejection(response))) {
           let probe = legacySummaryProbes.current.get(bridgeId);
           if (!probe) {
             const session = sessionsForBridge.find(row => {

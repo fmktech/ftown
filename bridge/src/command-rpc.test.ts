@@ -100,6 +100,41 @@ test('get_attention_summary batches live owner sessions with unresolved explicit
   assert.equal(reads.length, before);
 });
 
+test('attention summaries revalidate read authority before access and after asynchronous reads', async () => {
+  for (const revokeAt of ['before', 'during'] as const) {
+    let allowed = revokeAt !== 'before', reads = 0, checks = 0;
+    const responses: CommandResponse[] = [];
+    const security = { revalidate: async () => {}, policy: { revalidate: async (_principal: unknown, permission: string) => {
+      checks++; assert.equal(permission, 'read');
+      if (!allowed) throw new BridgeSecurityError('permission_denied');
+    } } } as unknown as BridgeSecurityService;
+    const attentionStore = { explicitSnapshot: async () => {
+      reads++; await Promise.resolve(); allowed = false;
+      return { attention: { id: 'notice', sequence: 1, message: 'must not be returned' }, sequence: 1 };
+    } } as unknown as AttentionStore;
+    await createCommandHandler({ bridgeId: 'bridge', security, attentionStore,
+      sessionController: { get: async () => ({ bridgeId: 'bridge', status: 'running' }) } as unknown as SessionController,
+      publishCommandResponse: async response => { responses.push(response); },
+    })({ type: 'get_attention_summary', requestId: revokeAt, payload: { bridgeId: 'bridge', sessionIds: ['session'] } }, { principal: {} } as VerifiedApplication);
+    assert.equal(reads, revokeAt === 'before' ? 0 : 1);
+    assert.equal(checks, revokeAt === 'before' ? 1 : 2);
+    assert.deepEqual(responses.at(-1)?.data, { code: 'permission_denied' });
+    assert.equal(JSON.stringify(responses).includes('must not be returned'), false);
+  }
+});
+
+test('summary permission checks remain bounded for a multi-session read and preserve trusted adapters', async () => {
+  const checks: string[] = []; const responses: CommandResponse[] = [];
+  const base = { bridgeId: 'bridge', attentionStore: { explicitSnapshot: async () => ({ attention: null, sequence: 0 }) } as unknown as AttentionStore,
+    sessionController: { get: async () => ({ bridgeId: 'bridge', status: 'running' }) } as unknown as SessionController,
+    publishCommandResponse: async (response: CommandResponse) => { responses.push(response); } };
+  const security = { revalidate: async () => {}, policy: { revalidate: async (_principal: unknown, permission: string) => { checks.push(permission); } } } as unknown as BridgeSecurityService;
+  const command: Command = { type: 'get_attention_summary', requestId: 'batch', payload: { bridgeId: 'bridge', sessionIds: Array.from({ length: 100 }, (_, n) => `session-${n}`) } };
+  await createCommandHandler({ ...base, security })(command, { principal: {} } as VerifiedApplication);
+  assert.deepEqual(checks, ['read', 'read']); assert.deepEqual(responses.at(-1)?.data, { summary: {} });
+  await createCommandHandler(base)(command); assert.equal(responses.at(-1)?.success, true);
+});
+
 test('oversized attention summaries return a sealable split hint and legal smaller subsets preserve every notice', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'attention-summary-cap-'));
   const ownerId = '7bac2a7f-c58e-4845-856f-8283fb07ad96';
