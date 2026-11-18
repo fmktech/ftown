@@ -66,3 +66,11 @@ For one idle visible dashboard, one bridge, and Overview open:
 Startup, visibility return, unrecovered subscriptions, explicit refreshes, and change-triggered reads are excluded. Modern attention startup uses one summary per bridge (up to 500 IDs) and no per-session reads for empty results; larger authorized summaries split only when needed. Older bridges retain a bounded legacy compatibility path.
 
 Security review artifacts are excluded from the public repository.
+
+## Rollout compatibility
+
+- Until the active tree receives a board publication, relevant session changes get one coalesced Overview read. A successful child attention action also refreshes Overview when board delivery is unavailable. A matching push cancels the queued fallback. A hidden tab defers reconciliation to visibility return.
+- Fresh subscriptions omit a recovery position. A reconnect or renewed subscription with a known epoch resumes from that position. The pinned Centrifugo smoke verifies that both channels skip old history on entry and replay the exact missed publication on recovery.
+- A bridge reconnect starts board reconciliation from its live trees and retains pending changes to stopped trees. It probes the namespace with one publication before allowing two acknowledged deliveries at a time. An unknown namespace suspends board work until the next reconnect.
+- A loopback `400 invalid_command` on the attention-summary read uses a single authorized legacy read to establish compatibility. Modern summaries revalidate read permission before and after collecting attention.
+- Board chunks share one expiry timer while the cache has entries. The timer releases expired bytes even after the final read and stops when the cache empties.
