@@ -38,9 +38,22 @@ export async function api<T = unknown>(
 }
 
 
+/** Cross-bridge control: when set (`--bridge` / FTOWN_BRIDGE), every API call is forwarded by the local bridge to this peer bridge. */
+let peerTarget: string | null = null;
+/** Inner deadline of a forwarded request: below the local 60 s request deadline, leaving room for the peer handshake and relay hops. */
+const PEER_REQUEST_TIMEOUT_MS = 40_000;
+export function setPeerTarget(target: string | null | undefined): void { peerTarget = target?.trim() || null; }
+export function currentPeerTarget(): string | null { return peerTarget; }
+
 export async function apiResponse(pointer: BridgePointer, method: string, path: string, body?: unknown,
   extraHeaders?: Record<string, string>, signal?: AbortSignal, fetchFn: typeof fetch = fetch): Promise<{ status: number; body: ApplicationJson }> {
   if (!['GET', 'POST', 'PATCH', 'PUT', 'DELETE'].includes(method)) throw new Error('Unsupported API method');
+  if (peerTarget !== null && path !== '/api/peers' && !path.startsWith('/api/peers?') && !path.startsWith('/api/peers/')) {
+    // The caller's own session id means nothing on another bridge (and a peer refuses it): it is not forwarded.
+    const forward: Record<string, unknown> = { bridge: peerTarget, method, path, timeoutMs: PEER_REQUEST_TIMEOUT_MS };
+    if (body !== undefined) forward.body = body;
+    return apiResponse(pointer, 'POST', '/api/peers/http', forward, undefined, signal, fetchFn);
+  }
   const requestId = randomUUID();
   const data: { [key: string]: ApplicationJson } = { timeoutMs: 60000 };
   if (body !== undefined) data.body = applicationJson(body);

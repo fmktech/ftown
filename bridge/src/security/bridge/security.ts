@@ -10,7 +10,7 @@ import { classifyCommand, classifyHttp, classifyTerminal, type OperationPermissi
 import { endpointSchema } from './metadata.js';
 import { accountIdOf, ledgerHead, ledgerHeads, parseLedger, relateHead } from '../ledger/ledger.js';
 import type { LedgerHeadRelation, LedgerRelation } from '../ledger/ledger.js';
-import type { Ledger, LedgerCheckpoint } from '../ledger/protocol.js';
+import type { Ledger, LedgerBridge, LedgerCheckpoint } from '../ledger/protocol.js';
 import { verifyHeadAnnouncement, type HeadAnnouncement } from '../ledger/announce.js';
 import { ledgerRemovesBridge, shortHead } from './ledger-store.js';
 import type { BridgeLedgerState, BridgeLedgerStore, LedgerDivergence, LedgerSource, LedgerTip, OwnBridgeKeys } from './ledger-store.js';
@@ -285,6 +285,35 @@ export class BridgeSecurityService implements Omit<BridgeSecurity, 'adoptAccount
     this.verified.delete(message);
     return receipt;
   }
+  /** Cross-bridge control: the other bridges of this account's current trusted ledger (revocations applied), never this one. Empty
+   *  outside account mode, while no trusted ledger is held, or while this bridge is not itself active in it. */
+  peerBridges(): LedgerBridge[] {
+    const trusted = this.trustedView;
+    if (this.closed || trusted === null || this.status.own !== 'active') return [];
+    return trusted.bridges.filter(peer => peer.endpoint.id !== this.endpoint.id);
+  }
+  /** Seals one request from this bridge to a peer bridge for the relay `channel`. The header names the PEER's bridgeId: that bridge
+   *  decrypts and executes it under its own policy (a peer is a read + control principal there). */
+  async sealToPeer(peer: LedgerBridge, purpose: 'hello' | 'application', body: unknown, channel: string, messageId: string,
+    receiverEpoch: string | null): Promise<SecureEnvelope> {
+    if (this.closed || !this.peerBridges().some(item => item.bridgeId === peer.bridgeId && item.endpoint.id === peer.endpoint.id)) {
+      throw new BridgeSecurityError('permission_denied');
+    }
+    const now = this.now();
+    return seal(this.identity, peer.endpoint, { type: 'ftown_encrypted', version: 1, senderId: this.endpoint.id, recipientId: peer.endpoint.id,
+      ownerId: this.endpoint.ownerId, bridgeId: peer.bridgeId, channel, purpose, messageId, createdAt: now, expiresAt: now + 120000,
+      receiverEpoch }, new TextEncoder().encode(JSON.stringify(body)));
+  }
+  /** Opens a peer bridge's answer to a request sealed by sealToPeer (same channel; `welcome` answers a hello). */
+  async openFromPeer(peer: LedgerBridge, packet: SecureEnvelope, purpose: 'welcome' | 'application', channel: string): Promise<unknown> {
+    const envelope = parseSecureEnvelope(packet);
+    const bytes = await open(this.identity, peer.endpoint, envelope, { ownerId: this.endpoint.ownerId, bridgeId: peer.bridgeId, channel,
+      recipientId: this.endpoint.id, purpose });
+    const now = this.now();
+    if (envelope.expiresAt <= now || envelope.createdAt > now + 30000) throw new BridgeSecurityError('expired');
+    try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); }
+    catch { throw new BridgeSecurityError('invalid_envelope'); }
+  }
   async sealTo(recipientId: string, application: SecureApplication, route: InboundTransportContext): Promise<SecureEnvelope> {
     const principal = await this.policy.principal(recipientId);
     const envelope = await this.reply(principal.endpoint, 'application', application, route,
@@ -301,7 +330,8 @@ export class BridgeSecurityService implements Omit<BridgeSecurity, 'adoptAccount
    * the packet of a recipient that stopped being one.
    */
   async sealPublication(channel: string, application: SecureApplication): Promise<(SecureEnvelope | SecurePublication)[]> {
-    const readers = (await this.policy.readers()).filter(reader => reader.endpoint.kind !== 'local-cli');
+    // Peer bridges read by request (cross-bridge control), never by fan-out: sealing every publication to them would only add relay load.
+    const readers = (await this.policy.readers()).filter(reader => reader.endpoint.kind === 'browser');
     const route: InboundTransportContext = { transport: 'cloud', channel, bridgeId: this.bridgeId, pairId: null };
     const plaintext = new TextEncoder().encode(JSON.stringify(application));
     const packets: SecureEnvelope[] = [];

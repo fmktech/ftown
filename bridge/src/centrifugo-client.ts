@@ -125,6 +125,10 @@ export class CentrifugoClient {
   private readonly terminalInbound = new Map<string, Promise<void>>();
   private secureCommandSubscription: Subscription | null = null;
   private secureCommandReady = false;
+  /** Channel of the current secure commands subscription (the account's commands:rpc), or null before subscribeSecureCommands. */
+  private secureCommandChannel: string | null = null;
+  /** Cross-bridge control: our outstanding requests to peer bridges, by request message id, with the peer endpoint expected to answer. */
+  private readonly peerPending = new Map<string, { senderId: string; resolve: (packet: SecureEnvelope) => void }>();
 
   setSecurity(security: BridgeSecurityService): void { this.security = security; }
   private readonly disabled: boolean;
@@ -366,6 +370,7 @@ export class CentrifugoClient {
     if (existing) { existing.unsubscribe(); this.client.removeSubscription(existing); }
     const sub = this.client.newSubscription(channel);
     this.secureCommandSubscription = sub;
+    this.secureCommandChannel = channel;
     sub.on('subscribed', () => { if (this.secureCommandSubscription === sub && this.client.state === 'connected') this.secureCommandReady = true; });
     sub.on('unsubscribed', () => { if (this.secureCommandSubscription === sub) this.secureCommandReady = false; });
     sub.on('publication', (ctx: PublicationContext) => {
@@ -374,6 +379,14 @@ export class CentrifugoClient {
       if (!packet || !['ftown_encrypted', 'ftown_enrollment'].includes(packet.type)) return;
       const envelope = packet.type === 'ftown_encrypted' ? packet : (ctx.data as { envelope?: SecureEnvelope }).envelope;
       if (envelope?.recipientId !== this.security.endpoint.id) return;
+      // A peer bridge answering one of our cross-bridge requests: hand it to the waiting request, never execute it.
+      if (packet.type === 'ftown_encrypted') {
+        const pending = this.peerPending.get(packet.messageId);
+        if (pending) {
+          if (pending.senderId === packet.senderId) { this.peerPending.delete(packet.messageId); pending.resolve(packet); }
+          return;
+        }
+      }
       const security = this.security;
       const scoped = scopedUpdateObserver(observer);
       void (async () => {
@@ -389,6 +402,35 @@ export class CentrifugoClient {
       })().catch((error: unknown) => { console.warn(`${COMMAND_REJECTED_WARNING}: ${describeError(error)}`); });
     });
     sub.subscribe(); this.subscriptions.set(channel, sub);
+  }
+
+  /** The relay channel cross-bridge requests travel on (the account's commands:rpc), or null while relay commands are unavailable. */
+  peerChannel(): string | null {
+    return this.disabled ? null : this.secureCommandChannel;
+  }
+
+  /**
+   * Cross-bridge control: publishes one sealed request to a peer bridge on the account's commands:rpc channel and resolves with the
+   * peer's sealed answer (same message id, sent by `peerEndpointId`). Rejects on timeout or when relay commands are unavailable.
+   */
+  async peerExchange(packet: SecureEnvelope, peerEndpointId: string, timeoutMs: number): Promise<SecureEnvelope> {
+    const channel = this.peerChannel();
+    if (!channel || packet.channel !== channel) throw new BridgeSecurityError('bridge_offline');
+    await this.waitUntilSecureCommandsReady(Math.min(timeoutMs, 10000)).catch(() => { throw new BridgeSecurityError('bridge_offline'); });
+    if (this.peerPending.has(packet.messageId) || this.peerPending.size >= 256) throw new BridgeSecurityError('capacity_exceeded');
+    return new Promise<SecureEnvelope>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (this.peerPending.get(packet.messageId)?.resolve === settle) this.peerPending.delete(packet.messageId);
+        reject(new BridgeSecurityError('bridge_offline'));
+      }, timeoutMs);
+      const settle = (answer: SecureEnvelope) => { clearTimeout(timer); resolve(answer); };
+      this.peerPending.set(packet.messageId, { senderId: peerEndpointId, resolve: settle });
+      this.client.publish(channel, packet).catch((error: unknown) => {
+        clearTimeout(timer);
+        if (this.peerPending.get(packet.messageId)?.resolve === settle) this.peerPending.delete(packet.messageId);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      });
+    });
   }
 
   /** Wait for the current secure commands subscription on the current connection. */

@@ -68,6 +68,7 @@ import { createPlanRoutes } from './coordination/routes-plan.js';
 import { createWorktreeRoutes } from './coordination/routes-worktrees.js';
 import { createCoordination, rootOf, type Coordination } from './coordination/wiring.js';
 import { GitWorktrees } from './worktrees.js';
+import { PeerTargetError, type PeerControl } from './peer-control.js';
 
 export interface HookPayload {
   ftown_session_id: string;
@@ -231,6 +232,38 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   private localEventBytes = 0;
   private readonly localEventWaiters = new Set<() => void>();
 
+  private peerControl: PeerControl | null = null;
+  /** Cross-bridge control: forwards the local CLI's requests to other bridges of this account. */
+  setPeerControl(peers: PeerControl): void { this.peerControl = peers; }
+  /** GET /api/peers and POST /api/peers/http, for the OS-local CLI only (a browser or a peer bridge never relays through this bridge). */
+  private async dispatchPeers(message: VerifiedApplication, method: string, path: string): Promise<ApplicationJson> {
+    if (message.principal.endpoint.kind !== 'local-cli') return { status: 403, body: { error: 'permission_denied', code: 'permission_denied' } };
+    if (!this.peerControl || !this.security) return { status: 503, body: { error: 'Cross-bridge control is starting', code: 'peers_starting' } };
+    await this.security.revalidate(message.principal);
+    const url = new URL(path, 'http://localhost');
+    try {
+      if (url.pathname === '/api/peers' && method === 'GET') {
+        const peers = await this.peerControl.list(url.searchParams.get('probe') === '1');
+        return applicationJson({ bridgeId: this.security.bridgeId, peers });
+      }
+      if (url.pathname === '/api/peers/http' && method === 'POST') {
+        const input = (message.application.data as { body?: ApplicationJson } | null)?.body;
+        const request = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+        const timeoutMs = request.timeoutMs === undefined ? undefined : request.timeoutMs;
+        if (typeof request.bridge !== 'string' || typeof request.method !== 'string' || typeof request.path !== 'string'
+          || (timeoutMs !== undefined && typeof timeoutMs !== 'number')) {
+          return { status: 400, body: { error: 'Expected { bridge, method, path, body?, timeoutMs? }' } };
+        }
+        return await this.peerControl.http(request.bridge, request.method, request.path, request.body, timeoutMs as number | undefined);
+      }
+    } catch (error) {
+      if (error instanceof PeerTargetError) return { status: error.status, body: { error: error.message } };
+      console.warn('[Peers] Cross-bridge request failed:', error instanceof Error ? error.message : String(error));
+      return { status: 502, body: { error: 'Cross-bridge request failed', code: 'peer_failed', outcomeUnknown: method !== 'GET' } };
+    }
+    return { status: 404, body: { error: 'Not found' } };
+  }
+
   setSecurity(security: BridgeSecurityService, info: BridgeSecurityInfo,
     command: (message: VerifiedApplication) => Promise<ApplicationJson>, observer?: SecureExecutionObserver): void {
     this.security = security; this.securityInfo = info; this.secureCommand = command;
@@ -262,6 +295,8 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       return this.secureCommand(message);
     }
     if (route.kind !== 'http') throw new Error('Invalid application route');
+    const routePath = route.path.split('?')[0];
+    if (routePath === '/api/peers' || routePath.startsWith('/api/peers/')) return this.dispatchPeers(message, route.method, route.path);
     if ((route.method === 'PUT' || route.method === 'DELETE') && /^\/api\/sessions\/[A-Za-z0-9_-]{1,200}\/preview$/.test(route.path.split('?')[0])
       && message.principal.endpoint.kind !== 'local-cli') return { status: 403, body: { error: 'permission_denied', code: 'permission_denied' } };
     if (route.method === 'GET' && route.path.startsWith('/api/browser/events')) {

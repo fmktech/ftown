@@ -15,7 +15,7 @@ import { formatAttentionAnswerText } from './attention-prompt.js';
 import { ATTENTION_ITEM_WAIT_MAX_SECONDS, type AttentionAnswer, type AttentionPrompt } from './attention-prompt-protocol.js';
 import { PREVIEW_CHAT_TEXT_BYTES } from './preview-chat-protocol.js';
 import { validateChatInput } from './preview-chat.js';
-import { api as request, loadPointer, listSessions, readInboxForCli, sendMail } from './cli-client.js';
+import { api as request, currentPeerTarget, loadPointer, listSessions, readInboxForCli, sendMail } from './cli-client.js';
 import {
   MAIL_TYPES,
   AUTOMATION_REMOVED_MESSAGE,
@@ -560,6 +560,9 @@ async function executeSessionCommand(cmd: SessionCommand, rest: string[], option
         const useParent = !!options.parent;
         const planItem = options.planItem;
 
+        if ((parentId || useParent) && currentPeerTarget() !== null) {
+          throw new Error('--parent/--parent-id cannot link sessions across bridges; create the child without a parent');
+        }
         if (planItem !== undefined && !/^p\d{1,6}$/.test(planItem)) {
           throw new Error('--plan-item must be a plan item id like p1, p12');
         }
