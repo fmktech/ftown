@@ -8,13 +8,15 @@ import { clearsManualInputNotice, isAskUserQuestionTool, parseLenientPrompt, hoo
 import type { AnswerSessionAttentionPayload, AttentionAnswerDelivery, AttentionAnswerEntry, AttentionPrompt } from "../../../bridge/src/attention-prompt-protocol";
 import { TokenUsage } from "./useSessionEvents";
 import type { BridgeRpc } from "./useBridgeRpc";
-import type { PersistedSessionAttention, SessionAttentionResponse } from "@/types";
+import type { CommandResponse, PersistedSessionAttention, SessionAttentionResponse } from "@/types";
 import { v4 as uuidv4 } from "uuid";
+import { ATTENTION_SUMMARY_TOO_LARGE } from "../../../bridge/src/attention-summary-protocol";
 
 const ANSWER_DELIVERIES: ReadonlySet<string> = new Set<AttentionAnswerDelivery>(["waiter", "mail", "mail_failed"]);
 
 /** Global cap on concurrent get_session_attention reads. */
 const READ_LIMIT = 4;
+const SUMMARY_BATCH_SIZE = 500;
 
 /** Re-parse a persisted prompt; the channel must match the item type (request: mail, question: hook). */
 function persistedPrompt(value: unknown, type: string): AttentionPrompt | undefined {
@@ -121,6 +123,21 @@ interface HookEventMessage {
   };
 }
 
+interface AttentionSubscription {
+  client: MessageClient; user: string; bridgeId: string; sub: MessageSubscription;
+  initialHydration: boolean; queued: boolean; inFlight: boolean; dirty: boolean;
+  dirtyResolving: boolean; pendingResolving: boolean;
+}
+interface LegacyAttentionProbe {
+  sessionId: string; owner: AttentionSubscription; observation: number; read: number; snapshot: SessionAttentionResponse;
+}
+interface AttentionSummaryBatch {
+  batch: Session[]; response: CommandResponse; legacyEligible: boolean;
+}
+interface AttentionReadiness {
+  client: MessageClient | null; user: string; promise: Promise<boolean>; resolve: (ready: boolean) => void;
+}
+
 export interface AllSessionEvents {
   sessionActivity: Map<string, SessionActivity>;
   /** Optimistically clear a session's activity (e.g. on a local ESC interrupt). */
@@ -160,7 +177,7 @@ export function useAllSessionEvents(
   rpc?: Pick<BridgeRpc, "sendCommand" | "onSubscribed">,
 ): AllSessionEvents {
   const [activityMap, setActivityMap] = useState<Map<string, SessionActivity>>(new Map());
-  const subsRef = useRef<Map<string, { client: MessageClient; user: string; sub: MessageSubscription; queued: boolean; inFlight: boolean; dirty: boolean; dirtyResolving: boolean; pendingResolving: boolean }>>(new Map());
+  const subsRef = useRef(new Map<string, AttentionSubscription>());
   const clientRef = useRef(client);
   const userIdRef = useRef(userId);
   const rpcRef = useRef(rpc);
@@ -187,6 +204,49 @@ export function useAllSessionEvents(
   const stampedDebounce = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const readsInFlight = useRef(0);
   const readWaiters = useRef<Array<() => void>>([]);
+  const summaryStarted = useRef(new Set<string>());
+  const summaryAttempts = useRef(new Map<string, Promise<boolean>>());
+  const attentionHydration = useRef(new Map<string, Promise<void>>());
+  const unsupportedSummaryBridges = useRef(new Set<string>());
+  const summaryRetried = useRef(new Set<string>());
+  const summaryRetries = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const legacySummaryProbes = useRef(new Map<string, Promise<LegacyAttentionProbe | null>>());
+  const legacySnapshots = useRef(new Map<string, LegacyAttentionProbe>());
+  const subscriptionReadiness = useRef(new Map<string, AttentionReadiness>());
+  function ownedBridgeSessions(bridgeId: string, ownerClient: MessageClient | null, ownerUser: string): Session[] {
+    return [...new Map(sessionsRef.current.filter(row => {
+      const owner = subsRef.current.get(row.id);
+      return row.bridgeId === bridgeId && row.status === "running" && owner?.bridgeId === bridgeId
+        && owner.client === ownerClient && owner.user === ownerUser;
+    }).map(row => [row.id, row])).values()];
+  }
+  function subscriptionsReady(bridgeId: string, ownerClient: MessageClient | null, ownerUser: string): boolean {
+    const rows = ownedBridgeSessions(bridgeId, ownerClient, ownerUser);
+    return rows.length > 0 && rows.every(row => {
+      const owner = subsRef.current.get(row.id)!;
+      return owner.initialHydration && !owner.queued && owner.sub.state === "subscribed";
+    });
+  }
+  function waitForSubscriptions(bridgeId: string, ownerClient: MessageClient | null, ownerUser: string): Promise<boolean> | null {
+    if (subscriptionsReady(bridgeId, ownerClient, ownerUser)) return null;
+    const existing = subscriptionReadiness.current.get(bridgeId);
+    if (existing?.client === ownerClient && existing.user === ownerUser) return existing.promise;
+    existing?.resolve(false);
+    let resolve!: AttentionReadiness["resolve"];
+    const promise = new Promise<boolean>(done => { resolve = done; });
+    subscriptionReadiness.current.set(bridgeId, { client: ownerClient, user: ownerUser, promise, resolve });
+    return promise;
+  }
+  function notifySubscriptions(bridgeId: string): void {
+    const waiting = subscriptionReadiness.current.get(bridgeId);
+    if (!waiting) return;
+    // A subscribed callback queues its initial read. Admit that read before
+    // capturing the shared snapshot's counters, even when raw state is ready.
+    void Promise.resolve().then(() => {
+      if (subscriptionReadiness.current.get(bridgeId) !== waiting || !subscriptionsReady(bridgeId, waiting.client, waiting.user)) return;
+      subscriptionReadiness.current.delete(bridgeId); waiting.resolve(true);
+    });
+  }
   const releaseRead = (): void => {
     const next = readWaiters.current.shift();
     if (next) next(); else readsInFlight.current -= 1;
@@ -195,6 +255,219 @@ export function useAllSessionEvents(
     if (readsInFlight.current < READ_LIMIT) { readsInFlight.current += 1; return Promise.resolve(releaseRead); }
     return new Promise(resolve => readWaiters.current.push(() => resolve(releaseRead)));
   };
+  const hydrateBridge = useCallback((bridgeId: string, resolving = false): Promise<void> => {
+    let sessionsForBridge = ownedBridgeSessions(bridgeId, clientRef.current, userIdRef.current);
+    if (!sessionsForBridge.length || !rpcRef.current || unsupportedSummaryBridges.current.has(bridgeId)) return Promise.resolve();
+    const existing = attentionHydration.current.get(bridgeId);
+    if (existing) return existing;
+    const send = rpcRef.current.sendCommand;
+    const user = userIdRef.current;
+    const activeClient = clientRef.current;
+    const retrySummaryOnce = () => {
+      if (summaryRetried.current.has(bridgeId) || !sessionsForBridge.some(session => {
+        const attention = activityRef.current.get(session.id)?.attention;
+        return attention?.type === "ask_user" && isDurableNotice(attention);
+      })) return;
+      summaryRetried.current.add(bridgeId);
+      summaryRetries.current.set(bridgeId, setTimeout(() => {
+        summaryRetries.current.delete(bridgeId);
+        if (clientRef.current === activeClient && userIdRef.current === user && rpcRef.current?.sendCommand === send) {
+          void hydrateBridge(bridgeId, true).catch(() => {});
+        }
+      }, 2000));
+    };
+    let readBySession = new Map<string, { read: number; observation: number }>();
+    const isCurrent = (): boolean => userIdRef.current === user && clientRef.current === activeClient && rpcRef.current?.sendCommand === send
+      && attentionHydration.current.get(bridgeId) === request;
+    async function readBatch(batch: Session[], adaptive = false): Promise<AttentionSummaryBatch | null> {
+      // Initial calls start before `request` is assigned; every child runs after
+      // an await and must still belong to this exact hydration cycle.
+      if (adaptive && !isCurrent()) return null;
+      const response = await send({ type: "get_attention_summary", requestId: uuidv4(), payload: { bridgeId, sessionIds: batch.map(session => session.id) } });
+      if (!isCurrent()) return null;
+      if (!response.success && (response.data as { code?: unknown } | undefined)?.code === ATTENTION_SUMMARY_TOO_LARGE) {
+        if (batch.length === 1) return { batch, response, legacyEligible: false };
+        const middle = Math.ceil(batch.length / 2);
+        const left = await readBatch(batch.slice(0, middle), true);
+        if (!left || !left.response.success) return left ? { ...left, legacyEligible: false } : null;
+        const right = await readBatch(batch.slice(middle), true);
+        if (!right || !right.response.success) return right ? { ...right, legacyEligible: false } : null;
+        const leftSummary = (left.response.data as { summary: Record<string, unknown> }).summary;
+        const rightSummary = (right.response.data as { summary: Record<string, unknown> }).summary;
+        return { batch, legacyEligible: false, response: { requestId: "split-summary", success: true,
+          data: { summary: { ...leftSummary, ...rightSummary } } } };
+      }
+      if (response.success) {
+        const data = response.data as { bridgeId?: unknown; summary?: unknown } | undefined;
+        if (!data || (data.bridgeId !== undefined && data.bridgeId !== bridgeId) || !data.summary
+          || typeof data.summary !== "object" || Array.isArray(data.summary)) return null;
+        const requested = new Set(batch.map(session => session.id));
+        for (const [id, value] of Object.entries(data.summary)) {
+          if (!requested.has(id) || !value || typeof value !== "object" || Array.isArray(value)) return null;
+          const row = value as Record<string, unknown>;
+          if (!snapshotResponse({ sessionId: id, attention: row.attention, sequence: row.sequence }, id)) return null;
+        }
+      }
+      return { batch, response, legacyEligible: !adaptive };
+    }
+    const startBatches = (): Promise<Array<AttentionSummaryBatch | null>> => {
+      sessionsForBridge = ownedBridgeSessions(bridgeId, activeClient, user);
+      readBySession = new Map(sessionsForBridge.map(session => [session.id, {
+        read: reads.current.get(session.id) ?? 0, observation: observations.current.get(session.id) ?? 0,
+      }]));
+      const batches: Session[][] = [];
+      for (let offset = 0; offset < sessionsForBridge.length; offset += SUMMARY_BATCH_SIZE) batches.push(sessionsForBridge.slice(offset, offset + SUMMARY_BATCH_SIZE));
+      return Promise.all(batches.map(batch => readBatch(batch)));
+    };
+    const readiness = waitForSubscriptions(bridgeId, activeClient, user);
+    const request: Promise<void> = (readiness ? readiness.then(ready => ready && isCurrent() ? startBatches() : null) : startBatches()).then(async pending => {
+      if (userIdRef.current !== user || clientRef.current !== activeClient || rpcRef.current?.sendCommand !== send
+        || attentionHydration.current.get(bridgeId) !== request) return;
+      if (!pending) return;
+      if (pending.some(result => result === null)) return;
+      const results = pending.filter((result): result is AttentionSummaryBatch => result !== null);
+      const failed = results.find(result => !result.response.success);
+      let response: CommandResponse;
+      if (failed) {
+        // A successful batch proves summary support. A failed sibling must not
+        // be reinterpreted as permission for legacy fanout or partial state.
+        if (results.some(result => result.response.success || !result.legacyEligible)) return;
+        const compatibility = (result: CommandResponse): "denied" | "unsupported" | null => {
+          const code = (result.data as { code?: unknown } | undefined)?.code;
+          if (code === "permission_denied") return "denied";
+          return code === "unknown_command" || code === "unsupported_command" || result.error === "Unknown command type: get_attention_summary" ? "unsupported" : null;
+        };
+        const kind = compatibility(failed.response);
+        if (kind && results.some(result => compatibility(result.response) !== kind)) return;
+        response = failed.response;
+      } else {
+        const summary: Record<string, unknown> = Object.create(null);
+        for (const { batch, response: result } of results) {
+          const data = result.data as { bridgeId?: unknown; summary?: unknown } | undefined;
+          if (!data || data.bridgeId !== undefined && data.bridgeId !== bridgeId || !data.summary
+            || typeof data.summary !== "object" || Array.isArray(data.summary)) return;
+          const requested = new Set(batch.map(session => session.id));
+          for (const [id, value] of Object.entries(data.summary)) {
+            if (!requested.has(id)) return;
+            summary[id] = value;
+          }
+        }
+        response = { requestId: "summary-batches", success: true, data: { summary } };
+      }
+      const summary = (response.data as { summary?: unknown } | undefined)?.summary;
+      if (!response.success || !summary || typeof summary !== "object" || Array.isArray(summary)) {
+        const code = (response.data as { code?: unknown } | undefined)?.code;
+        // Older encrypted bridges reject unknown commands at their permission
+        // allowlist. Verify one known read before enabling legacy hydration.
+        if (!response.success && code === "permission_denied") {
+          let probe = legacySummaryProbes.current.get(bridgeId);
+          if (!probe) {
+            const session = sessionsForBridge.find(row => {
+              const owner = subsRef.current.get(row.id);
+              return owner?.client === activeClient && owner.user === user && owner.bridgeId === bridgeId;
+            });
+            const owner = session ? subsRef.current.get(session.id) : undefined;
+            if (!session || !owner) return;
+            const observation = observations.current.get(session.id) ?? 0;
+            const read = reads.current.get(session.id) ?? 0;
+            probe = Promise.resolve().then(async (): Promise<LegacyAttentionProbe | null> => {
+              const release = await acquireRead();
+              try {
+                if (userIdRef.current !== user || clientRef.current !== activeClient || rpcRef.current?.sendCommand !== send
+                  || subsRef.current.get(session.id) !== owner) return null;
+                const result = await send({ type: "get_session_attention", requestId: uuidv4(), payload: { bridgeId, sessionId: session.id } });
+                const data = result.data as { bridgeId?: unknown } | undefined;
+                const snapshot = result.success && (data?.bridgeId === undefined || data.bridgeId === bridgeId)
+                  ? snapshotResponse(result.data, session.id) : null;
+                return snapshot ? { sessionId: session.id, owner, observation, read, snapshot } : null;
+              } catch { return null; } finally { release(); }
+            });
+            legacySummaryProbes.current.set(bridgeId, probe);
+          }
+          const result = await probe;
+          if (!result || userIdRef.current !== user || clientRef.current !== activeClient || rpcRef.current?.sendCommand !== send
+            || attentionHydration.current.get(bridgeId) !== request || subsRef.current.get(result.sessionId) !== result.owner) return;
+          unsupportedSummaryBridges.current.add(bridgeId);
+          if ((observations.current.get(result.sessionId) ?? 0) === result.observation && reads.current.get(result.sessionId) === result.read) {
+            legacySnapshots.current.set(result.sessionId, result);
+          }
+          for (const session of sessionsForBridge) void hydrate(session.id, resolving);
+          return;
+        }
+        // Unavailable or malformed responses never authorize a fanout.
+        if (!response.success && (response.error === "Unknown command type: get_attention_summary"
+          || code === "unknown_command" || code === "unsupported_command")) {
+          unsupportedSummaryBridges.current.add(bridgeId);
+          for (const session of sessionsForBridge) void hydrate(session.id, resolving);
+        } else if (!response.success) retrySummaryOnce();
+        return;
+      }
+      const responseBridge = (response.data as { bridgeId?: unknown }).bridgeId;
+      if (responseBridge !== undefined && responseBridge !== bridgeId) return;
+      const requested = new Set(sessionsForBridge.map(session => session.id));
+      const parsed = new Map<string, SessionAttentionResponse>();
+      for (const [sessionId, value] of Object.entries(summary)) {
+        if (!requested.has(sessionId) || !value || typeof value !== "object" || Array.isArray(value)) return;
+        const raw = value as Record<string, unknown>;
+        const snapshot = snapshotResponse({ sessionId, attention: raw.attention, sequence: raw.sequence }, sessionId);
+        if (!snapshot) return;
+        parsed.set(sessionId, snapshot);
+      }
+      summaryRetried.current.delete(bridgeId);
+      for (const session of sessionsForBridge) {
+        const owner = subsRef.current.get(session.id);
+        const stamps = readBySession.get(session.id);
+        if (!Object.prototype.hasOwnProperty.call(summary, session.id)) {
+          if (owner && owner.client === activeClient && owner.user === user && stamps
+            && reads.current.get(session.id) === stamps.read && (observations.current.get(session.id) ?? 0) === stamps.observation) {
+            const knownSequence = Math.max(canonical.current.get(session.id)?.sequence ?? 0,
+              activityRef.current.get(session.id)?.attention?.attentionSequence ?? 0);
+            canonical.current.set(session.id, { sequence: knownSequence, activeId: null });
+            setActivityMap(prev => {
+              if (userIdRef.current !== user || clientRef.current !== activeClient || subsRef.current.get(session.id) !== owner || reads.current.get(session.id) !== stamps.read
+                || (observations.current.get(session.id) ?? 0) !== stamps.observation) return prev;
+              const current = prev.get(session.id) ?? { activity: "idle" as const };
+              if (current.attention && !isDurableNotice(current.attention)) return prev;
+              return new Map(prev).set(session.id, { ...current, attention: undefined });
+            });
+          }
+          continue;
+        }
+        const snapshot = parsed.get(session.id);
+        if (!owner || owner.client !== activeClient || owner.user !== user || !stamps || !snapshot
+          || reads.current.get(session.id) !== stamps.read || (observations.current.get(session.id) ?? 0) !== stamps.observation
+          || !sessionsRef.current.some(row => row.id === session.id && row.bridgeId === bridgeId && row.status === "running")) continue;
+        const known = canonical.current.get(session.id);
+        if ((known?.sequence ?? 0) > snapshot.sequence
+          || (activityRef.current.get(session.id)?.attention?.attentionSequence ?? 0) > snapshot.sequence) continue;
+        const incoming = snapshot.attention && snapshot.attention.sequence > (dismissedThrough.current.get(session.id) ?? 0)
+          ? restoredNotice(snapshot.attention) : undefined;
+        canonical.current.set(session.id, { sequence: snapshot.sequence, activeId: snapshot.attention?.id ?? null });
+        setActivityMap(prev => {
+          if (userIdRef.current !== user || clientRef.current !== activeClient || subsRef.current.get(session.id) !== owner
+            || reads.current.get(session.id) !== stamps.read || (observations.current.get(session.id) ?? 0) !== stamps.observation) return prev;
+          const current = prev.get(session.id) ?? { activity: "idle" as const };
+          if (current.attention && !isDurableNotice(current.attention)) return prev;
+          if ((current.attention?.attentionSequence ?? 0) > snapshot.sequence) return prev;
+          let attention = incoming;
+          let kept = false;
+          if (!resolving && incoming?.attentionId && current.attention && isDurableNotice(current.attention)
+            && incoming.attentionId !== current.attention.attentionId && !isWithParentNotice(current.attention) && isWithParentNotice(incoming)) {
+            attention = current.attention; kept = true;
+            const yielded = yieldedItems.current.get(session.id) ?? new Set<string>();
+            yielded.add(incoming.attentionId); yieldedItems.current.set(session.id, yielded);
+          }
+          pruneYielded(session.id, snapshot.attention, kept ? undefined : incoming?.attentionId);
+          return new Map(prev).set(session.id, { ...current, attention });
+        });
+      }
+    }).catch(() => {
+      if (userIdRef.current === user && clientRef.current === activeClient && rpcRef.current?.sendCommand === send
+        && attentionHydration.current.get(bridgeId) === request) retrySummaryOnce();
+    }).finally(() => { if (attentionHydration.current.get(bridgeId) === request) attentionHydration.current.delete(bridgeId); });
+    attentionHydration.current.set(bridgeId, request);
+    return request;
+  }, []);
   clientRef.current = client;
   userIdRef.current = userId;
   rpcRef.current = rpc;
@@ -218,10 +491,31 @@ export function useAllSessionEvents(
       retries.current.set(sessionId, setTimeout(() => { retries.current.delete(sessionId); hydrate(sessionId, true); }, 2000));
     };
     try {
+      const summaryKey = `${session.bridgeId}:${owner.user}`;
+      if (!unsupportedSummaryBridges.current.has(session.bridgeId) && !summaryStarted.current.has(summaryKey)) {
+        summaryStarted.current.add(summaryKey);
+        const attempt = Promise.resolve().then(async () => {
+          await hydrateBridge(session.bridgeId, resolving);
+          return true;
+        });
+        summaryAttempts.current.set(summaryKey, attempt);
+        void attempt.finally(() => { if (summaryAttempts.current.get(summaryKey) === attempt) summaryAttempts.current.delete(summaryKey); }).catch(() => {});
+        if (await attempt) return;
+      } else if (!unsupportedSummaryBridges.current.has(session.bridgeId)) {
+        const attempt = summaryAttempts.current.get(summaryKey);
+        if (attempt && await attempt) return;
+        const inFlight = attentionHydration.current.get(session.bridgeId);
+        if (inFlight) { await inFlight; return; }
+      }
       const release = await acquireRead();
       try {
-        const response = await rpcRef.current.sendCommand({ type: "get_session_attention", requestId: uuidv4(),
-          payload: { bridgeId: session.bridgeId, sessionId } });
+        if (userIdRef.current !== user || clientRef.current !== owner.client || subsRef.current.get(sessionId) !== owner
+          || reads.current.get(sessionId) !== read || !rpcRef.current) return;
+        const seeded = legacySnapshots.current.get(sessionId);
+        legacySnapshots.current.delete(sessionId);
+        const response: CommandResponse = seeded?.owner === owner && seeded.observation === observation
+          ? { requestId: "legacy-probe", success: true, data: seeded.snapshot }
+          : await rpcRef.current.sendCommand({ type: "get_session_attention", requestId: uuidv4(), payload: { bridgeId: session.bridgeId, sessionId } });
         if (!response.success) { attentionDebug("read failed", sessionId, read, response.error ?? null); retryOnce(); return; }
         retried.current.delete(sessionId);
         if (userIdRef.current !== user || clientRef.current !== owner.client
@@ -263,7 +557,7 @@ export function useAllSessionEvents(
         });
       } finally { release(); }
     } catch (error) { attentionDebug("read threw", sessionId, error instanceof Error ? error.message : String(error)); retryOnce(); /* Older/offline bridges retain the existing live-only dashboard. */ }
-  }, []);
+  }, [hydrateBridge]);
 
   const hydrate: (sessionId: string, resolving?: boolean) => void = useCallback((sessionId: string, resolving = false) => {
     const pendingStamp = stampedDebounce.current.get(sessionId);
@@ -289,6 +583,7 @@ export function useAllSessionEvents(
       owner.inFlight = true;
       const read = owner.pendingResolving;
       owner.pendingResolving = false;
+      notifySubscriptions(owner.bridgeId);
       void readSnapshot(sessionId, read).finally(() => {
         if (subsRef.current.get(sessionId) !== owner || owner.client !== clientRef.current || owner.user !== userIdRef.current) return;
         owner.inFlight = false;
@@ -305,7 +600,8 @@ export function useAllSessionEvents(
   const subscribe = useCallback((sessionId: string) => {
     const c = clientRef.current;
     const u = userIdRef.current;
-    if (!c || !u) return;
+    const bridgeId = sessionsRef.current.find(row => row.id === sessionId)?.bridgeId;
+    if (!c || !u || !bridgeId) return;
     if (subsRef.current.has(sessionId)) return;
 
     let channel: string;
@@ -432,12 +728,16 @@ export function useAllSessionEvents(
     });
 
     sub.on("publication", onPublication);
-    sub.on("subscribed", () => {
-      if (clientRef.current === c && userIdRef.current === u && subsRef.current.get(sessionId)?.sub === sub) void hydrate(sessionId);
-    });
-    subsRef.current.set(sessionId, { client: c, user: u, sub, queued: false, inFlight: false, dirty: false, dirtyResolving: false, pendingResolving: false });
+    const hydrateInitially = () => {
+      const owner = subsRef.current.get(sessionId);
+      if (clientRef.current !== c || userIdRef.current !== u || owner?.sub !== sub) return;
+      if (!owner.initialHydration) { owner.initialHydration = true; void hydrate(sessionId); }
+      notifySubscriptions(owner.bridgeId);
+    };
+    sub.on("subscribed", hydrateInitially);
+    subsRef.current.set(sessionId, { client: c, user: u, bridgeId, sub, initialHydration: false, queued: false, inFlight: false, dirty: false, dirtyResolving: false, pendingResolving: false });
     sub.subscribe();
-    if (sub.state === "subscribed") void hydrate(sessionId);
+    if (sub.state === "subscribed") hydrateInitially();
   }, [hydrate]);
 
   const unsubscribe = useCallback((sessionId: string) => {
@@ -449,6 +749,20 @@ export function useAllSessionEvents(
       owner.removeSubscription(sub);
     }
     subsRef.current.delete(sessionId);
+    legacySnapshots.current.delete(sessionId);
+    if (owned && ![...subsRef.current.values()].some(owner => owner.bridgeId === owned.bridgeId)) {
+      const summaryKey = `${owned.bridgeId}:${owned.user}`;
+      summaryStarted.current.delete(summaryKey); summaryAttempts.current.delete(summaryKey);
+      attentionHydration.current.delete(owned.bridgeId);
+      legacySummaryProbes.current.delete(owned.bridgeId);
+      const retry = summaryRetries.current.get(owned.bridgeId);
+      if (retry) clearTimeout(retry);
+      summaryRetries.current.delete(owned.bridgeId); summaryRetried.current.delete(owned.bridgeId);
+      const waiting = subscriptionReadiness.current.get(owned.bridgeId);
+      subscriptionReadiness.current.delete(owned.bridgeId); waiting?.resolve(false);
+    } else if (owned) {
+      notifySubscriptions(owned.bridgeId);
+    }
   }, []);
 
   // A subscription belongs to the Centrifuge client and user that created it.
@@ -462,14 +776,36 @@ export function useAllSessionEvents(
     for (const timer of stampedDebounce.current.values()) clearTimeout(timer);
     stampedDebounce.current.clear();
     observations.current.clear(); reads.current.clear(); dismissedThrough.current.clear(); canonical.current.clear(); yieldedItems.current.clear();
+    summaryStarted.current.clear(); summaryAttempts.current.clear(); attentionHydration.current.clear(); unsupportedSummaryBridges.current.clear();
+    for (const timer of summaryRetries.current.values()) clearTimeout(timer);
+    summaryRetries.current.clear(); summaryRetried.current.clear();
+    legacySummaryProbes.current.clear(); legacySnapshots.current.clear();
+    for (const waiting of subscriptionReadiness.current.values()) waiting.resolve(false);
+    subscriptionReadiness.current.clear();
     activityOwner.current = { client, user: userId };
     setActivityMap(new Map());
   }, [client, userId, unsubscribe]);
 
   useEffect(() => rpc?.onSubscribed(() => {
     if (clientRef.current !== client || userIdRef.current !== userId) return;
-    for (const id of subsRef.current.keys()) void hydrate(id);
-  }), [rpc?.onSubscribed, client, userId, hydrate]);
+    const bridgeIds = new Set(Array.from(subsRef.current.keys()).flatMap(id => {
+      const row = sessionsRef.current.find(session => session.id === id && session.status === "running");
+      return row ? [row.bridgeId] : [];
+    }));
+    for (const bridgeId of bridgeIds) {
+      if (unsupportedSummaryBridges.current.has(bridgeId)) {
+        for (const [id, owner] of subsRef.current) if (owner.client === client && owner.user === userId
+          && sessionsRef.current.some(row => row.id === id && row.bridgeId === bridgeId && row.status === "running")) void hydrate(id, true);
+        continue;
+      }
+      for (const id of subsRef.current.keys()) if (sessionsRef.current.some(row => row.id === id && row.bridgeId === bridgeId && row.status === "running")) {
+        reads.current.set(id, (reads.current.get(id) ?? 0) + 1);
+      }
+      attentionHydration.current.delete(bridgeId);
+      summaryStarted.current.add(`${bridgeId}:${userId}`);
+      void hydrateBridge(bridgeId, true).catch(() => {});
+    }
+  }), [rpc?.onSubscribed, client, userId, hydrate, hydrateBridge]);
 
   useEffect(() => {
     if (!client || !userId) return;
@@ -479,7 +815,7 @@ export function useAllSessionEvents(
     );
 
     for (const sessionId of subsRef.current.keys()) {
-      if (!runningIds.has(sessionId)) {
+      if (!runningIds.has(sessionId) || sessions.find(row => row.id === sessionId)?.bridgeId !== subsRef.current.get(sessionId)?.bridgeId) {
         unsubscribe(sessionId);
       }
     }

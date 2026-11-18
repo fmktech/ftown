@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MessageClient, MessageEvents, MessageSubscription } from "@/lib/message-client";
 import type { Command, CommandResponse, Session } from "@/types";
 import { useAllSessionEvents } from "./useAllSessionEvents";
+import { useBridgeRpc } from "./useBridgeRpc";
+import { ATTENTION_SUMMARY_TOO_LARGE } from "../../../bridge/src/attention-summary-protocol";
 
 const sessions: Session[] = [{ id: "agent", name: "Agent", bridgeId: "bridge", status: "running", createdAt: "2026-10-23", updatedAt: "2026-10-23" }];
 const request = { notification_type: "agent_needs_input", title: "Work complete", message: "Review the result and checks." };
@@ -143,14 +145,22 @@ function durableClient() {
   };
   return { client, publications, subscribed };
 }
-function durableSetup(handle: (command: Command) => Promise<CommandResponse> = async () => reply(saved)) {
+function durableSetup(handle: (command: Command) => Promise<CommandResponse> = async () => reply(saved), rows: Session[] = sessions) {
   const transport = durableClient();
   const reconnects = new Set<() => void>();
-  const rpc = { sendCommand: vi.fn(handle), onSubscribed: (callback: () => void) => {
+  const summaryReply = (attention: typeof saved | null, sequence = attention?.sequence ?? 1): CommandResponse => ({
+    requestId: "response", success: true, data: { summary: { agent: { attention, sequence } } },
+  });
+  const rpc = { sendCommand: vi.fn((command: Command) => command.type === "get_attention_summary"
+    ? handle(command).then(value => value.success && (value.data as Record<string, unknown>)?.summary
+      ? value : value.success && value.data && typeof value.data === "object"
+        ? summaryReply((value.data as { attention?: typeof saved | null }).attention ?? null, (value.data as { sequence?: number }).sequence)
+        : value)
+    : handle(command)), onSubscribed: (callback: () => void) => {
     reconnects.add(callback); return () => { reconnects.delete(callback); };
   } };
   const hook = renderHook(({ client, user, rows }) => useAllSessionEvents(client, rows, user, rpc), {
-    initialProps: { client: transport.client, user: "user", rows: sessions },
+    initialProps: { client: transport.client, user: "user", rows },
   });
   const publish = (eventName: string, data: Record<string, unknown> = {}) => {
     transport.publications.at(-1)!({ data: { type: "hook_event", eventName, data } });
@@ -158,19 +168,334 @@ function durableSetup(handle: (command: Command) => Promise<CommandResponse> = a
   const publishSaved = (item = saved) => publish("Notification", { notification_type: item.type, title: item.title,
     message: item.message, attentionId: item.id, attentionSequence: item.sequence, attentionCreatedAt: item.createdAt });
   return { ...hook, ...transport, rpc, publish, publishSaved,
-    current: () => hook.result.current.sessionActivity.get("agent"),
+    current: (id = "agent") => hook.result.current.sessionActivity.get(id),
     reconnect: () => { for (const callback of reconnects) callback(); } };
 }
 async function settle() { await act(async () => { await Promise.resolve(); }); }
 
 describe("durable explicit attention restoration", () => {
+  it.each([
+    { separate: false, rpcResubscribesFirst: false },
+    { separate: true, rpcResubscribesFirst: false },
+    { separate: true, rpcResubscribesFirst: true },
+  ])("restores initial and reconnect rows through real RPC: %o", async ({ separate, rpcResubscribesFirst }) => {
+    type Listener = (context: never) => void;
+    const commands: Command[] = [];
+    class Subscription implements MessageSubscription {
+      state = "unsubscribed";
+      private listeners = new Map<keyof MessageEvents, Set<Listener>>();
+      constructor(readonly channel: string) {}
+      subscribe() { this.state = this.channel.startsWith("commands:") ? "subscribed" : "subscribing"; }
+      unsubscribe() { this.state = "unsubscribed"; }
+      async publish(value: unknown) { commands.push(value as Command); }
+      async presence() { return { clients: {} }; }
+      on<E extends keyof MessageEvents>(event: E, listener: (context: MessageEvents[E]) => void) {
+        const set = this.listeners.get(event) ?? new Set<Listener>(); set.add(listener as Listener); this.listeners.set(event, set); return this;
+      }
+      off<E extends keyof MessageEvents>(event: E, listener: (context: MessageEvents[E]) => void) { this.listeners.get(event)?.delete(listener as Listener); return this; }
+      removeAllListeners() { this.listeners.clear(); }
+      emit<E extends keyof MessageEvents>(event: E, context: MessageEvents[E]) { for (const listener of this.listeners.get(event) ?? []) listener(context as never); }
+    }
+    const subscriptions = new Map<string, Subscription>();
+    const client: MessageClient = {
+      getSubscription: channel => subscriptions.get(channel) ?? null,
+      newSubscription: channel => { const sub = new Subscription(channel); subscriptions.set(channel, sub); return sub; },
+      removeSubscription: sub => { for (const [channel, owned] of subscriptions) if (owned === sub) subscriptions.delete(channel); },
+    };
+    const rows = [sessions[0], { ...sessions[0], id: "agent-two" }];
+    const hook = renderHook(() => {
+      const rpc = useBridgeRpc(client, "user");
+      return { rpc, ...useAllSessionEvents(client, rows, "user", rpc) };
+    });
+    const originalRpc = hook.result.current.rpc;
+    const first = subscriptions.get("events:agent#user")!, second = subscriptions.get("events:agent-two#user")!;
+    const commandSub = subscriptions.get("commands:rpc#user")!;
+    const respond = (command: Command, data: unknown) => commandSub.emit("publication", { info: { user: "user" }, data: {
+      type: "command_response", response: { requestId: command.requestId, success: true, data },
+    } });
+    // SecureSubscription exposes raw state before its queued domain callback.
+    first.state = "subscribed"; second.state = "subscribed";
+    if (rpcResubscribesFirst) {
+      await act(async () => commandSub.emit("subscribed", {}));
+      expect(commands).toHaveLength(0);
+    }
+    if (separate) {
+      await act(async () => first.emit("subscribed", {}));
+      expect(commands).toHaveLength(0);
+      await act(async () => second.emit("subscribed", {}));
+    } else {
+      await act(async () => { first.emit("subscribed", {}); second.emit("subscribed", {}); });
+    }
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toMatchObject({ type: "get_attention_summary", payload: { bridgeId: "bridge", sessionIds: ["agent", "agent-two"] } });
+    await act(async () => respond(commands[0], { summary: {
+        agent: { attention: saved, sequence: saved.sequence }, "agent-two": { attention: newer, sequence: newer.sequence },
+    } }));
+    expect(hook.result.current.rpc).not.toBe(originalRpc);
+    expect(hook.result.current.rpc.sendCommand).toBe(originalRpc.sendCommand);
+    expect(hook.result.current.rpc.onSubscribed).toBe(originalRpc.onSubscribed);
+    expect(hook.result.current.sessionActivity.get("agent")?.attention?.attentionId).toBe(saved.id);
+    expect(hook.result.current.sessionActivity.get("agent-two")?.attention?.attentionId).toBe(newer.id);
+
+    // The command channel can resubscribe before the event subscriptions are
+    // ready. Their later callbacks must not invalidate the shared reconnect read.
+    first.state = "subscribing"; second.state = "subscribing";
+    await act(async () => commandSub.emit("subscribed", {}));
+    expect(commands).toHaveLength(1);
+    first.state = "subscribed"; second.state = "subscribed";
+    if (separate) {
+      await act(async () => first.emit("subscribed", {}));
+      await act(async () => second.emit("subscribed", {}));
+    } else {
+      await act(async () => { first.emit("subscribed", {}); second.emit("subscribed", {}); });
+    }
+    expect(commands).toHaveLength(2);
+    const restored = { ...saved, id: "reconnected-first", sequence: 3 };
+    const restoredSecond = { ...newer, id: "reconnected-second", sequence: 3 };
+    await act(async () => respond(commands[1], { summary: {
+      agent: { attention: restored, sequence: 3 }, "agent-two": { attention: restoredSecond, sequence: 3 },
+    } }));
+    expect(hook.result.current.sessionActivity.get("agent")?.attention?.attentionId).toBe(restored.id);
+    expect(hook.result.current.sessionActivity.get("agent-two")?.attention?.attentionId).toBe(restoredSecond.id);
+
+    // A manual resolution still fences an older batch that is already in flight.
+    await act(async () => commandSub.emit("subscribed", {}));
+    const pendingSummary = commands[2];
+    let dismissal!: Promise<void>;
+    act(() => { dismissal = hook.result.current.clearSessionAttention("agent", hook.result.current.sessionActivity.get("agent")!.attention); });
+    const resolve = commands.at(-1)!;
+    expect(resolve.type).toBe("resolve_session_attention");
+    await act(async () => { respond(resolve, { sessionId: "agent", attention: null, sequence: 3 }); await dismissal; });
+    await act(async () => respond(pendingSummary, { summary: {
+      agent: { attention: restored, sequence: 3 }, "agent-two": { attention: restoredSecond, sequence: 3 },
+    } }));
+    expect(hook.result.current.sessionActivity.get("agent")?.attention).toBeUndefined();
+    expect(hook.result.current.sessionActivity.get("agent-two")?.attention?.attentionId).toBe(restoredSecond.id);
+    expect(commands.filter(command => command.type === "get_session_attention")).toHaveLength(0);
+  });
+
+  it("bisects an explicitly oversized sixty-notice summary into two atomic authorized halves", async () => {
+    const rows = Array.from({ length: 60 }, (_, index) => ({ ...sessions[0], id: `agent-${index}` }));
+    const h = durableSetup(async command => {
+      const ids = (command.payload as { sessionIds: string[] }).sessionIds;
+      if (ids.length > 30) return { requestId: command.requestId, success: false, data: { code: ATTENTION_SUMMARY_TOO_LARGE } };
+      return { requestId: command.requestId, success: true, data: { summary: Object.fromEntries(ids.map(id => [id, {
+        attention: { ...saved, id: `${id}-notice`, title: "T".repeat(512), message: "M".repeat(6000) }, sequence: 1,
+      }])) } };
+    }, rows);
+    await settle();
+    expect(h.rpc.sendCommand.mock.calls.map(([command]) => (command.payload as { sessionIds: string[] }).sessionIds.length)).toEqual([60, 30, 30]);
+    expect(h.rpc.sendCommand.mock.calls.every(([command]) => command.type === "get_attention_summary")).toBe(true);
+    expect([...h.result.current.sessionActivity.values()].filter(activity => activity.attention)).toHaveLength(60);
+  });
+
+  it("bounds repeated typed size failures to a binary tree and stops at singletons", async () => {
+    const rows = Array.from({ length: 4 }, (_, index) => ({ ...sessions[0], id: `agent-${index}` }));
+    const h = durableSetup(async command => (command.payload as { sessionIds: string[] }).sessionIds.length > 1
+      ? { requestId: command.requestId, success: false, data: { code: ATTENTION_SUMMARY_TOO_LARGE } }
+      : { requestId: command.requestId, success: true, data: { summary: {} } }, rows);
+    await settle();
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(2 * rows.length - 1);
+    expect(h.rpc.sendCommand.mock.calls.every(([command]) => command.type === "get_attention_summary")).toBe(true);
+    const terminal = durableSetup(async command => ({ requestId: command.requestId, success: false, data: { code: ATTENTION_SUMMARY_TOO_LARGE } }));
+    await settle(); expect(terminal.rpc.sendCommand).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["denied", "malformed"])("does not enable legacy fallback when the first split child is %s", async failure => {
+    const rows = Array.from({ length: 60 }, (_, index) => ({ ...sessions[0], id: `agent-${index}` }));
+    const h = durableSetup(async command => {
+      const ids = (command.payload as { sessionIds: string[] }).sessionIds;
+      if (ids.length === 60) return { requestId: command.requestId, success: false, data: { code: ATTENTION_SUMMARY_TOO_LARGE } };
+      return failure === "denied"
+        ? { requestId: command.requestId, success: false, error: "Encrypted request rejected", data: { code: "permission_denied" } }
+        : { requestId: command.requestId, success: true, data: { summary: { stranger: { attention: saved, sequence: 1 } } } };
+    }, rows);
+    await settle();
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(2);
+    expect(h.rpc.sendCommand.mock.calls.every(([command]) => command.type === "get_attention_summary")).toBe(true);
+    expect([...h.result.current.sessionActivity.values()].some(activity => activity.attention)).toBe(false);
+  });
+
+  it("does not split a generic uncertain outcome", async () => {
+    const h = durableSetup(async command => ({ requestId: command.requestId, success: false, data: { code: "outcome_unknown" } }));
+    await settle(); expect(h.rpc.sendCommand).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops adaptive requests after the owning client changes", async () => {
+    const pending = deferred();
+    const rows = [sessions[0], { ...sessions[0], id: "agent-two" }];
+    const h = durableSetup(() => pending.promise, rows);
+    await settle(); expect(h.rpc.sendCommand).toHaveBeenCalledTimes(1);
+    h.rerender({ client: durableClient().client, user: "other", rows: [] });
+    await act(async () => pending.resolve({ requestId: "summary", success: false, data: { code: ATTENTION_SUMMARY_TOO_LARGE } }));
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(1);
+  });
+
+  it("deduplicates session IDs before summary partitioning", async () => {
+    const h = durableSetup(async () => ({ requestId: "summary", success: true, data: { summary: {} } }), [sessions[0], sessions[0]]);
+    await settle();
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(1);
+    expect(h.rpc.sendCommand.mock.calls[0][0].payload).toMatchObject({ sessionIds: ["agent"] });
+  });
+
+  it("keeps empty bridge summaries batched across delayed subscription notifications and reconnect", async () => {
+    const rows = Array.from({ length: 30 }, (_, index) => ({ ...sessions[0], id: `agent-${index}` }));
+    const h = durableSetup(async () => ({ requestId: "summary", success: true, data: { summary: {} } }), rows);
+    await settle();
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(1);
+    for (const subscribed of h.subscribed) { act(() => subscribed()); await settle(); }
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(1);
+    act(() => h.reconnect()); await settle();
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(2);
+    expect(h.rpc.sendCommand.mock.calls.every(([command]) => command.type === "get_attention_summary")).toBe(true);
+    expect([...h.result.current.sessionActivity.values()].some(activity => activity.attention)).toBe(false);
+  });
+  it("splits 501 running sessions into bounded empty summary commands without per-session reads", async () => {
+    const rows = Array.from({ length: 501 }, (_, index) => ({ ...sessions[0], id: `agent-${index}` }));
+    const h = durableSetup(async () => ({ requestId: "summary", success: true, data: { summary: {} } }), rows);
+    await settle();
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(2);
+    expect(h.rpc.sendCommand.mock.calls.map(([command]) => (command.payload as { sessionIds: string[] }).sessionIds.length)).toEqual([500, 1]);
+    expect(h.rpc.sendCommand.mock.calls.every(([command]) => command.type === "get_attention_summary")).toBe(true);
+  });
+  it("does not apply partial summaries or probe legacy reads when a sibling batch is denied", async () => {
+    const rows = Array.from({ length: 501 }, (_, index) => ({ ...sessions[0], id: `agent-${index}` }));
+    const h = durableSetup(async command => (command.payload as { sessionIds: string[] }).sessionIds.length === 500
+      ? { requestId: command.requestId, success: true, data: { summary: { "agent-0": { attention: saved, sequence: 1 } } } }
+      : { requestId: command.requestId, success: false, error: "Encrypted request rejected", data: { code: "permission_denied" } }, rows);
+    await settle();
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(2);
+    expect(h.current("agent-0")?.attention).toBeUndefined();
+  });
+  it("rejects summary rows outside the command's own batch", async () => {
+    const rows = Array.from({ length: 501 }, (_, index) => ({ ...sessions[0], id: `agent-${index}` }));
+    const h = durableSetup(async command => ({ requestId: command.requestId, success: true, data: { summary: {
+      "agent-0": { attention: saved, sequence: 1 },
+    } } }), rows);
+    await settle();
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(2);
+    expect(h.current("agent-0")?.attention).toBeUndefined();
+  });
+  it("runs only one denied compatibility probe across multiple rejected summary batches", async () => {
+    const rows = Array.from({ length: 501 }, (_, index) => ({ ...sessions[0], id: `agent-${index}` }));
+    const h = durableSetup(async command => ({ requestId: command.requestId, success: false, error: "Encrypted request rejected", data: { code: "permission_denied" } }), rows);
+    await settle();
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(3);
+    expect(h.rpc.sendCommand.mock.calls.filter(([command]) => command.type === "get_session_attention")).toHaveLength(1);
+  });
+
+  it("uses per-session fallback only when an older bridge explicitly rejects the summary command", async () => {
+    const rows = [sessions[0], { ...sessions[0], id: "agent-two" }];
+    const h = durableSetup(async command => command.type === "get_attention_summary"
+      ? { requestId: command.requestId, success: false, data: { code: "unknown_command" } }
+      : { requestId: command.requestId, success: true, data: { sessionId: (command.payload as { sessionId: string }).sessionId, attention: saved, sequence: saved.sequence } }, rows);
+    await settle();
+    expect(h.rpc.sendCommand.mock.calls.filter(([command]) => command.type === "get_attention_summary")).toHaveLength(1);
+    expect(h.rpc.sendCommand.mock.calls.filter(([command]) => command.type === "get_session_attention")).toHaveLength(2);
+    expect(h.current()?.attention?.attentionId).toBe(saved.id);
+    expect(h.current("agent-two")?.attention?.attentionId).toBe(saved.id);
+  });
+
+  it("recognizes an older encrypted bridge's permission error with one successful legacy probe", async () => {
+    const rows = [sessions[0], { ...sessions[0], id: "agent-two" }];
+    const h = durableSetup(async command => command.type === "get_attention_summary"
+      ? { requestId: command.requestId, success: false, error: "Encrypted request rejected", data: { code: "permission_denied" } }
+      : { requestId: command.requestId, success: true, data: { sessionId: (command.payload as { sessionId: string }).sessionId, attention: saved, sequence: saved.sequence } }, rows);
+    await settle();
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(3);
+    const legacy = h.rpc.sendCommand.mock.calls.map(([command]) => command).filter(command => command.type === "get_session_attention");
+    expect(legacy.map(command => (command.payload as { sessionId: string }).sessionId)).toEqual(["agent", "agent-two"]);
+    expect(h.current()?.attention?.attentionId).toBe(saved.id);
+    expect(h.current("agent-two")?.attention?.attentionId).toBe(saved.id);
+    for (const callback of h.subscribed) act(() => callback());
+    await settle(); expect(h.rpc.sendCommand).toHaveBeenCalledTimes(3);
+  });
+
+  it.each(["denied", "malformed"])("does not fan out or repeat a %s legacy compatibility probe", async failure => {
+    const rows = Array.from({ length: 20 }, (_, index) => ({ ...sessions[0], id: `agent-${index}` }));
+    const h = durableSetup(async command => command.type === "get_attention_summary" || failure === "denied"
+      ? { requestId: command.requestId, success: false, error: "Encrypted request rejected", data: { code: "permission_denied" } }
+      : { requestId: command.requestId, success: true, data: { sessionId: "wrong", attention: saved, sequence: 1 } }, rows);
+    await settle();
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(2);
+    expect(h.rpc.sendCommand.mock.calls.filter(([command]) => command.type === "get_session_attention")).toHaveLength(1);
+    act(() => h.reconnect()); await settle();
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(3);
+    expect(h.rpc.sendCommand.mock.calls.filter(([command]) => command.type === "get_session_attention")).toHaveLength(1);
+    expect([...h.result.current.sessionActivity.values()].some(activity => activity.attention)).toBe(false);
+  });
+
+  it("fences a successful legacy probe after the session's client or user changes", async () => {
+    const pending = deferred();
+    let probes = 0;
+    const h = durableSetup(async command => command.type === "get_attention_summary"
+      ? { requestId: command.requestId, success: false, error: "Encrypted request rejected", data: { code: "permission_denied" } }
+      : ++probes === 1 ? pending.promise : reply(null, 2));
+    await settle();
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(2);
+    h.rerender({ client: durableClient().client, user: "other", rows: sessions });
+    await settle();
+    await act(async () => pending.resolve(reply(saved)));
+    expect(h.current()?.attention).toBeUndefined();
+  });
+
+  it.each([
+    { requestId: "r", success: true, data: {} },
+    { requestId: "r", success: true, data: { summary: [] } },
+    { requestId: "r", success: true, data: { summary: { agent: { attention: saved } } } },
+    { requestId: "r", success: true, data: { bridgeId: "other", summary: { agent: { attention: saved, sequence: 1 } } } },
+    { requestId: "r", success: true, data: { summary: { stranger: { attention: saved, sequence: 1 } } } },
+  ])("does not turn a denied or malformed summary into per-session reads: %o", async response => {
+    const transport = durableClient();
+    const rpc = { sendCommand: vi.fn(async () => response), onSubscribed: () => () => {} };
+    const { result } = renderHook(() => useAllSessionEvents(transport.client, sessions, "user", rpc));
+    await settle();
+    expect(rpc.sendCommand).toHaveBeenCalledTimes(1);
+    expect(rpc.sendCommand.mock.calls[0]).toBeDefined();
+    expect(result.current.sessionActivity.get("agent")?.attention).toBeUndefined();
+  });
+
+  it("consumes rejected summary promises on startup and reconnect without per-session fallback", async () => {
+    const h = durableSetup(async () => { throw new Error("offline"); });
+    await settle(); act(() => h.reconnect()); await settle();
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(2);
+    expect(h.rpc.sendCommand.mock.calls.every(([command]) => command.type === "get_attention_summary")).toBe(true);
+    expect(h.current()?.attention).toBeUndefined();
+  });
+
+  it("accepts a pending summary when only the RPC response wrapper object rerenders", async () => {
+    const read = deferred(); const transport = durableClient();
+    const sendCommand = vi.fn(() => read.promise); const onSubscribed = () => () => {};
+    const { result, rerender } = renderHook(({ rpc }) => useAllSessionEvents(transport.client, sessions, "user", rpc), {
+      initialProps: { rpc: { sendCommand, onSubscribed } },
+    });
+    await settle(); rerender({ rpc: { sendCommand, onSubscribed } });
+    await act(async () => read.resolve({ requestId: "summary", success: true, data: { summary: { agent: { attention: saved, sequence: 1 } } } }));
+    expect(result.current.sessionActivity.get("agent")?.attention?.attentionId).toBe(saved.id);
+    expect(sendCommand).toHaveBeenCalledTimes(1);
+  });
+
+  it("hydrates all sessions on one bridge with one batched summary read", async () => {
+    const rows = [sessions[0], { ...sessions[0], id: "agent-two" }];
+    const response: CommandResponse = { requestId: "summary", success: true, data: { summary: {
+      agent: { attention: saved, sequence: saved.sequence },
+      "agent-two": { attention: newer, sequence: newer.sequence },
+    } } };
+    const h = durableSetup(async () => response, rows);
+    await settle();
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(1);
+    expect(h.rpc.sendCommand.mock.calls[0][0].type).toBe("get_attention_summary");
+    expect(h.current("agent")?.attention?.attentionId).toBe(saved.id);
+    expect(h.current("agent-two")?.attention?.attentionId).toBe(newer.id);
+  });
+
   it("does not dispatch a queued old-owner read during replacement render before passive cleanup", async () => {
     const queued: Array<() => void> = [];
     const microtask = vi.spyOn(globalThis, "queueMicrotask").mockImplementation(callback => { queued.push(callback); });
     try {
       const old = durableClient(); const replacement = durableClient();
-      const oldRpc = { sendCommand: vi.fn(async () => reply(saved)), onSubscribed: () => () => {} };
-      const newRpc = { sendCommand: vi.fn(async () => reply(newer)), onSubscribed: () => () => {} };
+      const oldRpc = { sendCommand: vi.fn(async () => ({ requestId: "r", success: true, data: { summary: { agent: { attention: saved, sequence: 1 } } } })), onSubscribed: () => () => {} };
+      const newRpc = { sendCommand: vi.fn(async () => ({ requestId: "r", success: true, data: { summary: { agent: { attention: newer, sequence: 2 } } } })), onSubscribed: () => () => {} };
       const hook = renderHook(({ client, user, rpc }) => {
         const result = useAllSessionEvents(client, sessions, user, rpc);
         useLayoutEffect(() => { if (user === "other-user") queued.splice(0).forEach(callback => callback()); }, [user]);
@@ -190,7 +515,9 @@ describe("durable explicit attention restoration", () => {
   it("bounds eighty overlapping prompts to one pending and one trailing snapshot", async () => {
     const first = deferred(); const trailing = deferred();
     let reads = 0;
-    const h = durableSetup(() => ++reads === 1 ? first.promise : trailing.promise);
+    const h = durableSetup(command => command.type === "get_attention_summary"
+      ? ++reads === 1 ? first.promise : trailing.promise
+      : Promise.resolve(reply(null)));
     await settle();
     act(() => { for (let i = 0; i < 80; i++) h.publish("UserPromptSubmit"); });
     expect(h.rpc.sendCommand).toHaveBeenCalledTimes(1);
@@ -204,7 +531,9 @@ describe("durable explicit attention restoration", () => {
   it("coalesces startup subscription notifications and a burst of pending prompts", async () => {
     const first = deferred(); const trailing = deferred();
     let reads = 0;
-    const h = durableSetup(() => ++reads === 1 ? first.promise : trailing.promise);
+    const h = durableSetup(command => command.type === "get_attention_summary"
+      ? ++reads === 1 ? first.promise : trailing.promise
+      : Promise.resolve(reply(null)));
     act(() => h.subscribed[0]());
     await settle();
     expect(h.rpc.sendCommand).toHaveBeenCalledTimes(1);
@@ -226,7 +555,7 @@ describe("durable explicit attention restoration", () => {
     const h = durableSetup(() => ++reads === 1 ? first.promise : trailing.promise);
     await settle();
     act(() => h.reconnect());
-    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(1);
+    expect(h.rpc.sendCommand).toHaveBeenCalledTimes(2);
     await act(async () => first.resolve(reply(saved)));
     expect(h.current()?.attention).toBeUndefined();
     expect(h.rpc.sendCommand).toHaveBeenCalledTimes(2);
@@ -277,8 +606,8 @@ describe("durable explicit attention restoration", () => {
     await settle();
     expect(first.current()?.attention).toMatchObject({ attentionId: saved.id, attentionSequence: 1,
       receivedAt: Date.parse(saved.createdAt), message: saved.message });
-    expect(first.rpc.sendCommand).toHaveBeenCalledWith(expect.objectContaining({ type: "get_session_attention",
-      payload: { bridgeId: "bridge", sessionId: "agent" } }));
+    expect(first.rpc.sendCommand).toHaveBeenCalledWith(expect.objectContaining({ type: "get_attention_summary",
+      payload: { bridgeId: "bridge", sessionIds: ["agent"] } }));
     first.unmount();
     const reopened = durableSetup();
     await settle();
@@ -468,7 +797,8 @@ it("rejects a failed stamped dismissal and retains the captured notice", async (
 });
 
 it("rejects a durable dismissal in the client/user switch window before any RPC", async () => {
-  const old = durableClient(), replacement = durableClient(); const rpc = { sendCommand: vi.fn(async (_command: Command) => reply(saved)), onSubscribed: () => () => {} };
+  const old = durableClient(), replacement = durableClient(); const rpc = { sendCommand: vi.fn(async (command: Command) => command.type === "get_attention_summary"
+    ? { requestId: command.requestId, success: true, data: { summary: { agent: { attention: saved, sequence: saved.sequence } } } } : reply(saved)), onSubscribed: () => () => {} };
   let captured: ReturnType<typeof restoredForTest> | undefined; let attempt: Promise<unknown> | undefined;
   function restoredForTest() { return { type: "agent_needs_input" as const, title: saved.title, message: saved.message, receivedAt: Date.parse(saved.createdAt), attentionId: saved.id, attentionSequence: saved.sequence }; }
   const hook = renderHook(({ client, user }) => {
@@ -1002,17 +1332,24 @@ describe("parent routing applies live (phase B smoke)", () => {
       let inFlight = 0; let peak = 0;
       let barrier: Promise<void> = Promise.resolve();
       const rpc = { sendCommand: vi.fn(async (command: Command) => {
+        if (command.type === "get_attention_summary") {
+          inFlight += 1; peak = Math.max(peak, inFlight);
+          await barrier;
+          inFlight -= 1;
+          return { requestId: command.requestId, success: true, data: { summary: Object.fromEntries(rows.map(row => [row.id, { attention: null, sequence: 0 }])) } };
+        }
         if (command.type !== "get_session_attention") return reply(null);
         inFlight += 1; peak = Math.max(peak, inFlight);
         await barrier;
         inFlight -= 1;
-        return reply(null);
+        return { requestId: command.requestId, success: true, data: { sessionId: (command.payload as { sessionId: string }).sessionId, attention: null, sequence: 2 } };
       }), onSubscribed: () => () => {} };
       renderHook(() => useAllSessionEvents(client, rows, "user", rpc));
-      await act(async () => { await Promise.resolve(); }); // the ten mount reads
-      const readsOf = () => rpc.sendCommand.mock.calls.filter(([command]) => command.type === "get_session_attention").length;
+      await act(async () => { await Promise.resolve(); }); // one mount batch
+      const readsOf = () => rpc.sendCommand.mock.calls.filter(([command]) => command.type === "get_attention_summary").length;
       const afterMount = readsOf();
-      expect(afterMount).toBe(10);
+      expect(rpc.sendCommand.mock.calls.filter(([command]) => command.type === "get_attention_summary")).toHaveLength(1);
+      expect(afterMount).toBe(1);
       let release!: () => void;
       barrier = new Promise<void>(done => { release = done; });
       const publish = (sessionId: string) => publications.get(`events:${sessionId}#user`)!({ data: { type: "hook_event", eventName: "Notification",
@@ -1022,11 +1359,11 @@ describe("parent routing applies live (phase B smoke)", () => {
       });
       expect(readsOf()).toBe(afterMount); // debounced per session: nothing yet
       await act(async () => { await vi.advanceTimersByTimeAsync(200); });
-      expect(peak).toBe(4); // global concurrency cap: only four reads in flight
-      expect(readsOf()).toBe(afterMount + 4);
+      expect(peak).toBe(4);
+      expect(rpc.sendCommand.mock.calls.filter(([command]) => command.type === "get_session_attention")).toHaveLength(4);
       release();
       await act(async () => { for (let i = 0; i < 50; i++) await Promise.resolve(); });
-      expect(readsOf()).toBe(afterMount + 10); // one trailing read per session
+      expect(rpc.sendCommand.mock.calls.filter(([command]) => command.type === "get_session_attention")).toHaveLength(10);
     } finally { vi.useRealTimers(); }
   });
 });

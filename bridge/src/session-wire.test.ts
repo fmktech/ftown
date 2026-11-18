@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { toWireSession } from './session-wire.js';
+import { toDashboardWireSession, toWireSession } from './session-wire.js';
 import { CentrifugoClient } from './centrifugo-client.js';
 import type { Session } from './types.js';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -11,6 +11,12 @@ import { generateEndpoint, open } from './security/crypto.js';
 import type { SecureEnvelope } from './security/protocol.js';
 import { BridgeSecurityService } from './security/bridge/security.js';
 import { LOCAL_RECOVERY_AUTHORITY } from './security/bridge/policy.js';
+import { PLAN_LIMITS } from './coordination/contract-c.js';
+
+function maximumPlan(): NonNullable<Session['plan']> {
+  return { seq: PLAN_LIMITS.items, items: Array.from({ length: PLAN_LIMITS.items }, (_, index) => ({ id: `p${index + 1}`,
+    title: '界'.repeat(PLAN_LIMITS.title), note: '界'.repeat(PLAN_LIMITS.note), after: [], priority: 2, state: 'todo', createdAt: '', updatedAt: '' })) };
+}
 
 function makeSession(overrides: Partial<Session> = {}): Session {
   return {
@@ -75,13 +81,34 @@ describe('toWireSession', () => {
   });
 });
 
+describe('toDashboardWireSession', () => {
+  it('omits only plan from the ordinary projection while HTTP/store data retain the complete plan', () => {
+    const session = makeSession({ plan: maximumPlan(), pullRequestUrl: 'https://github.com/owner/repo/pull/1', pullRequestLinkId: 'private-link' });
+    const ordinary = toWireSession(session);
+    const { plan, ...expected } = ordinary;
+    assert.equal(plan, session.plan);
+    assert.equal(plan?.items.length, PLAN_LIMITS.items);
+    const dashboard = toDashboardWireSession(session);
+    assert.deepEqual(dashboard, expected);
+    assert.equal('plan' in dashboard, false);
+    assert.equal(session.plan, plan);
+    assert.equal(toWireSession(session).plan, plan);
+  });
+
+  it('preserves the ordinary projection when there is no plan', () => {
+    const session = makeSession();
+    assert.deepEqual(toDashboardWireSession(session), toWireSession(session));
+    assert.equal('plan' in session, false);
+  });
+});
+
 interface PublishCapture {
   state: 'connected';
   publish(channel: string, data: Record<string, unknown>): Promise<unknown>;
 }
 
 describe('CentrifugoClient.publishSessionUpdate — token never crosses the wire', () => {
-  it('publishes only ciphertext and decrypts a session whose env (and token) is stripped', async t => {
+  it('seals a session with a maximum legal plan after stripping env and dashboard-only plan data', async t => {
     const client = new CentrifugoClient('ws://127.0.0.1:0/connection/websocket', 'tok', async () => 'tok');
     const ownerId = '7bac2a7f-c58e-4845-856f-8283fb07ad96';
     const dir = await mkdtemp(join(tmpdir(), 'ftown-session-wire-'));
@@ -108,17 +135,20 @@ describe('CentrifugoClient.publishSessionUpdate — token never crosses the wire
       },
     };
 
-    const session = makeSession();
+    const session = makeSession({ plan: maximumPlan() });
+    assert.ok(Buffer.byteLength(JSON.stringify(toWireSession(session))) > 300_000, 'fixture must exceed inline encrypted publication capacity');
     await client.publishSessionUpdate('user-1', session);
     await delivery;
 
     const envelope = captured.data as unknown as SecureEnvelope;
     assert.equal(envelope.type, 'ftown_encrypted');
+    assert.ok(Buffer.byteLength(JSON.stringify(envelope)) < 450_000);
     const decrypted = JSON.parse(new TextDecoder().decode(await open(browser, bridge.endpoint, envelope,
       { ownerId, bridgeId: 'bridge-1', channel: 'sessions:updates#user-1', recipientId: browser.endpoint.id, purpose: 'application' }))) as { data: { type: string; session: Session } };
     const publishedSession = decrypted.data.session;
     assert.strictEqual(publishedSession.env, undefined);
     assert.ok(!('env' in publishedSession));
+    assert.equal('plan' in publishedSession, false);
     // The full payload must contain no token value anywhere.
     assert.ok(!JSON.stringify(captured.data).includes('sk-secret-token'));
     assert.ok(!JSON.stringify(captured.data).includes(session.command));
@@ -128,6 +158,8 @@ describe('CentrifugoClient.publishSessionUpdate — token never crosses the wire
     assert.strictEqual(decrypted.data.type, 'session_update');
     // The original session keeps its env for server-side spawn/resume.
     assert.deepStrictEqual(session.env, { ANTHROPIC_AUTH_TOKEN: 'sk-secret-token', PATH: '/usr/bin' });
+    assert.equal(session.plan?.items.length, PLAN_LIMITS.items);
+    assert.deepEqual(toWireSession(session).plan, maximumPlan());
   });
 });
 

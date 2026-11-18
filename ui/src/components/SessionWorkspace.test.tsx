@@ -9,6 +9,37 @@ import type { InboxEntry } from './SessionInbox';
 import { PREVIEW_CSP } from '@/lib/session-preview';
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+it('reports usage visibility from the rendered terminal and keeps a closed preview from disabling Overview pushes', async () => {
+  class TestResizeObserver implements ResizeObserver {
+    constructor(private callback: ResizeObserverCallback) {}
+    observe(target: Element) { this.callback([{ target, contentRect: DOMRect.fromRect({ width: 900 }), borderBoxSize: [], contentBoxSize: [], devicePixelContentBoxSize: [] }], this); }
+    unobserve() {} disconnect() {}
+  }
+  vi.stubGlobal('ResizeObserver', TestResizeObserver);
+  const manager: Session = { id: 'manager', bridgeId: 'bridge', name: 'Manager', status: 'running', createdAt: '', updatedAt: '' };
+  const child: Session = { ...manager, id: 'child', name: 'Child', parentSessionId: 'manager' };
+  const onUsageVisibilityChange = vi.fn(); const sendCommand = vi.fn(async () => ({ requestId: 'r', success: false }));
+  const workspace = (desktop: boolean, mobileTab: 'overview' | 'terminal', visible = true) => <SessionWorkspace
+    session={manager} sessions={[manager, child]} client={null} userId="user" readable visible={visible} onUsageVisibilityChange={onUsageVisibilityChange}
+    sendCommand={sendCommand} securityGeneration={0} open={false} onClose={vi.fn()} isDesktop={desktop} mobileTab={mobileTab} onMobileTab={vi.fn()} onRefit={vi.fn()}>
+    <div>Terminal content</div>
+  </SessionWorkspace>;
+  const { rerender, unmount } = render(workspace(true, 'overview'));
+  await act(async () => {});
+  expect(onUsageVisibilityChange).toHaveBeenLastCalledWith('manager');
+  expect(sendCommand).toHaveBeenCalledWith(expect.objectContaining({ type: 'get_session_board' }));
+  rerender(workspace(false, 'overview'));
+  expect(onUsageVisibilityChange).toHaveBeenLastCalledWith(null);
+  rerender(workspace(false, 'terminal'));
+  expect(onUsageVisibilityChange).toHaveBeenLastCalledWith('manager');
+  rerender(workspace(false, 'terminal', false));
+  expect(onUsageVisibilityChange).toHaveBeenLastCalledWith(null);
+  const reads = sendCommand.mock.calls.length;
+  await act(async () => document.dispatchEvent(new Event('visibilitychange')));
+  expect(sendCommand).toHaveBeenCalledTimes(reads);
+  unmount(); expect(onUsageVisibilityChange).toHaveBeenLastCalledWith(null);
+});
 it('reports separator bounds consistently at Home and End for fractional pane limits', () => {
   class TestResizeObserver implements ResizeObserver {
     constructor(private callback: ResizeObserverCallback) {}
@@ -1402,7 +1433,7 @@ it('fetches the board snapshot while the Overview is visible and passes it throu
   const manager: Session = { id: 'manager', bridgeId: 'bridge', name: 'manager', status: 'running', createdAt: '', updatedAt: '', brief: { notes: [], updatedAt: '' } };
   const child: Session = { id: 'child', bridgeId: 'bridge', name: 'child', status: 'running', createdAt: '', updatedAt: '', parentSessionId: 'manager' };
   const workspace = (selected: Session, sessions: Session[]) => (
-    <SessionWorkspace session={selected} sessions={sessions} client={null} userId="user" readable={false} sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="terminal" onMobileTab={vi.fn()} onRefit={vi.fn()} idleSince={{ child: '2026-11-13T09:00:00.000Z' }}>
+    <SessionWorkspace session={selected} sessions={sessions} client={null} userId="user" readable={true} sendCommand={sendCommand} securityGeneration={0} open onClose={vi.fn()} isDesktop mobileTab="terminal" onMobileTab={vi.fn()} onRefit={vi.fn()} idleSince={{ child: '2026-11-13T09:00:00.000Z' }}>
       <div>Terminal content</div>
     </SessionWorkspace>
   );
@@ -1416,14 +1447,14 @@ it('fetches the board snapshot while the Overview is visible and passes it throu
   rerender(workspace(manager, [manager, { ...child }]));
   await act(async () => {});
   expect(boardCalls).toHaveLength(1);
-  // A tree session update refetches and the snapshot reaches the overview.
+  // Tree session updates no longer trigger board RPC reads.
   rerender(workspace(manager, [manager, { ...child, updatedAt: '2026-11-13T09:35:00.000Z' }]));
   await act(async () => {});
-  expect(boardCalls).toHaveLength(2);
+  expect(boardCalls).toHaveLength(1);
   expect(within(await screen.findByRole('region', { name: 'events' })).getByText('events · 2')).toBeTruthy();
   // A session without children never fetches (its overview does not exist).
   const plain: Session = { id: 'plain', bridgeId: 'bridge', name: 'plain', status: 'running', createdAt: '', updatedAt: '' };
   rerender(workspace(plain, [plain]));
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 5)); });
-  expect(boardCalls).toHaveLength(2);
+  expect(boardCalls).toHaveLength(1);
 });

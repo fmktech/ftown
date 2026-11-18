@@ -21,7 +21,8 @@ function namespaces(fly) {
   return [
     { name: 'terminal', ...permissions, allow_history_for_subscriber: true,
       history_size: fly ? 20 : 10000, history_ttl: fly ? '5m' : '24h', force_recovery: !fly, allow_publish_for_client: true },
-    { name: 'sessions', ...permissions, history_size: 0, history_ttl: '0s', force_recovery: false, allow_publish_for_client: true },
+    { name: 'sessions', ...permissions, history_size: 500, history_ttl: '1h', force_recovery: true, allow_publish_for_client: true },
+    { name: 'session-board', ...permissions, history_size: 5, history_ttl: '60s', force_recovery: true, allow_publish_for_client: true },
     { name: 'terminal-input', ...permissions, allow_publish_for_client: true },
     { name: 'events', ...permissions, history_size: 100, history_ttl: '1h', allow_publish_for_client: true },
     { name: 'commands', ...permissions, allow_publish_for_client: true },

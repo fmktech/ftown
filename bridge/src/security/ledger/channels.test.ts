@@ -4,6 +4,7 @@ import { accountChannel, sessionChannel } from './channels';
 
 describe('accountChannel', () => {
   it('builds kind#account for every account-scoped kind', () => {
+    assert.equal(accountChannel('session-board:updates', 'acc1'), 'session-board:updates#acc1');
     assert.equal(accountChannel('sessions:updates', 'a@x.io'), 'sessions:updates#a@x.io');
     assert.equal(accountChannel('commands:rpc', 'acc1'), 'commands:rpc#acc1');
     assert.equal(accountChannel('bridges:presence', 'acc1'), 'bridges:presence#acc1');

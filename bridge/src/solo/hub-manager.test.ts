@@ -240,11 +240,16 @@ describe('writeHubConfig', () => {
     for (const [key, value] of Object.entries(HUB_CHANNEL_DEFAULTS)) {
       assert.deepEqual(value, prodConfig.channel.without_namespace[key], `without_namespace.${key} drifted`);
     }
-    // Named namespaces do not inherit without_namespace. In particular sessions
-    // stays nonrecoverable and terminal retains its explicit retention policy.
+    // Named namespaces do not inherit without_namespace. Both dashboard
+    // channels need their own explicit recovery and retention policy.
     const sessions = HUB_NAMESPACES.find(namespace => namespace.name === 'sessions');
-    assert.equal(sessions?.force_recovery, false);
-    assert.equal(sessions?.history_size, 0);
+    assert.equal(sessions?.force_recovery, true);
+    assert.equal(sessions?.history_size, 500);
+    assert.equal(sessions?.history_ttl, '1h');
+    const board = HUB_NAMESPACES.find(namespace => namespace.name === 'session-board');
+    assert.equal(board?.force_recovery, true);
+    assert.equal(board?.history_size, 5);
+    assert.equal(board?.history_ttl, '60s');
     const dir = tmpDir('cfg-drift');
     const configPath = path.join(dir, 'hub.json');
     await writeHubConfig(configPath, { port: 8043, secret: 'drift-guard-secret-value' });

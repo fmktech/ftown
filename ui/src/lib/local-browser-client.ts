@@ -1,5 +1,5 @@
 import type { Command, CommandResponse } from '@/types';
-import type { MessageClient, MessageEvents, MessageSubscription, MessagePublishOptions } from './message-client';
+import { UNRECOVERED_SUBSCRIBED_CONTEXT, type MessageClient, type MessageEvents, type MessageSubscription, type MessagePublishOptions } from './message-client';
 import type { BridgeSecurityInfo, LocalEventPage, SecurityCommand, SecurityCommandResults } from '@security/protocol';
 import { SecurityError } from '@security/crypto';
 import { SecureEndpointRuntime } from './secure-endpoint-runtime';
@@ -68,7 +68,7 @@ class LocalSubscription implements MessageSubscription {
   }
   subscribe(): void {
     if (this.state === 'subscribed') return;
-    this.state = 'subscribed'; queueMicrotask(() => { if (this.state === 'subscribed') this.emit('subscribed', undefined); });
+    this.state = 'subscribed'; queueMicrotask(() => { if (this.state === 'subscribed') this.emit('subscribed', UNRECOVERED_SUBSCRIBED_CONTEXT); });
   }
   unsubscribe(): void { this.state = 'unsubscribed'; }
   removeAllListeners(): void { this.listeners.clear(); }
@@ -163,7 +163,7 @@ export class LocalBrowserClient implements MessageClient {
       try {
         await this.ensureReady();
         const recovered = !this.online; this.online = true; this.status(true);
-        if (recovered) for (const sub of this.subscriptions.values()) if (sub.state === 'subscribed') sub.emit('subscribed', undefined);
+        if (recovered) for (const sub of this.subscriptions.values()) if (sub.state === 'subscribed') sub.emit('subscribed', UNRECOVERED_SUBSCRIBED_CONTEXT);
         const channel = `local-events:${this.boot.bridgeId}`;
         const result = await this.securityRuntime!.request(this.boot.bridgeId, channel,
           { kind: 'http', requestId: crypto.randomUUID(), method: 'GET', path: `/api/browser/events?after=${this.cursor}` }, {},
@@ -172,7 +172,7 @@ export class LocalBrowserClient implements MessageClient {
         if (!Array.isArray(result.events) || !Number.isSafeInteger(result.cursor)) throw new Error('Invalid local event page');
         this.cursor = result.cursor;
         for (const event of result.events) this.deliver(event.channel, event.data);
-        if (result.reset) for (const sub of this.subscriptions.values()) if (sub.state === 'subscribed') sub.emit('subscribed', undefined);
+        if (result.reset) for (const sub of this.subscriptions.values()) if (sub.state === 'subscribed') sub.emit('subscribed', UNRECOVERED_SUBSCRIBED_CONTEXT);
       } catch (error) {
         this.handleError(error);
         if (this.abort.signal.aborted) return;

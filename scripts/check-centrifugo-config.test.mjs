@@ -42,7 +42,10 @@ for (const [name, change] of [
   ['missing namespace', c => { c.channel.namespaces.pop(); }],
   ['publish permission changed', c => { c.channel.namespaces[0].allow_publish_for_client = false; }],
   ['history policy changed', c => { c.channel.namespaces[0].history_size = 10000; }],
-  ['accidental namespace inheritance', c => { c.channel.namespaces[1].force_recovery = true; }],
+  ['sessions recovery disabled', c => { c.channel.namespaces.find(n => n.name === 'sessions').force_recovery = false; }],
+  ['board recovery disabled', c => { c.channel.namespaces.find(n => n.name === 'session-board').force_recovery = false; }],
+  ['board retention expanded', c => { c.channel.namespaces.find(n => n.name === 'session-board').history_size = 500; }],
+  ['board account isolation disabled', c => { c.channel.namespaces.find(n => n.name === 'session-board').allow_user_limited_channels = false; }],
 ]) test(`rejects ${name}`, () => {
   const config = load('fly'); change(config);
   assert.throws(() => validateConfiguration(config, 'fly'));

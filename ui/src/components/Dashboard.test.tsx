@@ -31,13 +31,17 @@ const state = vi.hoisted(() => ({
   terminalPaste: vi.fn(),
   terminalSendInput: vi.fn(),
   terminalFocus: vi.fn(),
+  usageTarget: null as string | null,
 }));
 
-vi.mock("@/hooks/useSessions", () => ({ useSessions: () => ({
+vi.mock("@/hooks/useSessions", () => ({ useSessions: (_client: unknown, _user: unknown, _rpc: unknown, usageTarget: string | null) => {
+  state.usageTarget = usageTarget;
+  return {
   sessions: state.sessions, createSession: state.createSession, handoffSession: state.handoffSession, stopSession: state.stopSession,
   retrySession: state.retrySession, removeSession: state.removeSession,
   renameSession: vi.fn(), setSessionParent: vi.fn(), refreshSessions: vi.fn(),
-}) }));
+  };
+} }));
 vi.mock("@/hooks/useBridgeRpc", () => ({ useBridgeRpc: () => ({ bridgeExec: state.bridgeExec,
   sendCommand: vi.fn().mockImplementation(async command => {
     state.rpcCommands.push(command.type);
@@ -95,6 +99,7 @@ beforeEach(() => {
   Object.defineProperty(HTMLDialogElement.prototype, "close", { configurable: true, value: function(this: HTMLDialogElement) { this.open = false; } });
   vi.clearAllMocks();
   state.activity = new Map();
+  state.usageTarget = null;
   state.rpcCommands = [];
   state.createSession.mockResolvedValue(undefined);
   state.clearSessionAttention.mockResolvedValue(undefined);
@@ -121,6 +126,17 @@ it("does not reissue bridge update reads when Dashboard rerenders with a fresh R
   expect(screen.getByText("Connect a bridge:")).toBeTruthy();
   await act(async () => { await Promise.resolve(); });
   expect(state.rpcCommands.filter(type => type === "get_bridge_update")).toHaveLength(1);
+});
+
+it("requests selected terminal usage only while the workspace is displayed", async () => {
+  dashboard();
+  expect(state.usageTarget).toBeNull();
+  fireEvent.click(screen.getByText("Regular shell", { exact: true }));
+  await waitFor(() => expect(state.usageTarget).toBe("ordinary"));
+  fireEvent.click(screen.getByRole("button", { name: "Inbox, 0 messages" }));
+  expect(state.usageTarget).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Back to workspace" }));
+  await waitFor(() => expect(state.usageTarget).toBe("ordinary"));
 });
 
 it("shows the selected non-default account in the session header", async () => {

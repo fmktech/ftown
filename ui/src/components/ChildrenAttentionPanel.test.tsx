@@ -144,7 +144,7 @@ describe("ChildrenAttentionPanel", () => {
   it("offers a child notice without a question only Dismiss and Open", () => {
     const onOpenChange = vi.fn();
     const noticeOnly: ChildAttentionItem = {
-      entry: { ...entry("child", { title: "Work complete", prompt: undefined, message: "Review the result and checks." }, { name: "Child", parentSessionId: "boss", status: "stopped" }),
+      entry: { ...entry("child", { title: "Work complete", prompt: undefined, message: "Review the result and checks." }, { name: "Child", parentSessionId: "boss", status: "completed" }),
         notice: { type: "agent_needs_input", title: "Work complete", message: "Review the result and checks.", receivedAt: now - 60_000, attentionId: "evt-3", attentionSequence: 1 } },
       eventId: "evt-3",
       live: true,

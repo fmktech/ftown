@@ -9,14 +9,15 @@ import type { ApplicationJson, SecureEnvelope, VerifiedApplication } from './sec
 import WebSocket from 'ws';
 import { createOutboundPipeline } from './outbound-pipeline.js';
 import { BridgeSecurityError } from './security/bridge/errors.js';
-import { COMMAND_REJECTED_WARNING, describeError } from './outbound-pipeline-types.js';
+import { COMMAND_REJECTED_WARNING, describeError, isPermanentPublicationError } from './outbound-pipeline-types.js';
 import type { OutboundPacket } from './outbound-pipeline-types.js';
 
 import type { Subscription, PublicationContext } from 'centrifuge';
 import { hostname } from 'node:os';
 
 import type { Command, CommandResponse, Session, BridgePresenceInfo } from './types.js';
-import { toWireSession } from './session-wire.js';
+import type { BoardSnapshot } from './coordination/contract-c.js';
+import { toDashboardWireSession } from './session-wire.js';
 import {
   isSignalMessage,
   isWatchMessage,
@@ -129,6 +130,11 @@ export class CentrifugoClient {
   private secureCommandChannel: string | null = null;
   /** Cross-bridge control: our outstanding requests to peer bridges, by request message id, with the peer endpoint expected to answer. */
   private readonly peerPending = new Map<string, { senderId: string; resolve: (packet: SecureEnvelope) => void }>();
+  /** One coalesced reconciliation per account, independent of mutation acknowledgements. */
+  private readonly sessionReconciliations = new Map<string, {
+    bridgeId: string; revision: number; attempts: number; running: boolean; blocked: boolean;
+    timer?: ReturnType<typeof setTimeout>;
+  }>();
 
   setSecurity(security: BridgeSecurityService): void { this.security = security; }
   private readonly disabled: boolean;
@@ -168,6 +174,11 @@ export class CentrifugoClient {
 
     this.client.on('connected', (ctx) => {
       console.log(`[Centrifugo] Connected to ${ctx.transport}`);
+      for (const [userId, pending] of this.sessionReconciliations) {
+        pending.blocked = false;
+        pending.attempts = 0;
+        this.scheduleSessionReconciliation(userId);
+      }
       // First 'connected' is the initial connect (startup resurrection already
       // publishes the sessions). Every later 'connected' is a reconnect after a
       // transport drop — re-sync so the UI, which does not re-fetch on its own,
@@ -196,7 +207,7 @@ export class CentrifugoClient {
     return () => { this.localListeners.delete(listener); };
   }
 
-  private publish(channel: string, data: Record<string, unknown>): Promise<void> {
+  private publish(channel: string, data: Record<string, unknown>, waitForDelivery = false): Promise<void> {
     for (const listener of this.localListeners) {
       try {
         listener(channel, data);
@@ -209,7 +220,10 @@ export class CentrifugoClient {
     // Disconnected updates are reconciled by the existing reconnect snapshot.
     if (!this.disabled && this.client.state === 'connected' && this.security) {
       const security = this.security;
-      this.outbound.enqueue({
+      let resolveDelivery: (() => void) | undefined;
+      let rejectDelivery: ((error: unknown) => void) | undefined;
+      const delivery = waitForDelivery ? new Promise<void>((resolve, reject) => { resolveDelivery = resolve; rejectDelivery = reject; }) : undefined;
+      const accepted = this.outbound.enqueue({
         label: `${channel.split(':')[0]}/${typeof data.type === 'string' ? data.type : 'unknown'}`,
         prepare: async () => {
           const packets = await security.sealPublication(channel, { type: 'application', route: { kind: 'publication' },
@@ -236,9 +250,14 @@ export class CentrifugoClient {
           }
           return out;
         },
+        ...(waitForDelivery ? { onSettled: (error?: unknown) => error === undefined ? resolveDelivery?.() : rejectDelivery?.(error) } : {}),
       });
+      // enqueue settles rejected jobs too, so its delivery promise is always observed.
+      if (!accepted && !delivery) return Promise.resolve();
+      if (delivery) return delivery;
       return Promise.resolve();
     }
+    if (waitForDelivery && !this.disabled) return Promise.reject(new Error('Centrifugo is disconnected'));
     return Promise.resolve();
   }
 
@@ -257,6 +276,8 @@ export class CentrifugoClient {
   }
 
   disconnect(): void {
+    for (const pending of this.sessionReconciliations.values()) clearTimeout(pending.timer);
+    this.sessionReconciliations.clear();
     this.secureCommandReady = false;
     for (const [channel, sub] of this.subscriptions) {
       sub.unsubscribe();
@@ -282,16 +303,66 @@ export class CentrifugoClient {
 
   async publishSessionUpdate(userId: string, session: Session): Promise<void> {
     const channel = accountChannel('sessions:updates', userId);
-    try {
-      await this.publish(channel, {
+    // State has already committed. Observe delivery without delaying CRUD or
+    // turning a relay failure into a failed mutation. A failed delta instead
+    // requests one authoritative read for the account, with capped backoff.
+    void this.publish(channel, {
         type: 'session_update',
-        session: toWireSession(session),
+        session: toDashboardWireSession(session),
         timestamp: new Date().toISOString(),
+      }, true).catch(error => this.requireSessionReconciliation(userId, session.bridgeId, error));
+  }
+
+  async publishSessionSnapshotRequired(userId: string, bridgeId: string): Promise<void> {
+    try { await this.sendSessionSnapshotRequired(userId, bridgeId); }
+    catch (error) { this.requireSessionReconciliation(userId, bridgeId, error); }
+  }
+
+  private sendSessionSnapshotRequired(userId: string, bridgeId: string): Promise<void> {
+    return this.publish(accountChannel('sessions:updates', userId), {
+      type: 'session_snapshot_required', bridgeId, timestamp: new Date().toISOString(),
+    }, true);
+  }
+
+  private requireSessionReconciliation(userId: string, bridgeId: string, error: unknown): void {
+    if (this.disabled) return;
+    const pending = this.sessionReconciliations.get(userId) ?? {
+      bridgeId, revision: 0, attempts: 0, running: false, blocked: false,
+    };
+    pending.revision += 1;
+    pending.blocked = isPermanentPublicationError(error);
+    this.sessionReconciliations.set(userId, pending);
+    this.scheduleSessionReconciliation(userId);
+  }
+
+  private scheduleSessionReconciliation(userId: string): void {
+    const pending = this.sessionReconciliations.get(userId);
+    if (!pending || pending.timer || pending.running || pending.blocked || this.client.state !== 'connected') return;
+    pending.timer = setTimeout(() => {
+      delete pending.timer;
+      if (this.client.state !== 'connected') return;
+      pending.running = true;
+      const revision = pending.revision;
+      void this.sendSessionSnapshotRequired(userId, pending.bridgeId).then(() => {
+        if (this.sessionReconciliations.get(userId) === pending && pending.revision === revision) this.sessionReconciliations.delete(userId);
+        pending.attempts = 0;
+      }, (error: unknown) => {
+        pending.attempts += 1;
+        pending.blocked = isPermanentPublicationError(error);
+      }).finally(() => {
+        pending.running = false;
+        this.scheduleSessionReconciliation(userId);
       });
-    } catch (err) {
-      console.error(`[Centrifugo] Failed to publish session update to ${channel}:`, err);
-      throw err;
-    }
+    }, Math.min(30_000, 1000 * 2 ** Math.min(pending.attempts, 5)));
+    pending.timer.unref?.();
+  }
+
+  /** 300 kB plaintext leaves room for HPKE/base64 and headers under the 450 kB envelope cap. */
+  async publishSessionBoard(userId: string, bridgeId: string, rootId: string, snapshot: BoardSnapshot): Promise<void> {
+    const payload = { type: 'session_board_snapshot', bridgeId, rootId, snapshot };
+    const data = byteLen(JSON.stringify(payload)) <= MAX_PUBLISH_BYTES
+      ? payload : { type: 'session_board_changed', bridgeId, rootId };
+    await this.publish(accountChannel('session-board:updates', userId), data, true);
   }
 
   async publishTerminalData(userId: string, sessionId: string, data: string): Promise<void> {

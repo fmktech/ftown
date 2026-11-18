@@ -178,7 +178,7 @@ export type CommandType =
   | 'dismiss_session_block' | 'retry_session' | 'handoff_session' | 'rename_session' | 'remove_session' | 'bridge_exec'
   | 'list_native_sessions'
   | 'update_session_parent'
-  | 'get_session_usage' | 'get_sessions_usage';
+  | 'get_session_usage' | 'get_sessions_usage' | 'get_attention_summary';
 
 export interface Command {
   type: CommandType;
@@ -187,6 +187,7 @@ export interface Command {
 }
 
 export interface GetSessionAttentionPayload { bridgeId: string; sessionId: string }
+export interface GetAttentionSummaryPayload { bridgeId: string; sessionIds: string[] }
 export interface ResolveSessionAttentionPayload extends GetSessionAttentionPayload { eventId: string }
 export interface PersistedSessionAttention {
   id: string; sequence: number; type: 'agent_needs_input' | 'ask_user'; title: string; message: string; createdAt: string;
@@ -272,7 +273,7 @@ export interface BridgeExecPayload {
   bridgeId?: string;
 }
 
-export type CommandPayload = PreviewChatListRequest | PreviewChatWriteRequest | SendSessionMessagePayload | GetPullRequestStatusesPayload | SessionPreviewStatusRequest | SessionPreviewChunkRequest | GetBridgeUpdatePayload | UpdateBridgePayload | GetSessionAttentionPayload | ResolveSessionAttentionPayload | AnswerSessionAttentionPayload | CreateSessionPayload | StopSessionPayload | HandoffSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | UpdateSessionParentPayload | GetSessionUsagePayload | GetSessionsUsagePayload | Record<string, unknown>;
+export type CommandPayload = PreviewChatListRequest | PreviewChatWriteRequest | SendSessionMessagePayload | GetPullRequestStatusesPayload | SessionPreviewStatusRequest | SessionPreviewChunkRequest | GetBridgeUpdatePayload | UpdateBridgePayload | GetSessionAttentionPayload | GetAttentionSummaryPayload | ResolveSessionAttentionPayload | AnswerSessionAttentionPayload | CreateSessionPayload | StopSessionPayload | HandoffSessionPayload | GetHistoryPayload | RenameSessionPayload | RemoveSessionPayload | BridgeExecPayload | UpdateSessionParentPayload | GetSessionUsagePayload | GetSessionsUsagePayload | Record<string, unknown>;
 
 export interface CommandResponse {
   requestId: string;

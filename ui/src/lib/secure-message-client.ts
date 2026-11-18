@@ -1,8 +1,8 @@
-import type { Centrifuge, Subscription } from "centrifuge";
+import type { Centrifuge, PublicationContext, SubscribedContext, Subscription } from "centrifuge";
 import type { ApplicationRoute, EndpointDirectory, SecureApplication, SecurityCommand, SecurityCommandResults } from "@security/protocol";
 import { SecurityError } from "@security/crypto";
 import { accountChannel } from "@security/ledger/channels";
-import type { MessageClient, MessageEvents, MessageSubscription, MessagePublishOptions } from "./message-client";
+import { UNRECOVERED_SUBSCRIBED_CONTEXT, type MessageClient, type MessageEvents, type MessageSubscription, type MessagePublishOptions } from "./message-client";
 import { applicationJson, SecureEndpointRuntime } from "./secure-endpoint-runtime";
 
 function record(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
@@ -11,7 +11,15 @@ type Listener = (context: never) => void;
 class SecureSubscription implements MessageSubscription {
   private listeners = new Map<keyof MessageEvents, Set<Listener>>();
   private queue: Promise<void> = Promise.resolve();
-  private receiving = (context: { data: unknown }) => {
+  private streamEpoch = "";
+  private receiving = (context: PublicationContext) => {
+    // Capture the broker epoch before decryption yields. A reconnect can move
+    // the raw subscription to another epoch while this packet is queued.
+    const epoch = this.streamEpoch;
+    if (Number.isSafeInteger(context.offset) && context.offset! >= 0 && epoch
+      && (!this.latestStreamPosition || this.latestStreamPosition.epoch !== epoch || context.offset! > this.latestStreamPosition.offset)) {
+      this.latestStreamPosition = { offset: context.offset!, epoch };
+    }
     this.queue = this.queue.then(async () => {
       for (const value of await this.owner.securityRuntime.receive(context.data, this.channel)) {
         if (value.application.route.kind === "response" && record(value.application.data) && typeof value.application.data.status === "number" && value.application.data.status >= 400) {
@@ -20,11 +28,28 @@ class SecureSubscription implements MessageSubscription {
             error: "Encrypted request rejected", data: { code: typeof body.code === "string" ? body.code : "permission_denied" } } });
         }
         if (!this.owner.observe(value.bridgeId, value.application)) continue;
-        this.emit("publication", { data: value.application.data, info: { user: this.owner.userId } });
+        this.emit("publication", { data: value.application.data, info: { user: this.owner.userId },
+          ...(context.offset === undefined ? {} : { offset: context.offset }), ...(epoch ? { epoch } : {}) });
       }
     }).catch(() => { /* Unauthenticated/plaintext packets never reach domain handlers. */ });
   };
-  private subscribed = () => this.emit("subscribed", undefined);
+  private latestStreamPosition: { offset: number; epoch: string } | null = null;
+  private subscribed = (context: SubscribedContext) => {
+    const position = context.streamPosition;
+    if (position && Number.isSafeInteger(position.offset) && position.offset >= 0 && typeof position.epoch === "string" && position.epoch) {
+      this.streamEpoch = position.epoch;
+      this.latestStreamPosition = { offset: position.offset, epoch: position.epoch };
+    }
+    const subscribed: MessageEvents["subscribed"] = {
+      recovered: context.recovered,
+      positioned: context.positioned,
+      wasRecovering: context.wasRecovering,
+      ...(position ? { offset: position.offset, epoch: position.epoch } : {}),
+    };
+    // Domain consumers see the same order as the raw stream, even if a prior
+    // publication is still being decrypted when recovery completes.
+    this.queue = this.queue.then(() => { this.emit("subscribed", subscribed); }).catch(() => {});
+  };
   private joined = (context: MessageEvents["join"]) => this.emit("join", context);
   private left = (context: MessageEvents["leave"]) => this.emit("leave", context);
   constructor(readonly channel: string, readonly raw: Subscription, private owner: SecureMessageClient) {
@@ -37,6 +62,7 @@ class SecureSubscription implements MessageSubscription {
   unsubscribe(): void { this.raw.unsubscribe(); }
   publish(data: unknown, options?: MessagePublishOptions): Promise<unknown> { return this.owner.publish(this.channel, data, options); }
   presence() { return this.raw.presence(); }
+  streamPosition() { return this.latestStreamPosition ? { ...this.latestStreamPosition } : null; }
   on<E extends keyof MessageEvents>(event: E, listener: (ctx: MessageEvents[E]) => void): this {
     const listeners = this.listeners.get(event) ?? new Set<Listener>(); listeners.add(listener as Listener); this.listeners.set(event, listeners); return this;
   }
@@ -137,7 +163,7 @@ export class SecureMessageClient implements MessageClient {
       }).catch(() => {});
   };
   private disconnected = () => { this.generation++; this.handshakes.clear(); this.recovering.clear(); this.securityRuntime.disconnected(); };
-  newSubscription(channel: string, options?: { since: { offset: number; epoch: string } }): SecureSubscription {
+  newSubscription(channel: string, options?: { since: { offset: number; epoch: string }; recoverable?: boolean; positioned?: boolean }): SecureSubscription {
     if (this.subscriptions.has(channel)) throw new Error(`Duplicate subscription: ${channel}`);
     const raw = this.raw.getSubscription(channel) ?? this.raw.newSubscription(channel, options);
     const sub = new SecureSubscription(channel, raw, this); this.subscriptions.set(channel, sub); return sub;
@@ -231,7 +257,7 @@ export class SecureMessageClient implements MessageClient {
     void this.ensureReady(bridgeId, force).then(() => {
       if (!this.closed && this.generation === generation && this.recovering.get(bridgeId) === cycle
         && this.securityRuntime.state(bridgeId).status === "ready") {
-        this.getSubscription(accountChannel("commands:rpc", this.userId))?.emit("subscribed", undefined);
+        this.getSubscription(accountChannel("commands:rpc", this.userId))?.emit("subscribed", UNRECOVERED_SUBSCRIBED_CONTEXT);
       }
     }).catch(() => {}).finally(() => {
       if (this.recovering.get(bridgeId) === cycle) this.recovering.delete(bridgeId);
@@ -246,6 +272,9 @@ export class SecureMessageClient implements MessageClient {
     if (value.type === "session_update") {
       if (!record(value.session) || value.session.bridgeId !== bridgeId) return false;
       register(value.session);
+    }
+    if (value.type === "session_board_snapshot" || value.type === "session_board_changed" || value.type === "session_snapshot_required") {
+      if (value.bridgeId !== bridgeId) return false;
     }
     if (value.type === "command_response" && record(value.response)) {
       const response = value.response;

@@ -8,8 +8,10 @@ import { randomUUID } from 'node:crypto';
 import { CentrifugoClient } from './centrifugo-client.js';
 import { secureFixture } from './security/bridge/fixtures.test.js';
 import { loadLocalIdentity } from './security/bridge/identity.js';
-import { seal } from './security/crypto.js';
-import type { SecureApplication } from './security/protocol.js';
+import { seal, generateEndpoint } from './security/crypto.js';
+import type { SecureApplication, SecureEnvelope } from './security/protocol.js';
+import type { Session } from './types.js';
+import { OUTBOUND_MAX_QUEUED } from './outbound-pipeline-types.js';
 import { signHeadAnnouncement } from './security/ledger/announce.js';
 import { generateAuthKey } from './security/ledger/proof.js';
 import { UpdateAdmission, UpdateResponseTicket } from './update-admission.js';
@@ -31,7 +33,7 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
     type: 'ftown_encrypted', version: 1, senderId: identity.endpoint.id, recipientId: secure.security.endpoint.id,
     ownerId: identity.endpoint.ownerId, bridgeId: 'bridge', channel, purpose: 'application', messageId: randomUUID(),
     createdAt: Date.now(), expiresAt: Date.now() + 60000, receiverEpoch: secure.security.receiverEpoch }, new TextEncoder().encode(JSON.stringify(data)));
-  return { client, subscriptions, packet, transport };
+  return { client, subscriptions, packet, transport, security: secure.security, identity };
 }
 const settle = async (condition: () => boolean) => { for (let count = 0; count < 100 && !condition(); count++) await new Promise(resolve => setTimeout(resolve, 5)); };
 
@@ -120,6 +122,7 @@ async function publishFixture(t: { after(fn: () => Promise<void>): void }, recip
   let calls = 0;
   const state = { inFlight: 0, maxInFlight: 0, replyMs: (_call: number) => 50 };
   const transport = Object.assign(new EventEmitter(), { state: 'connected',
+    disconnect() {},
     publish: async (channel: string, data: { recipientId?: string; messageId?: string }) => {
       const call = calls++; principalCallsAtPublish.push(principalCalls.length);
       published.push({ channel, recipientId: String(data.recipientId), messageId: String(data.messageId) });
@@ -130,7 +133,7 @@ async function publishFixture(t: { after(fn: () => Promise<void>): void }, recip
   const client = new CentrifugoClient('ws://127.0.0.1:1/unused', '', async () => '');
   Object.defineProperty(client, 'client', { value: transport }); client.setSecurity(security);
   t.after(async () => { await security.close(); await rm(directory, { recursive: true, force: true }); });
-  return { client, published, state, sealedTags, recipientCount, principalCalls, principalCallsAtPublish };
+  return { client, published, state, sealedTags, recipientCount, principalCalls, principalCallsAtPublish, transport, security };
 }
 
 const settleLong = async (condition: () => boolean) => { for (let count = 0; count < 3000 && !condition(); count++) await new Promise(resolve => setTimeout(resolve, 5)); };
@@ -320,4 +323,81 @@ test('publishLedgerAnnouncement publishes the announcement on the subscribed led
   assert.deepEqual(f.published, [{ channel: `bridges:ledger#${ANNOUNCE_ACCOUNT}`, data: f.announcement }]);
   const disabled = new CentrifugoClient('ws://127.0.0.1:1/unused', '', async () => '', { disabled: true, onLedgerMessage: () => {} });
   await assert.rejects(disabled.publishLedgerAnnouncement(ANNOUNCE_ACCOUNT, f.announcement), /Ledger channel not subscribed/);
+});
+
+
+test('board snapshots and oversized markers use the shared encrypted publication pipeline', async t => {
+  const f = await publishFixture(t, 1);
+  f.state.replyMs = () => 0;
+  const snapshot = { board: { rootId: 'root', cursor: 0, cards: [], rollup: {} }, events: [], attention: [] } as unknown as import('./coordination/contract-c.js').BoardSnapshot;
+  await f.client.publishSessionBoard(email, 'bridge', 'root', snapshot);
+  const large = structuredClone(snapshot);
+  large.events = [{ summary: '🦋'.repeat(80_000) }] as typeof large.events;
+  await f.client.publishSessionBoard(email, 'bridge', 'root', large);
+  await settleLong(() => f.published.length === 2 && f.state.inFlight === 0);
+  assert.deepEqual(f.sealedTags.map(value => JSON.parse(value)), [
+    { type: 'session_board_snapshot', bridgeId: 'bridge', rootId: 'root', snapshot },
+    { type: 'session_board_changed', bridgeId: 'bridge', rootId: 'root' },
+  ]);
+  assert.deepEqual(f.published.map(p => p.channel), [`session-board:updates#${email}`, `session-board:updates#${email}`]);
+});
+
+const drainPublications = async () => { for (let n = 0; n < 8; n++) await new Promise<void>(resolve => setImmediate(resolve)); };
+const wireSession = (): Session => ({ id: 'session', name: 'session', command: '', bridgeId: 'bridge', status: 'running', createdAt: '', updatedAt: '' });
+
+test('connected session send failure coalesces an acknowledged snapshot-required reconciliation without delaying CRUD', async t => {
+  const f = await publishFixture(t, 1); t.mock.timers.enable({ apis: ['setTimeout'] });
+  t.after(() => f.client.disconnect());
+  let calls = 0;
+  f.transport.publish = async () => { calls++; if (calls <= 3) throw new Error('transient relay failure'); };
+  await Promise.all([f.client.publishSessionUpdate(email, wireSession()), f.client.publishSessionUpdate(email, wireSession())]);
+  await drainPublications(); assert.equal(calls, 2);
+  t.mock.timers.tick(1000); await drainPublications(); assert.equal(calls, 3);
+  t.mock.timers.tick(1999); await drainPublications(); assert.equal(calls, 3);
+  t.mock.timers.tick(1); await drainPublications(); assert.equal(calls, 4);
+  assert.deepEqual(f.sealedTags.map(value => JSON.parse(value).type), ['session_update', 'session_update', 'session_snapshot_required', 'session_snapshot_required']);
+  t.mock.timers.tick(120_000); await drainPublications(); assert.equal(calls, 4);
+});
+
+test('a connected queue drop schedules one reconciliation after capacity recovers', async t => {
+  const f = await publishFixture(t, 1); t.mock.timers.enable({ apis: ['setTimeout'] });
+  t.after(() => f.client.disconnect());
+  f.transport.publish = async () => {};
+  const seal = f.security.sealPublication.bind(f.security);
+  let release!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  let first = true;
+  f.security.sealPublication = async (channel, data) => { if (first) { first = false; await blocked; } return seal(channel, data); };
+  for (let n = 0; n < OUTBOUND_MAX_QUEUED; n++) void f.client.publishTerminalData(email, 'session', 'held');
+  await f.client.publishSessionUpdate(email, wireSession()); await drainPublications();
+  assert.equal(f.sealedTags.length, 0);
+  release(); await drainPublications();
+  t.mock.timers.tick(1000); await drainPublications();
+  assert.equal(f.sealedTags.filter(value => JSON.parse(value).type === 'session_update').length, 0);
+  assert.equal(f.sealedTags.filter(value => JSON.parse(value).type === 'session_snapshot_required').length, 1);
+});
+
+test('session mutation acknowledgement does not await relay delivery', async t => {
+  const f = await publishFixture(t, 1); let acknowledge!: () => void;
+  f.transport.publish = async () => { await new Promise<void>(resolve => { acknowledge = resolve; }); };
+  await f.client.publishSessionUpdate(email, wireSession());
+  await drainPublications(); assert.equal(typeof acknowledge, 'function');
+  acknowledge(); await drainPublications();
+});
+
+test('real encrypted board snapshots and multibyte oversized markers stay below the envelope bound', async t => {
+  const f = await fixture(t);
+  const browser = await generateEndpoint(f.identity.endpoint.ownerId, 'browser');
+  const invite = await f.security.policy.createInvitation(await f.security.policy.principal(f.identity.endpoint.id), { label: 'browser' });
+  await f.security.policy.consumeInvitation({ type: 'enroll', candidate: browser.endpoint, invitationId: invite.invitationId, invitationSecret: invite.secret, label: 'browser' });
+  const packets: SecureEnvelope[] = [];
+  f.transport.publish = async (_channel, data) => { packets.push(data as SecureEnvelope); };
+  const snapshot = { board: { rootId: 'root', cursor: 0, cards: [], rollup: {} }, events: [], attention: [] } as unknown as import('./coordination/contract-c.js').BoardSnapshot;
+  snapshot.events = [{ summary: '🦋'.repeat(74_000) }] as typeof snapshot.events;
+  await f.client.publishSessionBoard(email, 'bridge', 'root', snapshot);
+  assert.ok(packets.length > 0, 'real policy must have an approved reader');
+  assert.ok(packets.every(packet => Buffer.byteLength(JSON.stringify(packet)) < 450_000));
+  snapshot.events = [{ summary: '🦋'.repeat(90_000) }] as typeof snapshot.events;
+  await f.client.publishSessionBoard(email, 'bridge', 'root', snapshot);
+  assert.ok(Buffer.byteLength(JSON.stringify(packets.at(-1))) < 10_000, 'oversized board must seal a small marker');
 });

@@ -24,6 +24,9 @@ export type WorkspaceTab = 'terminal' | 'overview' | 'preview' | 'review';
 
 interface Props {
   session: Session | null; client: MessageClient | null; userId: string; readable: boolean;
+  /** Whether the workspace is on screen (the inbox and mobile session list hide it). */
+  visible?: boolean;
+  onUsageVisibilityChange?: (sessionId: string | null) => void;
   sendCommand: BridgeRpc['sendCommand']; subscribeAuthority?: SessionPreviewAuthoritySubscriber; securityGeneration: number; open: boolean; onClose: () => void;
   isDesktop: boolean; mobileTab: 'sessions' | WorkspaceTab; onMobileTab: (tab: 'terminal' | 'preview' | 'review') => void;
   reviewOpen?: boolean; reviewActivation?: number; onCloseReview?: () => void;
@@ -67,7 +70,7 @@ function previewErrorMessage(reason: PreviewErrorReason, fileName: string): stri
     case 'unavailable': return `${fileName} is unavailable`;
   }
 }
-export function SessionWorkspace({ session, client, userId, readable, sendCommand, subscribeAuthority, securityGeneration, open, onClose, isDesktop, mobileTab, onMobileTab, onRefit, children, sessions = [], activity, activityBySession, openAttentionBySession, idleSince, reviewOpen = false, reviewActivation = 0, onCloseReview = () => {}, sessionActivation = 0, attention, onHandoff, attentionEntries, openAttentionId = null, onOpenAttentionChange, onDismissAttention, onReplyAttention, onAnswerAttention, onOpenSessionById }: Props) {
+export function SessionWorkspace({ session, client, userId, readable, visible = true, onUsageVisibilityChange, sendCommand, subscribeAuthority, securityGeneration, open, onClose, isDesktop, mobileTab, onMobileTab, onRefit, children, sessions = [], activity, activityBySession, openAttentionBySession, idleSince, reviewOpen = false, reviewActivation = 0, onCloseReview = () => {}, sessionActivation = 0, attention, onHandoff, attentionEntries, openAttentionId = null, onOpenAttentionChange, onDismissAttention, onReplyAttention, onAnswerAttention, onOpenSessionById }: Props) {
   const mainRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
   const [ratio, setRatio] = useState(50);
@@ -148,10 +151,15 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
   const previewDisappeared = previousView.current.showPreview && !showPreview && previousView.current.view === 'preview';
   const activeExpanded = expanded && rawView === view && view !== 'terminal' && view !== 'overview' && !attentionVisible && !previewDisappeared;
   const previewVisible = showPreview && !attentionShown && view === 'preview';
+  const terminalUsageVisible = !activeExpanded && !(compact && view === 'overview')
+    && (!(slotOpen || reviewOpen) || !compact || view === 'terminal');
+  useEffect(() => {
+    onUsageVisibilityChange?.(visible && readable && terminalUsageVisible ? session?.id ?? null : null);
+  }, [visible, readable, terminalUsageVisible, session?.id, onUsageVisibilityChange]);
+  useEffect(() => () => { onUsageVisibilityChange?.(null); }, [onUsageVisibilityChange]);
   // Dashboard data for the board v3 Overview: one get_session_board snapshot of
   // this manager's tree, fetched only while the Overview tab is on screen.
-  const treeSessions = useMemo(() => (session ? [session, ...childSessions] : []), [session, childSessions]);
-  const { snapshot: boardSnapshot, refresh: refreshBoard } = useSessionBoard(sendCommand, session?.bridgeId ?? null, session?.id ?? null, view === 'overview', treeSessions);
+  const { snapshot: boardSnapshot } = useSessionBoard(sendCommand, session?.bridgeId ?? null, session?.id ?? null, visible && readable && view === 'overview', client, userId);
   const sessionsById = useMemo(() => new Map(sessions.map(item => [item.id, item])), [sessions]);
   const childIds = useMemo(() => new Set(childSessions.map(item => item.id)), [childSessions]);
   // Items resolved through the panel stay hidden until the board snapshot catches up.
@@ -169,8 +177,7 @@ export function SessionWorkspace({ session, client, userId, readable, sendComman
     if (!eventId) return;
     setResolvedAttentionIds(current => new Set(current).add(eventId));
     if (openAttentionId === eventId) onOpenAttentionChange?.(null);
-    void refreshBoard();
-  }, [openAttentionId, onOpenAttentionChange, refreshBoard]);
+  }, [openAttentionId, onOpenAttentionChange]);
   const childAttentionItems = useMemo(() => mergeChildAttentionItems({ childIds, liveEntries: attentionEntries ?? [], snapshotAttention: boardSnapshot?.attention, sessionsById, excludeIds: resolvedAttentionIds }), [childIds, attentionEntries, boardSnapshot, sessionsById, resolvedAttentionIds]);
   const childAttention = onOpenAttentionChange && onDismissAttention && onReplyAttention && onAnswerAttention && onOpenSessionById
     ? {

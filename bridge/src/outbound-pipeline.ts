@@ -114,7 +114,7 @@ export const createOutboundPipeline: CreateOutboundPipeline = ({ logger }) => {
     }
   };
 
-  const sendPacket = (label: string, packet: OutboundPacket): void => {
+  const sendPacket = (label: string, packet: OutboundPacket): Promise<void> => {
     const bytes = Number.isFinite(packet.bytes) && packet.bytes > 0 ? packet.bytes : 0;
     inFlightPackets += 1;
     inFlightBytes += bytes;
@@ -130,9 +130,10 @@ export const createOutboundPipeline: CreateOutboundPipeline = ({ logger }) => {
     } catch (err) {
       reply = Promise.reject(err);
     }
-    reply.then(settle, (err: unknown) => {
+    return reply.then(() => { settle(); }, (err: unknown) => {
       settle();
       safeRecordFailure(label, err);
+      throw err;
     });
   };
 
@@ -144,20 +145,31 @@ export const createOutboundPipeline: CreateOutboundPipeline = ({ logger }) => {
     }
   };
 
+  const settleJob = (job: OutboundJob, error?: unknown): void => {
+    try { job.onSettled?.(error); } catch { /* observers must never break the sender */ }
+  };
+
   const processJob = async (job: OutboundJob): Promise<void> => {
-    let packets: readonly OutboundPacket[] = [];
+    const sent: Promise<void>[] = [];
+    let failure: unknown;
     try {
       const prepared: unknown = await job.prepare();
       if (!Array.isArray(prepared)) throw new Error('prepare() did not return an array');
-      packets = prepared;
+      const packets: readonly OutboundPacket[] = prepared;
+      for (const packet of packets) {
+        const bytes = Number.isFinite(packet.bytes) && packet.bytes > 0 ? packet.bytes : 0;
+        if (!hasRoom(bytes)) await waitForRoom(bytes);
+        // Observe immediately: another packet can hold the send window open long
+        // before this job reaches Promise.all. No rejection may escape meanwhile.
+        sent.push(sendPacket(job.label, packet).catch((error: unknown) => {
+          failure ??= error ?? new Error('Publication failed');
+        }));
+      }
     } catch (err) {
       safeRecordFailure(job.label, err);
+      failure ??= err ?? new Error('Publication preparation failed');
     }
-    for (const packet of packets) {
-      const bytes = Number.isFinite(packet.bytes) && packet.bytes > 0 ? packet.bytes : 0;
-      if (!hasRoom(bytes)) await waitForRoom(bytes);
-      sendPacket(job.label, packet);
-    }
+    void Promise.all(sent).then(() => settleJob(job, failure));
   };
 
   const run = async (): Promise<void> => {
@@ -187,13 +199,15 @@ export const createOutboundPipeline: CreateOutboundPipeline = ({ logger }) => {
           } catch {
             // logging must never break the pipeline
           }
+          settleJob(job, new Error('Encrypted publication queue is full'));
           return false;
         }
         queued += 1;
         jobs.push(job);
         if (!running) void run();
         return true;
-      } catch {
+      } catch (error) {
+        settleJob(job, error ?? new Error('Encrypted publication was not accepted'));
         return false;
       }
     },

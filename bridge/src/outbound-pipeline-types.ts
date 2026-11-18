@@ -35,6 +35,8 @@ export interface OutboundJob {
   /** Seals the publication for the readers of one policy snapshot. Called serially, in enqueue order. Each recipient is authorized
    *  again later, in its packet's send(). */
   prepare(): Promise<readonly OutboundPacket[]>;
+  /** Exactly one settlement, including rejected enqueue, preparation or packet failure; callbacks must not throw. */
+  onSettled?(error?: unknown): void;
 }
 
 export interface OutboundLogger {
@@ -43,7 +45,7 @@ export interface OutboundLogger {
 }
 
 export interface OutboundPipeline {
-  /** Accepts the job, or drops it (returns false) when OUTBOUND_MAX_QUEUED jobs are pending. Never throws. */
+  /** Accepts the job, or drops it (returns false) when OUTBOUND_MAX_QUEUED jobs are pending. A drop settles the job with an error. Never throws. */
   enqueue(job: OutboundJob): boolean;
   /** Jobs accepted whose packets have not all been sent yet. */
   readonly queued: number;
@@ -66,4 +68,12 @@ export function describeError(error: unknown): string {
   } catch {
     return 'unknown error';
   }
+}
+
+/** Relay refusals that will not improve by resending the same publication. Reconnect or a new change can retry after policy/config changes. */
+export function isPermanentPublicationError(error: unknown): boolean {
+  if (!error || typeof error !== 'object' || !('code' in error)) return false;
+  const code = error.code;
+  return [101, 102, 103, 104, 107].includes(Number(code))
+    || code === 'permission_denied' || code === 'approval_required' || code === 'key_revoked';
 }

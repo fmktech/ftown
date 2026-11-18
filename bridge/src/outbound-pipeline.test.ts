@@ -79,6 +79,39 @@ afterEach(() => {
 });
 
 describe('outbound pipeline', () => {
+  it('settles rejected sends immediately while a later full window is still blocked', async () => {
+    const sent: string[] = [];
+    const pipeline = createOutboundPipeline({ logger: makeLogger() });
+    const packets = Array.from({ length: OUTBOUND_MAX_IN_FLIGHT_PACKETS + 2 }, (_, i) => makePacket(`p${i}`, 1, sent));
+    const settlements: unknown[] = [];
+    pipeline.enqueue({ ...makeJob('many', packets), onSettled: error => { settlements.push(error); } });
+    await settle();
+    packets[0].reply.reject(new Error('first recipient refused'));
+    await settle();
+    // Still blocked before the final packet: an allSettled installed after the
+    // send loop would leave this rejection unhandled and terminate Node.
+    assert.equal(sent.length, OUTBOUND_MAX_IN_FLIGHT_PACKETS + 1);
+    assert.equal(settlements.length, 0);
+    for (const packet of packets.slice(1)) packet.reply.resolve();
+    await pipeline.idle(); await settle();
+    assert.equal(settlements.length, 1);
+    assert.match(String(settlements[0]), /first recipient refused/);
+  });
+
+  it('settles preparation failure and queue rejection exactly once without disturbing accepted jobs', async () => {
+    const pipeline = createOutboundPipeline({ logger: makeLogger() });
+    let preparationError: unknown;
+    pipeline.enqueue({ label: 'broken', prepare: async () => { throw new Error('cannot seal'); }, onSettled: error => { preparationError = error; } });
+    await pipeline.idle(); await settle();
+    assert.match(String(preparationError), /cannot seal/);
+    const block = deferred<readonly OutboundPacket[]>();
+    for (let i = 0; i < OUTBOUND_MAX_QUEUED; i++) pipeline.enqueue({ label: 'held', prepare: () => block.promise });
+    const dropped: unknown[] = [];
+    assert.equal(pipeline.enqueue({ label: 'dropped', prepare: async () => [], onSettled: error => { dropped.push(error); } }), false);
+    assert.equal(dropped.length, 1); assert.match(String(dropped[0]), /queue is full/);
+    block.resolve([]); await pipeline.idle();
+    assert.equal(dropped.length, 1);
+  });
   it('O1: sends packets in strict FIFO order across jobs even when replies resolve out of order', async () => {
     const sent: string[] = [];
     const pipeline = createOutboundPipeline({ logger: makeLogger() });

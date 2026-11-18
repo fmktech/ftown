@@ -11,6 +11,33 @@ const origin = 'https://ftown.ia.br';
 const other = 'https://preview.example.com';
 const bootstrap = () => ({ version: 1 as const, userId: 'local', bridgeId: 'bridge-1', hostname: 'laptop', localPort: 1234, localNonce: 'admin-secret' });
 
+test('paired local browser supports board snapshots/chunks and batched attention with exact owner targets', async () => {
+  const commands: Command[] = [];
+  const f = await fixture(async command => { commands.push(command); return { requestId: command.requestId, success: true, data: {} }; });
+  try {
+    const p = await f.pair(); let sequence = 0;
+    for (const [type, payload] of [
+      ['get_session_board', { bridgeId: 'bridge-1', sessionId: 'root' }],
+      ['get_session_board', { bridgeId: 'bridge-1', sessionId: 'root', snapshotId: 'a'.repeat(64), offset: 60_000 }],
+      ['get_attention_summary', { bridgeId: 'bridge-1', sessionIds: ['root', 'child'] }],
+    ] as const) {
+      const body = { type, requestId: `dashboard-${sequence++}`, payload };
+      assert.equal((await f.call('commands', 'POST', body)).status, 401);
+      assert.equal((await f.call('commands', 'POST', { ...body, payload: { ...payload, bridgeId: 'other' } }, p.token)).status, 403);
+      assert.equal((await f.call('commands', 'POST', { ...body, payload: { ...payload, extra: true } }, p.token)).status, 400);
+      assert.equal((await f.call('commands', 'POST', body, p.token)).body.success, true);
+    }
+    assert.equal(commands.length, 3);
+    for (const [type, payload] of [
+      ['get_attention_summary', { bridgeId: 'bridge-1', sessionIds: ['__proto__'] }],
+      ['get_attention_summary', { bridgeId: 'bridge-1', sessionIds: [42] }],
+      ['get_session_board', { bridgeId: 'bridge-1', sessionId: 'root', snapshotId: 'a'.repeat(64) }],
+      ['get_session_board', { sessionId: 'root' }],
+    ]) assert.equal((await f.call('commands', 'POST', { type, requestId: `invalid-${sequence++}`, payload }, p.token)).status, 400);
+    assert.equal(commands.length, 3);
+  } finally { await f.close(); }
+});
+
 test('browser attention RPC allows authenticated owner targets and rejects malformed or foreign targets', async () => {
   const commands: Command[] = [];
   const f = await fixture(async command => { commands.push(command); return { requestId: command.requestId, success: true, data: { sessionId: 'session', attention: null } }; });

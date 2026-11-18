@@ -1,5 +1,6 @@
 export type ChannelKind =
   | 'sessions:updates'
+  | 'session-board:updates'
   | 'commands:rpc'
   | 'bridges:presence'
   | 'bridges:security'

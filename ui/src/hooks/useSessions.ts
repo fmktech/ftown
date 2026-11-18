@@ -33,8 +33,11 @@ export type { BridgeExecResponse } from "@/hooks/useBridgeRpc";
 const REMOVED_TOMBSTONE_MS = 12_000;
 const LIST_REPLY_WINDOW_MS = 30_000;
 const MAX_LIST_REQUESTS = 64;
-const LIVE_USAGE_POLL_MS = 15_000;
-const LIVE_USAGE_COALESCE_MS = 1_000;
+type StreamPosition = { offset: number; epoch: string };
+function streamPosition(value: { offset?: number; epoch?: string } | null | undefined): StreamPosition | null {
+  return value && Number.isSafeInteger(value.offset) && value.offset! >= 0 && typeof value.epoch === "string" && value.epoch.length > 0
+    ? { offset: value.offset!, epoch: value.epoch } : null;
+}
 
 function isSessionUsage(value: unknown): value is SessionUsage {
   if (typeof value !== "object" || value === null) return false;
@@ -115,9 +118,10 @@ export function mergeSessionSnapshot(current: Session | undefined, incoming: Ses
 }
 
 interface SessionUpdateMessage {
-  type: 'session_update';
-  session: Session;
-  timestamp: string;
+  type: 'session_update'; session: Session; timestamp: string;
+}
+interface SessionSnapshotRequiredMessage {
+  type: 'session_snapshot_required'; bridgeId: string; timestamp: string;
 }
 
 export interface CreateSessionOptions {
@@ -179,17 +183,24 @@ interface UseSessionsResult {
 export function useSessions(
   client: MessageClient | null,
   userId: string | null,
-  rpc: BridgeRpc
+  rpc: BridgeRpc,
+  usageViewSessionId: string | null = null,
 ): UseSessionsResult {
   const [sessions, setSessions] = useState<Session[]>([]);
   const sessionsSubRef = useRef<MessageSubscription | null>(null);
   const sessionsRef = useRef<Session[]>([]);
-  const usageRequestsRef = useRef<Set<string>>(new Set());
+  const usageRequestsRef = useRef(new Map<string, { dirty: boolean }>());
+  const usageRefreshRef = useRef<() => Promise<void>>(async () => {});
   const usageGenerationRef = useRef(0);
   const confirmedRemovedRef = useRef(new Set<string>());
   const optimisticRef = useRef(new Map<string, { expiry: number; bridgeId?: string }>());
   const observationsRef = useRef(new Map<string, number>());
   const mutationRef = useRef(0);
+  const sessionPositionRef = useRef<StreamPosition>({ offset: 0, epoch: "" });
+  const sessionNeedsSnapshotRef = useRef(true);
+  const readinessRevisionRef = useRef(0);
+  const identityRef = useRef({ client, userId });
+  if (identityRef.current.client !== client || identityRef.current.userId !== userId) identityRef.current = { client, userId };
   const requestListRef = useRef<(coalesce?: boolean) => void>(() => {});
   const removeRef = useRef<(id: string, optimistic: boolean, command: Command) => void>(() => {});
   const { publishCommand, sendCommand, onResponse, onSubscribed } = rpc;
@@ -202,11 +213,28 @@ export function useSessions(
     setSessions(next);
   }, []);
 
-  useEffect(() => client?.securityRuntime?.onChange(() => {
-    const runtime = client.securityRuntime;
+  useEffect(() => {
+    const runtime = client?.securityRuntime;
     if (!runtime) return;
-    updateSessions(previous => previous.filter(session => !["revoked", "key_changed"].includes(runtime.state(session.bridgeId).status)));
-  }), [client, updateSessions]);
+    const identity = identityRef.current;
+    let active = true;
+    readinessRevisionRef.current = 0;
+    let ready = new Set(runtime.snapshot().filter(state => state.status === "ready").map(state => state.bridgeId));
+    const unsubscribe = runtime.onChange(() => {
+      if (!active || identityRef.current !== identity) return;
+      const next = new Set(runtime.snapshot().filter(state => state.status === "ready").map(state => state.bridgeId));
+      const newlyReady = [...next].some(bridgeId => !ready.has(bridgeId));
+      ready = next;
+      updateSessions(previous => previous.filter(session => !["revoked", "key_changed"].includes(runtime.state(session.bridgeId).status)));
+      if (!newlyReady) return;
+      readinessRevisionRef.current += 1;
+      if (sessionNeedsSnapshotRef.current && document.visibilityState !== "hidden") {
+        sessionNeedsSnapshotRef.current = false;
+        requestListRef.current(true);
+      }
+    });
+    return () => { active = false; unsubscribe(); };
+  }, [client, userId, updateSessions]);
 
   useEffect(() => {
     confirmedRemovedRef.current.clear();
@@ -215,6 +243,8 @@ export function useSessions(
     mutationRef.current = 0;
     usageGenerationRef.current += 1;
     usageRequestsRef.current.clear();
+    sessionPositionRef.current = { offset: 0, epoch: "" };
+    sessionNeedsSnapshotRef.current = true;
     updateSessions(() => []);
   }, [userId, updateSessions]);
 
@@ -228,8 +258,11 @@ export function useSessions(
       ? commandTimeoutMs : LIST_REPLY_WINDOW_MS;
     const contextGeneration = usageGenerationRef.current;
     let coalescingTimer: ReturnType<typeof setTimeout> | undefined;
-    const requests = new Map<string, { generation: number; contextGeneration: number; cutoff: number; expiry: number; applied: Set<string> }>();
+    let rpcReadyObserved = false;
+    let sessionsSubscribedOnce = false;
+    const requests = new Map<string, { generation: number; contextGeneration: number; cutoff: number; expiry: number; applied: Set<string>; position: StreamPosition | null; failed: boolean; readinessRevision: number }>();
     const appliedByBridge = new Map<string, number>();
+    const snapshotPositions = new Map<string, StreamPosition>();
     const removals = new Map<string, { id: string; timer: ReturnType<typeof setTimeout> }>();
     const pruneRequests = () => {
       for (const [id, request] of requests) {
@@ -242,10 +275,11 @@ export function useSessions(
       // Recovery callbacks delivered in the same turn share an unanswered
       // broadcast. Manual refresh and rollback always issue a new cutoff.
       if (coalesce && coalescingTimer !== undefined
-        && [...requests.values()].some(r => r.generation === generation && r.applied.size === 0)) return;
+        && [...requests.values()].some(r => r.generation === generation && r.applied.size === 0 && !r.failed)) return;
       const requestId = uuidv4();
       requests.set(requestId, { generation: ++generation, contextGeneration, cutoff: mutationRef.current,
-        expiry: Date.now() + listReplyWindowMs, applied: new Set() });
+        expiry: Date.now() + listReplyWindowMs, applied: new Set(), failed: false, readinessRevision: readinessRevisionRef.current,
+        position: sessionsSubRef.current?.streamPosition?.() ?? streamPosition(sessionPositionRef.current) });
       while (requests.size > MAX_LIST_REQUESTS) requests.delete(requests.keys().next().value!);
       clearTimeout(coalescingTimer);
       coalescingTimer = setTimeout(() => { coalescingTimer = undefined; }, 0);
@@ -288,7 +322,21 @@ export function useSessions(
       pruneRequests();
       // Broadcast remove replies cannot confirm ownership. A failure can
       // safely release optimism and reconcile; sticky confirmation still wins.
-      if (!response.success) { rollback(response.requestId); return; }
+      if (!response.success) {
+        const request = requests.get(response.requestId);
+        if (request && request.generation === generation && !request.failed) {
+          request.failed = true;
+          sessionNeedsSnapshotRef.current = true;
+          // A ready event can precede this asynchronous publish rejection.
+          // Consume it once; a new request captures the current revision, so a
+          // persistent denial cannot create a retry loop.
+          if (request.readinessRevision < readinessRevisionRef.current && document.visibilityState !== "hidden") {
+            sessionNeedsSnapshotRef.current = false;
+            requestList(true);
+          }
+        }
+        rollback(response.requestId); return;
+      }
       if (!response.data || typeof response.data !== "object") return;
       const data = response.data as { sessions?: unknown; bridgeId?: unknown };
       if (!Array.isArray(data.sessions)) return;
@@ -306,6 +354,7 @@ export function useSessions(
         if (request.applied.has(bridgeId) || (appliedByBridge.get(bridgeId) ?? 0) > request.generation) return;
         request.applied.add(bridgeId);
         appliedByBridge.set(bridgeId, request.generation);
+        if (request.position) snapshotPositions.set(bridgeId, request.position);
       }
       const cutoff = request?.cutoff;
       const newer = (id: string) => cutoff !== undefined && (observationsRef.current.get(id) ?? 0) > cutoff;
@@ -336,17 +385,40 @@ export function useSessions(
         return [...merged.values()];
       });
     });
-    const unregisterSubscribed = onSubscribed(() => requestList(true));
+    // The first command-ready signal may follow security enrollment. Later
+    // command resubscriptions defer to positioned sessions recovery.
+    const unregisterSubscribed = onSubscribed(() => {
+      const firstReady = !rpcReadyObserved;
+      rpcReadyObserved = true;
+      if (active && document.visibilityState !== "hidden" && (firstReady || sessionNeedsSnapshotRef.current)) {
+        sessionNeedsSnapshotRef.current = false;
+        requestList(true);
+      }
+    });
     let sessionsSub: MessageSubscription | null = null;
     if (client) {
       const channel = accountChannel("sessions:updates", userId);
       const existing = client.getSubscription(channel);
       if (existing) { existing.removeAllListeners(); existing.unsubscribe(); client.removeSubscription(existing); }
-      sessionsSub = client.newSubscription(channel);
+      sessionsSub = client.newSubscription(channel, { since: sessionPositionRef.current, recoverable: true, positioned: true });
       sessionsSub.on("publication", ctx => {
         if (!active) return;
-        const data = ctx.data as SessionUpdateMessage;
+        const nextPosition = streamPosition({ offset: ctx.offset, epoch: ctx.epoch ?? sessionPositionRef.current.epoch });
+        const previousPosition = streamPosition(sessionPositionRef.current);
+        if (nextPosition && (!previousPosition || nextPosition.epoch !== previousPosition.epoch || nextPosition.offset > previousPosition.offset)) sessionPositionRef.current = nextPosition;
+        const data = ctx.data as SessionUpdateMessage | SessionSnapshotRequiredMessage;
+        if (data?.type === "session_snapshot_required") {
+          if (typeof data.bridgeId !== "string" || !data.bridgeId || typeof data.timestamp !== "string") return;
+          sessionNeedsSnapshotRef.current = true;
+          if (document.visibilityState !== "hidden") {
+            sessionNeedsSnapshotRef.current = false;
+            requestList(true);
+          }
+          return;
+        }
         if (data?.type !== "session_update" || !data.session || typeof data.session.id !== "string") return;
+        const authoritative = snapshotPositions.get(data.session.bridgeId);
+        if (nextPosition && authoritative && nextPosition.epoch === authoritative.epoch && nextPosition.offset <= authoritative.offset) return;
         if ((data.session.status as string) === "removed") {
           confirm(data.session.id);
           updateSessions(prev => prev.filter(s => s.id !== data.session.id));
@@ -362,21 +434,35 @@ export function useSessions(
           });
         }
       });
-      sessionsSub.on("subscribed", () => { if (active) requestList(true); });
+      sessionsSub.on("subscribed", context => {
+        if (!active) return;
+        const initialSubscribe = !sessionsSubscribedOnce;
+        sessionsSubscribedOnce = true;
+        const nextPosition = streamPosition(context);
+        const previousPosition = streamPosition(sessionPositionRef.current);
+        const recovered = context?.recovered === true && context.positioned !== false && !!nextPosition && !!previousPosition
+          && nextPosition.epoch === previousPosition.epoch && nextPosition.offset >= previousPosition.offset;
+        sessionPositionRef.current = nextPosition ?? { offset: 0, epoch: "" };
+        if (document.visibilityState === "hidden") {
+          sessionNeedsSnapshotRef.current = true;
+        } else if (sessionNeedsSnapshotRef.current || !recovered) {
+          sessionNeedsSnapshotRef.current = false;
+          requestList(initialSubscribe);
+        }
+      });
       sessionsSubRef.current = sessionsSub;
       sessionsSub.subscribe();
     }
-    const periodic = window.setInterval(() => {
-      pruneRequests();
-      if (document.visibilityState !== "hidden") requestList(true);
-    }, LIVE_USAGE_POLL_MS);
-    const visible = () => { if (document.visibilityState === "visible") requestList(true); };
+    const visible = () => {
+      if (document.visibilityState !== "visible") { sessionNeedsSnapshotRef.current = true; return; }
+      requestList(false);
+      sessionNeedsSnapshotRef.current = false;
+    };
     document.addEventListener("visibilitychange", visible);
     return () => {
       active = false;
       usageGenerationRef.current += 1;
       unregisterResponse(); unregisterSubscribed();
-      window.clearInterval(periodic);
       clearTimeout(coalescingTimer);
       document.removeEventListener("visibilitychange", visible);
       for (const removal of removals.values()) clearTimeout(removal.timer);
@@ -388,13 +474,16 @@ export function useSessions(
     };
   }, [client, userId, onResponse, onSubscribed, publishCommand, updateSessions]);
 
-  const pollLiveUsage = useCallback(async () => {
+  const refreshLiveUsage = useCallback(async () => {
     if (!userId || (typeof document !== "undefined" && document.visibilityState === "hidden")) return;
-    const batches = buildUsagePollBatches(sessionsRef.current);
+    const selected = sessionsRef.current.filter(session => session.id === usageViewSessionId && session.status === "running");
+    const batches = buildUsagePollBatches(selected);
     await Promise.all(batches.map(async (batch) => {
       const requestKey = `${batch.bridgeId}:${batch.sessionIds.join("|")}`;
-      if (usageRequestsRef.current.has(requestKey)) return;
-      usageRequestsRef.current.add(requestKey);
+      const pending = usageRequestsRef.current.get(requestKey);
+      if (pending) { pending.dirty = true; return; }
+      const entry = { dirty: false };
+      usageRequestsRef.current.set(requestKey, entry);
       const requestGeneration = usageGenerationRef.current;
       try {
         const response = await sendCommand({
@@ -408,43 +497,44 @@ export function useSessions(
         const usageBySession = usages as Record<string, unknown>;
         updateSessions((prev) => prev.map((current) => {
           const usage = usageBySession[current.id];
-          if (current.status === "running" && current.bridgeId === batch.bridgeId && isSessionUsage(usage)) {
+          if (batch.sessionIds.includes(current.id) && current.status === "running" && current.bridgeId === batch.bridgeId && isSessionUsage(usage)) {
             observationsRef.current.set(current.id, ++mutationRef.current);
             return mergeSessionSnapshot(current, { ...current, usage });
           }
           return current;
         }));
       } catch {
-        // Live usage is best-effort; the next interval retries without
-        // disrupting terminal input or session status updates.
+        // Usage is best-effort; entry, visibility and session updates can retry.
       } finally {
-        usageRequestsRef.current.delete(requestKey);
+        if (usageRequestsRef.current.get(requestKey) === entry) {
+          usageRequestsRef.current.delete(requestKey);
+          if (entry.dirty && requestGeneration === usageGenerationRef.current) void Promise.resolve().then(() => usageRefreshRef.current());
+        }
       }
     }));
-  }, [userId, sendCommand, updateSessions]);
+  }, [userId, sendCommand, updateSessions, usageViewSessionId]);
+  usageRefreshRef.current = refreshLiveUsage;
 
-  const usagePollKey = JSON.stringify(buildUsagePollBatches(sessions));
-
+  const usageTarget = sessions.find(session => session.id === usageViewSessionId);
+  // Usage replies only change `usage`: they must never schedule another read.
+  const usageUpdateKey = usageTarget ? JSON.stringify([usageTarget.id, usageTarget.bridgeId, usageTarget.status, usageTarget.updatedAt,
+    usageTarget.shellType, usageTarget.workingDir, usageTarget.codexSessionId, usageTarget.claudeSessionId, usageTarget.museSessionId]) : "";
   useEffect(() => {
-    if (!userId || usagePollKey === "[]") return;
-    const timeout = window.setTimeout(() => void pollLiveUsage(), LIVE_USAGE_COALESCE_MS);
-    return () => window.clearTimeout(timeout);
-  }, [userId, usagePollKey, pollLiveUsage]);
-
-  useEffect(() => {
-    if (!userId) return;
-    const interval = window.setInterval(() => void pollLiveUsage(), LIVE_USAGE_POLL_MS);
-    return () => window.clearInterval(interval);
-  }, [userId, pollLiveUsage]);
+    if (!userId || usageViewSessionId === null) return;
+    if (usageTarget?.status !== "running") return;
+    let active = true;
+    void Promise.resolve().then(() => { if (active) void refreshLiveUsage(); });
+    return () => { active = false; };
+  }, [userId, refreshLiveUsage, usageViewSessionId, usageUpdateKey, usageTarget?.status]);
 
   useEffect(() => {
     if (!userId) return;
     const refreshWhenVisible = () => {
-      if (document.visibilityState === "visible") void pollLiveUsage();
+      if (document.visibilityState === "visible" && usageViewSessionId !== null) void refreshLiveUsage();
     };
     document.addEventListener("visibilitychange", refreshWhenVisible);
     return () => document.removeEventListener("visibilitychange", refreshWhenVisible);
-  }, [userId, pollLiveUsage]);
+  }, [userId, refreshLiveUsage, usageViewSessionId]);
 
   const createSession = useCallback(
     (prompt: string, options?: CreateSessionOptions): Promise<Session> => {
