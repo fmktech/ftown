@@ -44,14 +44,15 @@ const RATE_LIMITED = /\brate limited\b/i;
 const QUOTA_LATER = /\bquota exceeded,\s*try again later\b/i;
 const CODEX_QUOTA = /\bquota exceeded\.\s*check your plan and billing details\b/i;
 const RESOURCE = /(?:^|[^A-Za-z0-9_])RESOURCE_EXHAUSTED(?:[^A-Za-z0-9_]|$)/;
-const NOT_LOGGED = /\bnot logged in\b/i;
-const PLEASE_LOGIN = /\bplease run \/login\b/i;
-const LOGIN_EXPIRED = /\blogin expired\b/i;
-const TOKEN_EXPIRED = /\btoken (?:has )?expired\b/i;
-const SIGN_IN = /\bsign in required\b/i;
-const CANNOT_SIGN_IN = /\bcannot sign in\b/i;
-const AUTH_REQUIRED = /\bauthentication required\b/i;
-const UNAUTHORIZED = /\bunauthorized \(401\)(?!\w)/i;
+// Auth messages are complete CLI UI lines. Broad fragments such as "not
+// logged in" and "sign in required" also occur in command output and docs.
+const CLAUDE_AUTH = /^(?:invalid api key(?:\s*[·—-]\s*please run \/login)?|please run \/login|oauth token expired|login expired|token (?:has )?expired(?:\. please log out and sign in again\.)?)\.?$/i;
+const CODEX_AUTH = /^(?:not logged in|token (?:has )?expired\. please log out and sign in again\.)$/i;
+const MUSE_AUTH = /^not logged in(?:: run `muse login` first)?$/i;
+const GROK_AUTH = /^(?:not logged in\. run `grok login`\.|token expired\. run `grok login` to re-authenticate|unauthorized \(401\))$/i;
+const OPENCODE_AUTH = /^(?:not logged in|please run \/login|sign in required|token has expired and no refresh token is available)$/i;
+const ANTIGRAVITY_AUTH = /^(?:sign in required|not logged in|cannot sign in)$/i;
+const CURSOR_AUTH = /^(?:authentication required|sign in required)$/i;
 const STORAGE_QUOTA = /storage quota|quota_exceeded/i;
 
 const RANK: Record<LimitReason, number> = { usage_limit: 0, rate_limit: 1, auth: 2 };
@@ -110,13 +111,13 @@ function rateHit(shell: string, line: string): boolean {
 }
 
 function authHit(shell: string, line: string): boolean {
-  if (shell === 'cursor') return AUTH_REQUIRED.test(line) || SIGN_IN.test(line);
-  if (shell === 'muse') return NOT_LOGGED.test(line);
-  if (shell === 'claude') return PLEASE_LOGIN.test(line) || NOT_LOGGED.test(line) || LOGIN_EXPIRED.test(line) || TOKEN_EXPIRED.test(line);
-  if (shell === 'codex') return NOT_LOGGED.test(line) || TOKEN_EXPIRED.test(line);
-  if (shell === 'grok') return NOT_LOGGED.test(line) || TOKEN_EXPIRED.test(line) || UNAUTHORIZED.test(line);
-  if (shell === 'opencode') return NOT_LOGGED.test(line) || PLEASE_LOGIN.test(line) || SIGN_IN.test(line) || TOKEN_EXPIRED.test(line);
-  if (shell === 'antigravity') return SIGN_IN.test(line) || NOT_LOGGED.test(line) || CANNOT_SIGN_IN.test(line);
+  if (shell === 'cursor') return CURSOR_AUTH.test(line);
+  if (shell === 'muse') return MUSE_AUTH.test(line);
+  if (shell === 'claude') return CLAUDE_AUTH.test(line);
+  if (shell === 'codex') return CODEX_AUTH.test(line);
+  if (shell === 'grok') return GROK_AUTH.test(line);
+  if (shell === 'opencode') return OPENCODE_AUTH.test(line);
+  if (shell === 'antigravity') return ANTIGRAVITY_AUTH.test(line);
   return false;
 }
 

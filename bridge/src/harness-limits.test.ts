@@ -23,16 +23,21 @@ test('muse rate limit and auth screens', () => {
   assert.equal(retryAfter?.reason, 'rate_limit');
   assert.equal(retryAfter?.resetAt, new Date(NOW.getTime() + 30_000).toISOString());
   assert.equal(detectLimit('muse', 'not logged in: run `muse login` first')?.reason, 'auth');
-  assert.equal(detectLimit('muse', 'Not logged in — run /login')?.reason, 'auth');
+  assert.equal(detectLimit('muse', 'Not logged in — run /login'), undefined);
 });
 
 test('claude usage, rate, and auth screens', () => {
   assert.equal(detectLimit('claude', 'Usage limit reached')?.reason, 'usage_limit');
   assert.equal(detectLimit('claude', 'rate limit exceeded')?.reason, 'rate_limit');
   assert.equal(detectLimit('claude', 'Please run /login')?.reason, 'auth');
-  assert.equal(detectLimit('claude', 'Not logged in. Run claude auth login to authenticate.')?.reason, 'auth');
+  assert.equal(detectLimit('claude', 'Not logged in. Run claude auth login to authenticate.'), undefined);
   assert.equal(detectLimit('claude', 'Login expired')?.reason, 'auth');
+  assert.equal(detectLimit('claude', 'Invalid API key · Please run /login')?.reason, 'auth');
+  assert.equal(detectLimit('claude', 'OAuth token expired')?.reason, 'auth');
   assert.equal(detectLimit('claude', 'token has expired')?.reason, 'auth');
+  assert.equal(detectLimit('claude', 'gh --help\n auth Authenticate gh and git with GitHub\n'), undefined);
+  assert.equal(detectLimit('claude', 'git status\n# See docs about auth and login\n'), undefined);
+  assert.equal(detectLimit('claude', 'Documentation: Please run /login to authenticate'), undefined);
 });
 
 test('codex usage sentence, apostrophes, and billing quota', () => {

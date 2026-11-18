@@ -26,6 +26,7 @@ function harness() {
   const attention: Attention[] = [];
   let now = new Date('2026-01-01T12:00:00.000Z');
   let mailOk = true;
+  let activity: 'thinking' | 'tool_use' | 'idle' | 'unknown' = 'unknown';
   let mailCalls = 0;
   const acceptedKeys: Array<string | undefined> = [];
   const deps = {
@@ -33,6 +34,7 @@ function harness() {
       const found = sessions.get(id);
       return found ? structuredClone(found) : null;
     },
+    loadActivity: async () => activity,
     saveSession: async (next) => { sessions.set(next.id, structuredClone(next)); },
     publishSession: async () => {},
     withSessionWrite: async (_id, task) => { await task(); },
@@ -64,6 +66,7 @@ function harness() {
     acceptedKeys,
     setNow(next: Date) { now = next; },
     setMailOk(ok: boolean) { mailOk = ok; },
+    setActivity(next: typeof activity) { activity = next; },
   };
 }
 
@@ -143,6 +146,30 @@ test('a tmux capability sequence before a limit phrase still blocks', async () =
   const child = h.sessions.get('child')!;
   assert.equal(child.block?.reason, 'usage_limit');
   assert.ok(child.block?.resetAt);
+});
+
+test('gh help and documentation auth wording do not block a running Claude session', async () => {
+  const h = harness();
+  h.sessions.set('child', session({ id: 'child', shellType: 'claude' }));
+  h.monitor.observe('child', 'gh --help\n auth Authenticate gh and git with GitHub\ngit status\nDocs: Please run /login for auth setup\n');
+  await h.monitor.flush('child');
+  assert.equal(h.sessions.get('child')?.block, undefined);
+  assert.equal(h.attention.length, 0);
+});
+
+test('live auth output is ignored while the agent is thinking or using a tool', async () => {
+  const h = harness();
+  h.sessions.set('child', session({ id: 'child', shellType: 'claude' }));
+  h.setActivity('thinking');
+  h.monitor.observe('child', 'Invalid API key · Please run /login\n');
+  await h.monitor.flush('child');
+  assert.equal(h.sessions.get('child')?.block, undefined);
+  assert.equal(h.attention.length, 0);
+  h.setActivity('idle');
+  h.monitor.observe('child', 'Invalid API key · Please run /login\n');
+  await h.monitor.flush('child');
+  assert.equal(h.sessions.get('child')?.block?.reason, 'auth');
+  assert.equal(h.attention.length, 1);
 });
 
 test('a later error is a new transition and mails again', async () => {
@@ -261,9 +288,9 @@ test('automation retirement is not a harness failure', async () => {
 
 test('fresh healthy output clears a recorded auth block without rescanning old log', async () => {
   const h = harness();
-  h.sessions.set('child', session({ id: 'child' }));
-  h.deps.loadTerminalLog = async () => 'Not logged in · Please run /login\n';
-  h.monitor.observe('child', 'Not logged in · Please run /login\n');
+  h.sessions.set('child', session({ id: 'child', shellType: 'claude' }));
+  h.deps.loadTerminalLog = async () => 'Please run /login\n';
+  h.monitor.observe('child', 'Please run /login\n');
   await h.monitor.flush('child');
   assert.equal(h.sessions.get('child')?.block?.reason, 'auth');
   h.monitor.observe('child', 'Working on the requested task\n');
