@@ -139,6 +139,20 @@ export type AnswerSessionAttentionResult =
   | { ok: true; delivery: AttentionAnswerDelivery }
   | { ok: false; code: string; message: string };
 
+/**
+ * Opt-in diagnostics for attention reads (ids, counters and reasons only, never message content). A reply or dismissal relies on a
+ * follow-up read to clear the item; when a read is discarded the item stays on screen with no trace of why. Enable in a browser with
+ * `localStorage.setItem("ftown:debug-attention", "1")`.
+ */
+let attentionDebugEnabled: boolean | null = null;
+function attentionDebug(...details: unknown[]): void {
+  if (attentionDebugEnabled === null) {
+    try { attentionDebugEnabled = typeof window !== "undefined" && window.localStorage.getItem("ftown:debug-attention") === "1"; }
+    catch { attentionDebugEnabled = false; }
+  }
+  if (attentionDebugEnabled) console.debug("[attention]", ...details);
+}
+
 export function useAllSessionEvents(
   client: MessageClient | null,
   sessions: Session[],
@@ -191,7 +205,7 @@ export function useAllSessionEvents(
     const owner = subsRef.current.get(sessionId);
     const user = owner?.user;
     const session = sessionsRef.current.find(row => row.id === sessionId && row.status === "running");
-    if (!owner || owner.client !== clientRef.current || owner.user !== userIdRef.current || !session || !rpcRef.current) return;
+    if (!owner || owner.client !== clientRef.current || owner.user !== userIdRef.current || !session || !rpcRef.current) { attentionDebug("read skipped", sessionId, { owner: !!owner, session: !!session, rpc: !!rpcRef.current }); return; }
     const observation = observations.current.get(sessionId) ?? 0;
     const read = (reads.current.get(sessionId) ?? 0) + 1;
     reads.current.set(sessionId, read);
@@ -208,16 +222,19 @@ export function useAllSessionEvents(
       try {
         const response = await rpcRef.current.sendCommand({ type: "get_session_attention", requestId: uuidv4(),
           payload: { bridgeId: session.bridgeId, sessionId } });
-        if (!response.success) { retryOnce(); return; }
+        if (!response.success) { attentionDebug("read failed", sessionId, read, response.error ?? null); retryOnce(); return; }
         retried.current.delete(sessionId);
         if (userIdRef.current !== user || clientRef.current !== owner.client
           || subsRef.current.get(sessionId) !== owner || reads.current.get(sessionId) !== read
           || (observations.current.get(sessionId) ?? 0) !== observation
-          || !sessionsRef.current.some(row => row.id === sessionId && row.bridgeId === session.bridgeId && row.status === "running")) return;
+          || !sessionsRef.current.some(row => row.id === sessionId && row.bridgeId === session.bridgeId && row.status === "running")) {
+          attentionDebug("read fenced", sessionId, { read, latest: reads.current.get(sessionId), observation, nowObservation: observations.current.get(sessionId) ?? 0,
+            owner: subsRef.current.get(sessionId) === owner, running: sessionsRef.current.some(row => row.id === sessionId && row.status === "running") }); return; }
         const snapshot = snapshotResponse(response.data, sessionId);
-        if (!snapshot) return;
+        if (!snapshot) { attentionDebug("bad snapshot", sessionId, read); return; }
         const known = canonical.current.get(sessionId);
-        if (known && known.sequence > snapshot.sequence) return;
+        if (known && known.sequence > snapshot.sequence) { attentionDebug("older snapshot", sessionId, known, snapshot.sequence); return; }
+        attentionDebug("read ok", sessionId, { read, resolving, sequence: snapshot.sequence, item: snapshot.attention?.id ?? null });
         const incoming = snapshot.attention && snapshot.attention.sequence > (dismissedThrough.current.get(sessionId) ?? 0)
           ? restoredNotice(snapshot.attention) : undefined;
         canonical.current.set(sessionId, { sequence: snapshot.sequence, activeId: snapshot.attention?.id ?? null });
@@ -225,8 +242,8 @@ export function useAllSessionEvents(
           if (userIdRef.current !== user || clientRef.current !== owner.client || subsRef.current.get(sessionId) !== owner
             || (observations.current.get(sessionId) ?? 0) !== observation || reads.current.get(sessionId) !== read) return prev;
           const current = prev.get(sessionId) ?? { activity: "idle" as const };
-          if (current.attention && !isDurableNotice(current.attention)) return prev;
-          if ((current.attention?.attentionSequence ?? 0) > snapshot.sequence) return prev;
+          if (current.attention && !isDurableNotice(current.attention)) { attentionDebug("apply skipped: non-durable shown", sessionId); return prev; }
+          if ((current.attention?.attentionSequence ?? 0) > snapshot.sequence) { attentionDebug("apply skipped: shown newer", sessionId, current.attention?.attentionSequence, snapshot.sequence); return prev; }
           let attention = incoming;
           let kept = false;
           // A with-parent item never takes the slot from a displayed item that
@@ -245,7 +262,7 @@ export function useAllSessionEvents(
           return new Map(prev).set(sessionId, { ...current, attention });
         });
       } finally { release(); }
-    } catch { retryOnce(); /* Older/offline bridges retain the existing live-only dashboard. */ }
+    } catch (error) { attentionDebug("read threw", sessionId, error instanceof Error ? error.message : String(error)); retryOnce(); /* Older/offline bridges retain the existing live-only dashboard. */ }
   }, []);
 
   const hydrate: (sessionId: string, resolving?: boolean) => void = useCallback((sessionId: string, resolving = false) => {
@@ -299,6 +316,7 @@ export function useAllSessionEvents(
       if (clientRef.current !== c || userIdRef.current !== u || subsRef.current.get(sessionId)?.sub !== sub) return;
       const msg = ctx.data as HookEventMessage;
       if (msg.type !== "hook_event") return;
+      attentionDebug("event", sessionId, msg.eventName);
 
       const attention = extractManualInputNotice(msg.eventName, msg.data);
       const activity = hookEventToActivity(msg.eventName);

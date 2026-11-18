@@ -369,6 +369,10 @@ test("mobile Workspace tab keeps its name with a waiting description", async ({ 
 test("preview showing switches to the waiting item, file back, reply returns to file", async ({ page }) => {
   test.setTimeout(240_000);
   await page.setViewportSize({ width: 1280, height: 900 });
+  // Record why the dashboard keeps or clears the item, so a stuck pane names its cause in the report.
+  const attentionLog: string[] = [];
+  await page.addInitScript(() => { window.localStorage.setItem("ftown:debug-attention", "1"); });
+  page.on("console", message => { if (message.text().startsWith("[attention]")) attentionLog.push(`${new Date().toISOString()} ${message.text()}`); });
   const fixture = await createPreviewFixture();
   try {
     await login(page); await waitForBridgeOnline(page);
@@ -412,6 +416,7 @@ test("preview showing switches to the waiting item, file back, reply returns to 
     await expect(pane).toHaveCount(0);
     await expect(iframe.getByRole("heading", { name: `Pane ${stamp} version 1` })).toBeVisible({ timeout: 30_000 });
   } finally {
+    await test.info().attach("attention-log.txt", { body: attentionLog.join("\n"), contentType: "text/plain" });
     await fixture.cleanup().catch(() => undefined);
   }
 });
