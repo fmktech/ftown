@@ -424,6 +424,16 @@ for (const populated of [false, true]) {
     assert.equal(responses.length, 1);
   });
 }
+test('list_sessions answers only this bridge\'s sessions, never records of another bridge identity in the same data dir', async () => {
+  const own = { id: 'mine', bridgeId: 'owner', status: 'running' } as unknown as Session;
+  const stale = { id: 'stale', bridgeId: 'previous-identity', status: 'error' } as unknown as Session;
+  const responses: CommandResponse[] = [];
+  const handler = createCommandHandler({ bridgeId: 'owner', sessionController: { list: async () => [stale, own] }, publishCommandResponse: async r => { responses.push(r); } } as unknown as CommandRpcDeps);
+  await handler({ type: 'list_sessions', requestId: 'list', payload: {} });
+  const data = responses[0].data as { bridgeId: string; sessions: Session[] };
+  assert.deepEqual(data.sessions.map(session => session.id), ['mine']);
+  assert.ok(data.sessions.every(session => session.bridgeId === data.bridgeId));
+});
 test('create_session maps WorktreeError to a 400-class code without leaking git details', async () => {
   const responses: CommandResponse[] = [];
   const handler = createCommandHandler({ bridgeId: 'owner', sessionController: {

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { generateEndpoint, open, seal } from '@security/crypto';
 import type { SecureApplication, SecureEnvelope } from '@security/protocol';
 import { SecureEndpointRuntime } from '../secure-endpoint-runtime';
-import { WebRtcPeer } from './webrtc-peer';
+import { WebRtcPeer, toIceCandidateInit } from './webrtc-peer';
 import { PAIR_TIMEOUT_MS, PING_INTERVAL_MS, type SignalMessage } from './contract';
 
 const ownerId = '00000000-0000-4000-8000-000000000001';
@@ -96,11 +96,19 @@ describe('encrypted WebRTC peer', () => {
     f.peer.handleSignal({ ...signal('webrtc_answer', 'foreign'), pairId: 'foreign-pair' }); expect(f.connection.remote).toBeUndefined();
     f.peer.handleSignal(signal('webrtc_ice', 'not-json'));
     f.peer.handleSignal(signal('webrtc_answer', 'remote-sdp'));
-    await vi.waitFor(() => expect(f.connection.candidates).toEqual([early]));
+    await vi.waitFor(() => expect(f.connection.candidates).toEqual([{ ...early, sdpMLineIndex: 0 }]));
     expect(f.connection.remote).toEqual({ type: 'answer', sdp: 'remote-sdp' });
     f.peer.handleSignal(signal('webrtc_ice', JSON.stringify(late)));
-    await vi.waitFor(() => expect(f.connection.candidates).toEqual([early, late]));
+    await vi.waitFor(() => expect(f.connection.candidates).toEqual([{ ...early, sdpMLineIndex: 0 }, { ...late, sdpMLineIndex: 0 }]));
     const rejected = expect(f.connecting).rejects.toThrow(); f.peer.close(); await rejected; f.runtime.dispose();
+  });
+  it('accepts the bridge\'s { candidate, mid } ICE shape, which addIceCandidate would otherwise reject', () => {
+    expect(toIceCandidateInit({ candidate: 'a=candidate:1 1 UDP 2114977791 192.168.68.70 34034 typ host', mid: '0' }))
+      .toEqual({ candidate: 'candidate:1 1 UDP 2114977791 192.168.68.70 34034 typ host', sdpMid: '0' });
+    expect(toIceCandidateInit({ candidate: 'candidate:x', mid: '' })).toEqual({ candidate: 'candidate:x', sdpMLineIndex: 0 });
+    expect(toIceCandidateInit({ candidate: 'candidate:x', sdpMid: '0', sdpMLineIndex: 0, usernameFragment: 'u' }))
+      .toEqual({ candidate: 'candidate:x', sdpMid: '0', sdpMLineIndex: 0, usernameFragment: 'u' });
+    for (const bad of [null, 'candidate:x', [], {}, { candidate: 7 }]) expect(toIceCandidateInit(bad)).toBeNull();
   });
   it('delivers the screen before output and stops detached sessions without affecting siblings', async () => {
     const f = await fixture(); f.connection.channel.open(); await f.connecting;
