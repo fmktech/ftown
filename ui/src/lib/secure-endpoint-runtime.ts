@@ -193,6 +193,9 @@ export class SecureEndpointRuntime {
     if (pin && endpoint && pin.endpoint.id !== endpoint.id) { this.epochs.delete(bridgeId); this.setState(bridgeId, "key_changed"); return; }
     if (!pin) this.setState(bridgeId, "unpaired", endpoint ?? null);
   }
+  /** Handshakes in flight, and handshakes that have succeeded, per bridge (see handshake). */
+  private readonly handshakesInFlight = new Map<string, number>();
+  private readonly handshakeSuccesses = new Map<string, number>();
   disconnected(bridgeId?: string): void {
     for (const id of bridgeId ? [bridgeId] : this.bridges.keys()) {
       if (!["key_changed", "revoked"].includes(this.state(id).status)) this.setState(id, "offline");
@@ -232,17 +235,38 @@ export class SecureEndpointRuntime {
     clearTimeout(pending.timer); map.delete(key); pending.reject(error);
   }
   /** `timeoutMs` bounds the wait for the welcome (default 30 s). */
+  /**
+   * Several handshakes with one bridge can be in flight at once: the relay's, and one per direct channel attempt (loopback, WebRTC),
+   * each retried on its own schedule. The bridge's state follows them as a whole:
+   * - starting one never takes a ready bridge out of service;
+   * - one success makes the bridge ready;
+   * - a failure marks it offline only when it is the last word: no other handshake is still in flight, and none has succeeded since
+   *   this one started (a relay hello that times out after a direct channel connected must not blink a working bridge offline);
+   * - a failed direct attempt never downgrades a ready bridge: it is one more route, and says nothing about the relay.
+   */
   async handshake(bridgeId: string, channel: string, transmit: SecureTransmit, timeoutMs?: number): Promise<void> {
     const peer = this.usable(bridgeId);
     const challenge = crypto.randomUUID();
     const waiting = this.pending(this.welcomes, challenge, bridgeId, channel, timeoutMs);
-    this.setState(bridgeId, "connecting");
+    const direct = channel.startsWith("direct:");
+    const successesAtStart = this.handshakeSuccesses.get(bridgeId) ?? 0;
+    this.handshakesInFlight.set(bridgeId, (this.handshakesInFlight.get(bridgeId) ?? 0) + 1);
+    if (this.state(bridgeId).status !== "ready") this.setState(bridgeId, "connecting");
     void seal(this.identity, peer, this.header(bridgeId, peer, channel, "hello", null), encoder.encode(JSON.stringify({ type: "hello", challenge })))
       .then(packet => { this.recheck(packet); return transmit(packet); }).catch(error => this.rejectPending(this.welcomes, challenge, error));
+    let failure: { error: unknown } | null = null;
     try {
       const epoch = await waiting; this.usable(bridgeId); this.requireLedgerBridge(bridgeId, peer.id);
-      this.epochs.set(bridgeId, epoch); this.setState(bridgeId, "ready");
-    } catch (error) { this.disconnected(bridgeId); throw error; }
+      this.epochs.set(bridgeId, epoch);
+      this.handshakeSuccesses.set(bridgeId, (this.handshakeSuccesses.get(bridgeId) ?? 0) + 1);
+    } catch (error) { failure = { error }; }
+    const others = (this.handshakesInFlight.get(bridgeId) ?? 1) - 1;
+    if (others > 0) this.handshakesInFlight.set(bridgeId, others); else this.handshakesInFlight.delete(bridgeId);
+    if (!failure) { this.setState(bridgeId, "ready"); return; }
+    const superseded = (this.handshakeSuccesses.get(bridgeId) ?? 0) !== successesAtStart;
+    const ready = this.state(bridgeId).status === "ready";
+    if (!superseded && others === 0 && !(direct && ready)) this.disconnected(bridgeId);
+    throw failure.error;
   }
   /** Solo/local only: account computers are added by pairing, never by invitation. */
   async enroll(invitation: BridgeInvitation, label: string, channel: string, transmit: SecureTransmit): Promise<ApprovedBridge> {

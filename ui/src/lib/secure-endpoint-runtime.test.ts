@@ -138,6 +138,81 @@ const accountRuntime = (f: Account) => new SecureEndpointRuntime(f.browser, { le
 const received = async (f: Account, runtime: SecureEndpointRuntime, data: unknown) =>
   runtime.receive(await packet(f.bridge, f.browser, 'application', { type: 'application', route: { kind: 'publication' }, data, mcp: null }, { ownerId: f.accountId }), channel);
 
+describe('bridge state across concurrent handshakes', () => {
+  const direct = 'direct:loopback-ws:bridge-one:pair';
+  /** A handshake whose hello is answered (or failed) when the test says so. */
+  function controlled(runtime: SecureEndpointRuntime, bridge: EndpointIdentity, browser: EndpointIdentity, on: string) {
+    let hello!: SecureEnvelope; let sent!: () => void; const wasSent = new Promise<void>(resolve => { sent = resolve; });
+    let fail!: (error: Error) => void;
+    const done = runtime.handshake('bridge-one', on, message => { hello = message as SecureEnvelope; sent(); return new Promise<void>((resolve, reject) => { fail = reject; resolve(); }); });
+    const outcome = done.then(() => 'ok', () => 'failed');
+    return {
+      outcome,
+      async answer() {
+        await wasSent;
+        const plain = JSON.parse(new TextDecoder().decode(await open(bridge, browser.endpoint, hello, { ownerId, bridgeId: 'bridge-one', channel: on, recipientId: bridge.endpoint.id, purpose: 'hello' })));
+        await runtime.receive(await packet(bridge, browser, 'welcome', { type: 'welcome', challenge: plain.challenge, receiverEpoch: 'boot-one' }, { channel: on }), on);
+        await outcome;
+      },
+      fail,
+    };
+  }
+  const failing = (runtime: SecureEndpointRuntime, on: string) => runtime.handshake('bridge-one', on, async () => { throw new Error('unreachable'); });
+  const watch = (runtime: SecureEndpointRuntime) => { const seen: string[] = []; runtime.onChange(() => seen.push(runtime.state('bridge-one').status)); return seen; };
+
+  it('a direct attempt never takes a ready bridge out of service, while running or when it fails', async () => {
+    const { browser, bridge, runtime } = await fixture();
+    await establish(runtime, bridge, browser);
+    const seen = watch(runtime);
+    const attempt = failing(runtime, direct);
+    expect(runtime.state('bridge-one').status).toBe('ready');
+    await expect(attempt).rejects.toThrow();
+    expect(seen.filter(status => status !== 'ready')).toEqual([]);
+    runtime.dispose();
+  });
+
+  it('a relay hello that times out after a direct channel connected does not blink the bridge offline', async () => {
+    const { browser, bridge, runtime } = await fixture();
+    // The relay hello goes unanswered (the bridge does not know this browser yet) and will time out.
+    const relay = runtime.handshake('bridge-one', channel, async () => {}, 80).then(() => 'ok', () => 'failed');
+    expect(runtime.state('bridge-one').status).toBe('connecting');
+    // Meanwhile a direct channel connects.
+    await controlled(runtime, bridge, browser, direct).answer();
+    expect(runtime.state('bridge-one').status).toBe('ready');
+    const seen = watch(runtime);
+    expect(await relay).toBe('failed');
+    expect(runtime.state('bridge-one').status).toBe('ready');
+    expect(seen.filter(status => status !== 'ready')).toEqual([]);
+    runtime.dispose();
+  });
+
+  it('a failed attempt leaves the state alone while another handshake is still in flight', async () => {
+    const { browser, bridge, runtime } = await fixture();
+    const relay = controlled(runtime, bridge, browser, channel);
+    await expect(failing(runtime, direct)).rejects.toThrow();
+    expect(runtime.state('bridge-one').status).toBe('connecting');
+    await relay.answer();
+    expect(runtime.state('bridge-one').status).toBe('ready');
+    runtime.dispose();
+  });
+
+  it('the last handshake to fail, with none succeeded, takes the bridge offline', async () => {
+    const { runtime } = await fixture();
+    const first = failing(runtime, direct).catch(() => {}); const second = failing(runtime, channel).catch(() => {});
+    await Promise.all([first, second]);
+    expect(runtime.state('bridge-one').status).toBe('offline');
+    runtime.dispose();
+  });
+
+  it('a failed relay handshake on a ready bridge still takes it offline', async () => {
+    const { browser, bridge, runtime } = await fixture();
+    await establish(runtime, bridge, browser);
+    await expect(failing(runtime, channel)).rejects.toThrow();
+    expect(runtime.state('bridge-one').status).toBe('offline');
+    runtime.dispose();
+  });
+});
+
 describe('account runtime (passkey ledger authority)', () => {
   it('takes its bridges only from the trusted checkpoint and refuses pins and invitations', async () => {
     const f = await account(); const runtime = accountRuntime(f);
