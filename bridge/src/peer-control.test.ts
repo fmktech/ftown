@@ -14,6 +14,7 @@ import { BridgeSecurityService } from './security/bridge/security.js';
 import { executeSecurePacket } from './security/bridge/execute.js';
 import { BridgeSecurityError } from './security/bridge/errors.js';
 import { PeerControl, PeerTargetError, type PeerTransport } from './peer-control.js';
+import { PeerLinks, peerLinkChannel, type LinkDataChannel, type LinkPeerConnection } from './peer-link.js';
 
 const rpId = 'ftown.example';
 const origin = 'https://ftown.example';
@@ -185,4 +186,209 @@ test('an unreachable peer is reported as such (504) and probed as offline', asyn
   assert.deepEqual((await peers.list(true)).map(peer => peer.online), [false]);
   transport.online = true;
   assert.deepEqual((await peers.list(true)).map(peer => peer.online), [true]);
+});
+
+// ---- Direct bridge-to-bridge links ----
+
+/** In-memory WebRTC: an offerer and an answerer are joined once each holds the other's description. */
+class FakeChannel implements LinkDataChannel {
+  other?: FakeChannel; open = false; sent = 0; drop = false;
+  private handlers = { open: [] as (() => void)[], closed: [] as (() => void)[], message: [] as ((msg: string) => void)[] };
+  sendMessage(msg: string): boolean {
+    if (!this.open) return false;
+    this.sent++;
+    if (!this.drop) queueMicrotask(() => { if (this.other?.open) for (const cb of this.other.handlers.message) cb(msg); });
+    return true;
+  }
+  isOpen(): boolean { return this.open; }
+  close(): void {
+    if (!this.open) return;
+    this.open = false; for (const cb of this.handlers.closed) cb();
+    this.other?.close();
+  }
+  onOpen(cb: () => void): void { this.handlers.open.push(cb); }
+  onClosed(cb: () => void): void { this.handlers.closed.push(cb); }
+  onError(): void { /* never errors */ }
+  onMessage(cb: (msg: string) => void): void { this.handlers.message.push(cb); }
+  becomeOpen(): void { this.open = true; for (const cb of this.handlers.open) cb(); }
+}
+class FakeConnection implements LinkPeerConnection {
+  static byDescription = new Map<string, FakeConnection>();
+  static count = 0;
+  private readonly id = ++FakeConnection.count;
+  private local: { sdp: string; type: string } | null = null;
+  private gathering: ((state: string) => void)[] = [];
+  private incoming: ((dc: LinkDataChannel) => void)[] = [];
+  channel?: FakeChannel;
+  private offerer?: FakeConnection;
+  private describe(type: string): void {
+    this.local = { type, sdp: `${type}:${this.id}` };
+    FakeConnection.byDescription.set(this.local.sdp, this);
+    queueMicrotask(() => { for (const cb of this.gathering) cb('complete'); });
+  }
+  createDataChannel(): LinkDataChannel { this.channel = new FakeChannel(); this.describe('offer'); return this.channel; }
+  setRemoteDescription(sdp: string, type: string): void {
+    const remote = FakeConnection.byDescription.get(sdp);
+    if (!remote) throw new Error('Unknown description');
+    if (type === 'offer') { this.offerer = remote; this.describe('answer'); return; }
+    // The answer reached the offerer: both ends are described, so the channel opens on both.
+    const answerer = remote;
+    if (answerer.offerer !== this || !this.channel) throw new Error('Mismatched answer');
+    answerer.channel = new FakeChannel();
+    answerer.channel.other = this.channel; this.channel.other = answerer.channel;
+    for (const cb of answerer.incoming) cb(answerer.channel);
+    queueMicrotask(() => { answerer.channel!.becomeOpen(); this.channel!.becomeOpen(); });
+  }
+  localDescription(): { sdp: string; type: string } | null { return this.local; }
+  gatheringState(): string { return 'new'; }
+  onGatheringStateChange(cb: (state: string) => void): void { this.gathering.push(cb); }
+  onLocalCandidate(): void { /* completion is reported instead */ }
+  onStateChange(): void { /* driven through the channel in these tests */ }
+  onDataChannel(cb: (dc: LinkDataChannel) => void): void { this.incoming.push(cb); }
+  close(): void { this.channel?.close(); }
+}
+
+interface Linked { peers: PeerControl; transport: ReturnType<typeof relay>; studioLinks: PeerLinks; deskLinks: PeerLinks; connections: FakeConnection[];
+  studio: BridgeSecurityService; desk: BridgeSecurityService; settle: () => Promise<void> }
+
+/** Studio drives Desk. Desk serves `echo`, plus the link offer endpoint exactly as the local API server does (peer bridges only). */
+async function linked(t: TestContext, w: World, deskChain: Chain = w.both): Promise<Linked> {
+  const studio = await bridge(t, w, w.studio, w.both);
+  const desk = await bridge(t, w, w.desk, deskChain);
+  const connections: FakeConnection[] = [];
+  const factory = () => { const pc = new FakeConnection(); connections.push(pc); return pc; };
+  const serve = async (message: VerifiedApplication): Promise<ApplicationJson> => {
+    const route = message.application.route;
+    if (route.kind === 'http' && route.path === '/api/peers/link') {
+      const peer = desk.peerBridges().find(item => item.endpoint.id === message.principal.endpoint.id);
+      if (message.principal.endpoint.kind !== 'bridge' || !peer) return { status: 403, body: { error: 'permission_denied' } };
+      const offer = (message.application.data as { body: { pairId: string; sdp: string } }).body;
+      return { status: 200, body: await deskLinks.accept(peer, offer.pairId, offer.sdp) };
+    }
+    return echo(message);
+  };
+  const quiet = { log: () => undefined, factory };
+  const deskLinks: PeerLinks = new PeerLinks({ ...quiet, bridgeId: desk.bridgeId, endpointId: desk.endpoint.id, peers: () => desk.peerBridges(),
+    onRevoked: listener => desk.onRevoked(listener), execute: (packet, route) => executeSecurePacket(desk, packet, route, serve) });
+  const studioLinks = new PeerLinks({ ...quiet, bridgeId: studio.bridgeId, endpointId: studio.endpoint.id, peers: () => studio.peerBridges(),
+    execute: (packet, route) => executeSecurePacket(studio, packet, route, echo) });
+  t.after(() => { studioLinks.closeAll(); deskLinks.closeAll(); });
+  const transport = relay(w, desk, serve);
+  const peers = new PeerControl(studio, transport, studioLinks);
+  // The link is opened beside the first request; wait for that attempt itself to finish.
+  const settle = async () => { await peers.linked('Desk').catch(() => false); };
+  return { peers, transport, studioLinks, deskLinks, connections, studio, desk, settle };
+}
+
+test('the first request opens a direct link and later requests bypass the relay', async t => {
+  const w = await world();
+  const { peers, transport, studioLinks, deskLinks, settle } = await linked(t, w);
+
+  assert.equal((await peers.list())[0].direct, false);
+  assert.equal((await peers.http('Desk', 'GET', '/api/sessions')).status, 200);
+  await settle();
+  assert.deepEqual(studioLinks.status().map(link => link.bridgeId), ['desk-0001']);
+  assert.deepEqual(deskLinks.status().map(link => link.bridgeId), ['studio']);
+  assert.equal((await peers.list())[0].direct, true);
+
+  const relayed = transport.sent;
+  const listed = await peers.http('Desk', 'GET', '/api/sessions?archived=1');
+  assert.deepEqual(listed.body, { method: 'GET', path: '/api/sessions?archived=1', sender: 'bridge', permissions: ['read', 'control'], body: null });
+  const created = await peers.http('Desk', 'POST', '/api/sessions', { prompt: 'x'.repeat(100_000) });
+  assert.equal(((created.body as { body: { prompt: string } }).body.prompt).length, 100_000);
+  assert.equal(transport.sent, relayed, 'nothing more went through the relay');
+});
+
+test('a link accepts only envelopes sealed for it, only cross-bridge requests, and only from a bridge', async t => {
+  const w = await world();
+  const { peers, studio, desk, studioLinks, settle } = await linked(t, w);
+  await peers.http('Desk', 'GET', '/api/sessions'); await settle();
+  const pairId = studioLinks.status()[0].pairId;
+  const channel = peerLinkChannel(desk.bridgeId, pairId);
+  const route = { transport: 'bridge-link' as const, channel, bridgeId: desk.bridgeId, pairId };
+  const deskEntry = studio.peerBridges()[0];
+  const hello = await studio.sealToPeer(deskEntry, 'hello', { type: 'hello', challenge: 'c'.repeat(32) }, channel, crypto.randomUUID(), null);
+  const welcome = await studio.openFromPeer(deskEntry, await desk.handleHandshake(hello, route), 'welcome', channel) as { receiverEpoch: string };
+  const seal = (application: unknown, sealedFor: string, id: string) => studio.sealToPeer(deskEntry, 'application', application, sealedFor, id, welcome.receiverEpoch);
+
+  const ok = crypto.randomUUID();
+  await desk.acceptApplication(await seal({ type: 'application', route: { kind: 'http', requestId: ok, method: 'GET', path: '/api/sessions' }, data: {}, mcp: null }, channel, ok), route);
+
+  // Sealed for the relay channel: not acceptable on the link.
+  const relayed = crypto.randomUUID();
+  await assert.rejects(desk.acceptApplication(await seal({ type: 'application', route: { kind: 'http', requestId: relayed, method: 'GET', path: '/api/sessions' },
+    data: {}, mcp: null }, CHANNEL(w), relayed), route));
+  // Sealed for the link: not acceptable on the relay.
+  const direct = crypto.randomUUID();
+  await assert.rejects(desk.acceptApplication(await seal({ type: 'application', route: { kind: 'http', requestId: direct, method: 'GET', path: '/api/sessions' },
+    data: {}, mcp: null }, channel, direct), { transport: 'cloud', channel: CHANNEL(w), bridgeId: desk.bridgeId, pairId: null }));
+  // A command (the browser surface) is never served on a link.
+  const command = crypto.randomUUID();
+  await assert.rejects(desk.acceptApplication(await seal({ type: 'application', route: { kind: 'command', requestId: command, command: 'list_sessions', sessionId: null },
+    data: { type: 'list_sessions', requestId: command, payload: { bridgeId: desk.bridgeId } }, mcp: null }, channel, command), route),
+    (error: unknown) => error instanceof BridgeSecurityError && error.code === 'wrong_context');
+});
+
+test('a dropped link falls back to the relay; an unanswered change is reported, never repeated', async t => {
+  const w = await world();
+  const { peers, transport, connections, studioLinks, settle } = await linked(t, w);
+  await peers.http('Desk', 'GET', '/api/sessions'); await settle();
+  assert.equal(studioLinks.status().length, 1);
+
+  // The peer stops answering on the link: the change is in doubt, so it is not sent again over the relay.
+  const before = transport.sent;
+  connections[0].channel!.drop = true;
+  const pending = peers.http('Desk', 'POST', '/api/sessions', { prompt: 'once' }, 50);
+  await assert.rejects(pending, /Direct link lost/);
+  assert.equal(transport.sent, before);
+  assert.equal(studioLinks.status().length, 0, 'the unanswered link is closed');
+
+  // With no link, the next request travels over the relay again.
+  assert.equal((await peers.http('Desk', 'GET', '/api/sessions')).status, 200);
+  assert.ok(transport.sent > before);
+});
+
+test('a read that goes unanswered on the link is retried over the relay', async t => {
+  const w = await world();
+  const { peers, transport, connections, settle } = await linked(t, w);
+  await peers.http('Desk', 'GET', '/api/sessions'); await settle();
+  const before = transport.sent;
+  connections[0].channel!.drop = true;
+  assert.equal((await peers.http('Desk', 'GET', '/api/sessions', undefined, 50)).status, 200);
+  assert.ok(transport.sent > before);
+});
+
+test('a bridge revoked in the ledger gets no link', async t => {
+  const w = await world();
+  // Desk already holds the ledger that revokes Studio: the offer is never answered.
+  const refused = await linked(t, w, w.deskRevokedStudio);
+  await assert.rejects(refused.peers.http('Desk', 'GET', '/api/sessions'));
+  await refused.settle();
+  assert.equal(refused.studioLinks.status().length, 0);
+  assert.equal(refused.deskLinks.status().length, 0);
+
+  // An offer for a bridge that is not a peer is refused outright.
+  await assert.rejects(refused.deskLinks.accept(w.studio.entry, crypto.randomUUID(), 'offer:0'), /Unknown peer/);
+});
+
+test('a failed link attempt backs off instead of retrying on every request', async t => {
+  const w = await world();
+  const studio = await bridge(t, w, w.studio, w.both);
+  const desk = await bridge(t, w, w.desk, w.both);
+  // Desk runs an ftown without direct links: the offer path is unknown there.
+  let offers = 0;
+  const serve = async (message: VerifiedApplication): Promise<ApplicationJson> => {
+    const route = message.application.route;
+    if (route.kind === 'http' && route.path === '/api/peers/link') { offers++; return { status: 403, body: { error: 'permission_denied' } }; }
+    return echo(message);
+  };
+  const links = new PeerLinks({ log: () => undefined, factory: () => new FakeConnection(), bridgeId: studio.bridgeId, endpointId: studio.endpoint.id,
+    peers: () => studio.peerBridges(), execute: (packet, route) => executeSecurePacket(studio, packet, route, echo) });
+  t.after(() => links.closeAll());
+  const peers = new PeerControl(studio, relay(w, desk, serve), links);
+  for (let i = 0; i < 3; i++) {
+    assert.equal((await peers.http('Desk', 'GET', '/api/sessions')).status, 200);
+    assert.equal(await peers.linked('Desk'), false);
+  }
+  assert.equal(offers, 1);
 });

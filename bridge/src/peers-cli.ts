@@ -28,7 +28,7 @@ export function extractBridgeOption(args: readonly string[]): { args: string[]; 
   return { args: rest, target };
 }
 
-interface PeerRow { bridgeId: string; label: string; approvedAt: string; online?: boolean }
+interface PeerRow { bridgeId: string; label: string; approvedAt: string; online?: boolean; direct?: boolean }
 
 export function bridgesUsage(): string {
   return `Usage: ftown bridges [--probe] [--json]
@@ -59,7 +59,7 @@ export async function runBridges(args: string[]): Promise<number> {
   if (peers.length === 0) { console.log('no other bridges in this account'); return 0; }
   for (const peer of peers) {
     const state = peer.online === undefined ? '' : peer.online ? '  online' : '  offline';
-    console.log(`${peer.bridgeId}  ${peer.label || '(unnamed)'}${state}`);
+    console.log(`${peer.bridgeId}  ${peer.label || '(unnamed)'}${state}${peer.direct ? '  direct' : ''}`);
   }
   return 0;
 }

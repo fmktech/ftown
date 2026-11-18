@@ -34,6 +34,8 @@ export function classifyHttp(method: string, path: string): OperationPermission 
   // Cross-bridge control (the local API server additionally limits both to the OS-local CLI).
   if (url.pathname === '/api/peers') return method === 'GET' && queryAllows(url, ['probe']) ? result('read', 'peers_list') : deny();
   if (url.pathname === '/api/peers/http') return method === 'POST' && !url.search ? result('control', 'peers_http') : deny();
+  // Direct link setup between two bridges of the account (the local API server limits it to peer bridges).
+  if (url.pathname === '/api/peers/link') return method === 'POST' && !url.search ? result('control', 'peers_link') : deny();
   if (method === 'GET' && url.pathname === '/api/archive') return result('read', 'archive_list');
   if (method === 'GET' && url.pathname === '/api/inbox/resolve') return result('read', 'inbox_resolve');
   if (method === 'GET' && url.pathname === '/api/browser/events') return result('read', 'local_events');

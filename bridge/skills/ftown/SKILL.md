@@ -94,6 +94,10 @@ ftown sessions create --bridge my-laptop --shell codex --workdir ~/src/app --pro
 ftown sessions screen <session-id> --bridge my-laptop --limit 100
 ```
 
+The first command to another bridge goes through the relay and opens a direct
+link to it; later commands use that link (`ftown bridges` marks it `direct`).
+If no direct link can be made, commands keep using the relay.
+
 Requests travel end-to-end encrypted over the account relay; the target bridge
 has to run an ftown version with cross-bridge control. Security commands
 (pairing, devices, revocation) never work across bridges. `--parent` links

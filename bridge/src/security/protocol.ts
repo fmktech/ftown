@@ -11,7 +11,7 @@ export type ApplicationJson = null | boolean | number | string | ApplicationJson
 export type EndpointKind = 'bridge' | 'browser' | 'local-cli';
 export type EndpointPermission = 'read' | 'control' | 'admin';
 export type EnvelopePurpose = 'application' | 'hello' | 'welcome' | 'enroll' | 'enrolled';
-export type SecureTransport = 'cloud' | 'local-http' | 'local-events' | 'loopback-ws' | 'webrtc';
+export type SecureTransport = 'cloud' | 'local-http' | 'local-events' | 'loopback-ws' | 'webrtc' | 'bridge-link';
 
 export interface EndpointPublic {
   version: 1;

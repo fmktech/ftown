@@ -69,6 +69,7 @@ import { createWorktreeRoutes } from './coordination/routes-worktrees.js';
 import { createCoordination, rootOf, type Coordination } from './coordination/wiring.js';
 import { GitWorktrees } from './worktrees.js';
 import { PeerTargetError, type PeerControl } from './peer-control.js';
+import { MAX_LINK_SDP_CHARS, type PeerLinks } from './peer-link.js';
 
 export interface HookPayload {
   ftown_session_id: string;
@@ -234,13 +235,15 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
 
   private peerControl: PeerControl | null = null;
   /** Cross-bridge control: forwards the local CLI's requests to other bridges of this account. */
-  setPeerControl(peers: PeerControl): void { this.peerControl = peers; }
+  private peerLinks: PeerLinks | null = null;
+  setPeerControl(peers: PeerControl, links?: PeerLinks): void { this.peerControl = peers; this.peerLinks = links ?? null; }
   /** GET /api/peers and POST /api/peers/http, for the OS-local CLI only (a browser or a peer bridge never relays through this bridge). */
   private async dispatchPeers(message: VerifiedApplication, method: string, path: string): Promise<ApplicationJson> {
+    const url = new URL(path, 'http://localhost');
+    if (url.pathname === '/api/peers/link') return this.dispatchPeerLink(message, method);
     if (message.principal.endpoint.kind !== 'local-cli') return { status: 403, body: { error: 'permission_denied', code: 'permission_denied' } };
     if (!this.peerControl || !this.security) return { status: 503, body: { error: 'Cross-bridge control is starting', code: 'peers_starting' } };
     await this.security.revalidate(message.principal);
-    const url = new URL(path, 'http://localhost');
     try {
       if (url.pathname === '/api/peers' && method === 'GET') {
         const peers = await this.peerControl.list(url.searchParams.get('probe') === '1');
@@ -262,6 +265,25 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       return { status: 502, body: { error: 'Cross-bridge request failed', code: 'peer_failed', outcomeUnknown: method !== 'GET' } };
     }
     return { status: 404, body: { error: 'Not found' } };
+  }
+
+  /** POST /api/peers/link: another bridge of this account offers a direct link. Only a ledger-listed peer bridge may ask. */
+  private async dispatchPeerLink(message: VerifiedApplication, method: string): Promise<ApplicationJson> {
+    const denied = { status: 403, body: { error: 'permission_denied', code: 'permission_denied' } };
+    if (method !== 'POST' || message.principal.endpoint.kind !== 'bridge') return denied;
+    if (!this.peerLinks || !this.security) return { status: 503, body: { error: 'Cross-bridge control is starting', code: 'peers_starting' } };
+    await this.security.revalidate(message.principal);
+    const peer = this.security.peerBridges().find(item => item.endpoint.id === message.principal.endpoint.id);
+    if (!peer) return denied;
+    const input = (message.application.data as { body?: ApplicationJson } | null)?.body;
+    const offer = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+    if (Object.keys(offer).some(key => key !== 'pairId' && key !== 'sdp') || typeof offer.pairId !== 'string'
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(offer.pairId)
+      || typeof offer.sdp !== 'string' || !offer.sdp || offer.sdp.length > MAX_LINK_SDP_CHARS) {
+      return { status: 400, body: { error: 'Expected { pairId, sdp }' } };
+    }
+    try { return { status: 200, body: applicationJson(await this.peerLinks.accept(peer, offer.pairId, offer.sdp)) }; }
+    catch { return { status: 503, body: { error: 'Direct link unavailable', code: 'link_unavailable' } }; }
   }
 
   setSecurity(security: BridgeSecurityService, info: BridgeSecurityInfo,
