@@ -247,7 +247,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     try {
       if (url.pathname === '/api/peers' && method === 'GET') {
         const peers = await this.peerControl.list(url.searchParams.get('probe') === '1');
-        return applicationJson({ bridgeId: this.security.bridgeId, peers });
+        return { status: 200, body: applicationJson({ bridgeId: this.security.bridgeId, peers }) };
       }
       if (url.pathname === '/api/peers/http' && method === 'POST') {
         const input = (message.application.data as { body?: ApplicationJson } | null)?.body;
