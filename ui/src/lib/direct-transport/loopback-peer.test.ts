@@ -111,35 +111,62 @@ describe('encrypted loopback peer', () => {
   });
 });
 
-describe('read commands on the encrypted loopback peer', () => {
+describe('dashboard commands on the encrypted loopback peer', () => {
   const capabilities = (f: Awaited<ReturnType<typeof fixture>>) => f.respond({ type: 'application', mcp: null,
     route: { kind: 'terminal', sessionId: '', frameType: 'capabilities', pairId: f.pairId }, data: { kind: 'capabilities', commands: true } }, 'application');
   const route = (requestId: string) => ({ kind: 'command' as const, requestId, command: 'list_sessions', sessionId: null });
 
-  it('offers commands only after the bridge announces them', async () => {
+  it('offers commands once the bridge announces them', async () => {
     const f = await fixture(); f.socket.open(); await f.connecting;
     expect(f.peer.canCommand()).toBe(false);
     await capabilities(f);
-    await vi.waitFor(() => expect(f.peer.canCommand()).toBe(true));
+    await expect(f.peer.whenCommandsKnown()).resolves.toBe(true);
+    expect(f.peer.canCommand()).toBe(true);
     f.peer.close(); expect(f.peer.canCommand()).toBe(false); f.runtime.dispose();
   });
 
-  it('seals a command for this channel and resolves with the bridge\'s answer', async () => {
+  it('stops waiting for an announcement shortly after connecting to a bridge that never makes one, and on close', async () => {
+    vi.useFakeTimers();
+    const silent = await fixture(); silent.socket.open(); await silent.connecting;
+    let known: boolean | undefined; void silent.peer.whenCommandsKnown().then(value => { known = value; });
+    await vi.advanceTimersByTimeAsync(1_499); expect(known).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1); expect(known).toBe(false);
+    silent.peer.close(); silent.runtime.dispose();
+    const closing = await fixture(); closing.socket.open(); await closing.connecting; closing.peer.close();
+    await expect(closing.peer.whenCommandsKnown()).resolves.toBe(false); closing.runtime.dispose();
+  });
+
+  it('seals a command for this channel, reports when it has left, and resolves with the bridge\'s answer', async () => {
     const f = await fixture(); f.socket.open(); await f.connecting; await capabilities(f);
-    const answer = f.peer.command(route('read-one'), { type: 'list_sessions', requestId: 'read-one', payload: { bridgeId: 'bridge-one' } });
+    const handle = f.peer.command(route('read-one'), { type: 'list_sessions', requestId: 'read-one', payload: { bridgeId: 'bridge-one' } });
+    await handle.sent;
     await vi.waitFor(() => expect(f.received).toHaveLength(1));
     expect(f.received[0]).toMatchObject({ route: route('read-one'), data: { type: 'list_sessions', requestId: 'read-one' } });
     expect(JSON.stringify(f.socket.sent)).not.toContain('list_sessions');
     const reply = { type: 'command_response', response: { requestId: 'read-one', success: true, data: { sessions: [] } } };
     await f.respond({ type: 'application', route: { kind: 'response', requestId: 'read-one' }, data: reply, mcp: null }, 'application', 'read-one');
-    await expect(answer).resolves.toEqual(reply);
+    await expect(handle.answer).resolves.toEqual(reply);
+    f.peer.close(); f.runtime.dispose();
+  });
+
+  it('sends commands in call order, interleaved with terminal frames', async () => {
+    const f = await fixture(); f.socket.open(); await f.connecting; await capabilities(f);
+    f.peer.attach('session-one', { onOutput: vi.fn(), onScreen: vi.fn() });
+    const first = f.peer.command(route('order-one'), { type: 'list_sessions', requestId: 'order-one', payload: {} });
+    f.peer.sendInput('session-one', 'x');
+    const second = f.peer.command({ ...route('order-two'), command: 'stop_session', sessionId: 'session-one' }, { type: 'stop_session', requestId: 'order-two', payload: { sessionId: 'session-one' } });
+    await Promise.all([first.sent, second.sent]);
+    await vi.waitFor(() => expect(f.received).toHaveLength(4));
+    expect(f.received.map(app => app.route.kind === 'terminal' ? app.route.frameType : app.route.kind === 'command' ? app.route.requestId : '?'))
+      .toEqual(['attach', 'order-one', 'input', 'order-two']);
+    first.answer.catch(() => {}); second.answer.catch(() => {});
     f.peer.close(); f.runtime.dispose();
   });
 
   it('reassembles an answer that arrives in frames', async () => {
     const f = await fixture(); f.socket.open(); await f.connecting; await capabilities(f);
-    const answer = f.peer.command(route('read-two'), { type: 'list_sessions', requestId: 'read-two', payload: { bridgeId: 'bridge-one' } });
-    await vi.waitFor(() => expect(f.received).toHaveLength(1));
+    const handle = f.peer.command(route('read-two'), { type: 'list_sessions', requestId: 'read-two', payload: { bridgeId: 'bridge-one' } });
+    await handle.sent;
     const reply = { type: 'command_response', response: { requestId: 'read-two', success: true, data: { sessions: Array.from({ length: 400 }, (_, i) => ({ id: `s${i}`, title: 'x'.repeat(200) })) } } };
     // Seal without delivering, then deliver the envelope as frames.
     const original = f.socket.onmessage; let captured = '';
@@ -149,13 +176,15 @@ describe('read commands on the encrypted loopback peer', () => {
     const frames = frameMessage(captured);
     expect(frames.length).toBeGreaterThan(1);
     for (const frame of frames) f.socket.onmessage?.({ data: frame });
-    await expect(answer).resolves.toEqual(reply);
+    await expect(handle.answer).resolves.toEqual(reply);
     f.peer.close(); f.runtime.dispose();
   });
 
-  it('rejects a command on a closed peer', async () => {
+  it('reports a command on a closed peer as never sent', async () => {
     const f = await fixture(); f.socket.open(); await f.connecting; f.peer.close();
-    await expect(f.peer.command(route('read-three'), {})).rejects.toThrow('Direct channel closed');
+    const handle = f.peer.command(route('read-three'), {});
+    await handle.sent;
+    await expect(handle.answer).rejects.toMatchObject({ name: 'DirectUnsentError' });
     f.runtime.dispose();
   });
 });

@@ -217,7 +217,7 @@ export class BridgeSecurityService implements Omit<BridgeSecurity, 'adoptAccount
   }
   private requirement(application: SecureApplication, transport: InboundTransportContext): OperationPermission {
     const route = application.route;
-    // A direct browser channel carries terminal frames and read-only commands; everything else stays on the relay.
+    // A direct browser channel carries terminal frames and dashboard commands. Connection setup and HTTP routes stay off it.
     const directBrowser = transport.transport === 'webrtc' || transport.transport === 'loopback-ws';
     if (directBrowser && route.kind !== 'terminal' && route.kind !== 'command') throw new BridgeSecurityError('wrong_context');
     // A direct bridge-to-bridge link carries cross-bridge requests only.
@@ -234,9 +234,7 @@ export class BridgeSecurityService implements Omit<BridgeSecurity, 'adoptAccount
       const sessionId = typeof payload.sessionId === 'string' ? payload.sessionId : null;
       if (data.type !== route.command || data.requestId !== route.requestId || payload.bridgeId !== this.bridgeId
         || sessionId !== route.sessionId) throw new BridgeSecurityError('wrong_context');
-      const operation = classifyCommand(route.command, payload);
-      if (directBrowser && (operation.permission !== 'read' || operation.mutating)) throw new BridgeSecurityError('wrong_context');
-      return operation;
+      return classifyCommand(route.command, payload);
     }
     if (route.kind === 'http') {
       const data = object(application.data);

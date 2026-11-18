@@ -1,6 +1,6 @@
 import { timingSafeEqual } from 'node:crypto';
 import type { BridgeSecurityService } from '../security/bridge/security.js';
-import { EncryptedPeerChannel, type DirectCommandDispatch } from '../security/bridge/direct.js';
+import { EncryptedPeerChannel, type DirectCommands } from '../security/bridge/direct.js';
 import { WebSocket, WebSocketServer, type RawData } from 'ws';
 
 import type { Server as HttpServer, IncomingMessage } from 'node:http';
@@ -69,8 +69,8 @@ export interface LoopbackPeerServerOptions {
    * receives output that precedes its own snapshot.
    */
   onAttach: (sessionId: string, deliver: (screen: string) => void) => string | void;
-  /** Serves read-only dashboard commands arriving on a peer's channel. */
-  onCommand?: DirectCommandDispatch;
+  /** Serves dashboard commands arriving on a peer's channel. */
+  onCommand?: DirectCommands;
 }
 
 /**
@@ -248,7 +248,7 @@ class LoopbackPeer {
 export class LoopbackPeerServer {
   readonly security?: BridgeSecurityService;
   readonly bridgeId: string;
-  readonly onCommand?: DirectCommandDispatch;
+  readonly onCommand?: DirectCommands;
   private readonly nonce: string;
   private readonly authorize?: (token: string, origin: string) => boolean;
   private readonly allowedOrigins: string[];

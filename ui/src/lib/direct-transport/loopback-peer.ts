@@ -9,6 +9,9 @@ import {
   PING_INTERVAL_MS,
   type DirectMessage,
   type TerminalDataHandlers,
+  COMMANDS_ANNOUNCE_MS,
+  DirectUnsentError,
+  type DirectCommandHandle,
 } from './contract';
 
 /** WebSocket readyState value for an open socket (browser constant WebSocket.OPEN). */
@@ -54,9 +57,10 @@ export interface LoopbackPeerApi {
   sendResize(sessionId: string, cols: number, rows: number): void;
   close(): void;
   onClose(cb: () => void): void;
-  /** Whether the bridge announced that this channel answers read-only commands. */
+  /** Whether the bridge announced that this channel answers dashboard commands. */
   canCommand?(): boolean;
-  command?(route: DirectCommandRoute, data: unknown): Promise<ApplicationJson>;
+  whenCommandsKnown?(): Promise<boolean>;
+  command?(route: DirectCommandRoute, data: unknown): DirectCommandHandle<ApplicationJson>;
 }
 
 export type LoopbackPeerFactory = (opts: LoopbackPeerOptions) => LoopbackPeerApi;
@@ -81,8 +85,11 @@ export class LoopbackPeer implements LoopbackPeerApi {
   private readonly securityRuntime?: SecureEndpointRuntime;
   private incoming: Promise<void> = Promise.resolve();
   private readonly assembler = new FrameAssembler();
-  /** Set when the bridge announces that this channel answers read-only commands. */
+  /** Set when the bridge announces that this channel answers dashboard commands. */
   private commandsOffered = false;
+  private settleCommands!: (offered: boolean) => void;
+  private readonly commandsKnown = new Promise<boolean>(resolve => { this.settleCommands = resolve; });
+  private commandsTimer: ReturnType<typeof setTimeout> | null = null;
   private outgoing: Promise<void> = Promise.resolve();
   private readonly wsFactory: WebSocketFactory;
 
@@ -150,6 +157,8 @@ export class LoopbackPeer implements LoopbackPeerApi {
       if (this.closed) return;
       if (this.connectTimer) clearTimeout(this.connectTimer);
       this.connectTimer = null; this.startPing(); this.resolve();
+      // An older bridge never announces commands; stop waiting for it shortly after connecting.
+      this.commandsTimer = setTimeout(() => this.settleCommands(false), COMMANDS_ANNOUNCE_MS);
     }).catch(() => this.fail(new Error('Encrypted loopback handshake failed')));
   }
 
@@ -189,6 +198,7 @@ export class LoopbackPeer implements LoopbackPeerApi {
         break;
       case 'capabilities':
         this.commandsOffered = msg.commands === true;
+        this.settleCommands(this.commandsOffered);
         break;
       default:
         break;
@@ -236,13 +246,29 @@ export class LoopbackPeer implements LoopbackPeerApi {
 
   canCommand(): boolean { return this.commandsOffered && !this.closed; }
 
-  /** Sends one read-only command on this channel and resolves with the bridge's answer. */
-  command(route: DirectCommandRoute, data: unknown): Promise<ApplicationJson> {
-    if (this.closed || !this.securityRuntime) return Promise.reject(new Error('Direct channel closed'));
-    return this.securityRuntime.request(this.bridgeId, this.secureChannel(), route, data, async packet => {
-      if (!this.ws || this.ws.readyState !== WS_OPEN || this.closed) throw new Error('Direct channel closed');
-      this.ws.send(JSON.stringify(packet));
+  /** Resolves once it is known whether the bridge serves commands here: its announcement, a short wait after connecting, or close. */
+  whenCommandsKnown(): Promise<boolean> { return this.commandsKnown; }
+
+  /**
+   * Sends one dashboard command on this channel, in call order with other commands and terminal frames. `sent` settles once the
+   * command has left; `answer` settles with the bridge's reply, or rejects with DirectUnsentError when it never left.
+   */
+  command(route: DirectCommandRoute, data: unknown): DirectCommandHandle<ApplicationJson> {
+    let markSent!: () => void;
+    const sent = new Promise<void>(resolve => { markSent = resolve; });
+    const answer = new Promise<ApplicationJson>((resolve, reject) => {
+      this.outgoing = this.outgoing.then(async () => {
+        if (this.closed || !this.securityRuntime) { reject(new DirectUnsentError()); markSent(); return; }
+        let transmitted = false;
+        this.securityRuntime.request(this.bridgeId, this.secureChannel(), route, data, async packet => {
+          if (!this.ws || this.ws.readyState !== WS_OPEN || this.closed) throw new Error('Direct channel closed');
+          this.ws.send(JSON.stringify(packet));
+          transmitted = true; markSent();
+        }).then(resolve, (error: unknown) => { reject(transmitted ? error : new DirectUnsentError()); markSent(); });
+        await sent;
+      });
     });
+    return { sent, answer };
   }
 
   onClose(cb: () => void): void {
@@ -256,6 +282,8 @@ export class LoopbackPeer implements LoopbackPeerApi {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    if (this.commandsTimer) clearTimeout(this.commandsTimer);
+    this.settleCommands(false);
 
     if (this.connectTimer) {
       clearTimeout(this.connectTimer);

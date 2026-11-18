@@ -4,7 +4,7 @@ import type { EndpointIdentity, SecureApplication, SecureEnvelope } from '@secur
 import { generateEndpoint, open, seal } from '@security/crypto';
 import type { LedgerCheckpoint } from '@security/ledger/protocol';
 import { applicationJson, SecureEndpointRuntime, type LedgerBridgeAuthority } from './secure-endpoint-runtime';
-import { isDirectRead, SecureMessageClient, type DirectCommandSender, type ReadyRetryPolicy } from './secure-message-client';
+import { isDirectCommand, isDirectRead, SecureMessageClient, type DirectCommandSender, type ReadyRetryPolicy } from './secure-message-client';
 
 const ownerId = '00000000-0000-4000-8000-000000000001';
 const userId = 'owner@example.test';
@@ -374,21 +374,24 @@ describe('account computer readiness after a new browser enrolls', () => {
   });
 });
 
-describe('read commands over a direct channel', () => {
+describe('dashboard commands over a direct channel', () => {
+  type Handle = { answer: Promise<ReturnType<typeof applicationJson>> } | null;
   /** A direct sender that answers like the bridge: a command_response carrying the request id it was sent. */
   const answering = (data: unknown = { sessions: [{ id: 'session-two', bridgeId: 'bridge-a' }] }) =>
-    vi.fn<DirectCommandSender>((_bridgeId, route) => Promise.resolve(applicationJson({ type: 'command_response', response: { requestId: route.requestId, success: true, data } })));
+    vi.fn<DirectCommandSender>(async (_bridgeId, route) => ({ answer: Promise.resolve(applicationJson({ type: 'command_response', response: { requestId: route.requestId, success: true, data } })) }));
   const publications = (client: SecureMessageClient) => {
     const seen: unknown[] = [];
     client.getSubscription(channel)!.on('publication', ctx => seen.push(ctx.data));
     return seen;
   };
+  const unsent = () => Object.assign(new Error('not sent'), { name: 'DirectUnsentError' });
 
-  it('classifies only reads as direct, and never connection setup', () => {
+  it('sends every dashboard command direct except connection setup and security commands; only reads may be repeated', () => {
+    for (const command of ['list_sessions', 'get_session_usage', 'stop_session', 'send_message', 'create_session', 'update_bridge']) expect(isDirectCommand(command, { sessionId: 's', bridgeId: 'b' })).toBe(true);
+    for (const command of ['terminal_watch', 'terminal_unwatch', 'webrtc_offer', 'webrtc_answer', 'webrtc_ice', 'webrtc_close', 'security_revoke', 'security_invite', 'no_such_command']) expect(isDirectCommand(command, { sessionId: 's' })).toBe(false);
     expect(isDirectRead('list_sessions', { bridgeId: 'b' })).toBe(true);
     expect(isDirectRead('get_session_usage', { sessionId: 's', bridgeId: 'b' })).toBe(true);
-    for (const command of ['stop_session', 'send_message', 'create_session', 'security_revoke', 'update_bridge', 'no_such_command']) expect(isDirectRead(command, { sessionId: 's' })).toBe(false);
-    for (const command of ['terminal_watch', 'terminal_unwatch', 'webrtc_offer', 'webrtc_answer', 'webrtc_ice', 'webrtc_close']) expect(isDirectRead(command, { sessionId: 's' })).toBe(false);
+    for (const command of ['stop_session', 'send_message', 'create_session', 'update_bridge', 'terminal_watch', 'no_such_command']) expect(isDirectRead(command, { sessionId: 's' })).toBe(false);
   });
 
   it('answers a read from the direct channel without touching the relay, under the caller\'s request id', async () => {
@@ -399,8 +402,8 @@ describe('read commands over a direct channel', () => {
       .resolves.toMatchObject({ requestId: 'usage-one', success: true });
     expect(raw.publish).not.toHaveBeenCalled();
     expect(direct).toHaveBeenCalledTimes(1);
-    const [bridgeId, route, data] = direct.mock.calls[0];
-    expect(bridgeId).toBe('bridge-a');
+    const [bridgeId, route, data, timeoutMs] = direct.mock.calls[0];
+    expect(bridgeId).toBe('bridge-a'); expect(timeoutMs).toBe(8_000);
     // The direct attempt uses its own id, so a later relay attempt is not a replay of it.
     expect(route.requestId).not.toBe('usage-one');
     expect(data).toMatchObject({ type: 'get_session_usage', requestId: route.requestId, payload: { sessionId: 'session-one', bridgeId: 'bridge-a' } });
@@ -408,28 +411,37 @@ describe('read commands over a direct channel', () => {
     client.dispose(); runtime.dispose();
   });
 
-  it('sends each bridge of a fan-out its own way: direct where there is a channel, relay elsewhere', async () => {
+  it('sends a command that changes something direct too, waiting up to the command deadline for its answer', async () => {
     const { runtime, raw, client } = await setup();
-    const direct = vi.fn<DirectCommandSender>((bridgeId, route) => bridgeId === 'bridge-a'
-      ? Promise.resolve(applicationJson({ type: 'command_response', response: { requestId: route.requestId, success: true, data: { sessions: [] } } })) : null);
-    client.setDirectCommands(direct);
+    const direct = answering({}); client.setDirectCommands(direct);
+    await expect(client.request({ type: 'stop_session', requestId: 'stop-direct', payload: { sessionId: 'session-one' } }))
+      .resolves.toMatchObject({ requestId: 'stop-direct', success: true });
+    expect(raw.publish).not.toHaveBeenCalled();
+    expect(direct.mock.calls[0][3]).toBeGreaterThan(30_000);
+    client.dispose(); runtime.dispose();
+  });
+
+  it('sends each bridge of a fan-out its own way: direct where the bridge is reachable, relay elsewhere', async () => {
+    const { runtime, raw, client } = await setup();
+    client.setDirectCommands(async (bridgeId, route): Promise<Handle> => bridgeId === 'bridge-a'
+      ? { answer: Promise.resolve(applicationJson({ type: 'command_response', response: { requestId: route.requestId, success: true, data: { sessions: [] } } })) } : null);
     await client.publish(channel, { type: 'list_sessions', requestId: 'list-two', payload: {} });
     expect(raw.publish).toHaveBeenCalledTimes(1);
     expect((raw.publish.mock.calls[0][1] as SecureEnvelope).bridgeId).toBe('bridge-b');
     client.dispose(); runtime.dispose();
   });
 
-  it('falls back to the relay with the original request id when the direct channel fails or answers something else', async () => {
+  it('repeats a read over the relay with the original request id when the direct channel fails or answers something else', async () => {
     for (const failure of [
-      () => Promise.reject(new Error('Direct channel closed')),
-      () => Promise.resolve(applicationJson({ status: 503, body: { code: 'bridge_starting' } })),
-      (requestId: string) => Promise.resolve(applicationJson({ type: 'command_response', response: { requestId: `${requestId}-other`, success: true } })),
+      (): Handle => ({ answer: Promise.reject(new Error('Direct channel closed')) }),
+      (): Handle => ({ answer: Promise.resolve(applicationJson({ status: 500, body: { code: 'outcome_unknown' } })) }),
+      (requestId: string): Handle => ({ answer: Promise.resolve(applicationJson({ type: 'command_response', response: { requestId: `${requestId}-other`, success: true } })) }),
     ]) {
       const { browser, a, runtime, raw, client } = await setup();
-      client.setDirectCommands((_bridgeId, route) => failure(route.requestId));
+      client.setDirectCommands(async (_bridgeId, route) => failure(route.requestId));
       const seen = publications(client);
       await client.publish(channel, { type: 'get_session_usage', requestId: 'usage-two', payload: { sessionId: 'session-one' } });
-      expect(raw.publish).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() => expect(raw.publish).toHaveBeenCalledTimes(1));
       const envelope = raw.publish.mock.calls[0][1] as SecureEnvelope;
       expect(envelope.messageId).toBe('usage-two');
       const app = JSON.parse(new TextDecoder().decode(await open(a, browser.endpoint, envelope,
@@ -440,13 +452,51 @@ describe('read commands over a direct channel', () => {
     }
   });
 
-  it('never offers a command that changes something to the direct channel', async () => {
+  it('never repeats a command that changes something once it has left: a lost answer is reported as uncertain', async () => {
+    for (const [outcome, code] of [
+      [(): Handle => ({ answer: Promise.reject(new Error('Direct channel closed')) }), 'outcome_unknown'],
+      [(): Handle => ({ answer: Promise.resolve(applicationJson({ status: 500, body: { code: 'outcome_unknown', outcomeUnknown: true } })) }), 'outcome_unknown'],
+      [(): Handle => ({ answer: Promise.resolve(applicationJson({ status: 403, body: { code: 'permission_denied', outcomeUnknown: false } })) }), 'permission_denied'],
+    ] as const) {
+      const { runtime, raw, client } = await setup();
+      client.setDirectCommands(async () => outcome());
+      await expect(client.request({ type: 'stop_session', requestId: 'stop-lost', payload: { sessionId: 'session-one' } }))
+        .resolves.toMatchObject({ requestId: 'stop-lost', success: false, data: { code } });
+      expect(raw.publish).not.toHaveBeenCalled();
+      client.dispose(); runtime.dispose();
+    }
+  });
+
+  it('uses the relay for a command that never left the browser, and when the bridge cannot be reached directly', async () => {
+    for (const sender of [
+      async (): Promise<Handle> => ({ answer: Promise.reject(unsent()) }),
+      async (): Promise<Handle> => null,
+      async (): Promise<Handle> => { throw new Error('transport disposed'); },
+    ]) {
+      const { runtime, raw, client } = await setup();
+      client.setDirectCommands(sender);
+      await client.publish(channel, { type: 'stop_session', requestId: 'stop-relay', payload: { sessionId: 'session-one' } });
+      await vi.waitFor(() => expect(raw.publish).toHaveBeenCalledTimes(1));
+      expect((raw.publish.mock.calls[0][1] as SecureEnvelope).messageId).toBe('stop-relay');
+      client.dispose(); runtime.dispose();
+    }
+  });
+
+  it('keeps connection setup and security commands on the relay, and setup is not queued behind a waiting command', async () => {
     const { runtime, raw, client } = await setup();
-    const direct = answering(); client.setDirectCommands(direct);
-    await client.publish(channel, { type: 'stop_session', requestId: 'stop-two', payload: { sessionId: 'session-one' } });
+    // The bridge is being connected to: the command waits, and the offer that opens the connection must still go out.
+    let connect!: (handle: Handle) => void;
+    const direct = vi.fn<DirectCommandSender>(() => new Promise<Handle>(resolve => { connect = resolve; }));
+    client.setDirectCommands(direct);
+    const waiting = client.publish(channel, { type: 'get_session_usage', requestId: 'usage-wait', payload: { sessionId: 'session-one' } });
+    await vi.waitFor(() => expect(direct).toHaveBeenCalledTimes(1));
+    await client.publish(channel, { type: 'webrtc_offer', pairId: 'p', bridgeId: 'bridge-a', clientId: 'c', payload: 'sdp' });
+    expect(raw.publish).toHaveBeenCalledTimes(1);
     await client.publish(channel, { type: 'terminal_watch', sessionId: 'session-one', clientId: 'c' });
-    expect(direct).not.toHaveBeenCalled();
     expect(raw.publish).toHaveBeenCalledTimes(2);
+    expect(direct).toHaveBeenCalledTimes(1);
+    connect(null); await waiting;
+    expect(raw.publish).toHaveBeenCalledTimes(3);
     client.dispose(); runtime.dispose();
   });
 
@@ -455,8 +505,8 @@ describe('read commands over a direct channel', () => {
     client.setDirectCommands(answering({ sessions: [{ id: 'foreign', bridgeId: 'bridge-b' }] }));
     const seen = publications(client);
     await client.publish(channel, { type: 'list_sessions', requestId: 'list-three', payload: { bridgeId: 'bridge-a' } });
+    await vi.waitFor(() => expect(raw.publish).toHaveBeenCalledTimes(1));
     expect(seen).toEqual([]);
-    expect(raw.publish).toHaveBeenCalledTimes(1);
     client.dispose(); runtime.dispose();
   });
 });

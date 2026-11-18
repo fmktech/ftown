@@ -283,8 +283,9 @@ export function useCentrifugo(
     });
     transportRef.current = hybridTransport;
     setTransport(hybridTransport);
-    // Read-only commands go to a bridge over its direct channel when one is attached, and over the relay otherwise.
-    secureClient.setDirectCommands((bridgeId, route, data) => hybridTransport.directCommand(bridgeId, route, data));
+    // Dashboard commands go to a bridge over its direct channel, which is opened on first use; the relay carries them only when
+    // the bridge cannot be reached directly.
+    secureClient.setDirectCommands((bridgeId, route, data, timeoutMs) => hybridTransport.directCommand(bridgeId, route, data, timeoutMs));
 
     // Inbound signaling (webrtc_answer/webrtc_ice/webrtc_close) arrives as
     // publications on this same commands:rpc#{userId} channel. useSessions

@@ -410,7 +410,7 @@ test('an application carrying an MCP action context is never dispatched', async 
   assert.equal(dispatches, 1);
 });
 
-test('direct peers reject routes other than terminal frames and read commands; read-only peers cannot deliver input; control input is delivered', async t => {
+test('direct peers reject routes other than terminal frames and dashboard commands; read-only peers cannot deliver input; control input is delivered', async t => {
   const f = await fixture(t);
   const browser = await generateEndpoint(owner, 'browser');
   const invite = await f.security.policy.createInvitation(await f.security.policy.principal(f.client.endpoint.id), { label: 'browser' });
@@ -445,10 +445,10 @@ test('direct peers reject routes other than terminal frames and read commands; r
   };
   for (const kind of ['command', 'http'] as const) {
     const p = await peer(f.client); const requestId = randomUUID();
-    // A command that changes something, and any HTTP route, end the channel. (Read-only commands are served: see direct-commands.test.ts.)
-    await p.send({ type: 'application', route: kind === 'command' ? { kind, requestId, command: 'stop_session', sessionId: 's1' }
+    // A connection setup command, and any HTTP route, end the channel. (Dashboard commands are served: see direct-commands.test.ts.)
+    await p.send({ type: 'application', route: kind === 'command' ? { kind, requestId, command: 'terminal_watch', sessionId: 's1' }
       : { kind, requestId, method: 'GET', path: '/api/sessions' },
-      data: kind === 'command' ? { type: 'stop_session', requestId, payload: { bridgeId: 'bridge', sessionId: 's1' } } : {}, mcp: null });
+      data: kind === 'command' ? { type: 'terminal_watch', sessionId: 's1', clientId: 'c' } : {}, mcp: null });
   }
   assert.deepEqual(deliveries, []); assert.equal(closures, 2);
   const reader = await peer(browser);

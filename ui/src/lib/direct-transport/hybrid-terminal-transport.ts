@@ -97,6 +97,12 @@ type PeerStatus = 'connecting' | 'attached' | 'failed';
 
 /** A direct read that is not answered by then is repeated over the relay. */
 export const DIRECT_COMMAND_TIMEOUT_MS = 8_000;
+/** How long commands are held for a connection to their bridge, counted from the first attempt or from the loss of a channel. */
+export const DIRECT_CONNECT_WAIT_MS = 10_000;
+/** Pause between attempts inside that window. */
+export const DIRECT_QUICK_RETRY_MS = 500;
+/** After the window, commands start a new attempt at most this often. */
+export const DIRECT_RETRY_MS = 15_000;
 
 interface PeerEntry {
   peer: DirectPeerApi | null;
@@ -113,6 +119,12 @@ interface PeerEntry {
    * the active centrifugo path. Null when no upgrade attempt is pairing.
    */
   upgradePeer: DirectPeerApi | null;
+  /** Commands waiting for the current connection attempt to end, either way. */
+  settleWaiters: Array<() => void>;
+  /** When the last attempt failed (0 = never). */
+  failedAt: number;
+  /** Start of the window in which commands are held for a connection: the first attempt, or the loss of an attached channel. */
+  windowStartedAt: number;
   /** Single per-bridge upgrade retry timer (T1: one loop per bridge). */
   upgradeTimer: ReturnType<typeof setTimeout> | null;
   /** Index into the backoff array for the next scheduled attempt (caps at last). */
@@ -441,14 +453,14 @@ export class HybridTerminalTransport implements TerminalTransportApi {
   // --- ladder ------------------------------------------------------------
 
   /**
-   * Sends one read-only command over the bridge's attached direct channel and resolves with the bridge's answer. Returns null when
-   * no direct channel is attached; rejects when the channel closes or does not answer in time. Either way the caller falls back to
-   * the relay, which is safe because only reads are sent here.
+   * Sends one dashboard command over the bridge's direct channel, connecting to the bridge first if needed. Resolves once the
+   * command has left, with a handle on the bridge's answer; resolves null when the bridge cannot be reached directly or does not
+   * serve commands there (the caller then uses the relay). The answer rejects with DirectUnsentError when the command never left,
+   * and with another error when the channel closed or stayed silent for `timeoutMs` after it was sent.
    */
-  directCommand(bridgeId: string, route: DirectCommandRoute, data: unknown, timeoutMs = DIRECT_COMMAND_TIMEOUT_MS): Promise<ApplicationJson> | null {
-    const pe = this.peers.get(bridgeId);
-    const peer = pe?.status === 'attached' ? pe.peer : null;
-    if (!peer?.command || !peer.canCommand?.() || this.directUnanswered.has(peer)) return null;
+  async directCommand(bridgeId: string, route: DirectCommandRoute, data: unknown, timeoutMs = DIRECT_COMMAND_TIMEOUT_MS): Promise<{ answer: Promise<ApplicationJson> } | null> {
+    const peer = await this.commandPeer(bridgeId);
+    if (!peer?.command) return null;
     let waiting = this.directWaiters.get(peer);
     if (!waiting) {
       const created = new Set<(error: Error) => void>();
@@ -456,14 +468,64 @@ export class HybridTerminalTransport implements TerminalTransportApi {
       peer.onClose(() => { for (const reject of [...created]) reject(new Error('Direct channel closed')); created.clear(); });
     }
     const waiters = waiting;
-    return new Promise<ApplicationJson>((resolve, reject) => {
+    const handle = peer.command(route, data);
+    const answer = new Promise<ApplicationJson>((resolve, reject) => {
       const fail = (error: Error) => { clearTimeout(timer); waiters.delete(fail); reject(error); };
       // One unanswered command is enough to stop using this channel for commands; terminal traffic has its own keepalive.
       const timer = setTimeout(() => { this.directUnanswered.add(peer); fail(new Error('Direct command timed out')); }, timeoutMs);
       waiters.add(fail);
-      peer.command!(route, data).then(value => { clearTimeout(timer); waiters.delete(fail); resolve(value); },
+      handle.answer.then(value => { clearTimeout(timer); waiters.delete(fail); resolve(value); },
         (error: unknown) => fail(error instanceof Error ? error : new Error('Direct command failed')));
     });
+    // The caller may not look at the answer before `sent` settles.
+    answer.catch(() => {});
+    await handle.sent;
+    return { answer };
+  }
+
+  /**
+   * The bridge's attached peer, if it serves commands.
+   *
+   * Commands wait for the connection: from the first attempt (or from the moment an attached channel was lost) there is a window
+   * of DIRECT_CONNECT_WAIT_MS in which failed attempts are retried quickly and commands are held. A bridge that has only just
+   * learned about this browser, or is restarting, connects within it. After the window the caller is no longer held up: the relay
+   * carries the command, and a new attempt is started in the background at most every DIRECT_RETRY_MS.
+   */
+  private async commandPeer(bridgeId: string): Promise<DirectPeerApi | null> {
+    for (;;) {
+      if (this.disposed) return null;
+      const pe = this.peers.get(bridgeId) ?? this.ensurePeer(bridgeId);
+      const inWindow = Date.now() - pe.windowStartedAt < DIRECT_CONNECT_WAIT_MS;
+      if (pe.status === 'failed') {
+        // Sessions on the cloud path have their own upgrade loop; it must not race a second ladder.
+        const owned = pe.upgradeInFlight || pe.upgradeTimer !== null || this.hasCentrifugoSessions(pe);
+        const since = Date.now() - pe.failedAt;
+        const delay = inWindow ? DIRECT_QUICK_RETRY_MS : DIRECT_RETRY_MS;
+        if (!owned && since >= delay) {
+          pe.status = 'connecting'; pe.reason = null;
+          void this.runLadder(bridgeId);
+        } else if (!owned && inWindow) {
+          await new Promise<void>(resolve => setTimeout(resolve, delay - since));
+          continue;
+        } else {
+          return null;
+        }
+      }
+      if (pe.status === 'connecting') {
+        if (!inWindow) return null;
+        await new Promise<void>(resolve => {
+          const done = () => { clearTimeout(timer); const index = pe.settleWaiters.indexOf(done); if (index >= 0) pe.settleWaiters.splice(index, 1); resolve(); };
+          const timer = setTimeout(done, Math.max(1, pe.windowStartedAt + DIRECT_CONNECT_WAIT_MS - Date.now()));
+          pe.settleWaiters.push(done);
+        });
+        if (this.peers.get(bridgeId) !== pe) return null;
+        if ((pe.status as PeerStatus) !== 'attached') continue;
+      }
+      const peer = (pe.status as PeerStatus) === 'attached' ? pe.peer : null;
+      if (!peer?.command || this.directUnanswered.has(peer)) return null;
+      if (!(await (peer.whenCommandsKnown?.() ?? Promise.resolve(false)))) return null;
+      return !this.disposed && this.peers.get(bridgeId)?.peer === peer ? peer : null;
+    }
   }
 
   private ensurePeer(bridgeId: string): PeerEntry {
@@ -477,6 +539,9 @@ export class HybridTerminalTransport implements TerminalTransportApi {
       sessions: new Set(),
       reason: null,
       upgradePeer: null,
+      settleWaiters: [],
+      failedAt: 0,
+      windowStartedAt: Date.now(),
       upgradeTimer: null,
       upgradeAttempt: 0,
       upgradeInFlight: false,
@@ -663,6 +728,7 @@ export class HybridTerminalTransport implements TerminalTransportApi {
     pe.status = 'attached';
     pe.kind = kind;
     pe.reason = null;
+    for (const done of pe.settleWaiters.splice(0)) done();
     this.emitBridgeReachability(bridgeId, true);
 
     // An attached rung that later closes drops the session straight to Centrifugo
@@ -694,6 +760,10 @@ export class HybridTerminalTransport implements TerminalTransportApi {
     pe.peer = null;
     pe.kind = null;
     pe.reason = reason;
+    pe.failedAt = Date.now();
+    // Losing a working channel opens a new window; a failed attempt does not extend the current one.
+    if (wasDirectlyReachable) pe.windowStartedAt = pe.failedAt;
+    for (const done of pe.settleWaiters.splice(0)) done();
     // Any pending switchover is void — the peer is gone.
     pe.switchState = null;
     if (wasDirectlyReachable) this.emitBridgeReachability(bridgeId, false);

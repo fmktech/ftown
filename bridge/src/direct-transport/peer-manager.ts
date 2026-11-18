@@ -1,6 +1,6 @@
 import { PeerConnection } from 'node-datachannel';
 import type { BridgeSecurityService } from '../security/bridge/security.js';
-import { EncryptedPeerChannel, type DirectCommandDispatch } from '../security/bridge/direct.js';
+import { EncryptedPeerChannel, type DirectCommands } from '../security/bridge/direct.js';
 
 import {
   DATA_CHANNEL_LABEL,
@@ -55,8 +55,8 @@ export interface DirectPeerManagerOptions {
    * receives output that precedes its own snapshot.
    */
   onAttach: (sessionId: string, deliver: (screen: string) => void) => string | void;
-  /** Serves read-only dashboard commands arriving on a peer's channel. */
-  onCommand?: DirectCommandDispatch;
+  /** Serves dashboard commands arriving on a peer's channel. */
+  onCommand?: DirectCommands;
   /** node-datachannel PeerConnection factory; defaults to the real module. */
   peerConnectionFactory?: PeerConnectionFactory;
   /** Injectable clock for keepalive/teardown timers (defaults to Date.now). */
@@ -338,7 +338,7 @@ class DirectPeer {
 export class DirectPeerManager {
   readonly security?: BridgeSecurityService;
   readonly bridgeId: string;
-  readonly onCommand?: DirectCommandDispatch;
+  readonly onCommand?: DirectCommands;
   private readonly sendSignalCb: (msg: SignalMessage) => void;
   private readonly onInputCb: (sessionId: string, data: string) => void;
   private readonly onResizeCb: (sessionId: string, cols: number, rows: number) => void;

@@ -61,22 +61,31 @@ R7. Existing Centrifugo wire formats are unchanged. `seq` is added to direct-pat
 
 R8. No backwards compatibility shims. UI and bridge ship together.
 
-## Extension: read-only commands on the direct channel (bridge 0.30.43)
+## Extension: dashboard commands on the direct channel (bridge 0.30.43)
 
-The direct channel (WebRTC DataChannel or loopback WebSocket) also answers read-only dashboard commands, so they do not
-travel through the relay while a channel is attached. Everything above is unchanged.
+The direct channel (WebRTC DataChannel or loopback WebSocket) also carries the dashboard's commands, so the relay is left with
+connection setup. The terminal rules above are unchanged.
 
-- Once the channel is authorized, a bridge that serves commands sends `{ kind: 'capabilities', commands: true }`. A client
-  sends commands on the channel only after receiving it; older clients ignore the frame, and against an older bridge the
-  client never hears it and keeps commands on the relay.
-- A command is a sealed application with a `command` route, bound to the channel's own name like terminal frames. The bridge
-  accepts only commands classified as reads; a command that changes something, or a connection setup / watch command, ends
-  the channel exactly as any other invalid frame does.
+Bridge:
+
+- Once the channel is authorized, a bridge that serves commands sends `{ kind: 'capabilities', commands: true }`. Older clients
+  ignore the frame.
+- A command is a sealed application with a `command` route, bound to the channel's own name like terminal frames, and runs
+  through the same admission, dispatch and update observer as on the relay. Connection setup and watch commands
+  (`webrtc_*`, `terminal_watch`, `terminal_unwatch`) and HTTP routes are not accepted and end the channel.
 - The answer is a sealed `response` for the request id. An answer larger than one DataChannel message is split into
   `id.index.total.payload` text frames (`bridge/src/direct-transport/framing.ts`); a frame never starts with `{`.
-- The client gives the direct attempt its own request id. If the channel closes, answers something else, or does not answer
-  within 8 s, the client repeats the read over the relay under the original id. After one unanswered command it stops using
-  that channel for commands.
+
+Client:
+
+- The first command to a bridge opens the direct channel; no terminal needs to be open. Commands are held while it connects:
+  for 10 s from the first attempt (or from the loss of a working channel) failed attempts are retried every 0.5 s. After that
+  window commands are no longer held: the relay carries them and a new attempt starts in the background at most every 15 s.
+- Against a bridge that connects but never announces command support (older version), commands use the relay.
+- Connection setup commands and the security commands (`security_*`: pairing, devices, revocation) always use the relay.
+- Each direct attempt has its own request id. A read that is not answered properly within 8 s is repeated over the relay under
+  the original id. A command that changes something is never repeated once it has left: if the channel is lost first, the
+  caller is told delivery is uncertain. A command that never left the browser may use the relay.
 
 ## Signaling wire types (over commands:rpc)
 
