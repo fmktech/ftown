@@ -1,11 +1,14 @@
 // @vitest-environment jsdom
-import { createElement } from "react";
+import { createElement, useLayoutEffect } from "react";
 import { act, cleanup, render, renderHook, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Centrifuge } from "centrifuge";
 import type { Command, CommandResponse, CreateSessionPayload, Session, ShellType } from "@/types";
 import type { BridgeRpc } from "./useBridgeRpc";
 import { useSessions, mergeSessionSnapshot } from "./useSessions";
+import { useBridgeRpc } from "./useBridgeRpc";
+import type { MessageClient, MessageEvents, MessageSubscription } from "@/lib/message-client";
+import type { SecureEndpointRuntime } from "@/lib/secure-endpoint-runtime";
 import { SessionList } from "@/components/SessionList";
 
 const row = (id: string, bridgeId = "a", extra: Partial<Session> = {}): Session => ({
@@ -95,6 +98,119 @@ describe("structured session creation through the actual hook", () => {
 });
 
 describe("session-list transport deadlines through the actual hook", () => {
+  it.each([
+    { signalRpc: false, readyBeforeFailure: false, hidden: false, persistentDenial: false },
+    { signalRpc: true, readyBeforeFailure: false, hidden: false, persistentDenial: false },
+    { signalRpc: false, readyBeforeFailure: true, hidden: false, persistentDenial: false },
+    { signalRpc: false, readyBeforeFailure: false, hidden: true, persistentDenial: false },
+    { signalRpc: false, readyBeforeFailure: false, hidden: false, persistentDenial: true },
+  ])("reconciles pending initial inventory after security readiness: %o", async ({ signalRpc, readyBeforeFailure, hidden, persistentDenial }) => {
+    type Listener = (context: never) => void;
+    const sent: Command[] = [];
+    const states = new Map([["a", "ready"], ["b", "offline"]]);
+    const changed = new Set<() => void>();
+    let rejectInitial!: () => void;
+    const runtime = {
+      onChange: (listener: () => void) => { changed.add(listener); return () => { changed.delete(listener); }; },
+      state: (bridgeId: string) => ({ bridgeId, status: states.get(bridgeId) }),
+      snapshot: () => [...states].map(([bridgeId, status]) => ({ bridgeId, status })),
+      pinnedBridges: () => [...states.keys()].map(bridgeId => ({ bridgeId })),
+    } as unknown as SecureEndpointRuntime;
+    const subscriptions = new Map<string, Subscription>();
+    class Subscription implements MessageSubscription {
+      state = "subscribed";
+      private listeners = new Map<keyof MessageEvents, Set<Listener>>();
+      constructor(readonly channel: string) {}
+      subscribe() { if (this.channel.startsWith("sessions:")) this.emit("subscribed", { recovered: false, offset: 0, epoch: "epoch" }); }
+      unsubscribe() {}
+      async presence() { return { clients: {} }; }
+      on<E extends keyof MessageEvents>(event: E, listener: (context: MessageEvents[E]) => void) {
+        const listeners = this.listeners.get(event) ?? new Set<Listener>(); listeners.add(listener as Listener); this.listeners.set(event, listeners); return this;
+      }
+      off<E extends keyof MessageEvents>(event: E, listener: (context: MessageEvents[E]) => void) { this.listeners.get(event)?.delete(listener as Listener); return this; }
+      removeAllListeners() { this.listeners.clear(); }
+      emit<E extends keyof MessageEvents>(event: E, context: MessageEvents[E]) { for (const listener of this.listeners.get(event) ?? []) listener(context as never); }
+      async publish(value: unknown) {
+        const command = value as Command; sent.push(command);
+        // Both bridges are known targets, matching the secure adapter. The
+        // first empty reply succeeds while the other target's publish fails.
+        const targets = [...states.keys()];
+        await Promise.resolve();
+        let failed = false;
+        for (const bridgeId of targets) {
+          if (states.get(bridgeId) !== "ready" || persistentDenial && bridgeId === "b") { failed = true; continue; }
+          this.emit("publication", { info: { user: "user" }, data: { type: "command_response", response: {
+            requestId: command.requestId, success: true, data: { bridgeId, sessions: bridgeId === "b" ? [row("existing-b", "b", { status: "running" })] : [] },
+          } } });
+        }
+        if (failed) {
+          if (readyBeforeFailure && sent.length === 1) await new Promise<void>((_, reject) => { rejectInitial = () => reject(new Error("Initial bridge handshake failed")); });
+          throw new Error("Initial bridge handshake failed");
+        }
+      }
+    }
+    const client: MessageClient = {
+      securityRuntime: runtime,
+      getSubscription: channel => subscriptions.get(channel) ?? null,
+      newSubscription: channel => { const sub = new Subscription(channel); subscriptions.set(channel, sub); return sub; },
+      removeSubscription: () => {},
+    };
+    const hook = renderHook(() => { const rpc = useBridgeRpc(client, "user"); return useSessions(client, "user", rpc); });
+    await act(async () => {});
+    expect(sent).toHaveLength(1);
+    expect(hook.result.current.sessions).toEqual([]);
+    if (hidden) visibility = "hidden";
+    await act(async () => {
+      states.set("b", "ready"); changed.forEach(listener => listener());
+      if (readyBeforeFailure) rejectInitial();
+      if (signalRpc) subscriptions.get("commands:rpc#user")!.emit("subscribed", {});
+    });
+    if (hidden) {
+      expect(sent).toHaveLength(1);
+      expect(hook.result.current.sessions).toEqual([]);
+      await act(async () => { visibility = "visible"; document.dispatchEvent(new Event("visibilitychange")); });
+    }
+    expect(hook.result.current.sessions.map(session => session.id)).toEqual(persistentDenial ? [] : ["existing-b"]);
+    expect(sent).toHaveLength(2);
+    await act(async () => { changed.forEach(listener => listener()); await vi.advanceTimersByTimeAsync(60_000); });
+    expect(sent).toHaveLength(2);
+    if (!persistentDenial) {
+      await act(async () => {
+        states.set("b", "offline"); changed.forEach(listener => listener());
+        states.set("b", "ready"); changed.forEach(listener => listener());
+        subscriptions.get("sessions:updates#user")!.emit("subscribed", { recovered: true, positioned: true, offset: 1, epoch: "epoch" });
+        subscriptions.get("commands:rpc#user")!.emit("subscribed", {});
+      });
+      expect(sent).toHaveLength(2);
+    }
+  });
+
+  it.each(["user", "client"])("ignores a retained ready callback during a %s change before effect cleanup", async boundary => {
+    const h = harness(true);
+    const changed = new Set<() => void>();
+    let ready = false;
+    const runtime = {
+      onChange: (listener: () => void) => { changed.add(listener); return () => { changed.delete(listener); }; },
+      snapshot: () => [{ bridgeId: "a", status: ready ? "ready" : "offline" }],
+      state: () => ({ status: ready ? "ready" : "offline" }),
+    } as unknown as SecureEndpointRuntime;
+    const first: MessageClient = { securityRuntime: runtime, getSubscription: () => null,
+      newSubscription: (...args) => h.client.newSubscription(...args) as unknown as MessageSubscription, removeSubscription: vi.fn() };
+    const replacement = { ...first };
+    let retained: (() => void) | undefined;
+    const hook = renderHook(({ client, user }) => {
+      const result = useSessions(client, user, h.rpc);
+      useLayoutEffect(() => { if (client !== first || user !== "user") { ready = true; retained?.(); } }, [client, user]);
+      return result;
+    }, { initialProps: { client: first, user: "user" } });
+    retained = [...changed][0];
+    act(() => h.responses.forEach(listener => listener({ requestId: h.request(), success: false })));
+    expect(h.commands.filter(command => command.type === "list_sessions")).toHaveLength(1);
+    hook.rerender({ client: boundary === "client" ? replacement : first, user: boundary === "user" ? "other" : "user" });
+    expect(h.commands.filter(command => command.type === "list_sessions")).toHaveLength(2);
+    expect(hook.result.current.sessions).toEqual([]);
+  });
+
   it("retains independent broadcast replies after 35 seconds with a 40-second transport budget", () => {
     const h = setup(true, 40_000); const request = h.request(); visibility = "hidden";
     act(() => vi.advanceTimersByTime(35_000));

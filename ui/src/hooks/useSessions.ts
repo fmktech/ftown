@@ -198,6 +198,9 @@ export function useSessions(
   const mutationRef = useRef(0);
   const sessionPositionRef = useRef<StreamPosition>({ offset: 0, epoch: "" });
   const sessionNeedsSnapshotRef = useRef(true);
+  const readinessRevisionRef = useRef(0);
+  const identityRef = useRef({ client, userId });
+  if (identityRef.current.client !== client || identityRef.current.userId !== userId) identityRef.current = { client, userId };
   const requestListRef = useRef<(coalesce?: boolean) => void>(() => {});
   const removeRef = useRef<(id: string, optimistic: boolean, command: Command) => void>(() => {});
   const { publishCommand, sendCommand, onResponse, onSubscribed } = rpc;
@@ -210,11 +213,28 @@ export function useSessions(
     setSessions(next);
   }, []);
 
-  useEffect(() => client?.securityRuntime?.onChange(() => {
-    const runtime = client.securityRuntime;
+  useEffect(() => {
+    const runtime = client?.securityRuntime;
     if (!runtime) return;
-    updateSessions(previous => previous.filter(session => !["revoked", "key_changed"].includes(runtime.state(session.bridgeId).status)));
-  }), [client, updateSessions]);
+    const identity = identityRef.current;
+    let active = true;
+    readinessRevisionRef.current = 0;
+    let ready = new Set(runtime.snapshot().filter(state => state.status === "ready").map(state => state.bridgeId));
+    const unsubscribe = runtime.onChange(() => {
+      if (!active || identityRef.current !== identity) return;
+      const next = new Set(runtime.snapshot().filter(state => state.status === "ready").map(state => state.bridgeId));
+      const newlyReady = [...next].some(bridgeId => !ready.has(bridgeId));
+      ready = next;
+      updateSessions(previous => previous.filter(session => !["revoked", "key_changed"].includes(runtime.state(session.bridgeId).status)));
+      if (!newlyReady) return;
+      readinessRevisionRef.current += 1;
+      if (sessionNeedsSnapshotRef.current && document.visibilityState !== "hidden") {
+        sessionNeedsSnapshotRef.current = false;
+        requestListRef.current(true);
+      }
+    });
+    return () => { active = false; unsubscribe(); };
+  }, [client, userId, updateSessions]);
 
   useEffect(() => {
     confirmedRemovedRef.current.clear();
@@ -240,7 +260,7 @@ export function useSessions(
     let coalescingTimer: ReturnType<typeof setTimeout> | undefined;
     let rpcReadyObserved = false;
     let sessionsSubscribedOnce = false;
-    const requests = new Map<string, { generation: number; contextGeneration: number; cutoff: number; expiry: number; applied: Set<string>; position: StreamPosition | null; failed: boolean }>();
+    const requests = new Map<string, { generation: number; contextGeneration: number; cutoff: number; expiry: number; applied: Set<string>; position: StreamPosition | null; failed: boolean; readinessRevision: number }>();
     const appliedByBridge = new Map<string, number>();
     const snapshotPositions = new Map<string, StreamPosition>();
     const removals = new Map<string, { id: string; timer: ReturnType<typeof setTimeout> }>();
@@ -258,7 +278,7 @@ export function useSessions(
         && [...requests.values()].some(r => r.generation === generation && r.applied.size === 0 && !r.failed)) return;
       const requestId = uuidv4();
       requests.set(requestId, { generation: ++generation, contextGeneration, cutoff: mutationRef.current,
-        expiry: Date.now() + listReplyWindowMs, applied: new Set(), failed: false,
+        expiry: Date.now() + listReplyWindowMs, applied: new Set(), failed: false, readinessRevision: readinessRevisionRef.current,
         position: sessionsSubRef.current?.streamPosition?.() ?? streamPosition(sessionPositionRef.current) });
       while (requests.size > MAX_LIST_REQUESTS) requests.delete(requests.keys().next().value!);
       clearTimeout(coalescingTimer);
@@ -304,7 +324,17 @@ export function useSessions(
       // safely release optimism and reconcile; sticky confirmation still wins.
       if (!response.success) {
         const request = requests.get(response.requestId);
-        if (request) { request.failed = true; sessionNeedsSnapshotRef.current = true; }
+        if (request && request.generation === generation && !request.failed) {
+          request.failed = true;
+          sessionNeedsSnapshotRef.current = true;
+          // A ready event can precede this asynchronous publish rejection.
+          // Consume it once; a new request captures the current revision, so a
+          // persistent denial cannot create a retry loop.
+          if (request.readinessRevision < readinessRevisionRef.current && document.visibilityState !== "hidden") {
+            sessionNeedsSnapshotRef.current = false;
+            requestList(true);
+          }
+        }
         rollback(response.requestId); return;
       }
       if (!response.data || typeof response.data !== "object") return;
