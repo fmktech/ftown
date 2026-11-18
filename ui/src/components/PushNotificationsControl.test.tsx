@@ -1,21 +1,52 @@
 // @vitest-environment jsdom
 import { afterEach,expect,it,vi } from "vitest";
 import { webcrypto } from "node:crypto";
-import { cleanup,fireEvent,render,screen,waitFor } from "@testing-library/react";
+import { act,cleanup,fireEvent,render,screen,waitFor } from "@testing-library/react";
 import { PushNotificationsControl, detachPushSubscription } from "./PushNotificationsControl";
 const permission=vi.fn();const subscribe=vi.fn();const unsubscribe=vi.fn();
-function fixture(enabled=true){
+class FixturePort {
+ onmessage:((event:{data:unknown})=>void)|null=null;
+ peer:FixturePort|null=null;
+ private closed=false;
+ postMessage(data:unknown):void {
+  const peer=this.peer;
+  void Promise.resolve().then(()=>{if(!this.closed && peer && !peer.closed) peer.onmessage?.({data});});
+ }
+ close():void {this.closed=true;}
+}
+class FixtureMessageChannel {
+ port1=new FixturePort();port2=new FixturePort();
+ constructor(){this.port1.peer=this.port2;this.port2.peer=this.port1;}
+}
+function fixture(enabled=true,deferAcknowledgement=false){
+ // Model the worker acknowledgement in this test's microtask queue. A native
+ // Node MessagePort adds an unrelated OS scheduler to the component unit test.
+ vi.stubGlobal("MessageChannel",FixtureMessageChannel);
+ const acknowledgements:Array<()=>void>=[];
  Object.defineProperty(window,"isSecureContext",{value:true,configurable:true});
  Object.defineProperty(window,"PushManager",{value:class{},configurable:true});
  Object.defineProperty(window,"Notification",{value:{permission:"default",requestPermission:permission},configurable:true});
  const subscription={endpoint:"https://fcm.googleapis.com/x",toJSON:()=>({endpoint:"https://fcm.googleapis.com/x",keys:{p256dh:"fixture",auth:"fixture"}}),unsubscribe};
  Object.defineProperty(window,"crypto",{value:webcrypto,configurable:true});
- const registration={active:{postMessage:(_value:unknown,ports:MessagePort[])=>ports[0].postMessage({ok:true})},pushManager:{getSubscription:async()=>null,subscribe}};
+ const registration={active:{postMessage:(_value:unknown,ports:MessagePort[])=>{
+  const acknowledge=()=>ports[0].postMessage({ok:true});
+  if(deferAcknowledgement) acknowledgements.push(acknowledge); else acknowledge();
+ }},pushManager:{getSubscription:async()=>null,subscribe}};
  Object.defineProperty(navigator,"serviceWorker",{value:{getRegistration:async()=>registration,ready:Promise.resolve(registration),register:async()=>registration},configurable:true});
  subscribe.mockResolvedValue(subscription);permission.mockResolvedValue("granted");unsubscribe.mockResolvedValue(true);
  vi.stubGlobal("fetch",vi.fn(async(_input,options)=>new Response(JSON.stringify(options?.method?{enabled:true}:{enabled,publicKey:"BAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}),{status:options?.method?201:200})));
+ return {acknowledgements};
 }
 afterEach(()=>{cleanup();vi.unstubAllGlobals();vi.resetAllMocks();localStorage.clear();});
+it("keeps notification permission unavailable until the service worker acknowledges ownership",async()=>{
+ const f=fixture(true,true);render(<PushNotificationsControl accountId="owner"/>);
+ await waitFor(()=>expect(f.acknowledgements).toHaveLength(1));
+ expect((screen.getByRole("button") as HTMLButtonElement).disabled).toBe(true);
+ expect(permission).not.toHaveBeenCalled();
+ await act(async()=>{f.acknowledgements.shift()!();});
+ expect((screen.getByRole("button") as HTMLButtonElement).disabled).toBe(false);
+ expect(permission).not.toHaveBeenCalled();
+});
 it("requests permission only after explicit enable and permits opt-out",async()=>{
  fixture();render(<PushNotificationsControl accountId="owner"/>);
  await waitFor(()=>expect((screen.getByRole("button") as HTMLButtonElement).disabled).toBe(false));
