@@ -50,7 +50,7 @@ The executable configuration contract and its tests track all four files. This c
 - Focused E2E: live plan publication, child attention/answering, and external session create/rename/remove passed without a document reload. Existing desktop/mobile Overview scenarios and focused CRUD lifecycle also passed. The local run used the supported `http://localhost:3000` origin and isolated scratch services/database; cleanup completed.
 - A collapsed-section selector in the new E2E test was corrected after the rendered summary proved the push had arrived. No application assertion was weakened.
 - Latest main attention diagnostics were merged, independently reviewed, and checked with 100 focused tests, a fresh production build, live push/Overview tests, and the affected preview/reply E2E case. Scratch bridge `ftown harness status` passed. Desktop/mobile renders were reviewed.
-- PR CI remains pending.
+- The first full CI E2E run exposed two reproducible races: separately delivered subscription callbacks invalidated a shared attention snapshot, and pre-attachment resize requests were lost during terminal resurrection. Both received causal regressions and scoped fixes. All five failed attention cases passed locally afterward, and the restart case passed three repetitions alongside the bounded full bridge suite (3,578 passed, five skipped). The attention hook's 103 focused tests, static check, production build, and independent review passed. CI results are tracked on the pull request.
 
 ## Steady-state request rate
 
