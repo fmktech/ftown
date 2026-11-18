@@ -80,6 +80,26 @@ ftown setup --help
 ftown start --help
 ```
 
+## Other computers (cross-bridge control)
+
+Every computer paired to your account is a bridge. `ftown bridges` lists the
+others (`--probe` shows which answer). Add `--bridge <name|id|id-prefix>`, or
+set `FTOWN_BRIDGE`, to run `sessions`, `status`, `board`, `events`,
+`attention`, `brief`, `worktrees` and `plan` commands on another bridge:
+
+```bash
+ftown bridges --probe
+ftown sessions list --bridge my-laptop
+ftown sessions create --bridge my-laptop --shell codex --workdir ~/src/app --prompt "Run the test suite"
+ftown sessions screen <session-id> --bridge my-laptop --limit 100
+```
+
+Requests travel end-to-end encrypted over the account relay; the target bridge
+has to run an ftown version with cross-bridge control. Security commands
+(pairing, devices, revocation) never work across bridges. `--parent` links
+cannot cross bridges, and `harness mail` only reaches sessions on this bridge.
+Not available in `--local`/`--solo` mode.
+
 Read `references/sessions.md` for the session, mail and terminal command
 reference. Read `references/orchestrator.md` for practical worker coordination
 examples. Read `references/quota.md` before choosing a CLI, model and effort for delegated

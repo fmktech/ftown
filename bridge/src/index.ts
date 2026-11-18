@@ -24,6 +24,7 @@ import type { AttentionItem } from './attention-events.js';
 import { PreviewChatStore } from './preview-chat.js';
 import { BridgePushNotifier } from './push-notifier.js';
 import { LocalApiServer } from './local-api-server.js';
+import { PeerControl } from './peer-control.js';
 import { BrowserAccess } from './browser-access.js';
 import { registerLocalBrowserCommands } from './local-pair-cli.js';
 import type { CommandResponse } from './types.js';
@@ -1116,6 +1117,7 @@ program
     };
     localApiServer.setSecurity(security, { protocolVersion: 1, ownerId: auth.ownerId, bridgeId, endpoint: security.endpoint,
       relayUserId: userId }, dispatchCommand, updateEffects);
+    localApiServer.setPeerControl(new PeerControl(security, centrifugo));
 
     // Solo: the hub child must be healthy before connecting (L1 gates the
     // transport, not the front). A failed hub is fatal for solo — exit cleanly

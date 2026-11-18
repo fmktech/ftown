@@ -30,6 +30,9 @@ export function classifyHttp(method: string, path: string): OperationPermission 
     if (method === 'POST') return result('control', 'sessions_create');
     return deny();
   }
+  // Cross-bridge control (the local API server additionally limits both to the OS-local CLI).
+  if (url.pathname === '/api/peers') return method === 'GET' && queryAllows(url, ['probe']) ? result('read', 'peers_list') : deny();
+  if (url.pathname === '/api/peers/http') return method === 'POST' && !url.search ? result('control', 'peers_http') : deny();
   if (method === 'GET' && url.pathname === '/api/archive') return result('read', 'archive_list');
   if (method === 'GET' && url.pathname === '/api/inbox/resolve') return result('read', 'inbox_resolve');
   if (method === 'GET' && url.pathname === '/api/browser/events') return result('read', 'local_events');

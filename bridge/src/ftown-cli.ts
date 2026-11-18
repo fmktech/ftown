@@ -13,13 +13,17 @@ import { runWorktrees } from './worktrees-cli.js';
 import { runPlan } from './plan-cli.js';
 import { runAccounts } from './accounts-cli.js';
 import { executeCli, isCliEntry } from './cli-entry.js';
+import { setPeerTarget } from './cli-client.js';
+import { PEER_GROUPS, extractBridgeOption, runBridges } from './peers-cli.js';
 export { isCliEntry } from './cli-entry.js';
 
 export function usage(): string {
   return `Usage: ftown [bridge options]
-       ftown <setup|start|sessions|harness|env|accounts|security|quota|status|board|events|attention|brief|worktrees|plan> [args...]
+       ftown <setup|start|sessions|harness|env|accounts|security|quota|status|board|events|attention|brief|worktrees|plan|bridges> [args...]
 
 With no subcommand, start the bridge. Run setup explicitly before the first start.
+Add --bridge <name|id> (or set FTOWN_BRIDGE) to run sessions, status, board, events, attention, brief,
+worktrees or plan commands on another bridge of your account.
 
 Subcommands:
   setup      Install or upgrade local CLI, hooks, plugins and skill (--repair to recheck)
@@ -36,14 +40,31 @@ Subcommands:
   attention  Answer or escalate questions routed from child sessions
   brief      Manager brief for a session (show, set, note)
   worktrees  List or prune bridge-owned git worktrees
-  plan       Manager plan list (add, start, done, drop, todo, edit, rm)`;
+  plan       Manager plan list (add, start, done, drop, todo, edit, rm)
+  bridges    List the other bridges of this account (--probe to check which answer)`;
 }
 
 export async function runFtown(argv: string[], start: (argv: string[]) => Promise<number> = runStart): Promise<number> {
-  const [group, ...args] = argv;
+  const [group, ...rawArgs] = argv;
   if (['--help', '-h', 'help'].includes(group)) { console.log(usage()); return 0; }
   if (!group || group.startsWith('-')) return start(argv);
+  let args = rawArgs;
+  // Cross-bridge control: --bridge <target> (or FTOWN_BRIDGE) forwards this command's requests to another bridge of the account.
+  if (group !== 'start' && group !== 'setup') {
+    let extracted: { args: string[]; target: string | null };
+    try { extracted = extractBridgeOption(rawArgs); }
+    catch (error) { console.error(`ftown: ${error instanceof Error ? error.message : String(error)}`); return 1; }
+    args = extracted.args;
+    const target = extracted.target ?? (process.env.FTOWN_BRIDGE?.trim() || null);
+    if (target !== null && extracted.target !== null && !PEER_GROUPS.has(group)) {
+      console.error(`ftown: --bridge is not supported for "${group}" (supported: ${[...PEER_GROUPS].join(', ')})`);
+      return 1;
+    }
+    // FTOWN_BRIDGE applies only where forwarding is supported; local-only groups ignore it.
+    setPeerTarget(PEER_GROUPS.has(group) ? target : null);
+  }
   switch (group) {
+    case 'bridges': return runBridges(args);
     case 'sessions': return runSessions(args);
     case 'harness': return runHarness(args);
     case 'env': return runEnv(args);

@@ -170,7 +170,9 @@ export class BridgePolicyStore {
     if (view.trusted === null) throw new BridgeSecurityError('account_offline_expired');
     if (view.own !== 'active') throw new BridgeSecurityError('account_bridge_revoked');
     if (!this.withinGrace()) throw new BridgeSecurityError('account_offline_expired');
-    const member = view.trusted.devices.find(item => item.endpoint.id === endpointId);
+    const member = record.endpoint.kind === 'bridge'
+      ? view.trusted.bridges.find(item => item.endpoint.id === endpointId)
+      : view.trusted.devices.find(item => item.endpoint.id === endpointId);
     if (!member || member.endpoint.publicKey !== record.endpoint.publicKey) throw new BridgeSecurityError('account_device_revoked');
   }
   /** Written so that NaN, an unknown contact or an unread clock file fails closed. A passing check raises the high-water. */
@@ -370,7 +372,13 @@ export class BridgePolicyStore {
       ledger.lastServerReadAt = isTime(view.lastServerReadAt) ? view.lastServerReadAt : null;
     }
     const clock = this.loadClock();
-    const members = trusted === null ? [] : trusted.devices;
+    // Peer bridges of the same account are principals too (cross-bridge control): read + control, never admin, so a peer can drive
+    // sessions but cannot list, invite or revoke this bridge's endpoints. This bridge's own ledger entry is never a peer.
+    const members: { endpoint: EndpointPublic; label: string; approvedAt: number; permissions: EndpointPermission[] }[] = trusted === null ? [] : [
+      ...trusted.devices.map(device => ({ ...device, permissions: ['read', 'control', 'admin'] as EndpointPermission[] })),
+      ...trusted.bridges.filter(peer => peer.endpoint.id !== this.bridge.id)
+        .map(peer => ({ endpoint: peer.endpoint, label: peer.label, approvedAt: peer.approvedAt, permissions: ['read', 'control'] as EndpointPermission[] })),
+    ];
     return clock.then(() => this.snapshot.transact(state => {
       this.check(state);
       const removed: string[] = [];
@@ -378,7 +386,8 @@ export class BridgePolicyStore {
         const id = device.endpoint.id;
         if (state.provenance[id] !== 'account') return true;
         const member = members.find(item => item.endpoint.id === id);
-        if (member && member.endpoint.publicKey === device.endpoint.publicKey) return true;
+        if (member && member.endpoint.publicKey === device.endpoint.publicKey && member.endpoint.kind === device.endpoint.kind
+          && member.permissions.length === device.permissions.length && member.permissions.every(item => device.permissions.includes(item))) return true;
         removed.push(id);
         delete state.provenance[id];
         return false;
@@ -386,7 +395,7 @@ export class BridgePolicyStore {
       for (const member of members) {
         if (state.devices.some(device => device.endpoint.id === member.endpoint.id)) continue;
         if (state.devices.length >= MAX_ENDPOINTS) throw new BridgeSecurityError('capacity_exceeded');
-        state.devices.push({ endpoint: member.endpoint, label: displayLabel(member.label), permissions: ['read', 'control', 'admin'],
+        state.devices.push({ endpoint: member.endpoint, label: displayLabel(member.label), permissions: [...member.permissions],
           approvedAt: new Date(member.approvedAt).toISOString(), grantId: null, expiresAt: null });
         state.provenance[member.endpoint.id] = 'account';
       }
