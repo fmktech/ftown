@@ -12,7 +12,7 @@ export interface BrowserBootstrap extends BridgeSecurityInfo {
 export interface LocalDevice { port: number; bridgeId: string; credential?: string }
 export interface Pairing { id: string; code: string; pollToken: string; expiresAt: string }
 export class LocalAccessError extends Error {
-  constructor(message: string, readonly status: number) { super(message); }
+  constructor(message: string, readonly status: number, readonly code?: 'invalid_command') { super(message); }
 }
 export function localOrigin(port: string | number): string {
   if (!/^\d{1,5}$/.test(String(port)) || Number(port) < 1 || Number(port) > 65535) throw new Error('Enter the local bridge port.');
@@ -23,7 +23,14 @@ export async function localRequest<T>(port: number, path: string, _credential?: 
   const response = await fetch(`${localOrigin(port)}${path}`, { method: body === undefined ? 'GET' : 'POST', credentials: 'omit', redirect: 'error', cache: 'no-store',
     headers: body === undefined ? {} : { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body),
     signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(40_000)]) : AbortSignal.timeout(40_000) });
-  if (!response.ok) throw new LocalAccessError('Encrypted local bridge request failed.', response.status);
+  if (!response.ok) {
+    let code: 'invalid_command' | undefined;
+    if (response.status === 400) try {
+      const body: unknown = await response.json();
+      if (body && typeof body === 'object' && !Array.isArray(body) && 'code' in body && body.code === 'invalid_command') code = 'invalid_command';
+    } catch { /* A malformed rejection remains a transport failure. */ }
+    throw new LocalAccessError('Encrypted local bridge request failed.', response.status, code);
+  }
   return await response.json() as T;
 }
 export async function bootstrapLocal(device: LocalDevice, signal?: AbortSignal): Promise<BrowserBootstrap> {
@@ -137,6 +144,9 @@ export class LocalBrowserClient implements MessageClient {
     return this.handshake;
   }
   async command(command: Command, options: MessagePublishOptions = { deadline: Date.now() + this.commandTimeoutMs }): Promise<CommandResponse> {
+    const legacySummary = command.type === 'get_attention_summary' && 'bridgeId' in command.payload && command.payload.bridgeId === this.boot.bridgeId;
+    const unsupportedSummary = (): CommandResponse => ({ requestId: command.requestId, success: false,
+      error: 'Encrypted request rejected', data: { code: 'invalid_command' } });
     try {
       this.admit(options);
       await this.ensureReady();
@@ -146,10 +156,15 @@ export class LocalBrowserClient implements MessageClient {
         { kind: 'command', requestId: command.requestId, command: command.type, sessionId: 'sessionId' in command.payload ? String(command.payload.sessionId) : null },
         { ...command, payload: { ...command.payload, bridgeId: this.boot.bridgeId } }, this.transmit(channel, '/api/security/envelope', options));
       if (reply && typeof reply === 'object' && !Array.isArray(reply) && reply.type === 'command_response' && reply.response) return reply.response as unknown as CommandResponse;
+      if (legacySummary && reply && typeof reply === 'object' && !Array.isArray(reply) && reply.status === 400
+        && reply.body && typeof reply.body === 'object' && !Array.isArray(reply.body) && reply.body.code === 'invalid_command') return unsupportedSummary();
       if (reply && typeof reply === 'object' && !Array.isArray(reply) && typeof reply.status === 'number' && reply.status >= 400
         && reply.body && typeof reply.body === 'object' && !Array.isArray(reply.body) && reply.body.code === 'epoch_changed') throw new SecurityError('epoch_changed', 'Bridge restarted; refresh encrypted state before trying a new action');
       throw new SecurityError('permission_denied', 'Encrypted local command was rejected');
-    } catch (error) { this.handleError(error); throw error; }
+    } catch (error) {
+      if (legacySummary && error instanceof LocalAccessError && error.status === 400 && error.code === 'invalid_command') return unsupportedSummary();
+      this.handleError(error); throw error;
+    }
   }
   executeSecurity = <C extends SecurityCommand>(command: C): Promise<SecurityCommandResults[C['type']]> => this.securityRuntime!.command(command, value => this.command(value as Command));
   private handleError(error: unknown): void {

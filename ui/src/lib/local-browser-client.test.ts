@@ -8,6 +8,58 @@ const json = (data: unknown) => new Response(JSON.stringify(data));
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe('encrypted local browser control', () => {
+  it.each(['raw', 'authenticated'] as const)('normalizes an exact legacy %s loopback summary rejection after encrypted publication', async mode => {
+    const browser = await generateEndpoint(ownerId, 'browser'); const bridge = await generateEndpoint(ownerId, 'bridge');
+    const boot: BrowserBootstrap = { version: 1, protocolVersion: 1, ownerId, bridgeId: 'bridge-a', endpoint: bridge.endpoint, relayUserId: 'local-owner', userId: 'local-owner', hostname: 'laptop', localPort: 43127 };
+    const runtime = new SecureEndpointRuntime(browser, [{ bridgeId: boot.bridgeId, endpoint: bridge.endpoint, permissions: ['read'] }]);
+    const fetcher = vi.fn(async (_url: string, init: RequestInit) => {
+      const envelope = JSON.parse(String(init.body)) as SecureEnvelope;
+      const plain = JSON.parse(new TextDecoder().decode(await open(bridge, browser.endpoint, envelope,
+        { ownerId, bridgeId: boot.bridgeId, channel: `local-http:${boot.bridgeId}`, recipientId: bridge.endpoint.id, purpose: envelope.purpose })));
+      const body = { error: 'Invalid command envelope', code: 'invalid_command', requestId: null };
+      if (envelope.purpose !== 'hello' && mode === 'raw') return new Response(JSON.stringify(body), { status: 400 });
+      const value = envelope.purpose === 'hello' ? { type: 'welcome', challenge: plain.challenge, receiverEpoch: 'boot-one' }
+        : { type: 'application', route: { kind: 'response', requestId: plain.route.requestId }, data: { status: 400, body }, mcp: null };
+      return json(await seal(bridge, browser.endpoint, { ...envelope, senderId: bridge.endpoint.id, recipientId: browser.endpoint.id,
+        purpose: envelope.purpose === 'hello' ? 'welcome' : 'application' }, new TextEncoder().encode(JSON.stringify(value))));
+    });
+    vi.stubGlobal('fetch', fetcher);
+    const client = new LocalBrowserClient({ port: 43127, bridgeId: boot.bridgeId }, boot, vi.fn(), vi.fn(), undefined, runtime);
+    try {
+      await expect(client.command({ type: 'get_attention_summary', requestId: 'summary', payload: { bridgeId: boot.bridgeId, sessionIds: ['session-one'] } }))
+        .resolves.toEqual({ requestId: 'summary', success: false, error: 'Encrypted request rejected', data: { code: 'invalid_command' } });
+      expect(fetcher).toHaveBeenCalledTimes(2);
+      expect(fetcher.mock.calls.every(([url]) => url === 'http://127.0.0.1:43127/api/security/envelope')).toBe(true);
+    } finally { client.close(); runtime.dispose(); }
+  });
+
+  it.each([
+    { status: 400, body: { code: 'invalid_envelope' } },
+    { status: 403, body: { code: 'invalid_command' } },
+    { status: 400, body: {} },
+  ])('does not classify a generic raw loopback failure as legacy summary support: %o', async failure => {
+    const bridge = await generateEndpoint(ownerId, 'bridge');
+    const boot: BrowserBootstrap = { version: 1, protocolVersion: 1, ownerId, bridgeId: 'bridge-a', endpoint: bridge.endpoint, relayUserId: 'local-owner', userId: 'local-owner', hostname: 'laptop', localPort: 43127 };
+    const runtime = { state: () => ({ status: 'ready' }), request: async (_bridge: string, _channel: string, _route: unknown, _data: unknown, transmit: (packet: never) => Promise<void>) => transmit({} as never), disconnected: vi.fn() };
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(failure.body), { status: failure.status })));
+    const client = new LocalBrowserClient({ port: 43127, bridgeId: boot.bridgeId }, boot, vi.fn(), vi.fn(), undefined, runtime as unknown as SecureEndpointRuntime);
+    try { await expect(client.command({ type: 'get_attention_summary', requestId: 'summary', payload: { bridgeId: boot.bridgeId, sessionIds: ['session-one'] } })).rejects.toMatchObject({ status: failure.status }); }
+    finally { client.close(); }
+  });
+
+  it.each([
+    { type: 'list_sessions' as const, payload: {} },
+    { type: 'get_attention_summary' as const, payload: { bridgeId: 'other-bridge', sessionIds: ['session-one'] } },
+  ])('does not downgrade a raw invalid_command for another command or target: %o', async command => {
+    const bridge = await generateEndpoint(ownerId, 'bridge');
+    const boot: BrowserBootstrap = { version: 1, protocolVersion: 1, ownerId, bridgeId: 'bridge-a', endpoint: bridge.endpoint, relayUserId: 'local-owner', userId: 'local-owner', hostname: 'laptop', localPort: 43127 };
+    const runtime = { state: () => ({ status: 'ready' }), request: async (_bridge: string, _channel: string, _route: unknown, _data: unknown, transmit: (packet: never) => Promise<void>) => transmit({} as never), disconnected: vi.fn() };
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ code: 'invalid_command' }), { status: 400 })));
+    const client = new LocalBrowserClient({ port: 43127, bridgeId: boot.bridgeId }, boot, vi.fn(), vi.fn(), undefined, runtime as unknown as SecureEndpointRuntime);
+    try { await expect(client.command({ ...command, requestId: 'other' })).rejects.toMatchObject({ status: 400 }); }
+    finally { client.close(); }
+  });
+
   it('preserves a security code in a delivered command failure', async () => {
     const bridge = await generateEndpoint(ownerId, 'bridge');
     const boot: BrowserBootstrap = { version: 1, protocolVersion: 1, ownerId, bridgeId: 'bridge-a', endpoint: bridge.endpoint, relayUserId: 'local-owner', userId: 'local-owner', hostname: 'laptop', localPort: 43127 };

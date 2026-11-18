@@ -41,7 +41,7 @@ export interface MessageClient {
   readonly commandTimeoutMs?: number;
   /** A local controller snapshot is authoritative for this single bridge. */
   readonly sessionSnapshotBridgeId?: string;
-  newSubscription(channel: string, options?: { since: { offset: number; epoch: string }; recoverable?: boolean; positioned?: boolean }): MessageSubscription;
+  newSubscription(channel: string, options?: { since?: { offset: number; epoch: string }; recoverable?: boolean; positioned?: boolean }): MessageSubscription;
   getSubscription(channel: string): MessageSubscription | null;
   removeSubscription(sub: MessageSubscription | null): void;
 }

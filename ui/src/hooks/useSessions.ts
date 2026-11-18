@@ -400,7 +400,8 @@ export function useSessions(
       const channel = accountChannel("sessions:updates", userId);
       const existing = client.getSubscription(channel);
       if (existing) { existing.removeAllListeners(); existing.unsubscribe(); client.removeSubscription(existing); }
-      sessionsSub = client.newSubscription(channel, { since: sessionPositionRef.current, recoverable: true, positioned: true });
+      const since = streamPosition(sessionPositionRef.current);
+      sessionsSub = client.newSubscription(channel, { ...(since ? { since } : {}), recoverable: true, positioned: true });
       sessionsSub.on("publication", ctx => {
         if (!active) return;
         const nextPosition = streamPosition({ offset: ctx.offset, epoch: ctx.epoch ?? sessionPositionRef.current.epoch });
