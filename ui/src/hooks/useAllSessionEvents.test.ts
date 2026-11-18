@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MessageClient, MessageEvents, MessageSubscription } from "@/lib/message-client";
 import type { Command, CommandResponse, Session } from "@/types";
 import { useAllSessionEvents } from "./useAllSessionEvents";
+import { useBridgeRpc } from "./useBridgeRpc";
 import { ATTENTION_SUMMARY_TOO_LARGE } from "../../../bridge/src/attention-summary-protocol";
 
 const sessions: Session[] = [{ id: "agent", name: "Agent", bridgeId: "bridge", status: "running", createdAt: "2026-10-23", updatedAt: "2026-10-23" }];
@@ -173,6 +174,106 @@ function durableSetup(handle: (command: Command) => Promise<CommandResponse> = a
 async function settle() { await act(async () => { await Promise.resolve(); }); }
 
 describe("durable explicit attention restoration", () => {
+  it.each([
+    { separate: false, rpcResubscribesFirst: false },
+    { separate: true, rpcResubscribesFirst: false },
+    { separate: true, rpcResubscribesFirst: true },
+  ])("restores initial and reconnect rows through real RPC: %o", async ({ separate, rpcResubscribesFirst }) => {
+    type Listener = (context: never) => void;
+    const commands: Command[] = [];
+    class Subscription implements MessageSubscription {
+      state = "unsubscribed";
+      private listeners = new Map<keyof MessageEvents, Set<Listener>>();
+      constructor(readonly channel: string) {}
+      subscribe() { this.state = this.channel.startsWith("commands:") ? "subscribed" : "subscribing"; }
+      unsubscribe() { this.state = "unsubscribed"; }
+      async publish(value: unknown) { commands.push(value as Command); }
+      async presence() { return { clients: {} }; }
+      on<E extends keyof MessageEvents>(event: E, listener: (context: MessageEvents[E]) => void) {
+        const set = this.listeners.get(event) ?? new Set<Listener>(); set.add(listener as Listener); this.listeners.set(event, set); return this;
+      }
+      off<E extends keyof MessageEvents>(event: E, listener: (context: MessageEvents[E]) => void) { this.listeners.get(event)?.delete(listener as Listener); return this; }
+      removeAllListeners() { this.listeners.clear(); }
+      emit<E extends keyof MessageEvents>(event: E, context: MessageEvents[E]) { for (const listener of this.listeners.get(event) ?? []) listener(context as never); }
+    }
+    const subscriptions = new Map<string, Subscription>();
+    const client: MessageClient = {
+      getSubscription: channel => subscriptions.get(channel) ?? null,
+      newSubscription: channel => { const sub = new Subscription(channel); subscriptions.set(channel, sub); return sub; },
+      removeSubscription: sub => { for (const [channel, owned] of subscriptions) if (owned === sub) subscriptions.delete(channel); },
+    };
+    const rows = [sessions[0], { ...sessions[0], id: "agent-two" }];
+    const hook = renderHook(() => {
+      const rpc = useBridgeRpc(client, "user");
+      return { rpc, ...useAllSessionEvents(client, rows, "user", rpc) };
+    });
+    const originalRpc = hook.result.current.rpc;
+    const first = subscriptions.get("events:agent#user")!, second = subscriptions.get("events:agent-two#user")!;
+    const commandSub = subscriptions.get("commands:rpc#user")!;
+    const respond = (command: Command, data: unknown) => commandSub.emit("publication", { info: { user: "user" }, data: {
+      type: "command_response", response: { requestId: command.requestId, success: true, data },
+    } });
+    // SecureSubscription exposes raw state before its queued domain callback.
+    first.state = "subscribed"; second.state = "subscribed";
+    if (rpcResubscribesFirst) {
+      await act(async () => commandSub.emit("subscribed", {}));
+      expect(commands).toHaveLength(0);
+    }
+    if (separate) {
+      await act(async () => first.emit("subscribed", {}));
+      expect(commands).toHaveLength(0);
+      await act(async () => second.emit("subscribed", {}));
+    } else {
+      await act(async () => { first.emit("subscribed", {}); second.emit("subscribed", {}); });
+    }
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toMatchObject({ type: "get_attention_summary", payload: { bridgeId: "bridge", sessionIds: ["agent", "agent-two"] } });
+    await act(async () => respond(commands[0], { summary: {
+        agent: { attention: saved, sequence: saved.sequence }, "agent-two": { attention: newer, sequence: newer.sequence },
+    } }));
+    expect(hook.result.current.rpc).not.toBe(originalRpc);
+    expect(hook.result.current.rpc.sendCommand).toBe(originalRpc.sendCommand);
+    expect(hook.result.current.rpc.onSubscribed).toBe(originalRpc.onSubscribed);
+    expect(hook.result.current.sessionActivity.get("agent")?.attention?.attentionId).toBe(saved.id);
+    expect(hook.result.current.sessionActivity.get("agent-two")?.attention?.attentionId).toBe(newer.id);
+
+    // The command channel can resubscribe before the event subscriptions are
+    // ready. Their later callbacks must not invalidate the shared reconnect read.
+    first.state = "subscribing"; second.state = "subscribing";
+    await act(async () => commandSub.emit("subscribed", {}));
+    expect(commands).toHaveLength(1);
+    first.state = "subscribed"; second.state = "subscribed";
+    if (separate) {
+      await act(async () => first.emit("subscribed", {}));
+      await act(async () => second.emit("subscribed", {}));
+    } else {
+      await act(async () => { first.emit("subscribed", {}); second.emit("subscribed", {}); });
+    }
+    expect(commands).toHaveLength(2);
+    const restored = { ...saved, id: "reconnected-first", sequence: 3 };
+    const restoredSecond = { ...newer, id: "reconnected-second", sequence: 3 };
+    await act(async () => respond(commands[1], { summary: {
+      agent: { attention: restored, sequence: 3 }, "agent-two": { attention: restoredSecond, sequence: 3 },
+    } }));
+    expect(hook.result.current.sessionActivity.get("agent")?.attention?.attentionId).toBe(restored.id);
+    expect(hook.result.current.sessionActivity.get("agent-two")?.attention?.attentionId).toBe(restoredSecond.id);
+
+    // A manual resolution still fences an older batch that is already in flight.
+    await act(async () => commandSub.emit("subscribed", {}));
+    const pendingSummary = commands[2];
+    let dismissal!: Promise<void>;
+    act(() => { dismissal = hook.result.current.clearSessionAttention("agent", hook.result.current.sessionActivity.get("agent")!.attention); });
+    const resolve = commands.at(-1)!;
+    expect(resolve.type).toBe("resolve_session_attention");
+    await act(async () => { respond(resolve, { sessionId: "agent", attention: null, sequence: 3 }); await dismissal; });
+    await act(async () => respond(pendingSummary, { summary: {
+      agent: { attention: restored, sequence: 3 }, "agent-two": { attention: restoredSecond, sequence: 3 },
+    } }));
+    expect(hook.result.current.sessionActivity.get("agent")?.attention).toBeUndefined();
+    expect(hook.result.current.sessionActivity.get("agent-two")?.attention?.attentionId).toBe(restoredSecond.id);
+    expect(commands.filter(command => command.type === "get_session_attention")).toHaveLength(0);
+  });
+
   it("bisects an explicitly oversized sixty-notice summary into two atomic authorized halves", async () => {
     const rows = Array.from({ length: 60 }, (_, index) => ({ ...sessions[0], id: `agent-${index}` }));
     const h = durableSetup(async command => {

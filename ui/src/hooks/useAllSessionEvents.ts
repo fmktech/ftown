@@ -134,6 +134,9 @@ interface LegacyAttentionProbe {
 interface AttentionSummaryBatch {
   batch: Session[]; response: CommandResponse; legacyEligible: boolean;
 }
+interface AttentionReadiness {
+  client: MessageClient | null; user: string; promise: Promise<boolean>; resolve: (ready: boolean) => void;
+}
 
 export interface AllSessionEvents {
   sessionActivity: Map<string, SessionActivity>;
@@ -209,6 +212,41 @@ export function useAllSessionEvents(
   const summaryRetries = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const legacySummaryProbes = useRef(new Map<string, Promise<LegacyAttentionProbe | null>>());
   const legacySnapshots = useRef(new Map<string, LegacyAttentionProbe>());
+  const subscriptionReadiness = useRef(new Map<string, AttentionReadiness>());
+  function ownedBridgeSessions(bridgeId: string, ownerClient: MessageClient | null, ownerUser: string): Session[] {
+    return [...new Map(sessionsRef.current.filter(row => {
+      const owner = subsRef.current.get(row.id);
+      return row.bridgeId === bridgeId && row.status === "running" && owner?.bridgeId === bridgeId
+        && owner.client === ownerClient && owner.user === ownerUser;
+    }).map(row => [row.id, row])).values()];
+  }
+  function subscriptionsReady(bridgeId: string, ownerClient: MessageClient | null, ownerUser: string): boolean {
+    const rows = ownedBridgeSessions(bridgeId, ownerClient, ownerUser);
+    return rows.length > 0 && rows.every(row => {
+      const owner = subsRef.current.get(row.id)!;
+      return owner.initialHydration && !owner.queued && owner.sub.state === "subscribed";
+    });
+  }
+  function waitForSubscriptions(bridgeId: string, ownerClient: MessageClient | null, ownerUser: string): Promise<boolean> | null {
+    if (subscriptionsReady(bridgeId, ownerClient, ownerUser)) return null;
+    const existing = subscriptionReadiness.current.get(bridgeId);
+    if (existing?.client === ownerClient && existing.user === ownerUser) return existing.promise;
+    existing?.resolve(false);
+    let resolve!: AttentionReadiness["resolve"];
+    const promise = new Promise<boolean>(done => { resolve = done; });
+    subscriptionReadiness.current.set(bridgeId, { client: ownerClient, user: ownerUser, promise, resolve });
+    return promise;
+  }
+  function notifySubscriptions(bridgeId: string): void {
+    const waiting = subscriptionReadiness.current.get(bridgeId);
+    if (!waiting) return;
+    // A subscribed callback queues its initial read. Admit that read before
+    // capturing the shared snapshot's counters, even when raw state is ready.
+    void Promise.resolve().then(() => {
+      if (subscriptionReadiness.current.get(bridgeId) !== waiting || !subscriptionsReady(bridgeId, waiting.client, waiting.user)) return;
+      subscriptionReadiness.current.delete(bridgeId); waiting.resolve(true);
+    });
+  }
   const releaseRead = (): void => {
     const next = readWaiters.current.shift();
     if (next) next(); else readsInFlight.current -= 1;
@@ -217,9 +255,8 @@ export function useAllSessionEvents(
     if (readsInFlight.current < READ_LIMIT) { readsInFlight.current += 1; return Promise.resolve(releaseRead); }
     return new Promise(resolve => readWaiters.current.push(() => resolve(releaseRead)));
   };
-  const hydrateBridge = useCallback((bridgeId: string, resolving = false, readStamps?: Map<string, { read: number; observation: number }>): Promise<void> => {
-    const sessionsForBridge = [...new Map(sessionsRef.current.filter(row => row.bridgeId === bridgeId && row.status === "running")
-      .map(row => [row.id, row])).values()];
+  const hydrateBridge = useCallback((bridgeId: string, resolving = false): Promise<void> => {
+    let sessionsForBridge = ownedBridgeSessions(bridgeId, clientRef.current, userIdRef.current);
     if (!sessionsForBridge.length || !rpcRef.current || unsupportedSummaryBridges.current.has(bridgeId)) return Promise.resolve();
     const existing = attentionHydration.current.get(bridgeId);
     if (existing) return existing;
@@ -239,13 +276,8 @@ export function useAllSessionEvents(
         }
       }, 2000));
     };
-    const readBySession = readStamps ?? new Map(sessionsForBridge.map(session => {
-      const read = reads.current.get(session.id) ?? 0;
-      return [session.id, { read, observation: observations.current.get(session.id) ?? 0 }] as const;
-    }));
-    const batches: Session[][] = [];
-    for (let offset = 0; offset < sessionsForBridge.length; offset += SUMMARY_BATCH_SIZE) batches.push(sessionsForBridge.slice(offset, offset + SUMMARY_BATCH_SIZE));
-    const isCurrent = () => userIdRef.current === user && clientRef.current === activeClient && rpcRef.current?.sendCommand === send
+    let readBySession = new Map<string, { read: number; observation: number }>();
+    const isCurrent = (): boolean => userIdRef.current === user && clientRef.current === activeClient && rpcRef.current?.sendCommand === send
       && attentionHydration.current.get(bridgeId) === request;
     async function readBatch(batch: Session[], adaptive = false): Promise<AttentionSummaryBatch | null> {
       // Initial calls start before `request` is assigned; every child runs after
@@ -278,9 +310,20 @@ export function useAllSessionEvents(
       }
       return { batch, response, legacyEligible: !adaptive };
     }
-    const request = Promise.all(batches.map(batch => readBatch(batch))).then(async pending => {
+    const startBatches = (): Promise<Array<AttentionSummaryBatch | null>> => {
+      sessionsForBridge = ownedBridgeSessions(bridgeId, activeClient, user);
+      readBySession = new Map(sessionsForBridge.map(session => [session.id, {
+        read: reads.current.get(session.id) ?? 0, observation: observations.current.get(session.id) ?? 0,
+      }]));
+      const batches: Session[][] = [];
+      for (let offset = 0; offset < sessionsForBridge.length; offset += SUMMARY_BATCH_SIZE) batches.push(sessionsForBridge.slice(offset, offset + SUMMARY_BATCH_SIZE));
+      return Promise.all(batches.map(batch => readBatch(batch)));
+    };
+    const readiness = waitForSubscriptions(bridgeId, activeClient, user);
+    const request: Promise<void> = (readiness ? readiness.then(ready => ready && isCurrent() ? startBatches() : null) : startBatches()).then(async pending => {
       if (userIdRef.current !== user || clientRef.current !== activeClient || rpcRef.current?.sendCommand !== send
         || attentionHydration.current.get(bridgeId) !== request) return;
+      if (!pending) return;
       if (pending.some(result => result === null)) return;
       const results = pending.filter((result): result is AttentionSummaryBatch => result !== null);
       const failed = results.find(result => !result.response.success);
@@ -452,16 +495,7 @@ export function useAllSessionEvents(
       if (!unsupportedSummaryBridges.current.has(session.bridgeId) && !summaryStarted.current.has(summaryKey)) {
         summaryStarted.current.add(summaryKey);
         const attempt = Promise.resolve().then(async () => {
-          const bridgeSessions = sessionsRef.current.filter(row => row.bridgeId === session.bridgeId && row.status === "running");
-          const allSessionsReady = bridgeSessions.every(row => subsRef.current.has(row.id));
-          if (!allSessionsReady) { summaryStarted.current.delete(summaryKey); return false; }
-          // Every session's subscription callback enters this shared attempt;
-          // capture a stamp for each after the microtask batch has started.
-          const readStamps = new Map(bridgeSessions.map(row => [row.id, {
-            read: reads.current.get(row.id) ?? 0,
-            observation: observations.current.get(row.id) ?? 0,
-          }] as const));
-          await hydrateBridge(session.bridgeId, resolving, readStamps);
+          await hydrateBridge(session.bridgeId, resolving);
           return true;
         });
         summaryAttempts.current.set(summaryKey, attempt);
@@ -549,6 +583,7 @@ export function useAllSessionEvents(
       owner.inFlight = true;
       const read = owner.pendingResolving;
       owner.pendingResolving = false;
+      notifySubscriptions(owner.bridgeId);
       void readSnapshot(sessionId, read).finally(() => {
         if (subsRef.current.get(sessionId) !== owner || owner.client !== clientRef.current || owner.user !== userIdRef.current) return;
         owner.inFlight = false;
@@ -695,9 +730,9 @@ export function useAllSessionEvents(
     sub.on("publication", onPublication);
     const hydrateInitially = () => {
       const owner = subsRef.current.get(sessionId);
-      if (clientRef.current !== c || userIdRef.current !== u || owner?.sub !== sub || owner.initialHydration) return;
-      owner.initialHydration = true;
-      void hydrate(sessionId);
+      if (clientRef.current !== c || userIdRef.current !== u || owner?.sub !== sub) return;
+      if (!owner.initialHydration) { owner.initialHydration = true; void hydrate(sessionId); }
+      notifySubscriptions(owner.bridgeId);
     };
     sub.on("subscribed", hydrateInitially);
     subsRef.current.set(sessionId, { client: c, user: u, bridgeId, sub, initialHydration: false, queued: false, inFlight: false, dirty: false, dirtyResolving: false, pendingResolving: false });
@@ -723,6 +758,10 @@ export function useAllSessionEvents(
       const retry = summaryRetries.current.get(owned.bridgeId);
       if (retry) clearTimeout(retry);
       summaryRetries.current.delete(owned.bridgeId); summaryRetried.current.delete(owned.bridgeId);
+      const waiting = subscriptionReadiness.current.get(owned.bridgeId);
+      subscriptionReadiness.current.delete(owned.bridgeId); waiting?.resolve(false);
+    } else if (owned) {
+      notifySubscriptions(owned.bridgeId);
     }
   }, []);
 
@@ -741,6 +780,8 @@ export function useAllSessionEvents(
     for (const timer of summaryRetries.current.values()) clearTimeout(timer);
     summaryRetries.current.clear(); summaryRetried.current.clear();
     legacySummaryProbes.current.clear(); legacySnapshots.current.clear();
+    for (const waiting of subscriptionReadiness.current.values()) waiting.resolve(false);
+    subscriptionReadiness.current.clear();
     activityOwner.current = { client, user: userId };
     setActivityMap(new Map());
   }, [client, userId, unsubscribe]);
