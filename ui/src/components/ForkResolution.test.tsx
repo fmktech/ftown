@@ -52,11 +52,17 @@ async function divergence(mine: Ledger, theirs: Ledger, source: LedgerDivergence
   };
 }
 
+function genesisFor(key: SoftPasskey): LedgerGenesis {
+  // Genesis and its first authority describe the same event, even across a clock tick.
+  const createdAt = Date.now() - 5000;
+  return { type: "ftown_account_genesis", version: 2, rpId: RP, origins: [ORIGIN], handle: Buffer.alloc(32, 7).toString("base64url"), createdAt,
+    authority: { credentialId: key.credentialId, publicKey: key.publicKey, label: "MacBook Touch ID", addedAt: createdAt } };
+}
+
 let iphone: LedgerDevice; let homeServer: LedgerBridge; let macStudio: LedgerBridge;
 beforeAll(async () => {
   keyA = await createSoftPasskey({ rpId: RP, origin: ORIGIN }); keyB = await createSoftPasskey({ rpId: RP, origin: ORIGIN });
-  const genesis: LedgerGenesis = { type: "ftown_account_genesis", version: 2, rpId: RP, origins: [ORIGIN], handle: Buffer.alloc(32, 7).toString("base64url"), createdAt: Date.now() - 5000,
-    authority: { credentialId: keyA.credentialId, publicKey: keyA.publicKey, label: "MacBook Touch ID", addedAt: Date.now() - 5000 } };
+  const genesis = genesisFor(keyA);
   accountId = await accountIdOf(genesis);
   base = { genesis: { payload: genesis, signature: await keyA.sign(await ledgerChallenge(genesis)) }, transitions: [] };
   iphone = await member("iPhone Safari"); homeServer = await bridgeMember("Home server"); macStudio = await bridgeMember("Mac Studio");
@@ -107,6 +113,20 @@ const mineColumn = () => column("This browser's history");
 const otherColumn = () => column("The other history");
 
 describe("ForkResolution", () => {
+  it("builds a valid genesis when the clock advances between timestamp reads", async () => {
+    let now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now++);
+    let genesis: LedgerGenesis;
+    try {
+      genesis = genesisFor(keyA);
+    } finally {
+      clock.mockRestore();
+    }
+    expect(genesis.authority.addedAt).toBe(genesis.createdAt);
+    const ledger: Ledger = { genesis: { payload: genesis, signature: await keyA.sign(await ledgerChallenge(genesis)) }, transitions: [] };
+    expect((await verifyLedger(ledger)).revision).toBe(0);
+  });
+
   it("shows the heading (focused), intro, source line and the collapsed common part", () => {
     mount(fx.several);
     const heading = screen.getByRole("heading", { name: "Two different histories of this account exist" });
