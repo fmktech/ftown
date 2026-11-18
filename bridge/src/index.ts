@@ -882,6 +882,7 @@ program
       publishSession: (session) => centrifugo.publishSessionUpdate(userId, session),
       withSessionWrite: (id, task) => pump.withSessionWrite(id, task),
       loadTerminalLog: (id) => store.loadTerminalLog(id),
+      loadActivity: async (id) => (await attentionStore.list(id, { limit: 1 })).activity.state,
       listMail: async (sessionId) => (await mailStore.listAll(sessionId, 0)).map((message) => ({ from: message.from, type: message.type })),
       acceptMail: (parent, body) => localApiServer.acceptSessionMail(parent, body),
       recordAttention: async (sessionId, input) => {

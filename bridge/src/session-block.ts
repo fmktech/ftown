@@ -50,6 +50,7 @@ export interface SessionFailureDeps {
   publishSession(session: Session): Promise<void>;
   withSessionWrite(id: string, task: () => Promise<void>): Promise<void>;
   loadTerminalLog?(id: string): Promise<string>;
+  loadActivity?(id: string): Promise<'thinking' | 'tool_use' | 'idle' | 'unknown'>;
   listMail?(sessionId: string): Promise<Array<{ from: string; type: string }>>;
   acceptMail(parent: Session, body: { from: string; fromName?: string; type: 'escalation'; idempotencyKey: string; body: string }): Promise<{ ok: boolean; error?: string }>;
   recordAttention(sessionId: string, input: { title: string; message: string; notificationId: string }): Promise<boolean>;
@@ -292,6 +293,10 @@ export class SessionFailureMonitor {
       if (event.kind === 'output' && pending) {
         this.observed.add(sessionId);
         this.buffers.delete(sessionId);
+      }
+      if (event.kind === 'output' && pending && session.status === 'running' && this.deps.loadActivity) {
+        const activity = await this.deps.loadActivity(sessionId).catch(() => 'unknown' as const);
+        if (activity === 'thinking' || activity === 'tool_use') return;
       }
       if (event.kind === 'output' && pending && session.status === 'running' && session.block && screenTail(screen) && !detectLimit(session.shellType, screen, this.now())) {
         clearSessionBlock(session);
