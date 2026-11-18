@@ -66,6 +66,8 @@ export function isWatchMessage(msg: { type?: string }): msg is WatchMessage {
 export type DirectMessage =
   | { kind: 'hello'; clientId: string; protocolVersion: number }
   | { kind: 'hello_ack'; bridgeId: string; protocolVersion: number }
+  /** Bridge → client, once the channel is authorized: what this channel offers beyond terminal frames. Unknown to older clients, which ignore it. */
+  | { kind: 'capabilities'; commands: boolean }
   | { kind: 'attach'; sessionId: string }
   | { kind: 'detach'; sessionId: string }
   /** Full serialized screen; resets the output stream for the session. */
@@ -117,3 +119,14 @@ export interface TerminalTransportApi {
   getFallbackReason(sessionId: string): FallbackReason;
   dispose(): void;
 }
+
+/** How long after a direct channel connects the client waits to hear whether the bridge serves commands on it. */
+export const COMMANDS_ANNOUNCE_MS = 1_500;
+
+/** A command that never left this client on the direct channel; sending it another way cannot duplicate it. */
+export class DirectUnsentError extends Error {
+  constructor() { super('Direct command was not sent'); this.name = 'DirectUnsentError'; }
+}
+
+/** One command in flight on a direct channel: `sent` settles when it has left (or could not), `answer` with the bridge's reply. */
+export interface DirectCommandHandle<T> { sent: Promise<void>; answer: Promise<T> }

@@ -132,15 +132,19 @@ test.describe("IDOR: relay channel guards of the shared account", () => {
       expect(newId, "the signed-in browser's encrypted command should spawn a session").toBeTruthy();
       await expect(page.getByRole("button", { name: new RegExp(name) })).toBeVisible();
       const sent = frames.slice(start);
+      // The command leaves the browser sealed: on the bridge's direct channel (a loopback WebSocket here), or, when the bridge
+      // cannot be reached directly, as a publish on the relay's commands:rpc channel. Either way it is never plaintext.
+      type Sealed = { type?: string; purpose?: string; channel?: string; enc?: string; ciphertext?: string };
+      const sealed = (d: Sealed | undefined): boolean => d?.type === "ftown_encrypted" && d.purpose === "application"
+        && typeof d.enc === "string" && typeof d.ciphertext === "string";
       const encrypted = sent.some((frame) => frame.split("\n").some((line) => {
         try {
-          const cmd = JSON.parse(line) as { publish?: { channel?: string; data?: { type?: string; purpose?: string; enc?: string; ciphertext?: string } } } | null;
-          const d = cmd?.publish?.data;
-          return cmd?.publish?.channel === channel && d?.type === "ftown_encrypted" && d.purpose === "application"
-            && typeof d.enc === "string" && typeof d.ciphertext === "string";
+          const cmd = JSON.parse(line) as ({ publish?: { channel?: string; data?: Sealed } } & Sealed) | null;
+          if (cmd?.publish) return cmd.publish.channel === channel && sealed(cmd.publish.data);
+          return sealed(cmd ?? undefined) && typeof cmd?.channel === "string" && cmd.channel.startsWith("direct:");
         } catch { return false; }
       }));
-      expect(encrypted, "browser publishes an encrypted application envelope to commands:rpc").toBe(true);
+      expect(encrypted, "browser sends the command as an encrypted application envelope (direct channel or commands:rpc)").toBe(true);
       expect(sent.join("\n")).not.toContain(name);
       expect(sent.join("\n")).not.toContain('"type":"create_session"');
     } finally {

@@ -293,8 +293,12 @@ function useDismissContextMenu(onClose: () => void, menuRef: React.RefObject<HTM
     document.addEventListener("mousedown", handleClickOutside);
     document.addEventListener("touchstart", handleClickOutside);
     document.addEventListener("keydown", handleKeyDown);
-    window.addEventListener("scroll", handleScroll, true);
+    // A scroll that was already under way when the menu opened (the list settling after a section expanded, or the row being
+    // brought into view for the very click that opened it) reports its event on the next frame. That event is not the user
+    // scrolling away from the menu, so scrolls only dismiss from the frame after the one the menu opened in.
+    const armed = requestAnimationFrame(() => window.addEventListener("scroll", handleScroll, true));
     return () => {
+      cancelAnimationFrame(armed);
       document.removeEventListener("mousedown", handleClickOutside);
       document.removeEventListener("touchstart", handleClickOutside);
       document.removeEventListener("keydown", handleKeyDown);

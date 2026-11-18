@@ -14,7 +14,7 @@ vi.mock("centrifuge", () => ({
   },
 }));
 vi.mock("@/lib/secure-message-client", () => ({
-  SecureMessageClient: class { constructor(public raw: unknown) { mocks.wrapped.push(this as { raw: unknown }); } dispose() {} publish() { return Promise.resolve(); } getSubscription() { return null; } newSubscription() { return { on() {}, off() {}, subscribe() {} }; } },
+  SecureMessageClient: class { constructor(public raw: unknown) { mocks.wrapped.push(this as { raw: unknown }); } dispose() {} setDirectCommands() {} publish() { return Promise.resolve(); } getSubscription() { return null; } newSubscription() { return { on() {}, off() {}, subscribe() {} }; } },
 }));
 vi.mock("@/lib/direct-transport/hybrid-terminal-transport", () => ({ HybridTerminalTransport: class { dispose() {} } }));
 import { useCentrifugo } from "./useCentrifugo";

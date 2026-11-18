@@ -1,6 +1,6 @@
 import { PeerConnection } from 'node-datachannel';
 import type { BridgeSecurityService } from '../security/bridge/security.js';
-import { EncryptedPeerChannel } from '../security/bridge/direct.js';
+import { EncryptedPeerChannel, type DirectCommands } from '../security/bridge/direct.js';
 
 import {
   DATA_CHANNEL_LABEL,
@@ -55,6 +55,8 @@ export interface DirectPeerManagerOptions {
    * receives output that precedes its own snapshot.
    */
   onAttach: (sessionId: string, deliver: (screen: string) => void) => string | void;
+  /** Serves dashboard commands arriving on a peer's channel. */
+  onCommand?: DirectCommands;
   /** node-datachannel PeerConnection factory; defaults to the real module. */
   peerConnectionFactory?: PeerConnectionFactory;
   /** Injectable clock for keepalive/teardown timers (defaults to Date.now). */
@@ -209,7 +211,7 @@ class DirectPeer {
     if (!this.manager.security) { this.manager.teardown(this.pairId); return; }
     this.secure = new EncryptedPeerChannel(this.manager.security, { transport: 'webrtc', channel: `direct:webrtc:${this.manager.bridgeId}:${this.pairId}`,
       bridgeId: this.manager.bridgeId, pairId: this.pairId }, json => { if (dc.isOpen()) dc.sendMessage(json); },
-      frame => this.handleFrame(JSON.stringify(frame)), () => { this.helloOk = true; }, () => this.manager.teardown(this.pairId));
+      frame => this.handleFrame(JSON.stringify(frame)), () => { this.helloOk = true; }, () => this.manager.teardown(this.pairId), this.manager.onCommand);
     dc.onMessage((msg) => {
       if (typeof msg !== 'string') return;
       return this.secure?.receive(msg);
@@ -336,6 +338,7 @@ class DirectPeer {
 export class DirectPeerManager {
   readonly security?: BridgeSecurityService;
   readonly bridgeId: string;
+  readonly onCommand?: DirectCommands;
   private readonly sendSignalCb: (msg: SignalMessage) => void;
   private readonly onInputCb: (sessionId: string, data: string) => void;
   private readonly onResizeCb: (sessionId: string, cols: number, rows: number) => void;
@@ -346,6 +349,7 @@ export class DirectPeerManager {
   constructor(options: DirectPeerManagerOptions) {
     this.security = options.security;
     this.bridgeId = options.bridgeId;
+    this.onCommand = options.onCommand;
     this.sendSignalCb = options.sendSignal;
     this.onInputCb = options.onInput;
     this.onResizeCb = options.onResize;

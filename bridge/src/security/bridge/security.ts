@@ -150,7 +150,7 @@ export class BridgeSecurityService implements Omit<BridgeSecurity, 'adoptAccount
       : route.transport === 'local-events' ? `local-events:${this.bridgeId}`
       : route.transport === 'cloud' ? route.channel
       : `direct:${route.transport}:${this.bridgeId}:${route.pairId}`;
-    if (expected !== route.channel || ((route.transport === 'webrtc' || route.transport === 'loopback-ws') && !route.pairId)) {
+    if (expected !== route.channel || ((route.transport === 'webrtc' || route.transport === 'loopback-ws' || route.transport === 'bridge-link') && !route.pairId)) {
       throw new BridgeSecurityError('wrong_context');
     }
   }
@@ -217,12 +217,15 @@ export class BridgeSecurityService implements Omit<BridgeSecurity, 'adoptAccount
   }
   private requirement(application: SecureApplication, transport: InboundTransportContext): OperationPermission {
     const route = application.route;
-    if ((transport.transport === 'webrtc' || transport.transport === 'loopback-ws') && route.kind !== 'terminal') {
-      throw new BridgeSecurityError('wrong_context');
-    }
+    // A direct browser channel carries terminal frames and dashboard commands. Connection setup and HTTP routes stay off it.
+    const directBrowser = transport.transport === 'webrtc' || transport.transport === 'loopback-ws';
+    if (directBrowser && route.kind !== 'terminal' && route.kind !== 'command') throw new BridgeSecurityError('wrong_context');
+    // A direct bridge-to-bridge link carries cross-bridge requests only.
+    if (transport.transport === 'bridge-link' && route.kind !== 'http') throw new BridgeSecurityError('wrong_context');
     if (route.kind === 'command') {
       const data = object(application.data);
       if (['terminal_watch', 'terminal_unwatch', 'webrtc_offer', 'webrtc_answer', 'webrtc_ice', 'webrtc_close'].includes(route.command)) {
+        if (directBrowser) throw new BridgeSecurityError('wrong_context');
         if (data.type !== route.command || (data.bridgeId !== undefined && data.bridgeId !== this.bridgeId)
           || (typeof data.sessionId === 'string' ? data.sessionId : null) !== route.sessionId) throw new BridgeSecurityError('wrong_context');
         return classifyCommand(route.command, data);
@@ -252,6 +255,7 @@ export class BridgeSecurityService implements Omit<BridgeSecurity, 'adoptAccount
     const envelope = parseSecureEnvelope(packet);
     if (envelope.purpose !== 'application') throw new BridgeSecurityError('wrong_context');
     const principal = await this.senderPrincipal(envelope.senderId);
+    if (route.transport === 'bridge-link' && principal.endpoint.kind !== 'bridge') throw new BridgeSecurityError('permission_denied');
     const app = this.parseApplication(await this.decode(principal.endpoint, envelope, route));
     if (app.route.kind === 'http') {
       const data = object(app.data);

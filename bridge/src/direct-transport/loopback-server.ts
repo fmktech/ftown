@@ -1,6 +1,6 @@
 import { timingSafeEqual } from 'node:crypto';
 import type { BridgeSecurityService } from '../security/bridge/security.js';
-import { EncryptedPeerChannel } from '../security/bridge/direct.js';
+import { EncryptedPeerChannel, type DirectCommands } from '../security/bridge/direct.js';
 import { WebSocket, WebSocketServer, type RawData } from 'ws';
 
 import type { Server as HttpServer, IncomingMessage } from 'node:http';
@@ -69,6 +69,8 @@ export interface LoopbackPeerServerOptions {
    * receives output that precedes its own snapshot.
    */
   onAttach: (sessionId: string, deliver: (screen: string) => void) => string | void;
+  /** Serves dashboard commands arriving on a peer's channel. */
+  onCommand?: DirectCommands;
 }
 
 /**
@@ -95,7 +97,7 @@ class LoopbackPeer {
     if (server.security) this.secure = new EncryptedPeerChannel(server.security, { transport: 'loopback-ws',
       channel: `direct:loopback-ws:${server.bridgeId}:${pairId}`, bridgeId: server.bridgeId, pairId },
       json => { if (ws.readyState === WebSocket.OPEN) ws.send(json); }, frame => this.handleFrame(JSON.stringify(frame)),
-      () => { this.helloOk = true; }, () => server.remove(this));
+      () => { this.helloOk = true; }, () => server.remove(this), server.onCommand);
     ws.on('message', (data: RawData, isBinary: boolean) => {
       if (isBinary) return;
       if (!this.secure) { server.remove(this); return; }
@@ -246,6 +248,7 @@ class LoopbackPeer {
 export class LoopbackPeerServer {
   readonly security?: BridgeSecurityService;
   readonly bridgeId: string;
+  readonly onCommand?: DirectCommands;
   private readonly nonce: string;
   private readonly authorize?: (token: string, origin: string) => boolean;
   private readonly allowedOrigins: string[];
@@ -260,6 +263,7 @@ export class LoopbackPeerServer {
   constructor(options: LoopbackPeerServerOptions) {
     this.security = options.security;
     this.bridgeId = options.bridgeId;
+    this.onCommand = options.onCommand;
     this.nonce = options.nonce;
     this.authorize = options.authorize;
     this.allowedOrigins = options.allowedOrigins;

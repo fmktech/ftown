@@ -4,6 +4,7 @@ import type { ApplicationJson, SecureEnvelope } from './security/protocol.js';
 import type { LedgerBridge } from './security/ledger/protocol.js';
 import { BridgeSecurityError } from './security/bridge/errors.js';
 import { applicationJson } from './security/bridge/security.js';
+import { MAX_LINK_SDP_CHARS, PeerLinkError } from './peer-link.js';
 
 /**
  * Cross-bridge control.
@@ -13,6 +14,9 @@ import { applicationJson } from './security/bridge/security.js';
  * a hello/welcome handshake (to learn the peer's receiver epoch), then one HPKE-sealed `http` application whose answer is sealed back
  * to this bridge. The peer authorizes this bridge as a read + control principal (see BridgePolicyStore.projectLedger); admin
  * (security) operations are never available across bridges.
+ *
+ * The relay is the fallback path. The first request to a peer also asks it (one sealed request over the relay) to open a direct
+ * bridge-to-bridge link (see peer-link.ts); once that is open, requests to the peer travel on it and the relay is not involved.
  */
 
 export const PEER_HTTP_METHODS = ['GET', 'POST', 'PATCH', 'PUT', 'DELETE'] as const;
@@ -33,6 +37,20 @@ export interface PeerTransport {
   peerExchange(packet: SecureEnvelope, peerEndpointId: string, timeoutMs: number): Promise<SecureEnvelope>;
 }
 
+/** What PeerControl needs from the direct links (PeerLinks implements it). */
+export interface PeerDirect {
+  channel(peerBridgeId: string): string | null;
+  exchange(peerBridgeId: string, packet: SecureEnvelope, timeoutMs: number): Promise<SecureEnvelope>;
+  ensure(peer: LedgerBridge, signal: (offer: { pairId: string; sdp: string }) => Promise<{ sdp: string }>): Promise<boolean>;
+}
+
+/** One way to reach a peer: the channel its envelopes are sealed for, and how they travel. */
+interface PeerPath {
+  direct: boolean;
+  channel: string;
+  send(packet: SecureEnvelope, timeoutMs: number): Promise<SecureEnvelope>;
+}
+
 export interface PeerSummary {
   bridgeId: string;
   label: string;
@@ -40,6 +58,8 @@ export interface PeerSummary {
   approvedAt: string;
   /** Only when probed: whether the peer answered a handshake in time. */
   online?: boolean;
+  /** Whether a direct link to the peer is open right now (requests then bypass the relay). */
+  direct?: boolean;
 }
 
 export class PeerTargetError extends Error {
@@ -55,20 +75,24 @@ const DEFAULT_TIMEOUT_MS = 60_000;
 const HELLO_TIMEOUT_MS = 15_000;
 /** Answer slack past the inner request deadline the peer enforces. */
 const ANSWER_SLACK_MS = 5_000;
+const LINK_SIGNAL_TIMEOUT_MS = 15_000;
+const linkAnswerSchema = z.object({ sdp: z.string().min(1).max(MAX_LINK_SDP_CHARS) }).strict();
 
 export class PeerControl {
   /** Receiver epoch per peer bridgeId, learned by handshake; a peer restart changes it (answered `epoch_changed`, then re-learned). */
   private readonly epochs = new Map<string, string>();
+  /** Link attempts in progress, by peer bridgeId. */
+  private readonly linking = new Map<string, Promise<boolean>>();
 
-  constructor(private readonly security: PeerSecurity, private readonly transport: PeerTransport) {}
+  constructor(private readonly security: PeerSecurity, private readonly transport: PeerTransport, private readonly direct?: PeerDirect) {}
 
   /** The other bridges of this account (ledger order). With `probe`, each is sent a handshake (in parallel) to report reachability. */
   async list(probe = false, probeTimeoutMs = 4_000): Promise<PeerSummary[]> {
     const peers = this.security.peerBridges();
     const summaries = peers.map(peer => ({ bridgeId: peer.bridgeId, label: peer.label, endpointId: peer.endpoint.id,
-      approvedAt: new Date(peer.approvedAt).toISOString() } as PeerSummary));
+      approvedAt: new Date(peer.approvedAt).toISOString(), ...(this.direct ? { direct: this.direct.channel(peer.bridgeId) !== null } : {}) } as PeerSummary));
     if (!probe) return summaries;
-    const results = await Promise.all(peers.map(peer => this.hello(peer, probeTimeoutMs).then(() => true, () => false)));
+    const results = await Promise.all(peers.map(peer => this.hello(peer, this.relay(peer), probeTimeoutMs).then(() => true, () => false)));
     return summaries.map((summary, index) => ({ ...summary, online: results[index] }));
   }
 
@@ -102,9 +126,25 @@ export class PeerControl {
     if (path === '/api/peers' || path.startsWith('/api/peers/') || path.startsWith('/api/peers?')) throw new PeerTargetError(400, 'Cross-bridge requests cannot be chained');
     if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000) throw new PeerTargetError(400, 'Invalid timeout');
     const peer = this.resolve(target);
+    const linked = this.directPath(peer);
+    if (!linked) {
+      this.link(peer);
+      return this.request(peer, this.relay(peer), method as PeerHttpMethod, path, body, timeoutMs);
+    }
+    try { return await this.request(peer, linked, method as PeerHttpMethod, path, body, timeoutMs); }
+    catch (error) {
+      if (!(error instanceof PeerLinkError)) throw error;
+      // Nothing left this bridge, or a read went unanswered: the relay can carry it. A lost change is reported, never repeated.
+      if (error.reason === 'lost' && method !== 'GET') throw new Error('Direct link lost before the peer answered');
+      return this.request(peer, this.relay(peer), method as PeerHttpMethod, path, body, timeoutMs);
+    }
+  }
+
+  private async request(peer: LedgerBridge, route: PeerPath, method: PeerHttpMethod, path: string, body: unknown,
+    timeoutMs: number): Promise<{ status: number; body: ApplicationJson }> {
     for (let attempt = 0; ; attempt++) {
-      const epoch = this.epochs.get(peer.bridgeId) ?? await this.hello(peer, HELLO_TIMEOUT_MS);
-      const result = await this.exchange(peer, epoch, method as PeerHttpMethod, path, body, timeoutMs);
+      const epoch = this.epochs.get(peer.bridgeId) ?? await this.hello(peer, route, HELLO_TIMEOUT_MS);
+      const result = await this.exchange(peer, route, epoch, method, path, body, timeoutMs);
       const answer = result.body;
       const code = answer && typeof answer === 'object' && !Array.isArray(answer) ? answer.code : undefined;
       // The peer restarted since our handshake: it refused before dispatching anything, so one retry with a fresh epoch is safe.
@@ -113,32 +153,74 @@ export class PeerControl {
     }
   }
 
-  private channel(): string {
-    const channel = this.transport.peerChannel();
-    if (!channel) throw new PeerTargetError(503, 'Cross-bridge control needs the relay connection (not available in --local/--solo mode)');
-    return channel;
+  /** The relay path (the account's commands:rpc channel). */
+  private relay(peer: LedgerBridge): PeerPath {
+    const relayChannel = (): string => {
+      const channel = this.transport.peerChannel();
+      if (!channel) throw new PeerTargetError(503, 'Cross-bridge control needs the relay connection (not available in --local/--solo mode)');
+      return channel;
+    };
+    return {
+      direct: false,
+      get channel(): string { return relayChannel(); },
+      send: async (packet, timeoutMs) => {
+        try { return await this.transport.peerExchange(packet, peer.endpoint.id, timeoutMs); }
+        catch (error) {
+          if (error instanceof BridgeSecurityError && error.code === 'bridge_offline') {
+            throw new PeerTargetError(504, `Bridge ${peer.label || peer.bridgeId} did not answer (offline, or running an ftown without cross-bridge control)`);
+          }
+          throw error;
+        }
+      },
+    };
   }
 
-  private async hello(peer: LedgerBridge, timeoutMs: number): Promise<string> {
-    const channel = this.channel();
+  /** The direct link to the peer, when one is open. */
+  private directPath(peer: LedgerBridge): PeerPath | null {
+    const direct = this.direct;
+    const channel = direct?.channel(peer.bridgeId);
+    if (!direct || !channel) return null;
+    return { direct: true, channel, send: (packet, timeoutMs) => direct.exchange(peer.bridgeId, packet, timeoutMs) };
+  }
+
+  /** Asks the peer, over the relay, to open a direct link. Runs beside the request that triggered it and never fails it. */
+  private link(peer: LedgerBridge): void {
+    if (!this.direct || !this.transport.peerChannel() || this.linking.has(peer.bridgeId)) return;
+    const attempt = this.direct.ensure(peer, async offer => {
+      const answer = await this.request(peer, this.relay(peer), 'POST', '/api/peers/link', offer, LINK_SIGNAL_TIMEOUT_MS);
+      if (answer.status !== 200) throw new Error(`Link refused (${answer.status})`);
+      return linkAnswerSchema.parse(answer.body);
+    }).catch(() => false).finally(() => { this.linking.delete(peer.bridgeId); });
+    this.linking.set(peer.bridgeId, attempt);
+  }
+
+  /** Resolves once no link attempt to the target is in progress, with whether a direct link is open. */
+  async linked(target: string): Promise<boolean> {
+    const peer = this.resolve(target);
+    await this.linking.get(peer.bridgeId);
+    return (this.direct?.channel(peer.bridgeId) ?? null) !== null;
+  }
+
+  private async hello(peer: LedgerBridge, route: PeerPath, timeoutMs: number): Promise<string> {
+    const channel = route.channel;
     const challenge = randomUUID();
     const messageId = randomUUID();
     const packet = await this.security.sealToPeer(peer, 'hello', { type: 'hello', challenge }, channel, messageId, null);
-    const answer = await this.send(peer, packet, timeoutMs);
+    const answer = await route.send(packet, timeoutMs);
     const welcome = welcomeSchema(challenge).parse(await this.security.openFromPeer(peer, answer, 'welcome', channel));
     this.epochs.set(peer.bridgeId, welcome.receiverEpoch);
     return welcome.receiverEpoch;
   }
 
-  private async exchange(peer: LedgerBridge, epoch: string, method: PeerHttpMethod, path: string, body: unknown,
+  private async exchange(peer: LedgerBridge, route: PeerPath, epoch: string, method: PeerHttpMethod, path: string, body: unknown,
     timeoutMs: number): Promise<{ status: number; body: ApplicationJson }> {
-    const channel = this.channel();
+    const channel = route.channel;
     const requestId = randomUUID();
     const data: { [key: string]: ApplicationJson } = { timeoutMs };
     if (body !== undefined) data.body = applicationJson(body);
     const application = { type: 'application', route: { kind: 'http', requestId, method, path }, data, mcp: null };
     const packet = await this.security.sealToPeer(peer, 'application', application, channel, requestId, epoch);
-    const answer = await this.send(peer, packet, timeoutMs + ANSWER_SLACK_MS);
+    const answer = await route.send(packet, timeoutMs + ANSWER_SLACK_MS);
     const response = responseSchema(requestId).parse(await this.security.openFromPeer(peer, answer, 'application', channel));
     const result = response.data;
     if (!result || typeof result !== 'object' || Array.isArray(result)) throw new PeerTargetError(502, 'Invalid answer from peer bridge');
@@ -150,15 +232,5 @@ export class PeerControl {
       return { status: 503, body: { error: message, code: 'peer_unavailable' } };
     }
     return { status: record.status, body: applicationJson(record.body ?? null) };
-  }
-
-  private async send(peer: LedgerBridge, packet: SecureEnvelope, timeoutMs: number): Promise<SecureEnvelope> {
-    try { return await this.transport.peerExchange(packet, peer.endpoint.id, timeoutMs); }
-    catch (error) {
-      if (error instanceof BridgeSecurityError && error.code === 'bridge_offline') {
-        throw new PeerTargetError(504, `Bridge ${peer.label || peer.bridgeId} did not answer (offline, or running an ftown without cross-bridge control)`);
-      }
-      throw error;
-    }
   }
 }

@@ -110,6 +110,16 @@ class FakePeer implements WebRtcPeerLike {
     const cbs = this.closeCbs.splice(0);
     for (const cb of cbs) cb();
   }
+
+  /** Dashboard commands: off unless a test turns them on; each call is settled by the test. */
+  commands = false;
+  commandCalls: Array<{ route: unknown; data: unknown; resolve: (value: unknown) => void; reject: (error: Error) => void }> = [];
+  canCommand(): boolean { return this.commands; }
+  whenCommandsKnown(): Promise<boolean> { return Promise.resolve(this.commands); }
+  command(route: unknown, data: unknown): { sent: Promise<void>; answer: Promise<never> } {
+    const answer = new Promise<never>((resolve, reject) => this.commandCalls.push({ route, data, resolve: resolve as (value: unknown) => void, reject }));
+    return { sent: Promise.resolve(), answer };
+  }
 }
 
 interface CentrifugoSubscriptionLike {
@@ -2247,5 +2257,103 @@ describe('cloud outage recovery with remembered loopback discovery', () => {
       transport.dispose();
       vi.useRealTimers();
     }
+  });
+});
+
+describe('HybridTerminalTransport direct commands', () => {
+  beforeEach(() => { vi.useFakeTimers(); FakePeer.instances = []; });
+  afterEach(() => { vi.useRealTimers(); });
+  const route = { kind: 'command' as const, requestId: 'r1', command: 'list_sessions', sessionId: null };
+  const serving = (opts: PeerFactoryOpts) => { const peer = new FakePeer(opts.bridgeId); peer.commands = true; return peer; };
+
+  it('connects to the bridge on the first command, with no terminal open, and sends once connected', async () => {
+    const { transport, peerFactory } = makeTransport(serving);
+    const sending = transport.directCommand('bridge-1', route, { type: 'list_sessions' });
+    expect(peerFactory).toHaveBeenCalledWith(expect.objectContaining({ bridgeId: 'bridge-1' }));
+    const handle = await sending;
+    const peer = FakePeer.instances[0];
+    expect(peer.commandCalls).toHaveLength(1);
+    peer.commandCalls[0].resolve({ ok: true });
+    await expect(handle!.answer).resolves.toEqual({ ok: true });
+  });
+
+  it('reuses the channel a terminal already opened', async () => {
+    const { transport, peerFactory } = makeTransport(serving);
+    transport.subscribeTerminal('session-1', 'bridge-1', handlers());
+    await flush();
+    await transport.directCommand('bridge-1', route, {});
+    expect(peerFactory).toHaveBeenCalledTimes(1);
+    expect(FakePeer.instances[0].commandCalls).toHaveLength(1);
+  });
+
+  it('has no direct path when the bridge does not announce commands', async () => {
+    const { transport } = makeTransport((opts) => new FakePeer(opts.bridgeId));
+    await expect(transport.directCommand('bridge-1', route, {})).resolves.toBeNull();
+    expect(FakePeer.instances[0].commandCalls).toHaveLength(0);
+  });
+
+  it('holds a command while the connection is retried, and sends it once an attempt succeeds', async () => {
+    let mode: 'reject' | 'resolve' = 'reject';
+    const { transport, peerFactory } = makeTransport((opts) => { const peer = serving(opts); peer.connectMode = mode; return peer; });
+    let handle: unknown = 'pending';
+    void transport.directCommand('bridge-1', route, {}).then(value => { handle = value; });
+    await vi.advanceTimersByTimeAsync(1_200);
+    expect(handle).toBe('pending');
+    expect(peerFactory.mock.calls.length).toBeGreaterThan(1);
+    // The bridge starts accepting this browser: the next attempt connects and the held command goes out.
+    mode = 'resolve';
+    await vi.advanceTimersByTimeAsync(600);
+    expect(handle).not.toBe('pending'); expect(handle).not.toBeNull();
+    expect(FakePeer.instances.at(-1)!.commandCalls).toHaveLength(1);
+  });
+
+  it('gives up holding commands after the window, then retries in the background no more than every 15 s', async () => {
+    let mode: 'reject' | 'resolve' = 'reject';
+    const { transport, peerFactory } = makeTransport((opts) => { const peer = serving(opts); peer.connectMode = mode; return peer; });
+    let first: unknown = 'pending';
+    void transport.directCommand('bridge-1', route, {}).then(value => { first = value; });
+    await vi.advanceTimersByTimeAsync(10_500);
+    expect(first).toBeNull();
+    const attempts = peerFactory.mock.calls.length;
+    // Outside the window a command is answered at once and, so soon after a failure, starts nothing.
+    await expect(transport.directCommand('bridge-1', route, {})).resolves.toBeNull();
+    expect(peerFactory.mock.calls.length).toBe(attempts);
+    // Later a command starts one new attempt but is not held up by it.
+    await vi.advanceTimersByTimeAsync(15_000);
+    mode = 'resolve';
+    await expect(transport.directCommand('bridge-1', route, {})).resolves.toBeNull();
+    expect(peerFactory.mock.calls.length).toBe(attempts + 1);
+    await flush();
+    await expect(transport.directCommand('bridge-1', route, {})).resolves.not.toBeNull();
+  });
+
+  it('holds commands again for a window after a working channel is lost', async () => {
+    const { transport, peerFactory } = makeTransport(serving);
+    await transport.directCommand('bridge-1', route, {});
+    await vi.advanceTimersByTimeAsync(60_000);
+    FakePeer.instances[0].simulateClose();
+    let handle: unknown = 'pending';
+    void transport.directCommand('bridge-1', route, {}).then(value => { handle = value; });
+    await vi.advanceTimersByTimeAsync(600);
+    expect(peerFactory).toHaveBeenCalledTimes(2);
+    expect(handle).not.toBe('pending'); expect(handle).not.toBeNull();
+  });
+
+  it('rejects every unanswered command at once when the channel closes', async () => {
+    const { transport } = makeTransport(serving);
+    const first = (await transport.directCommand('bridge-1', route, {}))!; const second = (await transport.directCommand('bridge-1', route, {}))!;
+    const outcomes = Promise.allSettled([first.answer, second.answer]);
+    FakePeer.instances[0].simulateClose();
+    expect((await outcomes).map(outcome => outcome.status)).toEqual(['rejected', 'rejected']);
+  });
+
+  it('stops using a channel for commands after one goes unanswered', async () => {
+    const { transport } = makeTransport(serving);
+    const handle = (await transport.directCommand('bridge-1', route, {}, 8_000))!;
+    const outcome = handle.answer.then(() => 'answered', (error: Error) => error.message);
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(await outcome).toBe('Direct command timed out');
+    await expect(transport.directCommand('bridge-1', route, {})).resolves.toBeNull();
+    expect(FakePeer.instances[0].commandCalls).toHaveLength(1);
   });
 });

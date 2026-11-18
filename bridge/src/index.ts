@@ -25,6 +25,8 @@ import { PreviewChatStore } from './preview-chat.js';
 import { BridgePushNotifier } from './push-notifier.js';
 import { LocalApiServer } from './local-api-server.js';
 import { PeerControl } from './peer-control.js';
+import { PeerLinks } from './peer-link.js';
+import { executeSecurePacket } from './security/bridge/execute.js';
 import { BrowserAccess } from './browser-access.js';
 import { registerLocalBrowserCommands } from './local-pair-cli.js';
 import type { CommandResponse } from './types.js';
@@ -687,6 +689,11 @@ program
     // terminal output/screen fan out to them directly, and to Centrifugo only when
     // the session has an unexpired remote watcher (R2). Signaling and watch
     // heartbeats ride the existing commands:rpc channel.
+    // Dashboard commands arriving on a direct browser channel run through the same secure dispatch as the relay's.
+    const serveDirectCommand = async (message: VerifiedApplication): Promise<ApplicationJson> => {
+      if (!ready) throw new BridgeStartingError();
+      return localApiServer.dispatchSecure(message);
+    };
     const watchRegistry = new WatchRegistry();
     const directPeers = new DirectPeerManager({
       security,
@@ -699,6 +706,7 @@ program
       onInput: (sid, data) => { runner.write(sid, data); },
       onResize: (sid, cols, rows) => { handleClientResize(sid, cols, rows); },
       onAttach: (sid, deliver) => terminalOutput.attachScreen(sid, deliver),
+      onCommand: { dispatch: message => serveDirectCommand(message), get observer() { return updateEffects; } },
     });
     // Loopback WebSocket rung: same DirectMessage protocol as WebRTC, tunneled
     // over TCP on the existing 127.0.0.1 local API server. Bypasses VPN/endpoint
@@ -716,6 +724,7 @@ program
       onInput: (sid, data) => { runner.write(sid, data); },
       onResize: (sid, cols, rows) => { handleClientResize(sid, cols, rows); },
       onAttach: (sid, deliver) => terminalOutput.attachScreen(sid, deliver),
+      onCommand: { dispatch: message => serveDirectCommand(message), get observer() { return updateEffects; } },
     });
     const publishRouter = new PublishRouter({
       registry: watchRegistry,
@@ -1146,7 +1155,21 @@ program
     };
     localApiServer.setSecurity(security, { protocolVersion: 1, ownerId: auth.ownerId, bridgeId, endpoint: security.endpoint,
       relayUserId: userId }, dispatchCommand, updateEffects);
-    localApiServer.setPeerControl(new PeerControl(security, centrifugo));
+    // Direct bridge-to-bridge links: cross-bridge requests leave the relay once a link to the peer is open.
+    let peerLinkAdmission: Promise<void> = Promise.resolve();
+    const peerLinks = new PeerLinks({
+      bridgeId, endpointId: security.endpoint.id, peers: () => security.peerBridges(),
+      onRevoked: listener => security.onRevoked(listener),
+      execute: (packet, route) => executeSecurePacket(security, packet, route, async message => {
+        if (!ready) throw new BridgeStartingError();
+        return localApiServer.dispatchSecure(message);
+      }, accept => {
+        const accepted = peerLinkAdmission.then(accept);
+        peerLinkAdmission = accepted.then(() => undefined, () => undefined);
+        return accepted;
+      }),
+    });
+    localApiServer.setPeerControl(new PeerControl(security, centrifugo, peerLinks), peerLinks);
 
     // Solo: the hub child must be healthy before connecting (L1 gates the
     // transport, not the front). A failed hub is fatal for solo — exit cleanly
@@ -1233,6 +1256,7 @@ program
         await terminalOutput.stop();
         loopbackServer.closeAll();
         directPeers.closeAll();
+        peerLinks.closeAll();
         watchRegistry.dispose();
         // node-datachannel module-level cleanup — avoids the native crash-on-exit race.
         try { ndcCleanup(); } catch { /* native lib already torn down */ }
