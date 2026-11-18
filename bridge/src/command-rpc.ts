@@ -524,7 +524,9 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
         }
 
         case 'list_sessions': {
-          const sessions = await sessionController.list();
+          // Only this bridge's own sessions: a data dir can still hold records of another bridge identity (a shared dir, or one left
+          // from before an identity reset), and browsers reject a whole list that names any other bridge.
+          const sessions = (await sessionController.list()).filter(session => session.bridgeId === bridgeId);
           response = { requestId: command.requestId, success: true, data: { bridgeId, sessions: sessions.map(toWireSession) } };
           break;
         }
