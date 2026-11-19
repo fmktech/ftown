@@ -368,8 +368,7 @@ export function deriveRelaunchCommand(session: RelaunchCommandSource): {
     effort: session.effort,
   };
   const builderDefault = buildSessionCommand(builderBase);
-  const builderResume = buildSessionCommand({
-    ...builderBase,
+  const resumeFields = {
     claudeSessionId: session.claudeSessionId,
     cursorSessionId: session.cursorSessionId,
     codexSessionId: session.codexSessionId,
@@ -382,7 +381,14 @@ export function deriveRelaunchCommand(session: RelaunchCommandSource): {
     // resume explicitly. Id-based harnesses ignore this and key off their id
     // fields.
     resume: true,
-  });
+  };
+  const builderResume = buildSessionCommand({ ...builderBase, ...resumeFields });
+  // Commands an older bridge built, before reviewed approvals were the default, are still builder-generated: they are rebuilt
+  // with the current flags (and resumed), not replayed verbatim.
+  const legacyApprovalBuilds = [
+    buildSessionCommand({ ...builderBase, legacyApprovals: true }),
+    buildSessionCommand({ ...builderBase, ...resumeFields, legacyApprovals: true }),
+  ];
   const isLegacyPiBuilder = shellType === 'pi' && [
     buildPiCommand({ model: session.model, includeFtownExtension: false }),
     buildPiCommand({ model: session.model, resume: true, includeFtownExtension: false }),
@@ -391,6 +397,7 @@ export function deriveRelaunchCommand(session: RelaunchCommandSource): {
     Boolean(session.command) &&
     session.command !== builderDefault &&
     session.command !== builderResume &&
+    !legacyApprovalBuilds.includes(session.command) &&
     !isLegacyPiBuilder;
   return { command: isCustom ? session.command : builderResume, isCustom };
 }

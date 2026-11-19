@@ -1,3 +1,4 @@
+import { execFile } from 'node:child_process';
 /**
  * Single source of truth for the supported harnesses ("shell types").
  *
@@ -22,6 +23,11 @@ export interface BuildCommandInput {
   model?: string;
   /** Reasoning effort, for harnesses in EFFORT_SHELLS; validated by validateEffort before it gets here. */
   effort?: string;
+  /**
+   * Build the command as ftown did before reviewed approvals became the default (codex without --approve-for-me, claude
+   * without auto mode). Only for recognising commands stored by older bridges; never for a launch.
+   */
+  legacyApprovals?: boolean;
   claudeSessionId?: string;
   cursorSessionId?: string;
   codexSessionId?: string;
@@ -101,14 +107,20 @@ export function buildCodexCommand(options: {
   effort?: string;
   codexSessionId?: string;
   initialPrompt?: string;
+  legacyApprovals?: boolean;
 }): string {
   // --dangerously-bypass-hook-trust silences the interactive hook-trust review
   // for our installed ~/.codex/hooks.json entries (harmless warning banner).
-  const parts = [
-    'codex',
-    '--dangerously-bypass-approvals-and-sandbox',
-    '--dangerously-bypass-hook-trust',
-  ];
+  const parts = ['codex'];
+  if (options.legacyApprovals || !launchCapabilities.codexApproveForMe) {
+    parts.push('--dangerously-bypass-approvals-and-sandbox');
+  } else {
+    // Commands run in codex's workspace-write sandbox, and anything beyond it is put to codex's automatic reviewer instead of
+    // a person (nobody is watching an ftown session). Network stays open: the ftown CLI reaches the bridge over localhost,
+    // and builds and git need it; leaving it closed would put every one of those calls through review.
+    parts.push('--approve-for-me', '-c', 'sandbox_workspace_write.network_access=true');
+  }
+  parts.push('--dangerously-bypass-hook-trust');
   // A config override, so it also applies to a resumed thread (codex restores the thread, not its effort).
   if (options.effort?.trim()) parts.push('-c', shellQuote(`model_reasoning_effort="${options.effort.trim()}"`));
 
@@ -316,9 +328,13 @@ export function buildAntigravityCommand(options: {
   return parts.join(' ');
 }
 
-/** claude CLI launch — shared by 'claude' and every claude-rebadged provider flavor. */
-function buildClaudeCommand(input: BuildCommandInput): string {
+/**
+ * claude CLI launch — shared by 'claude' and every claude-rebadged provider flavor. `autoMode`: start in Claude's auto
+ * permission mode, where a classifier decides what needs asking; only for Anthropic's own models, so not for the flavors.
+ */
+function buildClaudeCommand(input: BuildCommandInput, autoMode = false): string {
   const parts = ['claude', '--allow-dangerously-skip-permissions'];
+  if (autoMode && !input.legacyApprovals && launchCapabilities.claudeAutoMode) parts.push('--permission-mode', 'auto');
   const mod = claudeModLaunchPath();
   if (mod) parts.push('--plugin-dir', shellQuote(mod));
   if (input.model?.trim()) {
@@ -334,7 +350,7 @@ function buildClaudeCommand(input: BuildCommandInput): string {
 }
 
 const CLAUDE_SPEC = {
-  buildCommand: buildClaudeCommand,
+  buildCommand: (input: BuildCommandInput) => buildClaudeCommand(input, true),
   hooked: true,
   promptAsCliArg: true,
   resumeField: 'claudeSessionId',
@@ -377,6 +393,7 @@ export const HARNESSES = {
       buildCodexCommand({
         model: input.model,
         effort: input.effort,
+        legacyApprovals: input.legacyApprovals,
         codexSessionId: input.codexSessionId,
         initialPrompt: input.initialPrompt,
       }),
@@ -549,6 +566,27 @@ export function validateEffort(shellType: string, input: unknown): string | unde
       : `${shellType} sessions take no effort level`);
   }
   return effort;
+}
+
+/**
+ * What the installed CLIs support, for the launch defaults. Assumed current until probeLaunchCapabilities says otherwise, so
+ * a launch never waits for the probe and tests see the default commands.
+ */
+export const launchCapabilities = { codexApproveForMe: true, claudeAutoMode: true };
+
+type HelpReader = (cli: 'codex' | 'claude') => Promise<string | null>;
+const readHelp: HelpReader = cli => new Promise(resolve => {
+  execFile(cli, ['--help'], { encoding: 'utf8', timeout: 10_000, maxBuffer: 1024 * 1024 }, (error, stdout) => resolve(error ? null : stdout));
+});
+
+/**
+ * Checks once, at bridge start, whether the installed codex knows --approve-for-me and claude knows the auto permission mode.
+ * An older CLI keeps the launch flags it understands. A CLI that is missing or does not answer changes nothing.
+ */
+export async function probeLaunchCapabilities(read: HelpReader = readHelp): Promise<void> {
+  const [codex, claude] = await Promise.all([read('codex'), read('claude')]);
+  if (codex !== null) launchCapabilities.codexApproveForMe = codex.includes('--approve-for-me');
+  if (claude !== null) launchCapabilities.claudeAutoMode = /--permission-mode[\s\S]{0,400}"auto"/.test(claude);
 }
 
 export class InvalidShellTypeError extends Error {

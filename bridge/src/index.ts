@@ -26,6 +26,7 @@ import { BridgePushNotifier } from './push-notifier.js';
 import { LocalApiServer } from './local-api-server.js';
 import { PeerControl } from './peer-control.js';
 import { PeerLinks } from './peer-link.js';
+import { launchCapabilities, probeLaunchCapabilities } from './harness-registry.js';
 import { startAddressedListener, type AddressedSetup } from './direct-transport/addressed-setup.js';
 import { executeSecurePacket } from './security/bridge/execute.js';
 import { BrowserAccess } from './browser-access.js';
@@ -987,6 +988,11 @@ program
     });
 
     // Session operations shared by local HTTP and dashboard RPC.
+    // Which launch defaults the installed codex and claude understand; until it answers, the current defaults are assumed.
+    void probeLaunchCapabilities().then(() => {
+      if (!launchCapabilities.codexApproveForMe) console.log('[Bridge] codex predates --approve-for-me: codex sessions keep the bypass flags');
+      if (!launchCapabilities.claudeAutoMode) console.log('[Bridge] claude predates auto mode: claude sessions keep their default permission mode');
+    }).catch(() => {});
     const sessionController = new SessionController({
       store,
       runner,
