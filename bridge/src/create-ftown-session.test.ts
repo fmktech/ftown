@@ -17,6 +17,7 @@ import {
   createFtownSession,
   deriveRelaunchCommand,
   findMissingProviderAuth,
+  InvalidEffortError,
   InvalidShellTypeError,
   nextAvailableGeneratedName,
   parseCreateSessionBody,
@@ -1844,5 +1845,59 @@ describe('WSL2 /mnt workdir warning (injected probe)', () => {
     await relaunchFtownSession(deps, sessionAt('/mnt/c/Users/me/project'), 'retry');
 
     assert.equal(warnings.length, 0);
+  });
+});
+
+// Effort is a launch option of its own, so agents never have to pass a full --command (which runs verbatim and drops the
+// flags ftown launches each harness with, leaving e.g. codex asking for approvals and hook trust).
+describe('reasoning effort', () => {
+  it('keeps the unattended flags of every harness and adds its own effort flag', () => {
+    const codex = buildSessionCommand({ shellType: 'codex', model: 'm1', effort: 'high' });
+    assert.ok(codex.startsWith('codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust '), codex);
+    assert.match(codex, / -c 'model_reasoning_effort="high"' /);
+    assert.match(buildSessionCommand({ shellType: 'claude', effort: 'max' }), /^claude --allow-dangerously-skip-permissions .*--effort 'max'/);
+    assert.match(buildSessionCommand({ shellType: 'grok', effort: 'low' }), /^grok --always-approve .*--reasoning-effort 'low'/);
+    assert.match(buildSessionCommand({ shellType: 'muse', effort: 'low' }), /^muse --yolo .*--reasoning-effort 'low'/);
+    assert.match(buildSessionCommand({ shellType: 'antigravity', effort: 'low' }), /^agy --dangerously-skip-permissions .*--effort 'low'/);
+    // A codex resume keeps its effort: the thread is restored, its effort is not.
+    assert.match(buildSessionCommand({ shellType: 'codex', effort: 'high', codexSessionId: 'thread-1' }), /-c 'model_reasoning_effort="high"' resume 'thread-1'$/);
+    // No effort, no flag: commands of existing sessions are unchanged.
+    assert.equal(buildSessionCommand({ shellType: 'codex', model: 'm1' }), "codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust -m 'm1'");
+  });
+
+  it('rejects a malformed level as soon as the request is read', () => {
+    assert.equal(parseCreateSessionBody({ shellType: 'codex', effort: 'xhigh' }).effort, 'xhigh');
+    assert.equal(parseCreateSessionBody({ shellType: 'codex' }).effort, undefined);
+    assert.equal(parseCreateSessionBody({ shellType: 'codex', effort: '' }).effort, undefined);
+    for (const bad of ['HIGH', 'high; rm -rf /', 7, 'a'.repeat(17)]) {
+      assert.throws(() => parseCreateSessionBody({ shellType: 'codex', effort: bad }), (error: unknown) => error instanceof InvalidEffortError, String(bad));
+    }
+  });
+
+  it('is checked against the harness actually launched, including one inherited from the parent', async () => {
+    const work = mkdtempSync(join(tmpdir(), 'ftown-effort-'));
+    try {
+      const codexParent = { ...fakeSession('codex-parent'), shellType: 'codex' as const };
+      const inherited = fakeDeps([codexParent]);
+      const child = await createFtownSession(inherited.deps, { parentSessionId: 'codex-parent', workingDir: work, effort: 'high' });
+      assert.equal(child.effort, 'high');
+      assert.match(child.command, /^codex --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust -c 'model_reasoning_effort="high"'/);
+
+      const shellParent = { ...fakeSession('shell-parent'), shellType: 'shell' as const };
+      await assert.rejects(createFtownSession(fakeDeps([shellParent]).deps, { parentSessionId: 'shell-parent', workingDir: work, effort: 'high' }), /shell sessions take no effort level/);
+      await assert.rejects(createFtownSession(fakeDeps().deps, { shellType: 'opencode', workingDir: work, effort: 'high' }), /#<level> suffix/);
+      // No harness named and no parent: a claude session.
+      const plain = await createFtownSession(fakeDeps().deps, { workingDir: work, effort: 'max' });
+      assert.match(plain.command, /^claude .*--effort 'max'/);
+      assert.equal(plain.effort, 'max');
+    } finally { rmSync(work, { recursive: true, force: true }); }
+  });
+
+  it('is replayed on relaunch, and a stored command built with it still counts as builder-generated', () => {
+    const stored = { shellType: 'codex' as const, workingDir: undefined, model: 'm1', effort: 'high', codexSessionId: 'thread-1' };
+    const command = buildSessionCommand({ shellType: 'codex', model: 'm1', effort: 'high' });
+    const derived = deriveRelaunchCommand({ ...stored, command });
+    assert.equal(derived.isCustom, false);
+    assert.equal(derived.command, buildSessionCommand({ shellType: 'codex', model: 'm1', effort: 'high', codexSessionId: 'thread-1' }));
   });
 });

@@ -37,6 +37,7 @@ import {
   createFtownSession,
   deriveRelaunchCommand,
   InvalidShellTypeError,
+  InvalidEffortError,
   parseCreateSessionBody,
   PlanItemError,
   ProviderAuthMissingError,
@@ -374,7 +375,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     await this.security.revalidate(message.principal);
     void this.handleApiRoute(request, response as unknown as ServerResponse, new URL(route.path, 'http://localhost').pathname,
       new URL(route.path, 'http://localhost')).catch(error => {
-        if (error instanceof BadRequestError || error instanceof WorktreeError || error instanceof PlanItemError || error instanceof InvalidShellTypeError) jsonResponse(response as unknown as ServerResponse, 400, { error: error.message });
+        if (error instanceof BadRequestError || error instanceof WorktreeError || error instanceof PlanItemError || error instanceof InvalidShellTypeError || error instanceof InvalidEffortError) jsonResponse(response as unknown as ServerResponse, 400, { error: error.message });
         else if (error instanceof RouteError) jsonResponse(response as unknown as ServerResponse, error.status, { error: error.message });
         else if (error instanceof AttentionError) jsonResponse(response as unknown as ServerResponse, error.status, { error: error.message, code: error.code });
         else jsonResponse(response as unknown as ServerResponse, 500, { error: 'bridge_error', code: 'bridge_error' });

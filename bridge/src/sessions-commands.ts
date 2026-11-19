@@ -135,7 +135,7 @@ function formatUsageTable(rows: UsageRow[]): string {
 
 interface SessionsOptions {
   plain?: boolean; json?: boolean; shell?: string; prompt?: string; workdir?: string;
-  name?: string; command?: string; model?: string; parentId?: string; parent?: boolean;
+  name?: string; command?: string; model?: string; effort?: string; parentId?: string; parent?: boolean;
   createWorkdir?: boolean; worktree?: boolean; branch?: string; base?: string;
   keepWorktree?: boolean; forceWorktree?: boolean; to?: string;
   offset?: string; limit?: string; pattern?: string;
@@ -174,6 +174,7 @@ function sessionProgram(): Command {
     .option('--account <id>', 'Harness account to launch with')
     .option('--allowed-accounts <ids>', 'Account ids children may use (comma-separated)')
     .option('--model <name>', 'Model override')
+    .option('--effort <level>', 'Reasoning effort (claude, codex, grok, muse, antigravity); keeps the flags ftown launches with')
     .option('--orchestrator', 'Compatibility flag (no additional prompt or environment changes)')
     .action((_opts, cmd: Command) => run('create', [], cmd));
   for (const name of ['get', 'running', 'revive'] as const) {
@@ -585,6 +586,7 @@ async function executeSessionCommand(cmd: SessionCommand, rest: string[], option
         if (name) body.name = name;
         if (command) body.command = command;
         if (model) body.model = model;
+        if (options.effort) body.effort = options.effort;
         if (parentId) body.parentSessionId = parentId;
         else if (useParent) body.parentSessionId = true;
         if (planItem) body.planItem = planItem;

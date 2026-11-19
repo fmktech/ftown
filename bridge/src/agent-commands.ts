@@ -31,6 +31,8 @@ export interface BuildSessionCommandInput {
   shellType?: ShellType;
   workingDir?: string;
   model?: string;
+  /** Reasoning effort; see validateEffort. */
+  effort?: string;
   claudeSessionId?: string;
   cursorSessionId?: string;
   codexSessionId?: string;

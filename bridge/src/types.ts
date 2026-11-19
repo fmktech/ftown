@@ -47,6 +47,8 @@ export interface Session {
   workingDir?: string;
   shellType?: ShellType;
   model?: string;
+  /** Reasoning effort the session was launched with (`ftown sessions create --effort`); replayed on relaunch. */
+  effort?: string;
   account?: string;
   allowedAccounts?: string[];
   claudeSessionId?: string;

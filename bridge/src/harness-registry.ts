@@ -20,6 +20,8 @@ export function shellQuote(value: string, platform: NodeJS.Platform = process.pl
 export interface BuildCommandInput {
   workingDir?: string;
   model?: string;
+  /** Reasoning effort, for harnesses in EFFORT_SHELLS; validated by validateEffort before it gets here. */
+  effort?: string;
   claudeSessionId?: string;
   cursorSessionId?: string;
   codexSessionId?: string;
@@ -96,6 +98,7 @@ export function buildCursorAgentCommand(options: {
 
 export function buildCodexCommand(options: {
   model?: string;
+  effort?: string;
   codexSessionId?: string;
   initialPrompt?: string;
 }): string {
@@ -106,6 +109,8 @@ export function buildCodexCommand(options: {
     '--dangerously-bypass-approvals-and-sandbox',
     '--dangerously-bypass-hook-trust',
   ];
+  // A config override, so it also applies to a resumed thread (codex restores the thread, not its effort).
+  if (options.effort?.trim()) parts.push('-c', shellQuote(`model_reasoning_effort="${options.effort.trim()}"`));
 
   if (options.codexSessionId?.trim()) {
     // Resume must not replay the original prompt — codex restores the thread.
@@ -127,6 +132,7 @@ export function buildCodexCommand(options: {
 
 export function buildGrokCommand(options: {
   model?: string;
+  effort?: string;
   grokSessionId?: string;
   initialPrompt?: string;
 }): string {
@@ -143,6 +149,7 @@ export function buildGrokCommand(options: {
   if (options.model?.trim()) {
     parts.push('-m', shellQuote(options.model.trim()));
   }
+  if (options.effort?.trim()) parts.push('--reasoning-effort', shellQuote(options.effort.trim()));
 
   if (options.initialPrompt?.trim()) {
     // The positional prompt is auto-submitted by the grok TUI.
@@ -247,6 +254,7 @@ export function buildKimiCodeCommand(options: { model?: string; resume?: boolean
 export function buildMuseCommand(options: {
   workingDir?: string;
   model?: string;
+  effort?: string;
   museSessionId?: string;
   initialPrompt?: string;
 }): string {
@@ -268,6 +276,7 @@ export function buildMuseCommand(options: {
   if (options.model?.trim()) {
     parts.push('--model', shellQuote(options.model.trim()));
   }
+  if (options.effort?.trim()) parts.push('--reasoning-effort', shellQuote(options.effort.trim()));
 
   if (options.initialPrompt?.trim()) {
     // The positional prompt is auto-submitted by the muse TUI.
@@ -279,6 +288,7 @@ export function buildMuseCommand(options: {
 
 export function buildAntigravityCommand(options: {
   model?: string;
+  effort?: string;
   antigravitySessionId?: string;
   initialPrompt?: string;
 }): string {
@@ -296,6 +306,7 @@ export function buildAntigravityCommand(options: {
   if (options.model?.trim()) {
     parts.push('--model', shellQuote(options.model.trim()));
   }
+  if (options.effort?.trim()) parts.push('--effort', shellQuote(options.effort.trim()));
 
   if (options.initialPrompt?.trim()) {
     // -i submits the initial prompt and keeps the interactive TUI open.
@@ -313,6 +324,7 @@ function buildClaudeCommand(input: BuildCommandInput): string {
   if (input.model?.trim()) {
     parts.push('--model', shellQuote(input.model.trim()));
   }
+  if (input.effort?.trim()) parts.push('--effort', shellQuote(input.effort.trim()));
   if (input.claudeSessionId?.trim()) {
     parts.push('--resume', shellQuote(input.claudeSessionId.trim()));
   } else if (input.initialPrompt?.trim()) {
@@ -364,6 +376,7 @@ export const HARNESSES = {
     buildCommand: (input) =>
       buildCodexCommand({
         model: input.model,
+        effort: input.effort,
         codexSessionId: input.codexSessionId,
         initialPrompt: input.initialPrompt,
       }),
@@ -383,6 +396,7 @@ export const HARNESSES = {
     buildCommand: (input) =>
       buildGrokCommand({
         model: input.model,
+        effort: input.effort,
         grokSessionId: input.grokSessionId,
         initialPrompt: input.initialPrompt,
       }),
@@ -401,6 +415,7 @@ export const HARNESSES = {
       buildMuseCommand({
         workingDir: input.workingDir,
         model: input.model,
+        effort: input.effort,
         museSessionId: input.museSessionId,
         initialPrompt: input.initialPrompt,
       }),
@@ -417,6 +432,7 @@ export const HARNESSES = {
     buildCommand: (input) =>
       buildAntigravityCommand({
         model: input.model,
+        effort: input.effort,
         antigravitySessionId: input.antigravitySessionId,
         initialPrompt: input.initialPrompt,
       }),
@@ -501,6 +517,39 @@ export const ACCEPTED_SHELL_TYPES: readonly string[] = Object.freeze([
   ...SHELL_TYPES,
   ...Object.keys(SHELL_ALIASES),
 ]);
+
+/**
+ * Harnesses whose launch command takes a reasoning effort from `ftown sessions create --effort`. opencode is absent: it takes
+ * effort as a `#<level>` suffix on the model. Claude-rebadged provider flavors share the claude builder, so they take it too.
+ */
+const EFFORT_BASES = new Set(['claude', 'codex', 'grok', 'muse', 'antigravity']);
+const EFFORT_LEVEL = /^[a-z]{1,16}$/;
+
+export class InvalidEffortError extends Error {
+  readonly status = 400;
+  readonly code = 'invalid_effort';
+}
+
+/** The effort to launch with, or undefined; throws InvalidEffortError for a malformed level or a harness that takes none. */
+/** A well-formed effort level, or undefined for none; throws InvalidEffortError otherwise. */
+export function validateEffortLevel(effort: unknown): string | undefined {
+  if (effort === undefined || effort === null || effort === '') return undefined;
+  if (typeof effort !== 'string' || !EFFORT_LEVEL.test(effort.trim())) throw new InvalidEffortError('effort must be a level such as low, medium, high, xhigh or max');
+  return effort.trim();
+}
+
+export function validateEffort(shellType: string, input: unknown): string | undefined {
+  const effort = validateEffortLevel(input);
+  if (effort === undefined) return undefined;
+  const spec = (HARNESSES as Record<string, HarnessSpec>)[shellType];
+  const base = spec?.providerBase ?? shellType;
+  if (!EFFORT_BASES.has(base)) {
+    throw new InvalidEffortError(shellType === 'opencode'
+      ? 'opencode takes effort as a #<level> suffix on --model, for example provider/model#high'
+      : `${shellType} sessions take no effort level`);
+  }
+  return effort;
+}
 
 export class InvalidShellTypeError extends Error {
   readonly status = 400;

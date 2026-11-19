@@ -454,7 +454,8 @@ Fan-out targets are messaged sequentially, one JSON result line per target.
 | `--prompt` | Initial task — passed as a CLI launch argument to `claude`/Claude provider flavors/`cursor`/`codex`/`grok`/`muse`/`antigravity`/`pi` (typed after boot for other shells) |
 | `--workdir` | Working directory |
 | `--name` | Dashboard label |
-| `--command` | Full command override (skips `--shell` builder) |
+| `--effort <level>` | Reasoning effort for claude, codex, grok, muse and antigravity (opencode: `--model provider/model#<level>`) |
+| `--command` | Full command override, run exactly as written: skips the `--shell` builder and the flags it adds for unattended runs (a codex launched this way asks for approvals). Not for setting a model or effort. |
 | `--parent` | Set parent to `$FTOWN_SESSION_ID` |
 | `--parent-id` | Explicit parent session UUID |
 | `--plan-item <id>` | Do plan item `p<n>` of the parent (requires `--parent` or `--parent-id`; see Plan list) |

@@ -10,6 +10,9 @@ import {
   HARNESSES,
   harnessAcceptsPromptAsCliArg,
   InvalidShellTypeError,
+  InvalidEffortError,
+  validateEffort,
+  validateEffortLevel,
   normalizeShellType,
   opencodeLaunchEnv,
   SHELL_ALIASES,
@@ -30,7 +33,7 @@ import type { UpdateAdmission } from './update-admission.js';
 import type { SessionStore } from './session-store.js';
 import type { CreateSessionPayload, Session, ShellType } from './types.js';
 
-export { WorktreeError, InvalidShellTypeError, normalizeShellType, SHELL_ALIASES };
+export { WorktreeError, InvalidShellTypeError, InvalidEffortError, normalizeShellType, SHELL_ALIASES };
 
 export type CreateSessionWorktreeInput = true | { branch?: string; base?: string };
 
@@ -97,6 +100,8 @@ export interface CreateFtownSessionInput {
   workingDir?: string;
   shellType?: ShellType;
   model?: string;
+  /** Reasoning effort (validated: validateEffort). */
+  effort?: string;
   account?: string;
   allowedAccounts?: string[];
   claudeSessionId?: string;
@@ -319,6 +324,7 @@ export type RelaunchCommandSource = Pick<
   | 'shellType'
   | 'workingDir'
   | 'model'
+  | 'effort'
   | 'claudeSessionId'
   | 'cursorSessionId'
   | 'codexSessionId'
@@ -359,6 +365,7 @@ export function deriveRelaunchCommand(session: RelaunchCommandSource): {
     shellType,
     workingDir: session.workingDir,
     model: session.model,
+    effort: session.effort,
   };
   const builderDefault = buildSessionCommand(builderBase);
   const builderResume = buildSessionCommand({
@@ -573,8 +580,11 @@ async function createFtownSessionImpl(
     selectedAccountEnv = accountEnv(selected);
   }
   if (account === 'default' && !harness) throw new AccountSelectionError('account_harness_mismatch', 'Account default requires a Claude or Codex harness');
+  // Checked against the harness actually launched, which may be inherited from the parent.
+  const effort = validateEffort(shellType ?? 'claude', input.effort);
   const effectiveBaseInput: CreateFtownSessionInput = {
     ...input,
+    effort,
     ...(shellType !== undefined ? { shellType } : {}),
   };
   const isAgent = shellType !== 'shell';
@@ -660,6 +670,7 @@ async function createFtownSessionImpl(
       workingDir,
       shellType,
       model: input.model,
+      ...(effort ? { effort } : {}),
       ...(account ? { account } : {}),
       ...(allowedAccounts ? { allowedAccounts } : {}),
       claudeSessionId: input.claudeSessionId,
@@ -848,6 +859,8 @@ export function parseCreateSessionBody(
     workingDir: typeof body.workingDir === 'string' ? body.workingDir : undefined,
     shellType,
     model: typeof body.model === 'string' ? body.model : undefined,
+    // The level's form is checked here; whether the harness takes one, once the harness is known (it may be inherited).
+    effort: body.effort === undefined ? undefined : validateEffortLevel(body.effort),
     account: typeof body.account === 'string' ? body.account : undefined,
     allowedAccounts: Array.isArray(body.allowedAccounts) && body.allowedAccounts.every(v => typeof v === 'string') ? body.allowedAccounts as string[] : undefined,
     claudeSessionId:

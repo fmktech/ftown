@@ -105,12 +105,19 @@ opencode takes effort as a `#variant` suffix on the model, for example
 `provider/model#high`. Check its `effortFlag` and the model's `efforts` in the report.
 
 ```bash
-ftown sessions create --shell <provider> --model <id> --parent \
+ftown sessions create --shell <provider> --model <id> --effort <level> --parent \
   --workdir "$PWD" --name review-auth --prompt "..."
 ```
 
-Where `ftown sessions create` has no flag for the effort, apply `effortFlag` as
-the harness documents it. Omit `--model` to take the harness default.
+Pass the effort with `--effort` (claude, codex, grok, muse, antigravity); ftown
+turns it into the harness's own `effortFlag`. For opencode put it on the model
+instead: `--model provider/model#high`. Omit `--model` or `--effort` to take the
+harness default.
+
+Never launch an agent with `--command` to set a model or effort. A `--command`
+runs exactly as written, without the flags ftown adds to every harness for
+unattended runs: a codex started that way stops to ask for approvals and for
+hook trust, and nobody is there to answer.
 
 ## When things are missing
 
