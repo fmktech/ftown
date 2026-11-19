@@ -45,7 +45,7 @@ import {
 // HybridTerminalTransport does not exist yet — this import is expected to fail until
 // A3 lands it. Only the class is imported; its options/peer/centrifuge types are
 // deliberately not, per the note above.
-import { HybridTerminalTransport } from './hybrid-terminal-transport';
+import { HybridTerminalTransport, LOCAL_PORTS_STORAGE_KEY } from './hybrid-terminal-transport';
 
 interface PeerFactoryOpts {
   bridgeId: string;
@@ -1055,6 +1055,77 @@ describe('HybridTerminalTransport — default presence-based getLocalAdvert', ()
     );
     expect(transport.getMode('session-1')).toBe('local');
     expect(peerFactory).not.toHaveBeenCalled();
+  });
+
+  describe('a localhost port remembered across page loads', () => {
+    let stored: Map<string, string>;
+    beforeEach(() => {
+      stored = new Map();
+      vi.stubGlobal('localStorage', { getItem: (key: string) => stored.get(key) ?? null, setItem: (key: string, value: string) => { stored.set(key, value); } });
+    });
+    afterEach(() => { vi.unstubAllGlobals(); });
+    /** A relay that cannot answer: presence never resolves. */
+    const silentRelay = () => { const centrifuge = new PresenceFakeClient(); centrifuge.seedPresenceSub(() => new Promise(() => {})); return centrifuge; };
+
+    it('remembers the port the relay advertised', async () => {
+      const centrifuge = new PresenceFakeClient();
+      centrifuge.seedPresenceSub(() => Promise.resolve({ clients: { 'conn-b': { connInfo: ADVERT_CONN_INFO } } }));
+      const { transport } = makeDefaultAdvertTransport(centrifuge);
+      transport.subscribeTerminal('session-1', 'bridge-1', handlers());
+      await flush();
+      // Only the port: the advert's other fields are never stored.
+      expect(JSON.parse(stored.get(LOCAL_PORTS_STORAGE_KEY)!)).toEqual({ 'bridge-1': 41999 });
+    });
+
+    it('connects on the remembered port without asking the relay anything', async () => {
+      stored.set(LOCAL_PORTS_STORAGE_KEY, JSON.stringify({ 'bridge-1': 41999 }));
+      const centrifuge = silentRelay();
+      const presence = vi.spyOn(centrifuge.getSubscription(PRESENCE_CHANNEL) as PresenceFakeSubscription, 'presence');
+      const { transport, peerFactory, loopbackPeerFactory } = makeDefaultAdvertTransport(centrifuge);
+      transport.subscribeTerminal('session-1', 'bridge-1', handlers());
+      await flush();
+      expect(loopbackPeerFactory).toHaveBeenCalledWith(expect.objectContaining({ bridgeId: 'bridge-1', port: 41999 }));
+      expect(transport.getMode('session-1')).toBe('local');
+      expect(presence).not.toHaveBeenCalled();
+      expect(peerFactory).not.toHaveBeenCalled();
+    });
+
+    it('asks the relay when the remembered port no longer answers, and uses a new port it advertises', async () => {
+      stored.set(LOCAL_PORTS_STORAGE_KEY, JSON.stringify({ 'bridge-1': 40000 }));
+      const centrifuge = new PresenceFakeClient();
+      centrifuge.seedPresenceSub(() => Promise.resolve({ clients: { 'conn-b': { connInfo: ADVERT_CONN_INFO } } }));
+      const { transport, loopbackPeerFactory, peerFactory } = makeDefaultAdvertTransport(centrifuge);
+      loopbackPeerFactory.mockImplementationOnce((opts: LoopbackFactoryOpts) => Object.assign(new SimpleLoopbackPeer(opts), { connect: () => Promise.reject(new Error('refused')) }));
+      transport.subscribeTerminal('session-1', 'bridge-1', handlers());
+      await flush();
+      expect(loopbackPeerFactory.mock.calls.map(([opts]) => opts.port)).toEqual([40000, 41999]);
+      expect(transport.getMode('session-1')).toBe('local');
+      expect(peerFactory).not.toHaveBeenCalled();
+      expect(JSON.parse(stored.get(LOCAL_PORTS_STORAGE_KEY)!)).toEqual({ 'bridge-1': 41999 });
+    });
+
+    it('tries a port once when the relay advertises the same one, then moves on to WebRTC', async () => {
+      stored.set(LOCAL_PORTS_STORAGE_KEY, JSON.stringify({ 'bridge-1': 41999 }));
+      const centrifuge = new PresenceFakeClient();
+      centrifuge.seedPresenceSub(() => Promise.resolve({ clients: { 'conn-b': { connInfo: ADVERT_CONN_INFO } } }));
+      const { transport, loopbackPeerFactory, peerFactory } = makeDefaultAdvertTransport(centrifuge);
+      loopbackPeerFactory.mockImplementation((opts: LoopbackFactoryOpts) => Object.assign(new SimpleLoopbackPeer(opts), { connect: () => Promise.reject(new Error('refused')) }));
+      transport.subscribeTerminal('session-1', 'bridge-1', handlers());
+      await flush();
+      expect(loopbackPeerFactory).toHaveBeenCalledTimes(1);
+      expect(peerFactory).toHaveBeenCalledTimes(1);
+    });
+
+    it('ignores stored values that are not a bridge id mapped to a port', async () => {
+      for (const junk of ['not json', '[]', 'null', JSON.stringify({ 'bridge-1': '41999', 'bridge 2': 5, b3: 0, b4: 70_000, b5: 1.5 })]) {
+        stored.set(LOCAL_PORTS_STORAGE_KEY, junk);
+        const { transport, loopbackPeerFactory } = makeDefaultAdvertTransport(new PresenceFakeClient());
+        transport.subscribeTerminal('session-1', 'bridge-1', handlers());
+        await flush();
+        expect(loopbackPeerFactory).not.toHaveBeenCalled();
+        transport.dispose();
+      }
+    });
   });
 
   it('skips loopback when connInfo lacks localPort/localNonce (old bridge) and attempts WebRTC', async () => {
