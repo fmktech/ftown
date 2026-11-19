@@ -1,7 +1,6 @@
-import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { constants } from 'node:fs';
-import { chmod, mkdir, open, opendir, realpath, type FileHandle } from 'node:fs/promises';
+import { constants, type BigIntStats } from 'node:fs';
+import { chmod, lstat, mkdir, open, opendir, realpath, rename, rmdir, type FileHandle } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 
 export const CHUNK_BYTES = 192 * 1024;
@@ -10,101 +9,82 @@ const MAX_HEADER_BYTES = 16 * 1024;
 const MAX_ENTRIES = 1_000_000;
 export const sha256 = () => createHash('sha256');
 
-// Python supplies descriptor-relative open on both macOS and Linux. Opening every component
-// with O_NOFOLLOW prevents a concurrent rename from redirecting traversal through a symlink.
-const SOURCE = String.raw`
-import hashlib, json, os, stat, struct, sys
-out = sys.stdout.buffer
-flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
-count = 0
-def identity(st):
-    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
-def walk(parent, prefix, depth):
-    global count
-    before = os.fstat(parent)
-    with os.scandir(parent) as entries:
-        for entry in entries:
-            name = entry.name
-            path = prefix + name
-            count += 1
-            if count > 1000000 or depth > 128 or len(name.encode()) > 255 or len(path.encode()) > 4096 or '\\' in name or any(ord(c) < 32 or ord(c) == 127 for c in name):
-                raise ValueError()
-            listed = entry.stat(follow_symlinks=False)
-            if not (stat.S_ISREG(listed.st_mode) or stat.S_ISDIR(listed.st_mode)) or listed.st_mode & 0o6000:
-                raise ValueError()
-            fd = os.open(name, flags | (os.O_DIRECTORY if stat.S_ISDIR(listed.st_mode) else 0), dir_fd=parent)
-            try:
-                info = os.fstat(fd)
-                if identity(listed) != identity(info) or info.st_mode != listed.st_mode:
-                    raise ValueError()
-                directory = stat.S_ISDIR(info.st_mode)
-                header = json.dumps(dict(path=path, size=None if directory else info.st_size), ensure_ascii=False).encode()
-                out.write(struct.pack('>I', len(header)))
-                out.write(header)
-                if directory:
-                    walk(fd, path + '/', depth + 1)
-                else:
-                    digest = hashlib.sha256()
-                    remaining = info.st_size
-                    while remaining:
-                        block = os.read(fd, min(remaining, 131072))
-                        if not block:
-                            raise ValueError()
-                        out.write(block)
-                        digest.update(block)
-                        remaining -= len(block)
-                    out.write(digest.digest())
-                if identity(info) != identity(os.fstat(fd)):
-                    raise ValueError()
-            finally:
-                os.close(fd)
-    if identity(before) != identity(os.fstat(parent)):
-        raise ValueError()
-
-root = os.open('/', flags | os.O_DIRECTORY)
-for part in sys.argv[1].split('/')[1:]:
-    fd = os.open(part, flags | os.O_DIRECTORY, dir_fd=root)
-    os.close(root)
-    root = fd
-if os.fstat(root).st_mode & 0o6000:
-    raise ValueError()
-walk(root, '', 1)
-out.write(b'\0' * 4)
-`;
-
-// Use the OS's exclusive directory rename. A check followed by fs.rename can overwrite
-// an empty directory created after the check.
-const INSTALL = String.raw`
-import ctypes, os, sys
-lib = ctypes.CDLL(None, use_errno=True)
-source, dest = map(os.fsencode, sys.argv[1:])
-if sys.platform.startswith('linux'):
-    result = lib.renameat2(-100, source, -100, dest, 1)
-elif sys.platform == 'darwin':
-    result = lib.renamex_np(source, dest, 4)
-else:
-    sys.exit(1)
-sys.exit(0 if result == 0 else 1)
-`;
-
-function python(script: string, args: string[], signal: AbortSignal) {
-  const child = spawn('python3', ['-I', '-c', script, ...args], { stdio: ['ignore', 'pipe', 'ignore'], signal });
-  const done = new Promise<boolean>(resolve => {
-    child.on('error', () => {});
-    child.once('close', code => resolve(code === 0));
-  });
-  return { child, done };
+function unchanged(left: BigIntStats, right: BigIntStats): boolean {
+  return left.dev === right.dev && left.ino === right.ino && left.size === right.size
+    && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs && left.mode === right.mode;
 }
 
 export async function* readSnapshot(source: string, signal: AbortSignal): AsyncGenerator<Buffer> {
-  // Resolve aliases above the selected root (macOS uses /var -> /private/var).
-  // The helper still opens the selected directory and every entry below it with O_NOFOLLOW.
   const root = join(await realpath(dirname(source)), basename(source));
-  const { child, done } = python(SOURCE, [root], signal);
+  const flags = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
+  const linux = process.platform === 'linux';
+  let entries = 0;
+
+  async function* walk(path: string, name: string, verifyParent: () => Promise<void>): AsyncGenerator<Buffer> {
+    signal.throwIfAborted();
+    await verifyParent();
+    const before = await lstat(path, { bigint: true });
+    const directory = before.isDirectory();
+    if ((!directory && !before.isFile()) || (!name && !directory) || (before.mode & 0o6000n)) throw new Error();
+    const file = await open(path, flags | (directory ? constants.O_DIRECTORY : 0));
+    try {
+      // Linux anchors descendants to the directory fd. Node on macOS has no
+      // openat: these repeated checks catch ordinary renames, but a concurrent
+      // local actor who can swap an ancestor out and back can race path lookup.
+      const verify = async () => {
+        await verifyParent();
+        if (!unchanged(before, await lstat(path, { bigint: true })) || !unchanged(before, await file.stat({ bigint: true }))) throw new Error();
+      };
+      await verify();
+      if (!directory && before.size > BigInt(MAX_SNAPSHOT_BYTES)) throw new Error();
+      const size = Number(before.size);
+      if (name) {
+        entryPath(name);
+        if (++entries > MAX_ENTRIES) throw new Error();
+        const header = Buffer.from(JSON.stringify({ path: name, size: directory ? null : size }));
+        const length = Buffer.alloc(4);
+        length.writeUInt32BE(header.length);
+        yield length;
+        yield header;
+      }
+      if (directory) {
+        const base = linux ? `/proc/self/fd/${file.fd}` : path;
+        for await (const entry of await opendir(base, { encoding: 'buffer' as BufferEncoding })) {
+          const raw = entry.name as unknown as Buffer;
+          const child = raw.toString('utf8');
+          if (!Buffer.from(child).equals(raw)) throw new Error();
+          yield* walk(join(base, child), name ? `${name}/${child}` : child, linux ? async () => {} : verify);
+        }
+      } else {
+        const digest = sha256();
+        let remaining = size;
+        if (remaining) {
+          for await (const bytes of file.createReadStream({ autoClose: false, signal, start: 0, end: size - 1, highWaterMark: CHUNK_BYTES })) {
+            digest.update(bytes);
+            remaining -= bytes.length;
+            yield bytes;
+          }
+        }
+        if (remaining) throw new Error();
+        await verify();
+        yield digest.digest();
+      }
+      await verify();
+    } finally {
+      await file.close();
+    }
+  }
+
   const chunk = Buffer.allocUnsafe(CHUNK_BYTES);
   let used = 0;
   try {
-    for await (const data of child.stdout as AsyncIterable<Buffer>) {
+    async function* records(): AsyncGenerator<Buffer> {
+      yield* walk(root, '', async () => {
+        if (await realpath(dirname(root)) !== dirname(root)) throw new Error();
+      });
+      yield Buffer.alloc(4);
+    }
+    for await (const data of records()) {
       for (let offset = 0; offset < data.length;) {
         const size = data.copy(chunk, used, offset);
         used += size;
@@ -115,11 +95,10 @@ export async function* readSnapshot(source: string, signal: AbortSignal): AsyncG
         }
       }
     }
-    if (!await done) throw new Error('Cannot read a stable folder snapshot. Check source paths, file types and Python 3 availability.');
     if (used) yield chunk.subarray(0, used);
-  } finally {
-    child.kill();
-    await done;
+  } catch {
+    signal.throwIfAborted();
+    throw new Error('Cannot read a stable folder snapshot. Check source paths and file types.');
   }
 }
 
@@ -227,9 +206,24 @@ export async function extractSnapshot(spool: string, root: string, bytes: number
   }
 }
 
-export async function installSnapshot(source: string, dest: string, signal: AbortSignal): Promise<void> {
+export async function installSnapshot(source: string, dest: string, signal: AbortSignal,
+  onReserve?: (reserved: BigIntStats) => Promise<void>): Promise<void> {
   signal.throwIfAborted();
-  // After launching the atomic commit, let it report its outcome even if cancellation arrives.
-  const { done } = python(INSTALL, [source, dest], new AbortController().signal);
-  if (!await done) throw new Error('Exclusive install failed');
+  let reserved: BigIntStats | undefined;
+  try {
+    await mkdir(dest, { mode: 0o700 });
+    reserved = await lstat(dest, { bigint: true });
+    await onReserve?.(reserved);
+    // mkdir refuses existing paths. Node has no exclusive rename flag, so
+    // a local actor who can replace our empty reservation between the check
+    // and rename can still race this step. The caller checks the parent trust.
+    if (!unchanged(reserved, await lstat(dest, { bigint: true }))) throw new Error();
+    signal.throwIfAborted();
+    await rename(source, dest);
+  } catch {
+    if (reserved && await lstat(dest, { bigint: true }).then(info => unchanged(reserved!, info), () => false)) {
+      await rmdir(dest).catch(() => {});
+    }
+    throw new Error('Exclusive install failed');
+  }
 }

@@ -5,11 +5,27 @@ import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { CHUNK_BYTES, extractSnapshot, installSnapshot, readSnapshot, sha256 } from './folder-snapshot.js';
+import { TRANSFER_CREDIT_BYTES, TRANSFER_FRAME_BYTES, TRANSFER_ID_BYTES } from './folder-transfer-protocol.js';
 import { FolderTransfers } from './folder-transfer.js';
-import { TransferJournal } from './folder-transfer-journal.js';
+import { inode, TransferJournal } from './folder-transfer-journal.js';
 import type { PeerControl } from './peer-control.js';
 
 const sourceEndpoint = 'paired-sender';
+const channel = 'test-channel';
+const wire = (transfers: FolderTransfers, input: unknown, endpoint = sourceEndpoint, link = channel) =>
+  transfers.wire(endpoint, input, link);
+function feed(transfers: FolderTransfers, id: string, bytes: Buffer, endpoint = sourceEndpoint, link = channel): void {
+  const prefix = Buffer.from(id.replaceAll('-', ''), 'hex');
+  const width = TRANSFER_FRAME_BYTES - TRANSFER_ID_BYTES;
+  for (let offset = 0; offset < bytes.length; offset += width) {
+    transfers.binary(endpoint, link, Buffer.concat([prefix, bytes.subarray(offset, offset + width)]));
+  }
+}
+async function batch(transfers: FolderTransfers, id: string, bytes: Buffer, offset = 0): Promise<void> {
+  feed(transfers, id, bytes);
+  await wire(transfers, { action: 'flush', id, bytes: offset + bytes.length });
+}
+
 async function fixture(t: TestContext) {
   const dir = await mkdtemp(join(tmpdir(), 'ftown-transfer-test-'));
   const source = join(dir, 'source');
@@ -48,13 +64,13 @@ async function waitFor(transfers: FolderTransfers, id: string, wanted: string, s
 async function transmit(transfers: FolderTransfers, id: string, source: string, corruptDigest = false): Promise<void> {
   const hash = sha256();
   let offset = 0;
-  await transfers.wire(sourceEndpoint, { action: 'begin', id });
+  await wire(transfers, { action: 'begin-binary', id });
   for await (const block of readSnapshot(source, new AbortController().signal)) {
     hash.update(block);
-    await transfers.wire(sourceEndpoint, { action: 'chunk', id, offset, chunk: block.toString('base64') });
+    await batch(transfers, id, block, offset);
     offset += block.length;
   }
-  await transfers.wire(sourceEndpoint, { action: 'verify', id, bytes: offset, digest: corruptDigest ? '0'.repeat(64) : hash.digest('hex') });
+  await wire(transfers, { action: 'verify', id, bytes: offset, digest: corruptDigest ? '0'.repeat(64) : hash.digest('hex') });
 }
 
 test('receiver refuses existing destinations and binds an invitation to its chosen sender', async t => {
@@ -65,12 +81,12 @@ test('receiver refuses existing destinations and binds an invitation to its chos
   await rm(destination, { recursive: true });
   const id = await prepare(transfers, destination);
   for (const action of ['begin', 'status', 'cancel']) {
-    await assert.rejects(transfers.wire('other-peer', { id, action }), /No matching receive invitation/);
+    await assert.rejects(wire(transfers, { id, action }, 'other-peer'), /No matching receive invitation/);
   }
-  await transfers.wire(sourceEndpoint, { action: 'begin', id });
-  await transfers.wire(sourceEndpoint, { action: 'chunk', id, offset: 0, chunk: Buffer.from('partial').toString('base64') });
+  await wire(transfers, { action: 'begin-binary', id });
+  await batch(transfers, id, Buffer.from('partial'));
   assert.equal((await transfers.local({ action: 'cancel', id }) as Status).state, 'cancelled');
-  assert.equal((await transfers.wire(sourceEndpoint, { action: 'status', id })).state, 'cancelled');
+  assert.equal((await wire(transfers, { action: 'status', id })).state, 'cancelled');
   assert.ok(!(await readdir(dir)).some(name => name.startsWith('.ftown-transfer-')));
   await assert.rejects(lstat(destination), { code: 'ENOENT' });
 });
@@ -99,14 +115,14 @@ test('a mismatched envelope checksum leaves no destination or retained spool', {
 test('a destination created after begin stays intact and the verified copy retries after restart', { timeout: 5_000 }, async t => {
   const { transfers, source, destination, dir, open, journalPath } = await fixture(t);
   const id = await prepare(transfers, destination);
-  await transfers.wire(sourceEndpoint, { action: 'begin', id });
+  await wire(transfers, { action: 'begin-binary', id });
   const blocks: Buffer[] = [];
   for await (const block of readSnapshot(source, t.signal)) blocks.push(Buffer.from(block));
   const snapshot = Buffer.concat(blocks);
-  await transfers.wire(sourceEndpoint, { action: 'chunk', id, offset: 0, chunk: snapshot.toString('base64') });
+  await batch(transfers, id, snapshot);
   await mkdir(destination);
   await writeFile(join(destination, 'existing'), 'leave this alone');
-  await transfers.wire(sourceEndpoint, { action: 'verify', id, bytes: snapshot.length, digest: sha256().update(snapshot).digest('hex') });
+  await wire(transfers, { action: 'verify', id, bytes: snapshot.length, digest: sha256().update(snapshot).digest('hex') });
   await waitFor(transfers, id, 'retained', t.signal);
   assert.deepEqual(await readdir(destination), ['existing']);
   await transfers.close();
@@ -177,35 +193,34 @@ test('receiver rejects absolute and traversing paths, duplicates, and invalid fi
   }
 });
 
-test('the receiver bounds the chunk window and rejects gaps and duplicate offsets', async t => {
+test('binary credit is limited and frames are bound to the authorized endpoint and link', async t => {
   const { transfers, destination } = await fixture(t);
   const id = await prepare(transfers, destination);
-  const chunk = Buffer.alloc(CHUNK_BYTES, 42).toString('base64');
-  const block = (offset: number) => transfers.wire(sourceEndpoint, { action: 'chunk', id, offset, chunk });
-  await transfers.wire(sourceEndpoint, { action: 'begin', id });
-  assert.equal((await block(CHUNK_BYTES)).bytes, 0);
-  await assert.rejects(block(CHUNK_BYTES), /Invalid snapshot block/);
-  await assert.rejects(block(4 * CHUNK_BYTES), /Invalid snapshot block/);
-  await assert.rejects(transfers.wire(sourceEndpoint, {
-    action: 'verify', id, bytes: 2 * CHUNK_BYTES, digest: '0'.repeat(64),
-  }), /Invalid snapshot checksum/);
-  assert.equal((await block(0)).bytes, 2 * CHUNK_BYTES);
-  assert.equal((await transfers.wire(sourceEndpoint, { action: 'cancel', id })).state, 'cancelled');
+  await wire(transfers, { action: 'begin-binary', id });
+  feed(transfers, id, Buffer.from('wrong peer'), 'other-peer');
+  feed(transfers, id, Buffer.from('wrong link'), sourceEndpoint, 'another-link');
+  const bytes = Buffer.alloc(TRANSFER_CREDIT_BYTES);
+  await batch(transfers, id, bytes);
+  assert.equal((await wire(transfers, { action: 'status', id })).bytes, bytes.length);
+  feed(transfers, id, bytes);
+  feed(transfers, id, Buffer.from('beyond credit'));
+  await assert.rejects(wire(transfers, { action: 'flush', id, bytes: 2 * bytes.length }), /Invalid snapshot batch/);
+  assert.equal((await wire(transfers, { action: 'status', id })).state, 'failed');
 });
 
 test('discard removes a retained snapshot and its journal', { timeout: 5_000 }, async t => {
   const { transfers, source, destination, dir, journalPath } = await fixture(t);
   const id = await prepare(transfers, destination);
-  await transfers.wire(sourceEndpoint, { action: 'begin', id });
+  await wire(transfers, { action: 'begin-binary', id });
   let offset = 0;
   const hash = sha256();
   for await (const block of readSnapshot(source, t.signal)) {
     hash.update(block);
-    await transfers.wire(sourceEndpoint, { action: 'chunk', id, offset, chunk: block.toString('base64') });
+    await batch(transfers, id, block, offset);
     offset += block.length;
   }
   await mkdir(destination);
-  await transfers.wire(sourceEndpoint, { action: 'verify', id, bytes: offset, digest: hash.digest('hex') });
+  await wire(transfers, { action: 'verify', id, bytes: offset, digest: hash.digest('hex') });
   await waitFor(transfers, id, 'retained', t.signal);
   assert.equal((await transfers.local({ action: 'discard', id }) as Status).state, 'cancelled');
   assert.deepEqual(await readdir(journalPath), []);
@@ -216,8 +231,8 @@ test('discard removes a retained snapshot and its journal', { timeout: 5_000 }, 
 test('startup removes staged partial data from interrupted receivers', async t => {
   const { transfers, destination, dir, open, journalPath } = await fixture(t);
   const id = await prepare(transfers, destination);
-  await transfers.wire(sourceEndpoint, { action: 'begin', id });
-  await transfers.wire(sourceEndpoint, { action: 'chunk', id, offset: 0, chunk: Buffer.from('partial').toString('base64') });
+  await wire(transfers, { action: 'begin-binary', id });
+  await batch(transfers, id, Buffer.from('partial'));
   const creating = crypto.randomUUID();
   const emptyStage = join(dir, `.ftown-transfer-${crypto.randomUUID()}`);
   await new TransferJournal(journalPath).save(creating, {
@@ -232,4 +247,46 @@ test('startup removes staged partial data from interrupted receivers', async t =
   assert.equal(status.state, 'failed');
   assert.deepEqual(await readdir(journalPath), []);
   assert.ok(!(await readdir(dir)).some(name => name.startsWith('.ftown-transfer-')));
+});
+
+
+test('Node traversal detects a source file changed during streaming', async t => {
+  const { source } = await fixture(t);
+  const file = join(source, 'fixture');
+  await writeFile(file, Buffer.alloc(3 * CHUNK_BYTES));
+  const snapshot = readSnapshot(source, t.signal);
+  assert.equal((await snapshot.next()).done, false);
+  await writeFile(file, 'changed mid-copy');
+  await assert.rejects(async () => {
+    for await (const _block of snapshot) { /* consume */ }
+  }, /Cannot read a stable folder snapshot/);
+});
+
+test('startup removes a recorded empty install reservation and preserves the spool', async t => {
+  const { transfers, source, destination, journalPath, open } = await fixture(t);
+  const id = await prepare(transfers, destination);
+  await wire(transfers, { action: 'begin-binary', id });
+  await mkdir(destination);
+  let offset = 0;
+  const digest = sha256();
+  for await (const block of readSnapshot(source, t.signal)) {
+    digest.update(block);
+    await batch(transfers, id, block, offset);
+    offset += block.length;
+  }
+  await wire(transfers, { action: 'verify', id, bytes: offset, digest: digest.digest('hex') });
+  await waitFor(transfers, id, 'retained', t.signal);
+  await transfers.close();
+
+  const journal = new TransferJournal(journalPath);
+  const [{ saved }] = await journal.entries();
+  saved.committing = { tree: await inode(source), entries: 1, reservation: await inode(destination) };
+  await journal.save(id, saved);
+  const recovered = open();
+  t.after(() => recovered.close());
+  assert.equal((await recovered.local({ action: 'status', id }) as Status).state, 'retained');
+  await assert.rejects(lstat(destination), { code: 'ENOENT' });
+  await recovered.local({ action: 'retry', id });
+  await waitFor(recovered, id, 'installed', t.signal);
+  assert.equal(await readFile(join(destination, 'fixture'), 'utf8'), 'synthetic data');
 });

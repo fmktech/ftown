@@ -414,7 +414,8 @@ test('two paired bridges copy a multi-MiB snapshot over native WebRTC and never 
   const target = join(dir, 'target');
   await mkdir(join(source, 'sub', 'empty'), { recursive: true });
   const file = join(source, 'sub', 'fixture');
-  const fixture = randomBytes(16 * 1024 ** 2);
+  const fixtureMiB = 64;
+  const fixture = randomBytes(fixtureMiB * 1024 ** 2);
   const expected = createHash('sha256').update(fixture).digest('hex');
   await writeFile(file, fixture);
   await chmod(file, 0o754);
@@ -452,6 +453,11 @@ test('two paired bridges copy a multi-MiB snapshot over native WebRTC and never 
             return {
               sendMessage(message) {
                 const sent = channel.sendMessage(message);
+                highWater = Math.max(highWater, channel.bufferedAmount());
+                return sent;
+              },
+              sendMessageBinary(message) {
+                const sent = channel.sendMessageBinary(message);
                 highWater = Math.max(highWater, channel.bufferedAmount());
                 return sent;
               },
@@ -515,7 +521,7 @@ test('two paired bridges copy a multi-MiB snapshot over native WebRTC and never 
   assert.equal((await stat(join(target, 'sub'))).mode & 0o7777, 0o700);
   assert.deepEqual(await readdir(join(dir, 'recipient-journal')), []);
   assert.ok(!(await readdir(dir)).some(name => name.startsWith('.ftown-transfer-')));
-  t.diagnostic(`16 MiB in ${elapsed.toFixed(2)} s (${(16 / elapsed).toFixed(2)} MiB/s), sender DataChannel buffered high-water ${highWater} bytes`);
+  t.diagnostic(`${fixtureMiB} MiB in ${elapsed.toFixed(2)} s (${(fixtureMiB / elapsed).toFixed(2)} MiB/s), sender DataChannel buffered high-water ${highWater} bytes`);
 
   const cancelledTarget = join(dir, 'cancelled');
   const second = await targetCLI({ action: 'receive', bridge: 'Studio', path: cancelledTarget });

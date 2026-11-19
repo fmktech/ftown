@@ -246,6 +246,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     this.peerControl = peers;
     this.peerLinks = links ?? null;
     this.transfers = new FolderTransfers(peers, transferStateDir ? new TransferJournal(transferStateDir) : undefined);
+    links?.setBinaryHandler((endpoint, channel, frame) => this.transfers?.binary(endpoint, channel, frame));
   }
 
   async closeTransfers(): Promise<void> { await this.transfers?.close(); }
@@ -262,7 +263,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     await this.security!.revalidate(message.principal);
     const body = (message.application.data as { body?: ApplicationJson } | null)?.body;
     try {
-      const result = wire ? await this.transfers.wire(endpoint.id, body) : await this.transfers.local(body);
+      const result = wire ? await this.transfers.wire(endpoint.id, body, message.envelope.channel) : await this.transfers.local(body);
       return { status: 200, body: applicationJson(result) };
     } catch (error) {
       return { status: 400, body: { error: transferError(error) } };

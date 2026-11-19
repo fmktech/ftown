@@ -9,7 +9,7 @@ export interface StoredReceive {
   stage: string;
   stageInode?: Inode;
   verified?: { bytes: number; digest: string };
-  committing?: { tree: Inode; entries: number };
+  committing?: { tree: Inode; entries: number; reservation?: Inode };
 }
 
 export async function inode(path: string): Promise<Inode> {

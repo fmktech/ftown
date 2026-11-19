@@ -3,15 +3,14 @@ import { constants } from 'node:fs';
 import { lstat, open, realpath, rm, rmdir } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, normalize } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { CHUNK_BYTES, MAX_SNAPSHOT_BYTES, extractSnapshot, installSnapshot, makePrivateDirectory, readSnapshot, sha256, writeBytes } from './folder-snapshot.js';
+import { MAX_SNAPSHOT_BYTES, extractSnapshot, installSnapshot, makePrivateDirectory, readSnapshot, sha256, writeBytes } from './folder-snapshot.js';
 import type { PeerControl } from './peer-control.js';
 import { inode, matchesInode, TransferJournal, TRANSFER_ID, type Inode, type StoredReceive } from './folder-transfer-journal.js';
-import { TRANSFER_WIRE } from './folder-transfer-protocol.js';
+import { TRANSFER_CREDIT_BYTES, TRANSFER_FRAME_BYTES, TRANSFER_ID_BYTES, TRANSFER_WIRE } from './folder-transfer-protocol.js';
 
 const LEASE_MS = 120_000;
 // Leave capacity for control requests on the shared DataChannel.
 const LIMIT = 4;
-const WINDOW = 4;
 const HISTORY_LIMIT = 64;
 const INVITATION_MS = 15 * 60_000;
 
@@ -37,9 +36,10 @@ interface Receive extends Job {
   cancelling?: Promise<void>;
   lease?: ReturnType<typeof setTimeout>;
   digest?: string;
-  chunks: Map<number, Promise<void>>;
-  written: Map<number, number>;
-  end?: number;
+  channel?: string;
+  batch?: Buffer;
+  batchBytes: number;
+  invalidBatch?: boolean;
 }
 interface Send extends Job { bridge: string; monitor?: boolean }
 interface History {
@@ -106,7 +106,7 @@ export class FolderTransfers {
     for (const { id, saved } of await this.journal?.entries() ?? []) {
       const { destination, endpoint, stage, stageInode, verified, committing } = saved;
       const parent = await trustedParent(dirname(destination)).catch(() => ({ dev: '', ino: '' }));
-      const job: Receive = { endpoint, destination, parent, stored: saved, abort: new AbortController(), chunks: new Map(), written: new Map(),
+      const job: Receive = { endpoint, destination, parent, stored: saved, abort: new AbortController(), batchBytes: 0,
         status: { id, state: 'failed', bytes: verified?.bytes ?? 0, direction: 'receive' } };
       this.incoming.set(id, job);
       if (committing && await matchesInode(destination, committing.tree)) {
@@ -116,6 +116,10 @@ export class FolderTransfers {
         job.digest = verified.digest;
         job.status.state = 'retained';
         job.status.error = 'Verified snapshot recovered after restart. Retry installation or discard it.';
+        if (committing?.reservation && parent.ino && await matchesInode(destination, committing.reservation)) {
+          // Only remove our empty reservation. An occupied destination stays intact.
+          await rmdir(destination).catch(() => {});
+        }
         await this.removeTree(job).catch(() => {});
         continue;
       } else job.status.error = 'Transfer interrupted by bridge restart.';
@@ -128,7 +132,6 @@ export class FolderTransfers {
   private async current(job: Receive | Send): Promise<Status> {
     if (terminal(job.status.state) || job.status.state === 'retained') {
       await job.operation;
-      if ('chunks' in job) await Promise.allSettled(job.chunks.values());
     }
     return this.view(job);
   }
@@ -151,6 +154,7 @@ export class FolderTransfers {
 
   private async clean(job: Receive): Promise<void> {
     clearTimeout(job.lease);
+    job.batch = undefined;
     const saved = job.stored;
     if (saved?.stageInode) {
       if (await matchesInode(saved.stage, saved.stageInode)) await rm(saved.stage, { recursive: true, force: true, maxRetries: 3 });
@@ -178,7 +182,6 @@ export class FolderTransfers {
       clearTimeout(job.lease);
       job.abort.abort();
       await job.operation;
-      await Promise.allSettled(job.chunks.values());
       if (!terminal(job.status.state)) job.status.state = 'cancelled';
       if (this.incoming.get(job.status.id) === job) await this.settle(job);
     })().finally(() => { job.cancelling = undefined; });
@@ -195,7 +198,6 @@ export class FolderTransfers {
         clearTimeout(job.lease);
         job.abort.abort();
         await job.operation;
-        await Promise.allSettled(job.chunks.values());
         if (!job.stored?.verified && this.incoming.get(job.status.id) === job) await this.settle(job);
       }),
       ...[...this.outgoing.values()].map(async job => {
@@ -223,7 +225,7 @@ export class FolderTransfers {
     if (this.stopped || this.incoming.size >= LIMIT) throw new TransferError('Incoming transfers unavailable.');
     if ([...this.incoming.values()].some(job => job.destination === destination)) throw new TransferError('Destination already reserved.');
     const id = randomUUID();
-    const job: Receive = { endpoint: peer.endpoint.id, destination, parent: parentInode, abort: new AbortController(), chunks: new Map(), written: new Map(),
+    const job: Receive = { endpoint: peer.endpoint.id, destination, parent: parentInode, abort: new AbortController(), batchBytes: 0,
       status: { id, state: 'waiting', bytes: 0, direction: 'receive' } };
     this.incoming.set(id, job);
     this.renew(job);
@@ -260,45 +262,43 @@ export class FolderTransfers {
       linked = await this.peers.connectDirect(job.bridge);
       if (!linked) throw new TransferError('No direct bridge link available. Folder bytes require a direct connection.');
       signal.throwIfAborted();
-      await this.request(job, { action: 'begin' });
+      await this.request(job, { action: 'begin-binary' });
       begun = true;
       job.status.state = 'copying';
       const hash = sha256();
+      const tag = Buffer.from(job.status.id.replaceAll('-', ''), 'hex');
       let queued = 0;
-      let window: Promise<Input>[] = [];
-      // Limit the sender and receiver to one small window of unacknowledged blocks.
-      // A window is drained even when one request fails so cancellation cannot race
-      // an older block still being written.
-      const drain = async () => {
-        const results = await Promise.allSettled(window);
-        window = [];
-        const failed = results.find(result => result.status === 'rejected');
-        if (failed) throw failed.reason;
+      const flush = async () => {
+        if (queued === job.status.bytes) return;
+        await this.request(job, { action: 'flush', bytes: queued });
         job.status.bytes = queued;
       };
-      try {
-        for await (const chunk of readSnapshot(source, signal)) {
-          signal.throwIfAborted();
-          if (queued + chunk.length > MAX_SNAPSHOT_BYTES) throw new TransferError('Snapshot exceeds 64 GiB.');
-          hash.update(chunk);
-          const request = this.request(job, { action: 'chunk', offset: queued, chunk: chunk.toString('base64') });
-          // The pipe can take time to supply the next block.
-          void request.catch(() => {});
-          window.push(request);
-          queued += chunk.length;
-          if (window.length === WINDOW) await drain();
+      for await (const chunk of readSnapshot(source, signal)) {
+        signal.throwIfAborted();
+        if (queued + chunk.length > MAX_SNAPSHOT_BYTES) throw new TransferError('Snapshot exceeds 64 GiB.');
+        hash.update(chunk);
+        for (let offset = 0; offset < chunk.length;) {
+          const credit = TRANSFER_CREDIT_BYTES - (queued - job.status.bytes);
+          const length = Math.min(TRANSFER_FRAME_BYTES - TRANSFER_ID_BYTES, credit, chunk.length - offset);
+          const frame = Buffer.allocUnsafe(TRANSFER_ID_BYTES + length);
+          tag.copy(frame);
+          chunk.copy(frame, TRANSFER_ID_BYTES, offset, offset + length);
+          await this.peers.sendBinary(job.bridge, frame, signal);
+          offset += length;
+          queued += length;
+          if (queued - job.status.bytes === TRANSFER_CREDIT_BYTES) await flush();
         }
-        await drain();
-      } finally {
-        await Promise.allSettled(window);
       }
+      await flush();
       signal.throwIfAborted();
       job.status.state = 'verifying';
       finishing = true;
       let reply = await this.request(job, { action: 'verify', bytes: job.status.bytes, digest: hash.digest('hex') });
+      let interval = 50;
       while (reply.state === 'verifying' || reply.state === 'installing') {
         job.status.state = reply.state;
-        await delay(500, undefined, { signal });
+        await delay(interval, undefined, { signal });
+        interval = Math.min(500, interval * 2);
         reply = await this.request(job, { action: 'status' });
       }
       this.updateResult(job, reply);
@@ -315,7 +315,7 @@ export class FolderTransfers {
         job.status.state = signal.aborted ? 'cancelled' : 'failed';
         if (!signal.aborted) job.status.error = error instanceof TransferError ? error.message
           : finishing ? 'Direct exchange failed. Check transfer status on the recipient.'
-            : 'Transfer interrupted. Check the direct link, source paths, file types and Python 3 availability.';
+            : 'Transfer interrupted. Check the direct link, source paths and file types.';
       }
     } finally {
       this.finish(job);
@@ -410,45 +410,34 @@ export class FolderTransfers {
     job.status.state = 'copying';
   }
 
-  private async chunk(job: Receive, input: Input): Promise<void> {
-    const offset = input.offset;
-    const next = job.status.bytes;
-    if (typeof offset !== 'number' || !Number.isSafeInteger(offset) || offset % CHUNK_BYTES !== 0
-      || offset < next || offset >= next + WINDOW * CHUNK_BYTES || job.chunks.has(offset) || job.written.has(offset)
-      || typeof input.chunk !== 'string' || input.chunk.length > Math.ceil(CHUNK_BYTES / 3) * 4) {
-      throw new TransferError('Invalid snapshot block.');
+  binary(endpoint: string, channel: string, frame: Buffer): void {
+    if (this.stopped || frame.length <= TRANSFER_ID_BYTES) return;
+    const tag = frame.toString('hex', 0, TRANSFER_ID_BYTES);
+    const id = `${tag.slice(0, 8)}-${tag.slice(8, 12)}-${tag.slice(12, 16)}-${tag.slice(16, 20)}-${tag.slice(20)}`;
+    const job = this.incoming.get(id);
+    if (!job || job.endpoint !== endpoint || job.channel !== channel || job.status.state !== 'copying'
+      || job.abort.signal.aborted || job.invalidBatch) return;
+    const length = frame.length - TRANSFER_ID_BYTES;
+    if (job.operation || frame.length > TRANSFER_FRAME_BYTES || job.batchBytes + length > TRANSFER_CREDIT_BYTES
+      || job.status.bytes + job.batchBytes + length > MAX_SNAPSHOT_BYTES) {
+      job.invalidBatch = true;
+      return;
     }
-    const bytes = Buffer.from(input.chunk, 'base64');
-    const end = offset + bytes.length;
-    if (!bytes.length || bytes.length > CHUNK_BYTES || bytes.toString('base64') !== input.chunk
-      || end > MAX_SNAPSHOT_BYTES || (job.end !== undefined && end > job.end)) throw new TransferError('Invalid snapshot block.');
-    if (bytes.length < CHUNK_BYTES) {
-      if ([...job.chunks.keys(), ...job.written.keys()].some(index => index > offset)) throw new TransferError('Invalid snapshot block.');
-      job.end = end;
-    }
+    job.batch ??= Buffer.allocUnsafe(TRANSFER_CREDIT_BYTES);
+    frame.copy(job.batch, job.batchBytes, TRANSFER_ID_BYTES);
+    job.batchBytes += length;
+    job.lease?.refresh();
+  }
 
-    const pending = (async () => {
-      try {
-        const file = await open(join(job.stored!.stage, 'snapshot'), constants.O_RDWR | constants.O_NOFOLLOW);
-        try { await writeBytes(file, bytes, offset); }
-        finally { await file.close(); }
-        job.written.set(offset, end);
-        for (let following; (following = job.written.get(job.status.bytes)) !== undefined;) {
-          job.written.delete(job.status.bytes);
-          job.status.bytes = following;
-        }
-        if (!job.abort.signal.aborted && job.status.state === 'copying') this.renew(job);
-      } catch {
-        job.status.state = 'failed';
-        job.status.error = 'Could not stage snapshot data.';
-        throw new TransferError(job.status.error);
-      } finally {
-        if (job.chunks.size === 1 && job.status.state === 'failed') await this.settle(job);
-        job.chunks.delete(offset);
-      }
-    })();
-    job.chunks.set(offset, pending);
-    await pending;
+  private async flush(job: Receive, bytes: unknown): Promise<void> {
+    if (!job.batchBytes || job.invalidBatch || bytes !== job.status.bytes + job.batchBytes) {
+      throw new TransferError('Invalid snapshot batch.');
+    }
+    const file = await open(join(job.stored!.stage, 'snapshot'), constants.O_RDWR | constants.O_NOFOLLOW);
+    try { await writeBytes(file, job.batch!.subarray(0, job.batchBytes), job.status.bytes); }
+    finally { await file.close(); }
+    job.status.bytes += job.batchBytes;
+    job.batchBytes = 0;
   }
 
   private async removeTree(job: Receive): Promise<void> {
@@ -493,11 +482,15 @@ export class FolderTransfers {
           await this.removeTree(job);
           await makePrivateDirectory(tree);
           job.status.entries = await extractSnapshot(spool, tree, job.status.bytes, job.digest!, signal);
-          saved.committing = { tree: await inode(tree), entries: job.status.entries };
+          const committing: NonNullable<StoredReceive['committing']> = { tree: await inode(tree), entries: job.status.entries };
+          saved.committing = committing;
           await this.journal?.save(job.status.id, saved);
           await trustedParent(dirname(job.destination));
           if (!await matchesInode(dirname(job.destination), job.parent)) throw new Error();
-          await installSnapshot(tree, job.destination, signal);
+          await installSnapshot(tree, job.destination, signal, async reserved => {
+            committing.reservation = { dev: String(reserved.dev), ino: String(reserved.ino) };
+            await this.journal?.save(job.status.id, saved);
+          });
           job.status.state = 'installed';
         }
       } catch {
@@ -513,7 +506,7 @@ export class FolderTransfers {
     });
   }
 
-  async wire(endpoint: string, value: unknown): Promise<Status> {
+  async wire(endpoint: string, value: unknown, channel: string): Promise<Status> {
     await this.ready;
     const input = record(value);
     const id = this.id(input);
@@ -533,22 +526,24 @@ export class FolderTransfers {
     }
     if (job.abort.signal.aborted || job.operation) throw new TransferError('Transfer is busy.');
     if (input.action === 'verify' && job.status.state === 'copying') {
-      if (job.chunks.size || job.written.size || input.bytes !== job.status.bytes || job.status.bytes < 4 || typeof input.digest !== 'string'
+      if (job.batchBytes || job.invalidBatch || job.channel !== channel || input.bytes !== job.status.bytes || job.status.bytes < 4 || typeof input.digest !== 'string'
         || !/^[0-9a-f]{64}$/.test(input.digest)) throw new TransferError('Invalid snapshot checksum.');
       clearTimeout(job.lease);
+      job.batch = undefined;
       job.digest = input.digest;
       this.startInstall(job);
       return this.view(job);
     }
-    if (input.action === 'chunk' && job.status.state === 'copying') {
-      await this.chunk(job, input);
-      return this.view(job);
-    }
-    if (input.action === 'begin' && job.status.state === 'waiting') {
+    const begin = input.action === 'begin-binary' && job.status.state === 'waiting';
+    const flush = input.action === 'flush' && job.status.state === 'copying' && job.channel === channel;
+    if (begin || flush) {
       let refusal: TransferError | undefined;
       await this.run(job, async () => {
         try {
-          await this.begin(job);
+          if (begin) {
+            await this.begin(job);
+            job.channel = channel;
+          } else await this.flush(job, input.bytes);
           if (!job.abort.signal.aborted) this.renew(job);
         } catch (error) {
           job.status.state = job.abort.signal.aborted ? 'cancelled' : 'failed';
@@ -566,7 +561,7 @@ export class FolderTransfers {
 
 // Only fixed strings from the remote side may become CLI output.
 const WIRE_ERRORS = new Set(['No matching receive invitation.', 'Transfer is busy.', 'Could not stage snapshot data.',
-  'Invalid snapshot block.', 'Invalid snapshot checksum.', 'Action unavailable in this transfer state.']);
+  'Invalid snapshot batch.', 'Invalid snapshot checksum.', 'Action unavailable in this transfer state.']);
 
 export function transferError(error: unknown, fallback = 'Transfer request failed. Check the paired bridge and local path.'): string {
   return error instanceof TransferError ? error.message : fallback;

@@ -40,6 +40,7 @@ export interface PeerTransport {
 
 /** What PeerControl needs from the direct links (PeerLinks implements it). */
 export interface PeerDirect {
+  sendBinary?(peerBridgeId: string, frame: Buffer, signal: AbortSignal): Promise<void>;
   channel(peerBridgeId: string): string | null;
   exchange(peerBridgeId: string, packet: SecureEnvelope, timeoutMs: number): Promise<SecureEnvelope>;
   ensure(peer: LedgerBridge, signal: (offer: { pairId: string; sdp: string }) => Promise<{ sdp: string }>): Promise<boolean>;
@@ -148,6 +149,11 @@ export class PeerControl {
     const peer = this.resolve(target);
     if (!this.directPath(peer)) this.link(peer);
     return this.linked(peer.bridgeId);
+  }
+
+  async sendBinary(target: string, frame: Buffer, signal: AbortSignal): Promise<void> {
+    if (!this.direct?.sendBinary) throw new PeerTargetError(503, 'Direct binary transfer unavailable');
+    await this.direct.sendBinary(target, frame, signal);
   }
 
   async directHttp(target: string, path: typeof TRANSFER_WIRE, body: unknown): Promise<{ status: number; body: ApplicationJson }> {

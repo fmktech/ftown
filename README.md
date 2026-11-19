@@ -167,9 +167,9 @@ The file travels through the existing encrypted connection and runs in an iframe
 ### Copy a folder between bridges
 
 Both bridges must be paired to the same account and able to open a direct
-connection. Folder transfer requires Python 3.8+ on both bridges. Installation
-uses an exclusive directory rename on macOS or Linux and requires filesystem
-support for that operation.
+connection. Bulk data travels over the encrypted direct link with one write
+acknowledgment per batch of up to 16 MiB. The recipient reserves an unused destination and installs the
+verified folder with a directory rename.
 
 On the recipient, choose an unused destination under an existing directory.
 On the sender, pass the ID printed by the recipient:
