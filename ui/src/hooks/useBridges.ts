@@ -1,8 +1,49 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import type { MessageClient, MessageSubscription } from "@/lib/message-client";
 import { accountChannel } from "@security/ledger/channels";
+import type { TerminalTransportApi } from "@/lib/direct-transport/contract";
+
+/** The names bridges were last seen under, so a bridge reached without the relay still shows its name. Not trusted for anything. */
+export const BRIDGE_NAMES_STORAGE_KEY = "ftown.bridgeNames.v1";
+const MAX_REMEMBERED_NAMES = 32;
+
+function readNames(): Map<string, string> {
+  const names = new Map<string, string>();
+  try {
+    if (typeof localStorage === "undefined") return names;
+    const stored: unknown = JSON.parse(localStorage.getItem(BRIDGE_NAMES_STORAGE_KEY) ?? "{}");
+    if (!stored || typeof stored !== "object" || Array.isArray(stored)) return names;
+    for (const [bridgeId, name] of Object.entries(stored)) {
+      if (names.size >= MAX_REMEMBERED_NAMES) break;
+      if (/^[A-Za-z0-9_-]{1,200}$/.test(bridgeId) && typeof name === "string" && name.length > 0 && name.length <= 200) names.set(bridgeId, name);
+    }
+  } catch { /* nothing remembered */ }
+  return names;
+}
+
+function rememberNames(names: Map<string, string>, bridges: readonly BridgeInfo[]): void {
+  let changed = false;
+  for (const bridge of bridges) {
+    if (!bridge.hostname || bridge.hostname === "unknown" || bridge.hostname.length > 200 || names.get(bridge.bridgeId) === bridge.hostname) continue;
+    names.delete(bridge.bridgeId); names.set(bridge.bridgeId, bridge.hostname); changed = true;
+  }
+  if (!changed) return;
+  while (names.size > MAX_REMEMBERED_NAMES) names.delete(names.keys().next().value!);
+  try { if (typeof localStorage !== "undefined") localStorage.setItem(BRIDGE_NAMES_STORAGE_KEY, JSON.stringify(Object.fromEntries(names))); } catch { /* this page only */ }
+}
+
+/**
+ * The bridges to show: those the relay reports, plus any reached directly that the relay does not report (the relay is down, or has
+ * not answered yet). A directly reached bridge has completed the encrypted handshake, so it is at least as real as a presence entry.
+ */
+export function withDirectBridges(relay: BridgeInfo[], direct: readonly string[], names: ReadonlyMap<string, string>): BridgeInfo[] {
+  const seen = new Set(relay.map(bridge => bridge.bridgeId));
+  const extra = direct.filter(bridgeId => !seen.has(bridgeId))
+    .map(bridgeId => ({ clientId: `direct:${bridgeId}`, bridgeId, hostname: names.get(bridgeId) ?? "unknown", connectedAt: "" }));
+  return extra.length ? [...relay, ...extra] : relay;
+}
 
 export interface BridgeInfo {
   clientId: string;
@@ -83,8 +124,20 @@ export function applyBridgeLeave(allClients: BridgeInfo[], clientId: string): Br
   return allClients.filter((b) => b.clientId !== clientId);
 }
 
-export function useBridges(client: MessageClient | null, userId: string | null): UseBridgesResult {
-  const [bridges, setBridges] = useState<BridgeInfo[]>([]);
+export function useBridges(client: MessageClient | null, userId: string | null,
+  transport: Pick<TerminalTransportApi, "getDirectlyReachableBridgeIds" | "onBridgeReachabilityChange"> | null = null): UseBridgesResult {
+  const [relayBridges, setBridges] = useState<BridgeInfo[]>([]);
+  const [direct, setDirect] = useState<string[]>([]);
+  const namesRef = useRef<Map<string, string> | null>(null);
+  if (!namesRef.current) namesRef.current = readNames();
+  useEffect(() => {
+    if (!transport) { setDirect([]); return; }
+    const read = () => setDirect(transport.getDirectlyReachableBridgeIds());
+    read();
+    return transport.onBridgeReachabilityChange(read);
+  }, [transport]);
+  useEffect(() => { rememberNames(namesRef.current!, relayBridges); }, [relayBridges]);
+  const bridges = useMemo(() => withDirectBridges(relayBridges, direct, namesRef.current!), [relayBridges, direct]);
   const subRef = useRef<MessageSubscription | null>(null);
   const localAdvertsRef = useRef<unknown[]>([]);
   // Every known client per bridgeId (not deduped) — the source of truth fed

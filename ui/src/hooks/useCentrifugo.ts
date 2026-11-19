@@ -286,6 +286,12 @@ export function useCentrifugo(
     // Dashboard commands go to a bridge over its direct channel, which is opened on first use; the relay carries them only when
     // the bridge cannot be reached directly.
     secureClient.setDirectCommands((bridgeId, route, data, timeoutMs) => hybridTransport.directCommand(bridgeId, route, data, timeoutMs));
+    // A bridge on this machine is opened from its remembered localhost port right away, whatever the relay is doing. Approved
+    // bridges may only become known after the ledger loads, so this runs again on every trust change (it skips bridges it has).
+    const connectLocal = () => hybridTransport.connectRemembered(securityRuntime.pinnedBridges()
+      .filter(pin => !["revoked", "key_changed"].includes(securityRuntime.state(pin.bridgeId).status)).map(pin => pin.bridgeId));
+    connectLocal();
+    const stopConnectLocal = securityRuntime.onChange(connectLocal);
 
     // Inbound signaling (webrtc_answer/webrtc_ice/webrtc_close) arrives as
     // publications on this same commands:rpc#{userId} channel. useSessions
@@ -379,6 +385,7 @@ export function useCentrifugo(
     client.connect();
 
     return () => {
+      stopConnectLocal();
       if (presenceTimer !== null) clearInterval(presenceTimer);
       waiters = [];
       detachPeers?.();

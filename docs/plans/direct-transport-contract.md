@@ -87,6 +87,26 @@ Client:
   the original id. A command that changes something is never repeated once it has left: if the channel is lost first, the
   caller is told delivery is uncertain. A command that never left the browser may use the relay.
 
+## Extension: a local bridge without the relay
+
+A browser on the same machine as a bridge can list, read and drive it while the relay is unreachable. Browser-only change; no
+bridge version is required.
+
+- **Remembered port.** The browser keeps the localhost port each bridge was last advertised on (`ftown.bridgeLocalPorts.v1` in
+  local storage) and the name it was shown under (`ftown.bridgeNames.v1`). Neither is a secret or grants anything: the encrypted
+  hello on the connection is what identifies the bridge. A stale port costs one failed attempt.
+- **Ladder order.** Remembered localhost port, then the port the relay advertises (only if different), then WebRTC, then the
+  relay.
+- **Connect on load.** For every approved bridge with a remembered port, the browser opens the localhost connection as soon as
+  the page loads and again whenever approved bridges change, without waiting for the relay or for a first command.
+- **Bridge list.** A bridge reached directly is listed even when relay presence does not report it.
+- **Loading data.** When a bridge becomes ready while the relay is not connected, the command channel's `subscribed` signal is
+  raised locally, which is what makes the dashboard read sessions and the rest. Commands then travel over the direct channel as
+  described above.
+
+Not covered: pushes (session updates, board, attention) still arrive only through the relay, so while it is down the page shows
+what it last read and does not refresh by itself. A bridge on another machine still needs the relay to be introduced.
+
 ## Signaling wire types (over commands:rpc)
 
 Envelope rides the existing commands-channel publish format. New `type` values:

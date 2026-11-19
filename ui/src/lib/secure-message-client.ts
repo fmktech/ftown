@@ -188,7 +188,14 @@ export class SecureMessageClient implements MessageClient {
     raw.on("connected", this.connected);
     raw.on("disconnected", this.disconnected);
     this.stopTrustObserver = securityRuntime.onChange(() => {
-      if (this.closed || this.raw.state !== "connected") return;
+      if (this.closed) return;
+      const becameReady = this.noteReadyBridges();
+      if (this.raw.state !== "connected") {
+        // A bridge can become ready over its direct channel while the relay is down. The dashboard loads its data on the command
+        // channel's "subscribed" signal, which the relay cannot send then, so it is raised here.
+        if (becameReady) this.getSubscription(accountChannel("commands:rpc", this.userId))?.emit("subscribed", UNRECOVERED_SUBSCRIBED_CONTEXT);
+        return;
+      }
       for (const pin of securityRuntime.pinnedBridges()) if (securityRuntime.state(pin.bridgeId).status === "offline") {
         this.recoverBridge(pin.bridgeId, false);
       }
@@ -334,6 +341,16 @@ export class SecureMessageClient implements MessageClient {
         return next;
       }));
     } catch (error) { return Promise.reject(error); }
+  }
+  /** The bridges seen ready at the last trust change, to tell a bridge that just became ready from one that already was. */
+  private readonly readyBridges = new Set<string>();
+  private noteReadyBridges(): boolean {
+    let becameReady = false;
+    for (const pin of this.securityRuntime.pinnedBridges()) {
+      if (this.securityRuntime.state(pin.bridgeId).status !== "ready") this.readyBridges.delete(pin.bridgeId);
+      else if (!this.readyBridges.has(pin.bridgeId)) { this.readyBridges.add(pin.bridgeId); becameReady = true; }
+    }
+    return becameReady;
   }
   private recoverBridge(bridgeId: string, force: boolean): void {
     if (this.closed || this.recovering.has(bridgeId)) return;

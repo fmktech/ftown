@@ -427,6 +427,15 @@ export class HybridTerminalTransport implements TerminalTransportApi {
       .sort();
   }
 
+  /**
+   * Opens the connection to each of these bridges whose localhost port is remembered, without waiting for the relay or for a first
+   * command. This is what lets a bridge on this machine be used while the relay is unreachable.
+   */
+  connectRemembered(bridgeIds: readonly string[]): void {
+    if (this.disposed) return;
+    for (const bridgeId of bridgeIds) if (this.rememberedPorts.has(bridgeId) && !this.peers.has(bridgeId)) this.ensurePeer(bridgeId);
+  }
+
   onBridgeReachabilityChange(
     cb: (bridgeId: string, reachable: boolean) => void,
   ): () => void {

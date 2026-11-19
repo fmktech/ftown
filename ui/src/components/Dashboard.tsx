@@ -281,7 +281,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const { bridgeExec } = rpc;
   const { sessions: rawSessions, createSession, stopSession, retrySession, handoffSession, dismissSessionBlock, renameSession, setSessionParent, removeSession } = useSessions(client, userId, rpc,
     !inboxOpen && selectedSessionId === usageViewSessionId && (isDesktop || mobileTab !== "sessions") ? usageViewSessionId : null);
-  const { bridges, prepareLocalAccess } = useBridges(client, userId);
+  const { bridges, prepareLocalAccess } = useBridges(client, userId, transport);
   const securityRuntime = client?.securityRuntime;
   useEffect(() => securityRuntime?.onChange(() => setSecurityGeneration(value => value + 1)), [securityRuntime]);
   const readyBridges = useMemo(() => bridges.filter(bridge => securityRuntime?.state(bridge.bridgeId).status === "ready"), [bridges, securityRuntime, securityGeneration]);

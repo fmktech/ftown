@@ -42,12 +42,13 @@ vi.mock("@/lib/secure-message-client", () => ({
     }
   },
 }));
-vi.mock("@/lib/direct-transport/hybrid-terminal-transport", () => ({ HybridTerminalTransport: class { dispose() {} } }));
+vi.mock("@/lib/direct-transport/hybrid-terminal-transport", () => ({ HybridTerminalTransport: class { dispose() {} connectRemembered() {} } }));
 import { LEDGER_PRESENCE_POLL_MS, parseLedgerMessage, useCentrifugo } from "./useCentrifugo";
 import type { LedgerPeersTransport } from "@/lib/ledger-peers";
 
 const accountId = "A".repeat(43);
-const runtime = {} as SecureEndpointRuntime;
+const trust = { pinnedBridges: () => [], onChange: () => () => {} };
+const runtime = { ...trust } as unknown as SecureEndpointRuntime;
 const jwt = `a.${btoa(JSON.stringify({ exp: 4102444800 }))}.c`;
 const ledgerChain = { genesis: { payload: {}, signature: {} }, transitions: [] };
 function fakeLedger() { return { offer: vi.fn(async () => {}), refresh: vi.fn(async () => {}), noteHead: vi.fn(async () => {}) }; }
@@ -125,7 +126,7 @@ describe("account ledger channel", () => {
 
 describe("account ledger agreement step (LedgerPeers)", () => {
   const endpoint = { version: 1, id: "E".repeat(43), ownerId: accountId, kind: "browser", publicKey: "P".repeat(87) };
-  const accountRuntime = { identity: { endpoint } } as unknown as SecureEndpointRuntime;
+  const accountRuntime = { ...trust, identity: { endpoint } } as unknown as SecureEndpointRuntime;
   /** A signed head announcement's exact shape (parseHeadAnnouncement accepts it; its signature is never checked here). */
   const announcement = { type: "ledger_head", version: 1, accountId, kind: "bridge", keyId: "studio", head: `${"h".repeat(42)}A`, revision: 3, at: 1, signature: `${"s".repeat(85)}A` };
   function fakePeers() {

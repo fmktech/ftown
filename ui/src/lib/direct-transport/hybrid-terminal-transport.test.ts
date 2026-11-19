@@ -1116,6 +1116,23 @@ describe('HybridTerminalTransport — default presence-based getLocalAdvert', ()
       expect(peerFactory).toHaveBeenCalledTimes(1);
     });
 
+    it('opens the remembered connection on request, before any terminal or command asks for it, and only for bridges it was given', async () => {
+      stored.set(LOCAL_PORTS_STORAGE_KEY, JSON.stringify({ 'bridge-1': 41999, 'bridge-2': 42000 }));
+      const { transport, loopbackPeerFactory } = makeDefaultAdvertTransport(silentRelay());
+      const reached: string[] = [];
+      transport.onBridgeReachabilityChange((bridgeId, reachable) => { if (reachable) reached.push(bridgeId); });
+      // bridge-2 is remembered but not approved here; bridge-3 is approved but was never seen on this machine.
+      transport.connectRemembered(['bridge-1', 'bridge-3']);
+      await flush();
+      expect(loopbackPeerFactory.mock.calls.map(([opts]) => opts.bridgeId)).toEqual(['bridge-1']);
+      expect(transport.getDirectlyReachableBridgeIds()).toEqual(['bridge-1']);
+      expect(reached).toEqual(['bridge-1']);
+      // Asking again does not open a second connection.
+      transport.connectRemembered(['bridge-1']);
+      await flush();
+      expect(loopbackPeerFactory).toHaveBeenCalledTimes(1);
+    });
+
     it('ignores stored values that are not a bridge id mapped to a port', async () => {
       for (const junk of ['not json', '[]', 'null', JSON.stringify({ 'bridge-1': '41999', 'bridge 2': 5, b3: 0, b4: 70_000, b5: 1.5 })]) {
         stored.set(LOCAL_PORTS_STORAGE_KEY, junk);
