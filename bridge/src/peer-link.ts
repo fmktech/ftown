@@ -50,6 +50,7 @@ const DEFAULT_TIMINGS: PeerLinkTimings = { gatherMs: 3_000, gatherQuietMs: 300, 
 
 export interface LinkDataChannel {
   sendMessage(msg: string): boolean;
+  bufferedAmount?(): number;
   isOpen(): boolean;
   close(): void;
   onOpen(cb: () => void): void;
@@ -177,7 +178,14 @@ class PeerLink {
   private write(message: string): boolean {
     if (!this.isOpen || message.length > MAX_MESSAGE_CHARS) return false;
     this.lastUsed = Date.now();
-    try { for (const frame of frameMessage(message)) if (!this.dc!.sendMessage(frame)) return false; }
+    try {
+      const dc = this.dc!;
+      for (const frame of frameMessage(message)) {
+        // The native channel returns false when it queues a valid send. Ordered
+        // frames are delivered once the SCTP send buffer drains.
+        if (!dc.sendMessage(frame) && !(dc.isOpen() && dc.bufferedAmount)) return false;
+      }
+    }
     catch { return false; }
     return true;
   }

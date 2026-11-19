@@ -548,7 +548,12 @@ program
         reconnect: () => reconnectRelay(),
       });
       accountRelay = relay;
-      releaseForRestart = async () => { relay.stop(); localApiServer.stop(); await ledgerSecurity.close(); };
+      releaseForRestart = async () => {
+        await localApiServer.closeTransfers();
+        relay.stop();
+        localApiServer.stop();
+        await ledgerSecurity.close();
+      };
       // A browser that enrolled moments ago may not be in this replica yet: its refused request pulls the server ledger (rate-limited),
       // so the browser's retry succeeds without waiting for the relay.
       if (!subscribeApprovalRequired(ledgerSecurity, () => relay.onUnknownEndpoint())) {
@@ -1191,7 +1196,7 @@ program
         return accepted;
       }),
     });
-    localApiServer.setPeerControl(new PeerControl(security, centrifugo, peerLinks), peerLinks);
+    localApiServer.setPeerControl(new PeerControl(security, centrifugo, peerLinks), peerLinks, join(dataDir, 'folder-transfers'));
 
     // Solo: the hub child must be healthy before connecting (L1 gates the
     // transport, not the front). A failed hub is fatal for solo — exit cleanly
@@ -1273,7 +1278,10 @@ program
           }
         } finally {
           // The port and the pointer would outlive a same-PID re-exec, so no earlier failure may skip them.
-          try { localApiServer.stop(); } finally { cleanupPointer(); }
+          try { await localApiServer.closeTransfers(); }
+          finally {
+            try { localApiServer.stop(); } finally { cleanupPointer(); }
+          }
         }
         await terminalOutput.stop();
         loopbackServer.closeAll();

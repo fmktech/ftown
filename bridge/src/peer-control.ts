@@ -1,3 +1,4 @@
+import { TRANSFER_LOCAL, TRANSFER_WIRE, TRANSFER_REQUEST_TTL_MS } from './folder-transfer-protocol.js';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { ApplicationJson, SecureEnvelope } from './security/protocol.js';
@@ -27,7 +28,7 @@ export interface PeerSecurity {
   readonly bridgeId: string;
   peerBridges(): LedgerBridge[];
   sealToPeer(peer: LedgerBridge, purpose: 'hello' | 'application', body: unknown, channel: string, messageId: string,
-    receiverEpoch: string | null): Promise<SecureEnvelope>;
+    receiverEpoch: string | null, ttlMs?: number): Promise<SecureEnvelope>;
   openFromPeer(peer: LedgerBridge, packet: SecureEnvelope, purpose: 'welcome' | 'application', channel: string): Promise<unknown>;
 }
 
@@ -122,6 +123,9 @@ export class PeerControl {
   async http(target: string, method: string, path: string, body?: unknown, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<{ status: number; body: ApplicationJson }> {
     if (!(PEER_HTTP_METHODS as readonly string[]).includes(method)) throw new PeerTargetError(400, 'Unsupported method');
     if (typeof path !== 'string' || !path.startsWith('/api/') || path.length > 16_384) throw new PeerTargetError(400, 'Invalid path');
+    if (path.split('?')[0] === TRANSFER_LOCAL || path.split('?')[0] === TRANSFER_WIRE) {
+      throw new PeerTargetError(400, 'Folder transfers use the dedicated direct transfer API');
+    }
     // No chaining: a peer's own peers are reached directly from here.
     if (path === '/api/peers' || path.startsWith('/api/peers/') || path.startsWith('/api/peers?')) throw new PeerTargetError(400, 'Cross-bridge requests cannot be chained');
     if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000) throw new PeerTargetError(400, 'Invalid timeout');
@@ -138,6 +142,19 @@ export class PeerControl {
       if (error.reason === 'lost' && method !== 'GET') throw new Error('Direct link lost before the peer answered');
       return this.request(peer, this.relay(peer), method as PeerHttpMethod, path, body, timeoutMs);
     }
+  }
+
+  async connectDirect(target: string): Promise<boolean> {
+    const peer = this.resolve(target);
+    if (!this.directPath(peer)) this.link(peer);
+    return this.linked(peer.bridgeId);
+  }
+
+  async directHttp(target: string, path: typeof TRANSFER_WIRE, body: unknown): Promise<{ status: number; body: ApplicationJson }> {
+    const peer = this.resolve(target);
+    const route = this.directPath(peer);
+    if (!route) throw new PeerTargetError(503, 'Direct bridge link unavailable');
+    return this.request(peer, route, 'POST', path, body, TRANSFER_REQUEST_TTL_MS - ANSWER_SLACK_MS);
   }
 
   private async request(peer: LedgerBridge, route: PeerPath, method: PeerHttpMethod, path: string, body: unknown,
@@ -219,7 +236,7 @@ export class PeerControl {
     const data: { [key: string]: ApplicationJson } = { timeoutMs };
     if (body !== undefined) data.body = applicationJson(body);
     const application = { type: 'application', route: { kind: 'http', requestId, method, path }, data, mcp: null };
-    const packet = await this.security.sealToPeer(peer, 'application', application, channel, requestId, epoch);
+    const packet = await this.security.sealToPeer(peer, 'application', application, channel, requestId, epoch, path === TRANSFER_WIRE ? TRANSFER_REQUEST_TTL_MS : undefined);
     const answer = await route.send(packet, timeoutMs + ANSWER_SLACK_MS);
     const response = responseSchema(requestId).parse(await this.security.openFromPeer(peer, answer, 'application', channel));
     const result = response.data;

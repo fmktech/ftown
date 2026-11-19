@@ -14,6 +14,7 @@ import { runPlan } from './plan-cli.js';
 import { runAccounts } from './accounts-cli.js';
 import { executeCli, isCliEntry } from './cli-entry.js';
 import { setPeerTarget } from './cli-client.js';
+import { runTransfer } from './transfer-cli.js';
 import { PEER_GROUPS, extractBridgeOption, runBridges } from './peers-cli.js';
 export { isCliEntry } from './cli-entry.js';
 
@@ -41,13 +42,15 @@ Subcommands:
   brief      Manager brief for a session (show, set, note)
   worktrees  List or prune bridge-owned git worktrees
   plan       Manager plan list (add, start, done, drop, todo, edit, rm)
-  bridges    List the other bridges of this account (--probe to check which answer)`;
+  bridges    List the other bridges of this account (--probe to check which answer)
+  transfer   Copy a folder once between paired bridges`;
 }
 
 export async function runFtown(argv: string[], start: (argv: string[]) => Promise<number> = runStart): Promise<number> {
   const [group, ...rawArgs] = argv;
   if (['--help', '-h', 'help'].includes(group)) { console.log(usage()); return 0; }
   if (!group || group.startsWith('-')) return start(argv);
+  if (group === 'transfer') return runTransfer(rawArgs);
   let args = rawArgs;
   // Cross-bridge control: --bridge <target> (or FTOWN_BRIDGE) forwards this command's requests to another bridge of the account.
   if (group !== 'start' && group !== 'setup') {

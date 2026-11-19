@@ -1,3 +1,4 @@
+import { TRANSFER_REQUEST_TTL_MS } from '../../folder-transfer-protocol.js';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { open, seal, parseSecureEnvelope } from '../crypto.js';
@@ -106,6 +107,8 @@ export class BridgeSecurityService implements Omit<BridgeSecurity, 'adoptAccount
   readonly policy: BridgePolicyStore;
   private readonly now: () => number;
   private readonly replay = new Map<string, number>();
+  private readonly transferReplay = new Map<string, number>();
+  private transferReplaySweep = -Infinity;
   private readonly revoked = new Set<(endpointId: string) => void>();
   private readonly bridgeRevokedListeners = new Set<() => void>();
   private readonly bridgeRevokedNotified = new WeakSet<() => void>();
@@ -161,13 +164,18 @@ export class BridgeSecurityService implements Omit<BridgeSecurity, 'adoptAccount
     }
     if (executable && envelope.receiverEpoch !== this.receiverEpoch) throw new BridgeSecurityError('epoch_changed');
   }
-  private claim(envelope: SecureEnvelope): void {
+  private claim(envelope: SecureEnvelope, transfer: boolean): void {
     const now = this.now();
-    for (const [id, expires] of this.replay) if (expires <= now) this.replay.delete(id);
+    const replay = transfer ? this.transferReplay : this.replay;
+    const capacity = transfer ? 32_000 : 10_000;
+    if (!transfer || now >= this.transferReplaySweep + 1_000 || replay.size >= capacity) {
+      for (const [id, expires] of replay) if (expires <= now) replay.delete(id);
+      if (transfer) this.transferReplaySweep = now;
+    }
     const id = `${envelope.senderId}:${envelope.messageId}`;
-    if (this.replay.has(id)) throw new BridgeSecurityError('replayed');
-    if (this.replay.size >= 10000) throw new BridgeSecurityError('capacity_exceeded');
-    this.replay.set(id, envelope.expiresAt);
+    if (replay.has(id)) throw new BridgeSecurityError('replayed');
+    if (replay.size >= capacity) throw new BridgeSecurityError('capacity_exceeded');
+    replay.set(id, envelope.expiresAt);
   }
   private async decode(sender: ApprovedEndpoint['endpoint'], envelope: SecureEnvelope, route: InboundTransportContext): Promise<unknown> {
     this.context(route);
@@ -240,7 +248,10 @@ export class BridgeSecurityService implements Omit<BridgeSecurity, 'adoptAccount
       const data = object(application.data);
       if (Object.keys(data).some(key => key !== 'body' && key !== 'timeoutMs' && key !== 'callerSessionId')
         || (data.timeoutMs !== undefined && (typeof data.timeoutMs !== 'number' || !Number.isInteger(data.timeoutMs) || data.timeoutMs < 1 || data.timeoutMs > 60000))) throw new BridgeSecurityError('invalid_envelope');
-      return classifyHttp(route.method, route.path);
+      const operation = classifyHttp(route.method, route.path);
+      if (operation.operation === 'transfer_wire' && transport.transport !== 'bridge-link') throw new BridgeSecurityError('wrong_context');
+      if (operation.operation === 'transfer_local' && transport.transport !== 'local-http') throw new BridgeSecurityError('wrong_context');
+      return operation;
     }
     if (route.kind === 'terminal') {
       const data = object(application.data);
@@ -262,8 +273,13 @@ export class BridgeSecurityService implements Omit<BridgeSecurity, 'adoptAccount
       if (data.callerSessionId !== undefined && (principal.endpoint.kind !== 'local-cli'
         || typeof data.callerSessionId !== 'string' || !/^[A-Za-z0-9_-]{1,200}$/.test(data.callerSessionId))) throw new BridgeSecurityError('permission_denied');
     }
-    this.freshness(envelope, true); this.claim(envelope);
+    this.freshness(envelope, true);
     const operation = this.requirement(app, route);
+    const transfer = operation.operation === 'transfer_wire';
+    // Bulk requests have their own short replay window so a large copy cannot fill
+    // the control plane's replay cache.
+    if (transfer && envelope.expiresAt - envelope.createdAt > TRANSFER_REQUEST_TTL_MS) throw new BridgeSecurityError('expired');
+    this.claim(envelope, transfer);
     await this.policy.revalidate(principal, operation.permission);
     const message = { principal, envelope, application: app };
     this.verified.add(message); return message;
@@ -300,13 +316,13 @@ export class BridgeSecurityService implements Omit<BridgeSecurity, 'adoptAccount
   /** Seals one request from this bridge to a peer bridge for the relay `channel`. The header names the PEER's bridgeId: that bridge
    *  decrypts and executes it under its own policy (a peer is a read + control principal there). */
   async sealToPeer(peer: LedgerBridge, purpose: 'hello' | 'application', body: unknown, channel: string, messageId: string,
-    receiverEpoch: string | null): Promise<SecureEnvelope> {
+    receiverEpoch: string | null, ttlMs = 120_000): Promise<SecureEnvelope> {
     if (this.closed || !this.peerBridges().some(item => item.bridgeId === peer.bridgeId && item.endpoint.id === peer.endpoint.id)) {
       throw new BridgeSecurityError('permission_denied');
     }
     const now = this.now();
     return seal(this.identity, peer.endpoint, { type: 'ftown_encrypted', version: 1, senderId: this.endpoint.id, recipientId: peer.endpoint.id,
-      ownerId: this.endpoint.ownerId, bridgeId: peer.bridgeId, channel, purpose, messageId, createdAt: now, expiresAt: now + 120000,
+      ownerId: this.endpoint.ownerId, bridgeId: peer.bridgeId, channel, purpose, messageId, createdAt: now, expiresAt: now + ttlMs,
       receiverEpoch }, new TextEncoder().encode(JSON.stringify(body)));
   }
   /** Opens a peer bridge's answer to a request sealed by sealToPeer (same channel; `welcome` answers a hello). */
@@ -700,7 +716,7 @@ export class BridgeSecurityService implements Omit<BridgeSecurity, 'adoptAccount
   async close(): Promise<void> {
     this.closed = true;
     await this.ledgerTail.catch(() => undefined);
-    this.revoked.clear(); this.bridgeRevokedListeners.clear(); this.approvalListeners.clear(); this.approvalEmitted.clear(); this.replay.clear();
+    this.revoked.clear(); this.bridgeRevokedListeners.clear(); this.approvalListeners.clear(); this.approvalEmitted.clear(); this.replay.clear(); this.transferReplay.clear();
     this.headListeners.clear();
     await this.policy.close();
   }
