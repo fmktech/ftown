@@ -1,5 +1,7 @@
-name: Validate and deploy Centrifugo to Fly
+name: Validate Centrifugo for Fly
 
+# Validation only. Production is deployed by Fly's own GitHub integration from main;
+# this workflow holds no Fly credentials and never deploys.
 on:
   pull_request:
     paths:
@@ -34,19 +36,11 @@ on:
       - '.github/workflows/deploy-centrifugo-fly.yml'
       - '.github/actions/run-ci/**'
       - 'scripts/ci/**'
-  workflow_dispatch:
-    inputs:
-      deploy:
-        description: Deploy the validated image to the production Fly app
-        required: true
-        default: false
-        type: boolean
 
 permissions:
   contents: read
 
 env:
-  FLY_APP: ftown-centrifugo
   CENTRIFUGO_IMAGE: ftown-centrifugo:ci
   CENTRIFUGO_UPSTREAM: centrifugo/centrifugo:v6.10.2@sha256:34b84f823515927266ce3abfb840fd9e0acabb58805e7e896f5de731217a627d
 
@@ -65,78 +59,3 @@ jobs:
       - uses: ./.github/actions/run-ci
         with:
           job: centrifugo
-
-  deploy:
-    if: github.event_name == 'workflow_dispatch' && inputs.deploy
-    needs: validate
-    runs-on: ubuntu-latest
-    concurrency:
-      group: deploy-centrifugo-fly
-      cancel-in-progress: false
-    steps:
-      # actions/checkout v4.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-
-      # superfly/flyctl-actions v1.6.
-      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1
-
-      - name: Verify app and runtime secret
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-        run: |
-          set -euo pipefail
-          test -n "${FLY_API_TOKEN:-}"
-          flyctl status --app "$FLY_APP" >/dev/null
-          flyctl secrets list --app "$FLY_APP" --json | jq -e '
-            map(.Name // .name) | (index("CENTRIFUGO_TOKEN_HMAC_SECRET_KEY") != null or index("CENTRIFUGO_CLIENT_TOKEN_HMAC_SECRET_KEY") != null)
-          ' >/dev/null
-
-      - name: Deploy one memory-engine Machine
-        working-directory: centrifugo
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-        run: flyctl deploy --remote-only --ha=false --config fly.toml
-
-      - name: Verify deployment and private checks
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-        run: |
-          set -euo pipefail
-          flyctl status --app "$FLY_APP"
-          flyctl checks list --app "$FLY_APP"
-
-          base="https://${FLY_APP}.fly.dev"
-          for path in / /api /health; do
-            status="$(curl --retry 5 --retry-all-errors --retry-delay 2 \
-              -sS -o /dev/null -w '%{http_code}' "$base$path")"
-            if [ "$status" != 404 ]; then
-              echo "ERROR: expected $path to be hidden (404), got $status" >&2
-              exit 1
-            fi
-          done
-
-          BASE_HOST="${FLY_APP}.fly.dev" python3 - <<'PY'
-          import base64
-          import os
-          import socket
-          import ssl
-
-          host = os.environ["BASE_HOST"]
-          key = base64.b64encode(os.urandom(16)).decode()
-          request = (
-              "GET /connection/websocket HTTP/1.1\r\n"
-              f"Host: {host}\r\n"
-              "Upgrade: websocket\r\n"
-              "Connection: Upgrade\r\n"
-              f"Sec-WebSocket-Key: {key}\r\n"
-              "Sec-WebSocket-Version: 13\r\n"
-              "Origin: https://ftown.ia.br\r\n\r\n"
-          )
-          context = ssl.create_default_context()
-          with socket.create_connection((host, 443), timeout=10) as raw:
-              with context.wrap_socket(raw, server_hostname=host) as sock:
-                  sock.sendall(request.encode())
-                  status = sock.recv(256).split(b"\r\n", 1)[0]
-          if b" 101 " not in status:
-              raise SystemExit(f"Fly WebSocket upgrade failed: {status!r}")
-          PY

@@ -69,7 +69,7 @@ contacts the host. The job also rejects non-`main` refs. There are no `push`,
 `pull_request`, `pull_request_target` or `workflow_run` deployment triggers.
 
 Pushes and pull requests touching the legacy config, workflow or deploy scripts
-instead trigger the existing **Validate and deploy Centrifugo to Fly** validation
+instead trigger the existing **Validate Centrifugo for Fly** validation
 job. That validation uses placeholder data and no production credentials; it
 neither deploys Fly nor contacts AWS. A concurrency group still serializes
 explicit AWS deploys, with `permissions: contents: read`.

@@ -20,7 +20,8 @@ any deployment or DNS change.
 
 Pushes and pull requests automatically run secret-free configuration/image
 validation, including legacy AWS config/workflow/script changes. They deploy
-neither platform. Fly production deployment remains an explicit manual action.
+neither platform. Fly production is deployed by Fly's own GitHub integration,
+which builds `main` directly; GitHub Actions holds no Fly credentials.
 The legacy **Deploy centrifugo config** workflow is now manual fallback only:
 select `main` and explicitly enable `deploy_legacy_aws`; the default `false`
 skips its deployment job and makes no AWS contact. Its verified host-key pin and
@@ -34,7 +35,7 @@ patched-runtime prerequisites remain mandatory. See the
 | `centrifugo/config.fly.json` | Hardened Centrifugo v6 runtime config. Admin and HTTP API are disabled; secrets are absent. |
 | `centrifugo/Dockerfile.fly` | Reproducible image pinned to the Centrifugo v6.10.2 multi-platform digest. |
 | `centrifugo/fly.toml` | Fly service, checks, region, resource limits, and one-Machine policy. |
-| `.github/workflows/deploy-centrifugo-fly.yml` | PR/push validation plus an explicitly approved manual production deploy. |
+| `.github/workflows/deploy-centrifugo-fly.yml` | PR/push validation only. Production deploys come from Fly's GitHub integration on `main`. |
 
 The threat model, reviewed findings, and full absence checklist are in
 [`centrifugo-fly-security-review.md`](./centrifugo-fly-security-review.md).
@@ -65,13 +66,8 @@ printf 'CENTRIFUGO_TOKEN_HMAC_SECRET_KEY=%s\n' "$CENTRIFUGO_HMAC_VALUE" \
 unset CENTRIFUGO_HMAC_VALUE
 ```
 
-Create a short-lived, app-scoped deploy token and store it as the repository
-secret `FLY_API_TOKEN`. Never use an organization token:
-
-```sh
-fly tokens create deploy -a ftown-centrifugo -x 720h \
-  | gh secret set FLY_API_TOKEN
-```
+No deploy token is stored in GitHub: the app is connected to this repository in
+the Fly dashboard and deploys `main` itself.
 
 Confirm that only the required runtime secret exists:
 
@@ -86,9 +82,10 @@ value fails startup. No secret rotation or UI/bridge environment rename is neede
 
 ## First deployment
 
-The normal path is GitHub Actions: run **Validate and deploy Centrifugo to
-Fly**, choose **Run workflow**, and check the `deploy` input. Pushes and pull
-requests validate but never deploy.
+The normal path is Fly's GitHub integration: the app is connected to this
+repository and deploys `main`. The **Validate Centrifugo for Fly** workflow
+checks pushes and pull requests but never deploys. After a deploy, confirm the
+app still runs exactly one Machine (`fly status -a ftown-centrifugo`).
 
 For a controlled first deployment from a trusted workstation:
 
