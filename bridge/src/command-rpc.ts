@@ -37,6 +37,7 @@ import { BridgeUpdateError, type BridgeUpdateCoordinator } from './bridge-update
 import type { UpdateEffects } from './update-effects.js';
 import { validFileId, validPreviewId, validRevision } from './session-preview.js';
 import { PREVIEW_CHUNK_BYTES } from './preview-protocol.js';
+import type { DirectAddress } from './direct-transport/contract.js';
 import type { ModelRoutingService } from './quota/routing-service.js';
 import type { ModelRoutingConfig } from './quota/types.js';
 
@@ -90,6 +91,8 @@ export interface CommandRpcDeps {
   /** Durable mail path with full mail fields (threadId etc.); used for the answer_session_attention mail fallback. */
   acceptSessionMail?: (session: Session, body: Record<string, unknown>) => Promise<{ ok: true; id: string } | { ok: false; error: string }>;
   updates?: BridgeUpdateCoordinator;
+  /** Where browsers can reach this bridge without signaling; null while the fixed-address listener is off. */
+  directAddress?: () => DirectAddress | null;
   updateEffects?: UpdateEffects;
   /** The bridge's long-lived model-routing service (get_model_routing / set_model_routing); resolved only when one of those commands runs. */
   modelRouting?: () => ModelRoutingService;
@@ -320,6 +323,13 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
             : await sessionController.getPreviewChunk(payload.sessionId, payload.previewId, payload.fileId, 'revision' in payload && typeof payload.revision === 'string' ? payload.revision : '', 'offset' in payload && typeof payload.offset === 'number' ? payload.offset : -1);
           response = result.ok ? { requestId: command.requestId, success: true, data: result.preview }
             : { requestId: command.requestId, success: false, error: result.message, data: { code: result.code } };
+          break;
+        }
+        case 'get_direct_address': {
+          const payload = command.payload as Record<string, unknown>;
+          if (!verified || payloadBridgeId !== bridgeId || Object.keys(payload).some(key => key !== 'bridgeId')) throw new Error('approval_required');
+          const address = deps.directAddress?.() ?? null;
+          response = { requestId: command.requestId, success: true, data: { bridgeId, address } };
           break;
         }
         case 'get_bridge_update':

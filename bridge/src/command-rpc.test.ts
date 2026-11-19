@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { classifyCommand } from './security/bridge/permissions.js';
 import test from 'node:test';
 import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -256,6 +257,30 @@ test('targeted update commands validate payloads and bind an accepted ticket to 
   await handler({ type: 'get_bridge_update', requestId: 'invalid', payload: { bridgeId: 'bridge', refresh: 'yes' } }, message('invalid', 'get_bridge_update', {}));
   assert.equal(responses.at(-1)?.success, false); assert.equal((responses.at(-1)?.data as { code: string }).code, 'invalid_update_request');
   await handler({ type: 'update_bridge', requestId: 'unauthenticated', payload }); assert.equal(responses.at(-1)?.success, false); assert.equal(requests, 1);
+});
+
+test('get_direct_address answers an authenticated request for this bridge with where it listens, or null when it does not', async () => {
+  const responses: CommandResponse[] = [];
+  let address: { port: number; fingerprint: string; addresses: string[] } | null = { port: 47001, fingerprint: 'AA:BB', addresses: ['192.168.1.20'] };
+  const handler = createCommandHandler({ bridgeId: 'bridge', directAddress: () => address,
+    sessionController: {} as SessionController, publishCommandResponse: async response => { responses.push(response); } });
+  const verified = (requestId: string, payload: Record<string, unknown>) => ({ envelope: { messageId: requestId }, principal: {},
+    application: { route: { kind: 'command', requestId, command: 'get_direct_address', sessionId: null }, data: { payload } } }) as unknown as Parameters<typeof handler>[1];
+  await handler({ type: 'get_direct_address', requestId: 'r1', payload: { bridgeId: 'bridge' } }, verified('r1', { bridgeId: 'bridge' }));
+  assert.deepEqual(responses.at(-1), { requestId: 'r1', success: true, data: { bridgeId: 'bridge', address: { port: 47001, fingerprint: 'AA:BB', addresses: ['192.168.1.20'] } } });
+  address = null;
+  await handler({ type: 'get_direct_address', requestId: 'r2', payload: { bridgeId: 'bridge' } }, verified('r2', { bridgeId: 'bridge' }));
+  assert.deepEqual(responses.at(-1), { requestId: 'r2', success: true, data: { bridgeId: 'bridge', address: null } });
+  // Never without authenticated dispatch, never with extra fields, never for another bridge.
+  address = { port: 47001, fingerprint: 'AA:BB', addresses: [] };
+  await handler({ type: 'get_direct_address', requestId: 'r3', payload: { bridgeId: 'bridge' } });
+  assert.equal(responses.at(-1)?.requestId, 'r3'); assert.equal(responses.at(-1)?.success, false);
+  await handler({ type: 'get_direct_address', requestId: 'r4', payload: { bridgeId: 'bridge', extra: 1 } }, verified('r4', { bridgeId: 'bridge', extra: 1 }));
+  assert.equal(responses.at(-1)?.requestId, 'r4'); assert.equal(responses.at(-1)?.success, false);
+  const before = responses.length;
+  await handler({ type: 'get_direct_address', requestId: 'r5', payload: { bridgeId: 'other' } }, verified('r5', { bridgeId: 'other' }));
+  assert.equal(responses.length, before);
+  assert.equal(classifyCommand('get_direct_address', { bridgeId: 'bridge' }).permission, 'read');
 });
 
 test('list_native_sessions requires authenticated dispatch, validates input, returns summaries, and reports read errors', async () => {

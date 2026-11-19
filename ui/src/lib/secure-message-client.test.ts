@@ -125,6 +125,34 @@ describe('secure broker adapter', () => {
     f.client.dispose(); f.runtime.dispose();
   });
 
+  it('raises the command-ready signal when a bridge becomes ready while the relay is not connected', () => {
+    const raw = new RawClient(); raw.state = 'connecting';
+    const states = new Map([['a', 'offline'], ['b', 'offline']]);
+    let changed = () => {};
+    const runtime = {
+      onChange: (callback: () => void) => { changed = callback; return () => {}; },
+      pinnedBridges: () => [{ bridgeId: 'a' }, { bridgeId: 'b' }],
+      state: (id: string) => ({ status: states.get(id) }),
+    } as unknown as SecureEndpointRuntime;
+    const client = new SecureMessageClient(raw as unknown as Centrifuge, userId, runtime);
+    let signals = 0;
+    client.getSubscription(channel)!.on('subscribed', () => { signals++; });
+    changed();
+    expect(signals).toBe(0);
+    // Bridge a finishes its handshake over a direct channel: the dashboard is told to load.
+    states.set('a', 'ready'); changed();
+    expect(signals).toBe(1);
+    // Unrelated trust changes do not repeat it.
+    changed(); changed();
+    expect(signals).toBe(1);
+    // A second bridge, and a bridge that went away and came back, each count once.
+    states.set('b', 'ready'); changed();
+    expect(signals).toBe(2);
+    states.set('a', 'offline'); changed(); states.set('a', 'ready'); changed();
+    expect(signals).toBe(3);
+    client.dispose();
+  });
+
   it('coordinates reentrant recoveries per bridge and ignores stale completion after disconnect', async () => {
     const raw = new RawClient(); raw.state = 'connected';
     const states = new Map([['a', 'offline'], ['b', 'ready']]);
@@ -149,7 +177,8 @@ describe('secure broker adapter', () => {
     expect(pending).toHaveLength(1);
     states.set('b', 'offline'); changed();
     expect(pending.map(item => item.bridge)).toEqual(['a', 'b']);
-    states.set('b', 'ready'); pending[1].resolve();
+    // The real runtime notifies on every state change, including this one.
+    states.set('b', 'ready'); changed(); pending[1].resolve();
     await vi.waitFor(() => expect(refreshes).toBe(1));
 
     raw.state = 'disconnected';

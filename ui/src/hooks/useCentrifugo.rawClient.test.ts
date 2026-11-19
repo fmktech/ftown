@@ -16,10 +16,10 @@ vi.mock("centrifuge", () => ({
 vi.mock("@/lib/secure-message-client", () => ({
   SecureMessageClient: class { constructor(public raw: unknown) { mocks.wrapped.push(this as { raw: unknown }); } dispose() {} setDirectCommands() {} publish() { return Promise.resolve(); } getSubscription() { return null; } newSubscription() { return { on() {}, off() {}, subscribe() {} }; } },
 }));
-vi.mock("@/lib/direct-transport/hybrid-terminal-transport", () => ({ HybridTerminalTransport: class { dispose() {} } }));
+vi.mock("@/lib/direct-transport/hybrid-terminal-transport", () => ({ HybridTerminalTransport: class { dispose() {} connectRemembered() {} } }));
 import { useCentrifugo } from "./useCentrifugo";
 
-const runtime = {} as SecureEndpointRuntime;
+const runtime = { pinnedBridges: () => [], onChange: () => () => {} } as unknown as SecureEndpointRuntime;
 const jwt = `a.${btoa(JSON.stringify({ exp: 4102444800 }))}.c`;
 beforeEach(() => { mocks.created.length = 0; mocks.wrapped.length = 0; });
 

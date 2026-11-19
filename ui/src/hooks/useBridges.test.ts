@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { dedupeBridges, applyBridgeJoin, applyBridgeLeave, type BridgeInfo } from "./useBridges";
+import { dedupeBridges, applyBridgeJoin, applyBridgeLeave, withDirectBridges, type BridgeInfo } from "./useBridges";
 
 const bridge = (overrides: Partial<BridgeInfo> = {}): BridgeInfo => ({
   clientId: "client-1",
@@ -119,5 +119,26 @@ describe("presence lifecycle (applyBridgeJoin/applyBridgeLeave over the known-cl
     allClients = applyBridgeLeave(allClients, "old-client");
 
     expect(dedupeBridges(allClients)).toEqual([]);
+  });
+});
+
+describe("withDirectBridges", () => {
+  const names = new Map([["bridge-2", "studio"]]);
+
+  it("adds a directly reached bridge the relay does not report, under its remembered name", () => {
+    expect(withDirectBridges([bridge()], ["bridge-2"], names)).toEqual([
+      bridge(),
+      { clientId: "direct:bridge-2", bridgeId: "bridge-2", hostname: "studio", connectedAt: "" },
+    ]);
+  });
+
+  it("lists a bridge with no remembered name as unknown, and lists every bridge when the relay reports none", () => {
+    expect(withDirectBridges([], ["bridge-2", "bridge-3"], names).map(entry => [entry.bridgeId, entry.hostname])).toEqual([["bridge-2", "studio"], ["bridge-3", "unknown"]]);
+  });
+
+  it("never duplicates or overrides a bridge the relay already reports", () => {
+    const relay = [bridge()];
+    expect(withDirectBridges(relay, ["bridge-1"], new Map([["bridge-1", "old name"]]))).toBe(relay);
+    expect(withDirectBridges(relay, [], names)).toBe(relay);
   });
 });

@@ -6,6 +6,8 @@ import {
   LOOPBACK_TIMEOUT_MS,
   WATCH_HEARTBEAT_MS,
   type BridgeLocalAdvert,
+  type DirectAddress,
+  MAX_DIRECT_ADDRESSES,
   type DirectCommandMessage,
   type FallbackReason,
   type SignalMessage,
@@ -17,6 +19,7 @@ import {
   WebRtcPeer,
   type WebRtcPeerApi,
   type WebRtcPeerFactory,
+  validPeerAddress,
 } from './webrtc-peer';
 import {
   LoopbackPeer,
@@ -91,6 +94,69 @@ export interface HybridTerminalTransportOptions {
   upgradeBackoffMs?: number[];
   /** ±fraction jitter applied to each upgrade backoff delay (T1). Default 0.2. */
   upgradeJitter?: number;
+}
+
+/**
+ * The localhost port each bridge was last seen on, kept across page loads. A bridge on this machine can then be reached before the
+ * relay has said anything, or while the relay is down. A port is not a secret and proves nothing: the encrypted hello on the
+ * connection is what identifies the bridge, so a stale port, or another program on it, only costs one failed attempt.
+ */
+export const LOCAL_PORTS_STORAGE_KEY = 'ftown.bridgeLocalPorts.v1';
+const MAX_REMEMBERED_PORTS = 32;
+const validPort = (value: unknown): value is number => typeof value === 'number' && Number.isInteger(value) && value > 0 && value < 65_536;
+
+/** Best effort: storage may be blocked or hold anything. */
+function readRememberedPorts(): Map<string, number> {
+  const ports = new Map<string, number>();
+  try {
+    if (typeof localStorage === 'undefined') return ports;
+    const stored: unknown = JSON.parse(localStorage.getItem(LOCAL_PORTS_STORAGE_KEY) ?? '{}');
+    if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return ports;
+    for (const [bridgeId, port] of Object.entries(stored)) {
+      if (ports.size >= MAX_REMEMBERED_PORTS) break;
+      if (/^[A-Za-z0-9_-]{1,200}$/.test(bridgeId) && validPort(port)) ports.set(bridgeId, port);
+    }
+  } catch { /* nothing remembered */ }
+  return ports;
+}
+
+function writeRememberedPorts(ports: Map<string, number>): void {
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.setItem(LOCAL_PORTS_STORAGE_KEY, JSON.stringify(Object.fromEntries(ports)));
+  } catch { /* remembered for this page only */ }
+}
+
+/**
+ * Where each bridge listens for connections made without signaling, as the bridge last reported it (`get_direct_address`), kept
+ * across page loads. Like the localhost port it is not a secret: a browser that connects to a wrong or stale address simply
+ * fails the certificate check or the encrypted hello.
+ */
+export const DIRECT_ADDRESSES_STORAGE_KEY = 'ftown.bridgeDirectAddresses.v1';
+const MAX_REMEMBERED_ADDRESSES = 32;
+/** Addresses of one bridge tried at once. */
+const MAX_ADDRESSES_TRIED = 4;
+
+function parseDirectAddress(value: unknown): DirectAddress | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const { port, fingerprint, addresses } = value as Record<string, unknown>;
+  if (!Array.isArray(addresses)) return null;
+  const usable = addresses.filter((ip): ip is string => validPeerAddress({ ip, port, fingerprint })).slice(0, MAX_DIRECT_ADDRESSES);
+  return usable.length ? { port: port as number, fingerprint: fingerprint as string, addresses: usable } : null;
+}
+
+function readRememberedAddresses(): Map<string, DirectAddress> {
+  const remembered = new Map<string, DirectAddress>();
+  try {
+    if (typeof localStorage === 'undefined') return remembered;
+    const stored: unknown = JSON.parse(localStorage.getItem(DIRECT_ADDRESSES_STORAGE_KEY) ?? '{}');
+    if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return remembered;
+    for (const [bridgeId, value] of Object.entries(stored)) {
+      if (remembered.size >= MAX_REMEMBERED_ADDRESSES) break;
+      const address = parseDirectAddress(value);
+      if (/^[A-Za-z0-9_-]{1,200}$/.test(bridgeId) && address) remembered.set(bridgeId, address);
+    }
+  } catch { /* nothing remembered */ }
+  return remembered;
 }
 
 type PeerStatus = 'connecting' | 'attached' | 'failed';
@@ -258,6 +324,10 @@ export class HybridTerminalTransport implements TerminalTransportApi {
   // Scoped to this authenticated transport's lifetime; never persist nonces.
   // Cloud presence can disappear while the loopback server is still healthy.
   private readonly localAdverts = new Map<string, BridgeLocalAdvert>();
+  /** Ports from earlier page loads (see LOCAL_PORTS_STORAGE_KEY). Tried first; never taken as a sign that the bridge is online. */
+  private readonly rememberedPorts: Map<string, number>;
+  /** Addresses from earlier page loads or reported this page load (see DIRECT_ADDRESSES_STORAGE_KEY). */
+  private readonly rememberedAddresses: Map<string, DirectAddress>;
   private readonly sessions = new Map<string, SessionEntry>();
   private readonly modeChangeCbs = new Set<(sessionId: string, mode: TerminalTransportMode) => void>();
   private readonly bridgeReachabilityCbs = new Set<
@@ -288,6 +358,8 @@ export class HybridTerminalTransport implements TerminalTransportApi {
     this.loopbackPeerFactory = opts.loopbackPeerFactory ?? ((o) => new LoopbackPeer(o));
     this.getLocalAdvert = opts.getLocalAdvert ?? ((bridgeId) => this.defaultGetLocalAdvert(bridgeId));
     this.advertInjected = typeof opts.getLocalAdvert === 'function';
+    this.rememberedPorts = this.advertInjected ? new Map() : readRememberedPorts();
+    this.rememberedAddresses = readRememberedAddresses();
     this.upgradeBackoffMs =
       opts.upgradeBackoffMs && opts.upgradeBackoffMs.length > 0
         ? opts.upgradeBackoffMs
@@ -392,6 +464,36 @@ export class HybridTerminalTransport implements TerminalTransportApi {
       .filter(([, pe]) => pe.status === 'attached' && pe.peer !== null)
       .map(([bridgeId]) => bridgeId)
       .sort();
+  }
+
+  /**
+   * Opens the connection to each of these bridges whose localhost port is remembered, without waiting for the relay or for a first
+   * command. This is what lets a bridge on this machine be used while the relay is unreachable.
+   */
+  connectRemembered(bridgeIds: readonly string[]): void {
+    if (this.disposed) return;
+    for (const bridgeId of bridgeIds) {
+      if ((this.rememberedPorts.has(bridgeId) || this.rememberedAddresses.has(bridgeId)) && !this.peers.has(bridgeId)) this.ensurePeer(bridgeId);
+    }
+  }
+
+  /** Whether an address is remembered for this bridge (the caller asks the bridge for one otherwise). */
+  hasRememberedAddress(bridgeId: string): boolean { return this.rememberedAddresses.has(bridgeId); }
+
+  /**
+   * Records where a bridge said it listens for connections without signaling (the answer to `get_direct_address`), or forgets it
+   * when the bridge reports none. Anything malformed is treated as none.
+   */
+  rememberAddress(bridgeId: string, value: unknown): void {
+    if (this.disposed || !/^[A-Za-z0-9_-]{1,200}$/.test(bridgeId)) return;
+    const address = parseDirectAddress(value);
+    if (JSON.stringify(address) === JSON.stringify(this.rememberedAddresses.get(bridgeId) ?? null)) return;
+    this.rememberedAddresses.delete(bridgeId);
+    if (address) this.rememberedAddresses.set(bridgeId, address);
+    while (this.rememberedAddresses.size > MAX_REMEMBERED_ADDRESSES) this.rememberedAddresses.delete(this.rememberedAddresses.keys().next().value!);
+    try {
+      if (typeof localStorage !== 'undefined') localStorage.setItem(DIRECT_ADDRESSES_STORAGE_KEY, JSON.stringify(Object.fromEntries(this.rememberedAddresses)));
+    } catch { /* remembered for this page only */ }
   }
 
   onBridgeReachabilityChange(
@@ -577,6 +679,35 @@ export class HybridTerminalTransport implements TerminalTransportApi {
     // Only await the (async) advert lookup when a loopback rung is actually
     // possible. Otherwise fall through with NO await before the WebRTC attempt, so
     // the WebRTC peer is constructed synchronously (preserves pre-addendum timing).
+    // A port remembered from an earlier page load is tried before anything is asked of the relay.
+    const remembered = this.rememberedPorts.get(bridgeId);
+    if (remembered !== undefined) {
+      const lp = await this.attemptLoopback(bridgeId, { localPort: remembered }, ctx);
+      if (lp) return { peer: lp, kind: 'local' };
+      if (ctx.aborted()) return null;
+    }
+    // A remembered address needs nothing from the relay, so it runs beside the signaled rungs instead of ahead of them: on the
+    // bridge's network it answers long before signaling could, and away from it nothing waits for it to time out.
+    const signaled = this.climbSignaled(bridgeId, ctx, remembered);
+    const addressed = this.attemptAddressed(bridgeId, ctx);
+    return new Promise(resolve => {
+      let open = 2;
+      const settle = (result: { peer: DirectPeerApi; kind: 'local' | 'webrtc' } | null) => {
+        open--;
+        if (result) resolve(result);
+        else if (open === 0) resolve(null);
+      };
+      void signaled.then(settle, () => settle(null));
+      void addressed.then(peer => settle(peer ? { peer, kind: 'webrtc' } : null), () => settle(null));
+    });
+  }
+
+  /** The rungs that need the relay: the advertised localhost port, then signaled WebRTC. */
+  private async climbSignaled(
+    bridgeId: string,
+    ctx: LadderCtx,
+    remembered: number | undefined,
+  ): Promise<{ peer: DirectPeerApi; kind: 'local' | 'webrtc' } | null> {
     if (this.hasLoopbackAdvertChance()) {
       let advert: BridgeLocalAdvert | null = null;
       try {
@@ -586,7 +717,8 @@ export class HybridTerminalTransport implements TerminalTransportApi {
       }
       if (ctx.aborted()) return null;
 
-      if (advert) {
+      // The port just tried is not tried again; a different one means the bridge restarted on another port.
+      if (advert && advert.localPort !== remembered) {
         const lp = await this.attemptLoopback(bridgeId, advert, ctx);
         if (lp) return { peer: lp, kind: 'local' };
         if (ctx.aborted()) return null;
@@ -596,6 +728,31 @@ export class HybridTerminalTransport implements TerminalTransportApi {
     const wp = await this.attemptWebRtc(bridgeId, ctx);
     if (wp) return { peer: wp, kind: 'webrtc' };
     return null;
+  }
+
+  /**
+   * Connects to the bridge's remembered addresses with no signaling, all at once; the first to complete the encrypted handshake
+   * wins and the rest are closed. Resolves null when there is nothing remembered or nothing answers.
+   */
+  private async attemptAddressed(bridgeId: string, ctx: LadderCtx): Promise<WebRtcPeerApi | null> {
+    const known = this.rememberedAddresses.get(bridgeId);
+    if (!known || this.localOnly) return null;
+    const peers: WebRtcPeerApi[] = [];
+    for (const ip of known.addresses.slice(0, MAX_ADDRESSES_TRIED)) {
+      try {
+        peers.push(this.peerFactory({ bridgeId, clientId: this.clientId, sendSignal: () => {}, securityRuntime: this.securityRuntime,
+          address: { ip, port: known.port, fingerprint: known.fingerprint } }));
+      } catch { /* WebRTC unavailable here */ }
+    }
+    if (!peers.length) return null;
+    const winner = await new Promise<WebRtcPeerApi | null>(resolve => {
+      let failed = 0;
+      for (const peer of peers) peer.connect().then(() => resolve(peer), () => { if (++failed === peers.length) resolve(null); });
+    });
+    for (const peer of peers) if (peer !== winner) peer.close();
+    // Another rung attached first, or the run was superseded.
+    if (winner && ctx.aborted()) { winner.close(); return null; }
+    return winner;
   }
 
   /** Ladder steering for the initial pairing run (peer held in `pe.peer`). */
@@ -1330,6 +1487,15 @@ export class HybridTerminalTransport implements TerminalTransportApi {
     return sub;
   }
 
+  private rememberPort(bridgeId: string, port: number): void {
+    if (!validPort(port) || this.rememberedPorts.get(bridgeId) === port) return;
+    // Re-inserted so the map stays ordered by when a port was last learned; the oldest is dropped at the limit.
+    this.rememberedPorts.delete(bridgeId);
+    this.rememberedPorts.set(bridgeId, port);
+    while (this.rememberedPorts.size > MAX_REMEMBERED_PORTS) this.rememberedPorts.delete(this.rememberedPorts.keys().next().value!);
+    writeRememberedPorts(this.rememberedPorts);
+  }
+
   private async defaultGetLocalAdvert(bridgeId: string): Promise<BridgeLocalAdvert | null> {
     const cached = this.localAdverts.get(bridgeId) ?? null;
     const sub = this.ensurePresenceSub();
@@ -1346,6 +1512,7 @@ export class HybridTerminalTransport implements TerminalTransportApi {
         typeof ci.localPort === 'number'
       ) {
         this.localAdverts.set(ci.bridgeId, { localPort: ci.localPort });
+        this.rememberPort(ci.bridgeId, ci.localPort);
       }
     }
     return this.localAdverts.get(bridgeId) ?? null;

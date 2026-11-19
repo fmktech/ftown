@@ -87,6 +87,69 @@ Client:
   the original id. A command that changes something is never repeated once it has left: if the channel is lost first, the
   caller is told delivery is uncertain. A command that never left the browser may use the relay.
 
+## Extension: a local bridge without the relay
+
+A browser on the same machine as a bridge can list, read and drive it while the relay is unreachable. Browser-only change; no
+bridge version is required.
+
+- **Remembered port.** The browser keeps the localhost port each bridge was last advertised on (`ftown.bridgeLocalPorts.v1` in
+  local storage) and the name it was shown under (`ftown.bridgeNames.v1`). Neither is a secret or grants anything: the encrypted
+  hello on the connection is what identifies the bridge. A stale port costs one failed attempt.
+- **Ladder order.** Remembered localhost port, then the port the relay advertises (only if different), then WebRTC, then the
+  relay.
+- **Connect on load.** For every approved bridge with a remembered port, the browser opens the localhost connection as soon as
+  the page loads and again whenever approved bridges change, without waiting for the relay or for a first command.
+- **Bridge list.** A bridge reached directly is listed even when relay presence does not report it.
+- **Loading data.** When a bridge becomes ready while the relay is not connected, the command channel's `subscribed` signal is
+  raised locally, which is what makes the dashboard read sessions and the rest. Commands then travel over the direct channel as
+  described above.
+
+Not covered: pushes (session updates, board, attention) still arrive only through the relay, so while it is down the page shows
+what it last read and does not refresh by itself. A bridge on another machine still needs the relay to be introduced.
+
+## Extension: connecting by remembered address (bridge 0.30.45)
+
+A browser on the bridge's network or VPN can connect with no relay and no signaling, using only what it remembered from an
+earlier visit: the bridge's address, its UDP port and its certificate fingerprint.
+
+**Bridge side**
+- **Fixed listener.** One UDP port (kept in `<dataDir>/direct-udp-port`, so it survives restarts), opened with node-datachannel's
+  `IceUdpMuxListener`. `FTOWN_DIRECT_ADDRESS=0` turns it off.
+- **Persistent identity.** A self-signed ECDSA P-256 certificate in `<dataDir>/direct-identity/` (key owner-only), valid 20
+  years, replaced when less than a year is left or when it is unreadable. It identifies the listener only.
+- **`get_direct_address`** (read permission, verified dispatch only) answers `{ bridgeId, address: { port, fingerprint,
+  addresses } | null }`. `addresses` are the bridge's current non-loopback, non-link-local IPv4 addresses, at most 16.
+
+**Connection (no SDP munging)**
+1. The browser creates its offer and sets it unchanged.
+2. It reads its own ICE password `pwd` from that offer and writes the bridge's answer itself: ICE-lite, `setup:passive`, the
+   remembered fingerprint, one host candidate at the remembered address and port, and the bridge's ICE username fragment *and*
+   password both set to `ftown+direct+v1/<pwd>`.
+3. The browser's first STUN check reaches the listener for a username nobody serves. The bridge reads the browser's ufrag from
+   it and `pwd` from the ufrag the browser chose for the bridge, rebuilds the browser's offer, and answers under that name.
+4. Both sides open one pre-negotiated data channel (`id: 0`).
+5. Both derive the pair id from the browser's credentials: `"a" + base64url(sha256("<ufrag>:<pwd>"))`. The encrypted channel
+   is `direct:webrtc:<bridgeId>:<pairId>`, so it is bound to this connection without either side announcing an id.
+
+This is the same technique as libp2p's WebRTC Direct v2, chosen because Chrome is removing the ability to change ICE
+credentials in a local offer, which the older v1 technique depended on.
+
+**Trust.** The browser checks the bridge's certificate against the remembered fingerprint. The bridge cannot check the
+browser's certificate and does not try; the encrypted hello on the channel decides who the peer is, as on every transport.
+Until that hello is accepted, an addressed peer may do nothing, is closed after 10 s, and at most 16 such peers may wait at
+once. One source address may start at most 16 connections per 30 s.
+
+**Browser side**
+- Each ready bridge is asked `get_direct_address` once per page load (retried up to 5 times with a growing pause); the answer
+  is kept in `ftown.bridgeDirectAddresses.v1`, and a `null` answer forgets it.
+- The remembered addresses (at most 4) are tried all at once, beside the signaled rungs rather than before them: on the
+  bridge's network they win, elsewhere they time out after 2.5 s without delaying anything. The first to complete the
+  encrypted handshake is kept; the others are closed.
+- Bridges with a remembered address are connected on page load, like those with a remembered localhost port.
+
+Not covered: a bridge behind a router with no VPN still needs the relay to be introduced, and pushes still arrive only through
+the relay.
+
 ## Signaling wire types (over commands:rpc)
 
 Envelope rides the existing commands-channel publish format. New `type` values:

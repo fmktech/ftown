@@ -6,6 +6,9 @@ export type DirectCommandRoute = Extract<ApplicationRoute, { kind: "command" }>;
 import {
   DIRECT_PROTOCOL_VERSION,
   DATA_CHANNEL_LABEL,
+  ADDRESSED_CHANNEL_ID,
+  ADDRESSED_TIMEOUT_MS,
+  ADDRESSED_UFRAG_PREFIX,
   STUN_SERVERS,
   PAIR_TIMEOUT_MS,
   PING_INTERVAL_MS,
@@ -22,6 +25,55 @@ export interface WebRtcPeerOptions {
   clientId: string;
   sendSignal: (msg: SignalMessage) => void;
   securityRuntime?: SecureEndpointRuntime;
+  /**
+   * Connect to the bridge at this address with no signaling: nothing is sent through `sendSignal`, and the bridge's half of the
+   * exchange is written here from what is already known about it.
+   */
+  address?: PeerAddress;
+}
+
+/** One place a bridge listens for connections made without signaling. */
+export interface PeerAddress {
+  ip: string;
+  port: number;
+  /** SHA-256 of the bridge's DTLS certificate. The browser refuses any other certificate at this address. */
+  fingerprint: string;
+}
+
+const FINGERPRINT = /^([0-9A-F]{2}:){31}[0-9A-F]{2}$/;
+const IPV4 = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
+/** RFC 5245 ice-char. */
+const ICE_CHARS = /^[A-Za-z0-9+/]+$/;
+
+/** Only values that can be written into SDP as they are: anything else could add lines of its own. */
+export function validPeerAddress(value: unknown): value is PeerAddress {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const { ip, port, fingerprint } = value as Record<string, unknown>;
+  return typeof ip === 'string' && IPV4.test(ip) && typeof port === 'number' && Number.isInteger(port) && port > 0 && port < 65_536
+    && typeof fingerprint === 'string' && FINGERPRINT.test(fingerprint);
+}
+
+/**
+ * The pair id of an addressed connection, derived on both sides from the browser's ICE credentials (the bridge reads them out of
+ * the first STUN request). Must match `addressedPairId` in the bridge's addressed-listener.
+ */
+export async function addressedPairId(clientUfrag: string, clientPwd: string): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${clientUfrag}:${clientPwd}`)));
+  let binary = '';
+  for (const byte of digest) binary += String.fromCharCode(byte);
+  return `a${btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')}`;
+}
+
+/**
+ * The answer the bridge would have sent, written by the browser. The bridge's ICE username fragment and password are both the
+ * prefix followed by the browser's own ICE password, which is how the bridge learns that password from the first STUN request.
+ */
+export function addressedAnswer(address: PeerAddress, clientPwd: string): string {
+  const serverUfrag = `${ADDRESSED_UFRAG_PREFIX}${clientPwd}`;
+  return ['v=0', `o=- 0 0 IN IP4 ${address.ip}`, 's=-', 't=0 0', 'a=ice-lite',
+    `m=application ${address.port} UDP/DTLS/SCTP webrtc-datachannel`, `c=IN IP4 ${address.ip}`, 'a=mid:0', 'a=setup:passive',
+    `a=ice-ufrag:${serverUfrag}`, `a=ice-pwd:${serverUfrag}`, `a=fingerprint:sha-256 ${address.fingerprint}`, 'a=sctp-port:5000',
+    'a=max-message-size:262144', `a=candidate:1 1 UDP 1 ${address.ip} ${address.port} typ host`, 'a=end-of-candidates', ''].join('\r\n');
 }
 
 /** Public surface of {@link WebRtcPeer}; kept structural so tests can inject a fake. */
@@ -50,7 +102,9 @@ export class WebRtcPeer implements WebRtcPeerApi {
   private readonly bridgeId: string;
   private readonly clientId: string;
   private readonly sendSignal: (msg: SignalMessage) => void;
-  private readonly pairId: string;
+  /** Random for a signaled connection; for an addressed one, derived from the ICE credentials once the offer exists. */
+  private pairId: string;
+  private readonly address: PeerAddress | null;
   private readonly securityRuntime?: SecureEndpointRuntime;
   private incoming: Promise<void> = Promise.resolve();
   private readonly assembler = new FrameAssembler();
@@ -87,6 +141,7 @@ export class WebRtcPeer implements WebRtcPeerApi {
     this.clientId = opts.clientId;
     this.sendSignal = opts.sendSignal;
     this.pairId = crypto.randomUUID();
+    this.address = opts.address ?? null;
   }
 
   connect(): Promise<void> {
@@ -95,8 +150,8 @@ export class WebRtcPeer implements WebRtcPeerApi {
       this.resolveConnect = resolve;
       this.rejectConnect = reject;
     });
-    this.pairTimer = setTimeout(() => this.fail(new Error('pair timeout')), PAIR_TIMEOUT_MS);
-    void this.startPairing().catch((err) => this.fail(err instanceof Error ? err : new Error(String(err))));
+    this.pairTimer = setTimeout(() => this.fail(new Error('pair timeout')), this.address ? ADDRESSED_TIMEOUT_MS : PAIR_TIMEOUT_MS);
+    void (this.address ? this.startAddressed(this.address) : this.startPairing()).catch((err) => this.fail(err instanceof Error ? err : new Error(String(err))));
     return this.connectPromise;
   }
 
@@ -138,6 +193,33 @@ export class WebRtcPeer implements WebRtcPeerApi {
       clientId: this.clientId,
       payload: offer.sdp ?? '',
     });
+  }
+
+  /** Connects with no signaling: an unmodified offer, then the bridge's answer written here (see ADDRESSED_UFRAG_PREFIX). */
+  private async startAddressed(address: PeerAddress): Promise<void> {
+    if (!validPeerAddress(address)) throw new Error('invalid address');
+    const pc = new RTCPeerConnection();
+    this.pc = pc;
+    pc.oniceconnectionstatechange = () => {
+      const state = pc.iceConnectionState;
+      if (state === 'failed' || state === 'closed') this.fail(new Error(`ice ${state}`));
+    };
+    // Negotiated in advance on both sides: the bridge creates the same channel when it accepts the connection.
+    const channel = pc.createDataChannel('', { negotiated: true, id: ADDRESSED_CHANNEL_ID, ordered: true });
+    this.channel = channel;
+    channel.onopen = () => this.onChannelOpen();
+    channel.onmessage = (ev) => this.onFrame(ev.data);
+    channel.onclose = () => this.close();
+    channel.onerror = () => this.fail(new Error('datachannel error'));
+
+    await pc.setLocalDescription(await pc.createOffer());
+    const sdp = pc.localDescription?.sdp ?? '';
+    const ufrag = /^a=ice-ufrag:(\S+)\s*$/m.exec(sdp)?.[1];
+    const pwd = /^a=ice-pwd:(\S+)\s*$/m.exec(sdp)?.[1];
+    if (!ufrag || !pwd || !ICE_CHARS.test(ufrag) || !ICE_CHARS.test(pwd) || pwd.length < 22 || pwd.length > 200) throw new Error('unusable ICE credentials');
+    this.pairId = await addressedPairId(ufrag, pwd);
+    if (this.closed) return;
+    await pc.setRemoteDescription({ type: 'answer', sdp: addressedAnswer(address, pwd) });
   }
 
   private onChannelOpen(): void {
@@ -209,7 +291,8 @@ export class WebRtcPeer implements WebRtcPeerApi {
   }
 
   handleSignal(msg: SignalMessage): void {
-    if (this.closed) return;
+    // An addressed connection takes no part in signaling.
+    if (this.closed || this.address) return;
     if (msg.clientId !== this.clientId || msg.pairId !== this.pairId || msg.bridgeId !== this.bridgeId) {
       return;
     }
@@ -343,8 +426,8 @@ export class WebRtcPeer implements WebRtcPeerApi {
       this.channel = null;
     }
     if (this.pc) {
-      // Best-effort notify the bridge to tear down its peer.
-      this.sendSignal({
+      // Best-effort notify the bridge to tear down its peer. An addressed connection has no signaling: closing it is the notice.
+      if (!this.address) this.sendSignal({
         type: 'webrtc_close',
         pairId: this.pairId,
         bridgeId: this.bridgeId,
