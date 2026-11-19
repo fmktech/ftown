@@ -68,6 +68,12 @@ const MAX_MISSED_PINGS = 2;
 /** Peers that never reach channel-open within this window are torn down (leak guard). */
 const PAIRING_TIMEOUT_MS = 30_000;
 /**
+ * A peer that connected to the bridge's fixed address has proved nothing until its encrypted hello is accepted. It gets this long
+ * to do so, and only this many such peers may be waiting at once; a signaled peer, by contrast, was introduced by a sealed offer.
+ */
+export const ADDRESSED_AUTH_TIMEOUT_MS = 10_000;
+export const MAX_UNAUTHENTICATED_ADDRESSED = 16;
+/**
  * Max chars per DataChannel frame `data` field. Worst-case UTF-8 is 4 bytes per
  * 2 chars, so 32k chars stays under ~128 KiB — safely below the ~256 KiB max
  * message size negotiated by libdatachannel and browsers. Larger payloads are
@@ -116,35 +122,57 @@ class DirectPeer {
   private missedPings = 0;
   private iceDisconnectTimer?: ReturnType<typeof setTimeout>;
   private pairingTimer?: ReturnType<typeof setTimeout>;
+  /** Addressed peers only: closes the peer unless its encrypted hello is accepted in time. */
+  private authTimer?: ReturnType<typeof setTimeout>;
   private secure?: EncryptedPeerChannel;
 
+  /**
+   * `addressed`: the peer connected to the bridge's fixed address with no signaling. Nothing is signaled back for it, and it must
+   * pass the encrypted hello within ADDRESSED_AUTH_TIMEOUT_MS.
+   */
   constructor(
     manager: DirectPeerManager,
     pc: DirectPeerConnection,
     pairId: string,
     clientId: string,
+    readonly addressed = false,
   ) {
     this.manager = manager;
     this.pc = pc;
     this.pairId = pairId;
     this.clientId = clientId;
 
-    pc.onLocalDescription((sdp, type) => {
-      if (type === 'answer') {
-        this.manager.emitSignal({ type: 'webrtc_answer', pairId, clientId, payload: sdp });
-      }
-    });
-    pc.onLocalCandidate((candidate, mid) => {
-      const payload: IceCandidatePayload = { candidate, mid };
-      this.manager.emitSignal({ type: 'webrtc_ice', pairId, clientId, payload: JSON.stringify(payload) });
-    });
+    if (!addressed) {
+      pc.onLocalDescription((sdp, type) => {
+        if (type === 'answer') {
+          this.manager.emitSignal({ type: 'webrtc_answer', pairId, clientId, payload: sdp });
+        }
+      });
+      pc.onLocalCandidate((candidate, mid) => {
+        const payload: IceCandidatePayload = { candidate, mid };
+        this.manager.emitSignal({ type: 'webrtc_ice', pairId, clientId, payload: JSON.stringify(payload) });
+      });
+      pc.onDataChannel((dc) => this.bindDataChannel(dc));
+    }
     pc.onStateChange((state) => this.onStateChange(state));
-    pc.onDataChannel((dc) => this.bindDataChannel(dc));
 
     // Leak guard: tear down attempts that never reach channel-open (client
     // vanished pre-ICE); keepalive only starts once the channel opens.
     this.pairingTimer = setTimeout(() => this.manager.teardown(this.pairId), PAIRING_TIMEOUT_MS);
     this.pairingTimer.unref?.();
+    if (addressed) {
+      this.authTimer = setTimeout(() => this.manager.teardown(this.pairId), ADDRESSED_AUTH_TIMEOUT_MS);
+      this.authTimer.unref?.();
+    }
+  }
+
+  /** An addressed peer whose hello has not been accepted yet. */
+  get unauthenticatedAddressed(): boolean { return this.addressed && !this.helloOk; }
+  /** Binds the channel of an addressed peer (it is negotiated in advance, so no channel event announces it). */
+  adopt(dc: DirectDataChannel): void { this.bindDataChannel(dc); }
+  private authenticated(): void {
+    this.helloOk = true;
+    if (this.authTimer) { clearTimeout(this.authTimer); this.authTimer = undefined; }
   }
 
   hasAttached(sessionId: string): boolean {
@@ -199,6 +227,7 @@ class DirectPeer {
     if (this.pingTimer) clearInterval(this.pingTimer);
     if (this.iceDisconnectTimer) clearTimeout(this.iceDisconnectTimer);
     if (this.pairingTimer) clearTimeout(this.pairingTimer);
+    if (this.authTimer) clearTimeout(this.authTimer);
     this.attached.clear();
     this.seq.clear();
     this.secure?.close();
@@ -211,7 +240,7 @@ class DirectPeer {
     if (!this.manager.security) { this.manager.teardown(this.pairId); return; }
     this.secure = new EncryptedPeerChannel(this.manager.security, { transport: 'webrtc', channel: `direct:webrtc:${this.manager.bridgeId}:${this.pairId}`,
       bridgeId: this.manager.bridgeId, pairId: this.pairId }, json => { if (dc.isOpen()) dc.sendMessage(json); },
-      frame => this.handleFrame(JSON.stringify(frame)), () => { this.helloOk = true; }, () => this.manager.teardown(this.pairId), this.manager.onCommand);
+      frame => this.handleFrame(JSON.stringify(frame)), () => this.authenticated(), () => this.manager.teardown(this.pairId), this.manager.onCommand);
     dc.onMessage((msg) => {
       if (typeof msg !== 'string') return;
       return this.secure?.receive(msg);
@@ -253,7 +282,7 @@ class DirectPeer {
           this.manager.teardown(this.pairId);
           return;
         }
-        this.helloOk = true;
+        this.authenticated();
         this.send({ kind: 'hello_ack', bridgeId: this.manager.bridgeId, protocolVersion: DIRECT_PROTOCOL_VERSION });
         return;
       }
@@ -400,6 +429,22 @@ export class DirectPeerManager {
     } catch (err) {
       console.error('[DirectTransport] Failed to handle signal:', err);
     }
+  }
+
+  /**
+   * Takes over a connection made to the bridge's fixed address. `dc` is its pre-negotiated channel. Returns false, leaving the
+   * caller to close the connection, when the pair id is already in use or too many such peers are still unauthenticated.
+   */
+  adoptAddressed(pc: DirectPeerConnection, dc: DirectDataChannel, pairId: string): boolean {
+    if (this.peers.has(pairId)) return false;
+    let waiting = 0;
+    for (const peer of this.peers.values()) if (peer.unauthenticatedAddressed) waiting++;
+    if (waiting >= MAX_UNAUTHENTICATED_ADDRESSED) return false;
+    // Its own pair id as client id: an addressed peer has not named a client, and must never displace a signaled one.
+    const peer = new DirectPeer(this, pc, pairId, pairId, true);
+    this.peers.set(pairId, peer);
+    peer.adopt(dc);
+    return true;
   }
 
   sendOutput(sessionId: string, data: string): void {

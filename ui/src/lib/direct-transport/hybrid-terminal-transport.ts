@@ -6,6 +6,8 @@ import {
   LOOPBACK_TIMEOUT_MS,
   WATCH_HEARTBEAT_MS,
   type BridgeLocalAdvert,
+  type DirectAddress,
+  MAX_DIRECT_ADDRESSES,
   type DirectCommandMessage,
   type FallbackReason,
   type SignalMessage,
@@ -17,6 +19,7 @@ import {
   WebRtcPeer,
   type WebRtcPeerApi,
   type WebRtcPeerFactory,
+  validPeerAddress,
 } from './webrtc-peer';
 import {
   LoopbackPeer,
@@ -121,6 +124,39 @@ function writeRememberedPorts(ports: Map<string, number>): void {
   try {
     if (typeof localStorage !== 'undefined') localStorage.setItem(LOCAL_PORTS_STORAGE_KEY, JSON.stringify(Object.fromEntries(ports)));
   } catch { /* remembered for this page only */ }
+}
+
+/**
+ * Where each bridge listens for connections made without signaling, as the bridge last reported it (`get_direct_address`), kept
+ * across page loads. Like the localhost port it is not a secret: a browser that connects to a wrong or stale address simply
+ * fails the certificate check or the encrypted hello.
+ */
+export const DIRECT_ADDRESSES_STORAGE_KEY = 'ftown.bridgeDirectAddresses.v1';
+const MAX_REMEMBERED_ADDRESSES = 32;
+/** Addresses of one bridge tried at once. */
+const MAX_ADDRESSES_TRIED = 4;
+
+function parseDirectAddress(value: unknown): DirectAddress | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const { port, fingerprint, addresses } = value as Record<string, unknown>;
+  if (!Array.isArray(addresses)) return null;
+  const usable = addresses.filter((ip): ip is string => validPeerAddress({ ip, port, fingerprint })).slice(0, MAX_DIRECT_ADDRESSES);
+  return usable.length ? { port: port as number, fingerprint: fingerprint as string, addresses: usable } : null;
+}
+
+function readRememberedAddresses(): Map<string, DirectAddress> {
+  const remembered = new Map<string, DirectAddress>();
+  try {
+    if (typeof localStorage === 'undefined') return remembered;
+    const stored: unknown = JSON.parse(localStorage.getItem(DIRECT_ADDRESSES_STORAGE_KEY) ?? '{}');
+    if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return remembered;
+    for (const [bridgeId, value] of Object.entries(stored)) {
+      if (remembered.size >= MAX_REMEMBERED_ADDRESSES) break;
+      const address = parseDirectAddress(value);
+      if (/^[A-Za-z0-9_-]{1,200}$/.test(bridgeId) && address) remembered.set(bridgeId, address);
+    }
+  } catch { /* nothing remembered */ }
+  return remembered;
 }
 
 type PeerStatus = 'connecting' | 'attached' | 'failed';
@@ -290,6 +326,8 @@ export class HybridTerminalTransport implements TerminalTransportApi {
   private readonly localAdverts = new Map<string, BridgeLocalAdvert>();
   /** Ports from earlier page loads (see LOCAL_PORTS_STORAGE_KEY). Tried first; never taken as a sign that the bridge is online. */
   private readonly rememberedPorts: Map<string, number>;
+  /** Addresses from earlier page loads or reported this page load (see DIRECT_ADDRESSES_STORAGE_KEY). */
+  private readonly rememberedAddresses: Map<string, DirectAddress>;
   private readonly sessions = new Map<string, SessionEntry>();
   private readonly modeChangeCbs = new Set<(sessionId: string, mode: TerminalTransportMode) => void>();
   private readonly bridgeReachabilityCbs = new Set<
@@ -321,6 +359,7 @@ export class HybridTerminalTransport implements TerminalTransportApi {
     this.getLocalAdvert = opts.getLocalAdvert ?? ((bridgeId) => this.defaultGetLocalAdvert(bridgeId));
     this.advertInjected = typeof opts.getLocalAdvert === 'function';
     this.rememberedPorts = this.advertInjected ? new Map() : readRememberedPorts();
+    this.rememberedAddresses = readRememberedAddresses();
     this.upgradeBackoffMs =
       opts.upgradeBackoffMs && opts.upgradeBackoffMs.length > 0
         ? opts.upgradeBackoffMs
@@ -433,7 +472,28 @@ export class HybridTerminalTransport implements TerminalTransportApi {
    */
   connectRemembered(bridgeIds: readonly string[]): void {
     if (this.disposed) return;
-    for (const bridgeId of bridgeIds) if (this.rememberedPorts.has(bridgeId) && !this.peers.has(bridgeId)) this.ensurePeer(bridgeId);
+    for (const bridgeId of bridgeIds) {
+      if ((this.rememberedPorts.has(bridgeId) || this.rememberedAddresses.has(bridgeId)) && !this.peers.has(bridgeId)) this.ensurePeer(bridgeId);
+    }
+  }
+
+  /** Whether an address is remembered for this bridge (the caller asks the bridge for one otherwise). */
+  hasRememberedAddress(bridgeId: string): boolean { return this.rememberedAddresses.has(bridgeId); }
+
+  /**
+   * Records where a bridge said it listens for connections without signaling (the answer to `get_direct_address`), or forgets it
+   * when the bridge reports none. Anything malformed is treated as none.
+   */
+  rememberAddress(bridgeId: string, value: unknown): void {
+    if (this.disposed || !/^[A-Za-z0-9_-]{1,200}$/.test(bridgeId)) return;
+    const address = parseDirectAddress(value);
+    if (JSON.stringify(address) === JSON.stringify(this.rememberedAddresses.get(bridgeId) ?? null)) return;
+    this.rememberedAddresses.delete(bridgeId);
+    if (address) this.rememberedAddresses.set(bridgeId, address);
+    while (this.rememberedAddresses.size > MAX_REMEMBERED_ADDRESSES) this.rememberedAddresses.delete(this.rememberedAddresses.keys().next().value!);
+    try {
+      if (typeof localStorage !== 'undefined') localStorage.setItem(DIRECT_ADDRESSES_STORAGE_KEY, JSON.stringify(Object.fromEntries(this.rememberedAddresses)));
+    } catch { /* remembered for this page only */ }
   }
 
   onBridgeReachabilityChange(
@@ -626,6 +686,28 @@ export class HybridTerminalTransport implements TerminalTransportApi {
       if (lp) return { peer: lp, kind: 'local' };
       if (ctx.aborted()) return null;
     }
+    // A remembered address needs nothing from the relay, so it runs beside the signaled rungs instead of ahead of them: on the
+    // bridge's network it answers long before signaling could, and away from it nothing waits for it to time out.
+    const signaled = this.climbSignaled(bridgeId, ctx, remembered);
+    const addressed = this.attemptAddressed(bridgeId, ctx);
+    return new Promise(resolve => {
+      let open = 2;
+      const settle = (result: { peer: DirectPeerApi; kind: 'local' | 'webrtc' } | null) => {
+        open--;
+        if (result) resolve(result);
+        else if (open === 0) resolve(null);
+      };
+      void signaled.then(settle, () => settle(null));
+      void addressed.then(peer => settle(peer ? { peer, kind: 'webrtc' } : null), () => settle(null));
+    });
+  }
+
+  /** The rungs that need the relay: the advertised localhost port, then signaled WebRTC. */
+  private async climbSignaled(
+    bridgeId: string,
+    ctx: LadderCtx,
+    remembered: number | undefined,
+  ): Promise<{ peer: DirectPeerApi; kind: 'local' | 'webrtc' } | null> {
     if (this.hasLoopbackAdvertChance()) {
       let advert: BridgeLocalAdvert | null = null;
       try {
@@ -646,6 +728,31 @@ export class HybridTerminalTransport implements TerminalTransportApi {
     const wp = await this.attemptWebRtc(bridgeId, ctx);
     if (wp) return { peer: wp, kind: 'webrtc' };
     return null;
+  }
+
+  /**
+   * Connects to the bridge's remembered addresses with no signaling, all at once; the first to complete the encrypted handshake
+   * wins and the rest are closed. Resolves null when there is nothing remembered or nothing answers.
+   */
+  private async attemptAddressed(bridgeId: string, ctx: LadderCtx): Promise<WebRtcPeerApi | null> {
+    const known = this.rememberedAddresses.get(bridgeId);
+    if (!known || this.localOnly) return null;
+    const peers: WebRtcPeerApi[] = [];
+    for (const ip of known.addresses.slice(0, MAX_ADDRESSES_TRIED)) {
+      try {
+        peers.push(this.peerFactory({ bridgeId, clientId: this.clientId, sendSignal: () => {}, securityRuntime: this.securityRuntime,
+          address: { ip, port: known.port, fingerprint: known.fingerprint } }));
+      } catch { /* WebRTC unavailable here */ }
+    }
+    if (!peers.length) return null;
+    const winner = await new Promise<WebRtcPeerApi | null>(resolve => {
+      let failed = 0;
+      for (const peer of peers) peer.connect().then(() => resolve(peer), () => { if (++failed === peers.length) resolve(null); });
+    });
+    for (const peer of peers) if (peer !== winner) peer.close();
+    // Another rung attached first, or the run was superseded.
+    if (winner && ctx.aborted()) { winner.close(); return null; }
+    return winner;
   }
 
   /** Ladder steering for the initial pairing run (peer held in `pe.peer`). */

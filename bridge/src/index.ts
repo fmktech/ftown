@@ -26,6 +26,7 @@ import { BridgePushNotifier } from './push-notifier.js';
 import { LocalApiServer } from './local-api-server.js';
 import { PeerControl } from './peer-control.js';
 import { PeerLinks } from './peer-link.js';
+import { startAddressedListener, type AddressedSetup } from './direct-transport/addressed-setup.js';
 import { executeSecurePacket } from './security/bridge/execute.js';
 import { BrowserAccess } from './browser-access.js';
 import { registerLocalBrowserCommands } from './local-pair-cli.js';
@@ -726,6 +727,18 @@ program
       onAttach: (sid, deliver) => terminalOutput.attachScreen(sid, deliver),
       onCommand: { dispatch: message => serveDirectCommand(message), get observer() { return updateEffects; } },
     });
+    // Fixed-address rung: a browser that remembers this bridge's address, port and certificate connects with no signaling at
+    // all, so a bridge on the same network or VPN stays reachable without the relay. Connections land in the same peer manager,
+    // where the encrypted hello decides what they may do. FTOWN_DIRECT_ADDRESS=0 turns the listener off.
+    let addressed: AddressedSetup | null = null;
+    if (process.env.FTOWN_DIRECT_ADDRESS !== '0') {
+      try {
+        addressed = await startAddressedListener(dataDir, (pc, channel, pairId) => directPeers.adoptAddressed(pc, channel, pairId));
+        console.log(`[Bridge] Direct address listener on UDP port ${addressed.listener.port}`);
+      } catch (err) {
+        console.warn('[Bridge] Direct address listener unavailable:', err instanceof Error ? err.message : String(err));
+      }
+    }
     const publishRouter = new PublishRouter({
       registry: watchRegistry,
       peerManager: directPeers,
@@ -1141,7 +1154,8 @@ program
         return { type: 'command_response', response: { requestId: route.requestId, success: true } };
       }
       let result: CommandResponse | undefined;
-      await createCommandHandler({ bridgeId, security, sessionController, attentionStore, updates, updateEffects, pullRequestStatuses, pullRequestReview,
+      await createCommandHandler({ bridgeId, security, sessionController, attentionStore, updates, updateEffects, pullRequestStatuses,
+        directAddress: () => addressed?.address() ?? null, pullRequestReview,
         modelRouting: () => modelRouting,
         // Commands may arrive during bootstrap; only board reads resolve this late-bound source.
         get sessionBoard() { return sessionBoard; },
@@ -1255,6 +1269,7 @@ program
         }
         await terminalOutput.stop();
         loopbackServer.closeAll();
+        addressed?.listener.stop();
         directPeers.closeAll();
         peerLinks.closeAll();
         watchRegistry.dispose();

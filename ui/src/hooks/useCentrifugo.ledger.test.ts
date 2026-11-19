@@ -10,7 +10,7 @@ interface FakeCommands { state: string; handlers: Map<string, (() => void)[]> }
 const mocks = vi.hoisted(() => ({
   subs: [] as FakeSub[], removed: [] as string[], secure: [] as { userId: string; request: (command: unknown) => Promise<unknown> }[],
   getToken: [] as (() => Promise<string>)[], clientOn: [] as [string, ClientHandler][], presence: [] as string[],
-  presenceResult: null as unknown, clients: [] as { state: string }[], commands: [] as FakeCommands[],
+  presenceResult: null as unknown, clients: [] as { state: string }[], commands: [] as FakeCommands[], transports: [] as unknown[],
 }));
 vi.mock("centrifuge", () => ({
   UnauthorizedError: class extends Error {},
@@ -42,7 +42,11 @@ vi.mock("@/lib/secure-message-client", () => ({
     }
   },
 }));
-vi.mock("@/lib/direct-transport/hybrid-terminal-transport", () => ({ HybridTerminalTransport: class { dispose() {} connectRemembered() {} } }));
+vi.mock("@/lib/direct-transport/hybrid-terminal-transport", () => ({ HybridTerminalTransport: class {
+  remembered: [string, unknown][] = [];
+  constructor() { mocks.transports.push(this); }
+  dispose() {} connectRemembered() {} rememberAddress(bridgeId: string, address: unknown) { this.remembered.push([bridgeId, address]); }
+} }));
 import { LEDGER_PRESENCE_POLL_MS, parseLedgerMessage, useCentrifugo } from "./useCentrifugo";
 import type { LedgerPeersTransport } from "@/lib/ledger-peers";
 
@@ -61,7 +65,64 @@ const fire = (sub: FakeSub, event: string, ctx: Parameters<Handler>[0] = {}) => 
 const fireClient = (event: string, ctx: unknown = {}) => { act(() => { for (const [name, handler] of mocks.clientOn) if (name === event) handler(ctx); }); };
 beforeEach(() => {
   mocks.subs.length = 0; mocks.removed.length = 0; mocks.secure.length = 0; mocks.getToken.length = 0; mocks.clientOn.length = 0; mocks.presence.length = 0;
-  mocks.presenceResult = null; mocks.clients.length = 0; mocks.commands.length = 0;
+  mocks.presenceResult = null; mocks.clients.length = 0; mocks.commands.length = 0; mocks.transports.length = 0;
+});
+
+describe("direct address", () => {
+  type Answer = { success: boolean; data?: unknown };
+  function readyRuntime() {
+    const listeners = new Set<() => void>();
+    const states = new Map([["bridge-1", "offline"]]);
+    const fake = { pinnedBridges: () => [{ bridgeId: "bridge-1" }], state: (id: string) => ({ status: states.get(id) ?? "unpaired" }),
+      onChange: (listener: () => void) => { listeners.add(listener); return () => listeners.delete(listener); } };
+    return { runtime: fake as unknown as SecureEndpointRuntime, ready: () => { states.set("bridge-1", "ready"); for (const listener of [...listeners]) listener(); } };
+  }
+  const address = { port: 47001, fingerprint: "AA", addresses: ["192.168.1.20"] };
+  const asks = () => (mocks.secure[0] as unknown as { request: ReturnType<typeof vi.fn> }).request.mock.calls.map(([command]) => command as { type: string; payload: unknown })
+    .filter(command => command.type === "get_direct_address");
+
+  it("asks a bridge once it is ready and remembers its answer", async () => {
+    const trustState = readyRuntime();
+    const ledger = fakeLedger();
+    renderHook(() => useCentrifugo(jwt, "wss://relay.test", accountId, { securityRuntime: trustState.runtime, ledger }));
+    const secure = mocks.secure[0] as unknown as { request: ReturnType<typeof vi.fn> };
+    secure.request.mockImplementation(async (command: { requestId: string }) => ({ requestId: command.requestId, success: true, data: { bridgeId: "bridge-1", address } }));
+    expect(asks()).toEqual([]);
+    act(() => trustState.ready());
+    await vi.waitFor(() => expect((mocks.transports[0] as { remembered: unknown[] }).remembered).toEqual([["bridge-1", address]]));
+    expect(asks()).toEqual([{ type: "get_direct_address", requestId: expect.any(String), payload: { bridgeId: "bridge-1" } }]);
+    // Later trust changes do not ask again.
+    act(() => trustState.ready());
+    expect(asks()).toHaveLength(1);
+  });
+
+  it("asks again after a failed answer, with a growing pause, and gives up after a few tries", async () => {
+    vi.useFakeTimers();
+    try {
+      const trustState = readyRuntime();
+      const ledger = fakeLedger();
+      renderHook(() => useCentrifugo(jwt, "wss://relay.test", accountId, { securityRuntime: trustState.runtime, ledger }));
+      const secure = mocks.secure[0] as unknown as { request: ReturnType<typeof vi.fn> };
+      const answers: Answer[] = [{ success: false, data: { code: "bridge_starting" } }, { success: true, data: { bridgeId: "other" } }];
+      secure.request.mockImplementation(async (command: { requestId: string }) => {
+        const next = answers.shift() ?? { success: false };
+        return { requestId: command.requestId, ...next };
+      });
+      act(() => trustState.ready());
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(asks()).toHaveLength(1);
+      await act(async () => { await vi.advanceTimersByTimeAsync(2_999); });
+      expect(asks()).toHaveLength(1);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(asks()).toHaveLength(2);
+      // An answer for another bridge counts as a failure too; the pause doubles.
+      await act(async () => { await vi.advanceTimersByTimeAsync(6_000); });
+      expect(asks()).toHaveLength(3);
+      await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+      expect(asks()).toHaveLength(5);
+      expect((mocks.transports[0] as { remembered: unknown[] }).remembered).toEqual([]);
+    } finally { vi.useRealTimers(); }
+  });
 });
 
 describe("account ledger channel", () => {

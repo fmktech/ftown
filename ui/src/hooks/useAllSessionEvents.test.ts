@@ -982,6 +982,32 @@ describe("structured attention questions", () => {
     expect(h.current()?.attention).toBeUndefined();
   });
 
+  it("a refresh during an older bridge-wide read reads again once that read ends, so it never shows the state from before", async () => {
+    let item: AnyItem | null = saved;
+    let release: (() => void) | null = null;
+    let holdSummary = false;
+    const h = durableSetup(async command => {
+      if (command.type === "get_attention_summary" && holdSummary) {
+        // A bridge-wide read that started before the item was resolved, and answers with the old state.
+        const answer = respond(item);
+        await new Promise<void>(resolve => { release = resolve; });
+        return answer;
+      }
+      return respond(item);
+    });
+    await settle();
+    expect(h.current()?.attention?.attentionId).toBe(saved.id);
+    holdSummary = true;
+    await act(async () => { h.reconnect(); await Promise.resolve(); });
+    await vi.waitFor(() => expect(release).not.toBeNull());
+    // The item is resolved on the bridge, and the page asks for the new state while the old read is still out.
+    item = null;
+    let refreshed: Promise<void> = Promise.resolve();
+    await act(async () => { refreshed = h.result.current.refreshSessionAttention("agent"); await Promise.resolve(); });
+    await act(async () => { release!(); await refreshed; });
+    expect(h.current()?.attention).toBeUndefined();
+  });
+
   it("applies a snapshot whose routing changed at the same sequence (escalate, parent route)", async () => {
     let item: AnyItem | null = saved;
     const h = durableSetup(async () => respond(item));

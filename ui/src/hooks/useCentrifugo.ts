@@ -41,6 +41,10 @@ function decodeJwtExpMs(token: string): number | null {
   }
 }
 
+/** Asks for a bridge's direct address before giving up for this page load, and the pause before the n-th retry is n times this. */
+const ADDRESS_ASK_ATTEMPTS = 5;
+const ADDRESS_ASK_RETRY_MS = 3_000;
+
 /** The ledger client's replication entry points (LedgerClient satisfies it); every refresh it runs is throttled single-flight. */
 export interface LedgerFeed {
   /** A full ledger pushed on the relay. */
@@ -291,7 +295,33 @@ export function useCentrifugo(
     const connectLocal = () => hybridTransport.connectRemembered(securityRuntime.pinnedBridges()
       .filter(pin => !["revoked", "key_changed"].includes(securityRuntime.state(pin.bridgeId).status)).map(pin => pin.bridgeId));
     connectLocal();
-    const stopConnectLocal = securityRuntime.onChange(connectLocal);
+    // Each ready bridge is asked where it listens for connections made without signaling, and the answer is remembered, so the
+    // next connection to it (after a reload, or with the relay down) needs no introduction. One answer per page load is enough;
+    // a failed ask (the bridge is still starting, or unreachable for a moment) is repeated a few times with a growing pause. A
+    // bridge too old to know the command fails every time and ends with nothing remembered.
+    const addressAsks = new Map<string, { done: boolean; asking: boolean; attempts: number; timer: ReturnType<typeof setTimeout> | null }>();
+    const learnAddresses = () => {
+      for (const pin of securityRuntime.pinnedBridges()) {
+        const bridgeId = pin.bridgeId;
+        const ask = addressAsks.get(bridgeId) ?? { done: false, asking: false, attempts: 0, timer: null };
+        addressAsks.set(bridgeId, ask);
+        if (ask.done || ask.asking || ask.timer || ask.attempts >= ADDRESS_ASK_ATTEMPTS || securityRuntime.state(bridgeId).status !== "ready") continue;
+        ask.asking = true; ask.attempts++;
+        const retry = () => {
+          ask.asking = false;
+          if (ask.attempts >= ADDRESS_ASK_ATTEMPTS || transportRef.current !== hybridTransport) return;
+          ask.timer = setTimeout(() => { ask.timer = null; learnAddresses(); }, ADDRESS_ASK_RETRY_MS * ask.attempts);
+        };
+        void secureClient.request({ type: "get_direct_address", requestId: crypto.randomUUID(), payload: { bridgeId } }).then(response => {
+          const { success, data } = (response && typeof response === "object" ? response : {}) as { success?: unknown; data?: unknown };
+          if (success !== true || !data || typeof data !== "object" || (data as { bridgeId?: unknown }).bridgeId !== bridgeId) { retry(); return; }
+          ask.asking = false; ask.done = true;
+          if (transportRef.current === hybridTransport) hybridTransport.rememberAddress(bridgeId, (data as { address?: unknown }).address);
+        }, retry);
+      }
+    };
+    learnAddresses();
+    const stopConnectLocal = securityRuntime.onChange(() => { connectLocal(); learnAddresses(); });
 
     // Inbound signaling (webrtc_answer/webrtc_ice/webrtc_close) arrives as
     // publications on this same commands:rpc#{userId} channel. useSessions
@@ -386,6 +416,7 @@ export function useCentrifugo(
 
     return () => {
       stopConnectLocal();
+      for (const ask of addressAsks.values()) if (ask.timer) clearTimeout(ask.timer);
       if (presenceTimer !== null) clearInterval(presenceTimer);
       waiters = [];
       detachPeers?.();
