@@ -239,7 +239,7 @@ export async function preparePreviewAdd(
 }
 
 export function previewStatus(id: string, fileId: string, snapshot: Snapshot, knownRevision?: string): SessionPreviewStatus {
-  return { state: snapshot.revision === knownRevision ? 'unchanged' : 'ready', previewId: id, fileId, revision: snapshot.revision, totalBytes: snapshot.bytes.length };
+  return { state: snapshot.revision === knownRevision ? 'unchanged' : 'ready', previewId: id, fileId, revision: snapshot.revision, totalBytes: snapshot.bytes.length, wait: true };
 }
 export function previewChunk(id: string, fileId: string, snapshot: Snapshot, revision: string, offset: number): SessionPreviewChunk {
   if (snapshot.revision !== revision) return { state: 'stale_revision' };

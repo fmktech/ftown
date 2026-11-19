@@ -42,14 +42,14 @@ export function isPreviewDescriptor(value: unknown): value is SessionPreviewDesc
 export type SessionPreviewStatus =
   | { state: 'unregistered' }
   | { state: 'unavailable'; previewId: string; fileId: string; reason: PreviewUnavailableReason }
-  | { state: 'ready' | 'unchanged'; previewId: string; fileId: string; revision: string; totalBytes: number };
+  | { state: 'ready' | 'unchanged'; previewId: string; fileId: string; revision: string; totalBytes: number; wait?: true };
 
 export function parseStatus(value: unknown, previewId: string, fileId: string): SessionPreviewStatus {
   if (!record(value)) throw new Error('Invalid preview response');
   if (value.state === 'unregistered') return { state: 'unregistered' };
   if (value.previewId !== previewId || value.fileId !== fileId) throw new Error('Invalid preview response');
   if (value.state === 'unavailable' && typeof value.reason === 'string' && reasons.includes(value.reason as PreviewUnavailableReason)) return { state: 'unavailable', previewId, fileId, reason: value.reason as PreviewUnavailableReason };
-  if ((value.state === 'ready' || value.state === 'unchanged') && typeof value.revision === 'string' && revisionPattern.test(value.revision) && size(value.totalBytes)) return { state: value.state, previewId, fileId, revision: value.revision, totalBytes: value.totalBytes };
+  if ((value.state === 'ready' || value.state === 'unchanged') && typeof value.revision === 'string' && revisionPattern.test(value.revision) && size(value.totalBytes)) return { state: value.state, previewId, fileId, revision: value.revision, totalBytes: value.totalBytes, ...(value.wait === true ? { wait: true as const } : {}) };
   throw new Error('Invalid preview response');
 }
 

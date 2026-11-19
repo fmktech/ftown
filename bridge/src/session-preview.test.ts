@@ -211,10 +211,10 @@ test('status and chunk helpers thread fileId through; unknown fileId and stale p
   const mdSnapshot = await reader.read(session, source!, mdId);
   assert.equal(mdSnapshot.bytes.toString(), '# title');
   assert.deepEqual(previewStatus(prepared.preview.id, htmlId, htmlSnapshot), {
-    state: 'ready', previewId: prepared.preview.id, fileId: htmlId, revision: htmlSnapshot.revision, totalBytes: 5,
+    state: 'ready', previewId: prepared.preview.id, fileId: htmlId, revision: htmlSnapshot.revision, totalBytes: 5, wait: true,
   });
   assert.deepEqual(previewStatus(prepared.preview.id, htmlId, htmlSnapshot, htmlSnapshot.revision), {
-    state: 'unchanged', previewId: prepared.preview.id, fileId: htmlId, revision: htmlSnapshot.revision, totalBytes: 5,
+    state: 'unchanged', previewId: prepared.preview.id, fileId: htmlId, revision: htmlSnapshot.revision, totalBytes: 5, wait: true,
   });
   assert.deepEqual(previewChunk(prepared.preview.id, htmlId, htmlSnapshot, htmlSnapshot.revision, 0), {
     state: 'chunk', previewId: prepared.preview.id, fileId: htmlId, revision: htmlSnapshot.revision,

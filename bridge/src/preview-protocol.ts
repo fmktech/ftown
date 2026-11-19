@@ -4,6 +4,19 @@ export const PREVIEW_MAX_FILES = 12;
 export const PREVIEW_CHUNK_BYTES = 98_304;
 export const PREVIEW_POLL_MS = 1_000;
 export const PREVIEW_MAX_CONCURRENT_READS = 4;
+/**
+ * Waiting for a change instead of asking every second. A status request that names the revision the browser already has may add
+ * `waitMs`: the bridge then answers as soon as the file changes, or `unchanged` once the wait is over. A bridge that supports this
+ * marks its `ready` and `unchanged` answers with `wait: true`; a browser sends `waitMs` only to a bridge that has done so, because
+ * an older bridge refuses the unknown field.
+ */
+export const PREVIEW_WAIT_MS = 20_000;
+/** The longest wait a bridge accepts. */
+export const PREVIEW_MAX_WAIT_MS = 30_000;
+/** How often a held request looks at the file: a local stat, never a read or a network round trip. */
+export const PREVIEW_WAIT_CHECK_MS = 250;
+/** Held requests per bridge. Beyond this a request is answered at once, as if it had not asked to wait. */
+export const PREVIEW_MAX_WAITERS = 16;
 
 export type SessionPreviewKind = 'html' | 'markdown';
 
@@ -71,7 +84,7 @@ export interface SessionPreviewUnavailable {
 export type SessionPreviewStatus =
   | { state: 'unregistered' }
   | SessionPreviewUnavailable
-  | { state: 'ready' | 'unchanged'; previewId: string; fileId: string; revision: string; totalBytes: number };
+  | { state: 'ready' | 'unchanged'; previewId: string; fileId: string; revision: string; totalBytes: number; wait?: true };
 
 export type SessionPreviewChunk =
   | { state: 'stale_revision' }

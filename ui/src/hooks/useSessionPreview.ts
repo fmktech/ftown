@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { v4 as uuidv4 } from 'uuid';
-import { PREVIEW_POLL_MS, type PreviewUnavailableReason, type SessionPreviewDescriptor, type SessionPreviewFile } from '../../../bridge/src/preview-protocol';
+import { PREVIEW_POLL_MS, PREVIEW_WAIT_MS, type PreviewUnavailableReason, type SessionPreviewDescriptor, type SessionPreviewFile } from '../../../bridge/src/preview-protocol';
 import type { MessageClient } from '@/lib/message-client';
 import type { BridgeRpc } from '@/hooks/useBridgeRpc';
 import { isPreviewDescriptor, parseChunk, parseStatus, verifyPreview } from '@/lib/session-preview';
@@ -20,6 +20,8 @@ interface Store {
   identity: string; client: MessageClient | null; runtime: MessageClient['securityRuntime']; userId: string; readable: boolean; subscriber?: SessionPreviewAuthoritySubscriber;
   visible: boolean; documentVisible: boolean; securityGeneration: number; epoch: number; nonce: number; manualRequested: number; manualApplied: number; hardEpoch: number;
   complete: Complete | null; status: PreviewState; fingerprint: string | null;
+  /** The bridge said it can hold a status request until the file changes. Learned from its answers, forgotten on any failure. */
+  waitable: boolean;
 }
 
 function isTransient(value: unknown): boolean {
@@ -42,9 +44,9 @@ export function useSessionPreview({ client, userId, target: requestedTarget, vis
   const refreshRef = useRef<() => void>(() => {});
   const authorityCheckRef = useRef<() => void>(() => {});
   const storeRef = useRef<Store>({ identity, client, runtime: client?.securityRuntime, userId, readable, subscriber: subscribeAuthority, visible, documentVisible, securityGeneration,
-    epoch: 0, nonce: 0, manualRequested: 0, manualApplied: 0, hardEpoch: 0, complete: null, status: { kind: 'loading' }, fingerprint: null });
+    epoch: 0, nonce: 0, manualRequested: 0, manualApplied: 0, hardEpoch: 0, complete: null, status: { kind: 'loading' }, fingerprint: null, waitable: false });
   const store = storeRef.current;
-  const clear = () => { store.hardEpoch++; store.epoch++; store.manualApplied = store.manualRequested; store.complete = null; store.fingerprint = null; store.status = { kind: 'loading' }; };
+  const clear = () => { store.hardEpoch++; store.epoch++; store.manualApplied = store.manualRequested; store.complete = null; store.fingerprint = null; store.status = { kind: 'loading' }; store.waitable = false; };
   if (store.identity !== identity || store.client !== client || store.runtime !== client?.securityRuntime || store.userId !== userId || store.subscriber !== subscribeAuthority) {
     clear(); store.identity = identity; store.client = client; store.runtime = client?.securityRuntime; store.userId = userId; store.subscriber = subscribeAuthority;
   }
@@ -119,6 +121,9 @@ export function useSessionPreview({ client, userId, target: requestedTarget, vis
     if (!target || !visible || !client || !readable || !documentVisible || (client.securityRuntime && (!store.fingerprint || client.securityRuntime.state(target.bridgeId).status !== 'ready'))) return;
     let active = true; let busy = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    // Set while a status request is held open by the bridge: calling it abandons that request so a manual refresh runs at once.
+    let abandonWait: (() => void) | null = null;
+    const ABANDONED = Symbol('abandoned');
     const isActive = () => active && store.epoch === epoch;
     const mayCommit = () => {
       if (!isActive()) return false;
@@ -152,9 +157,19 @@ export function useSessionPreview({ client, userId, target: requestedTarget, vis
         if (complete && manual) { store.status = { kind: 'ready', ...complete, updating: true }; render(); }
         else if (!complete) { store.status = { kind: 'loading' }; render(); }
         const base = { bridgeId: target.bridgeId, sessionId: target.sessionId, previewId: target.preview.id, fileId: target.file.id };
-        const raw = await command('session_preview_status', { ...base, ...(complete ? { knownRevision: complete.revision } : {}) });
+        // With content already shown and a bridge that can wait, the request stays open until the file changes (or the wait ends):
+        // an idle preview then costs one request per wait instead of one per second.
+        const wait = !!complete && !manual && store.waitable;
+        const request = command('session_preview_status', { ...base, ...(complete ? { knownRevision: complete.revision } : {}), ...(wait ? { waitMs: PREVIEW_WAIT_MS } : {}) });
+        let raw: unknown;
+        if (wait) {
+          raw = await Promise.race([request, new Promise<typeof ABANDONED>(resolve => { abandonWait = () => resolve(ABANDONED); })]);
+          abandonWait = null;
+          if (raw === ABANDONED) { request.catch(() => {}); return; }
+        } else raw = await request;
         if (!mayCommit()) return;
         const status = parseStatus(raw, target.preview.id, target.file.id);
+        store.waitable = (status.state === 'ready' || status.state === 'unchanged') && status.wait === true;
         if (status.state === 'unregistered' || status.state === 'unavailable') {
           store.hardEpoch++; store.complete = null;
           if (status.state === 'unregistered') store.manualApplied = manualVersion;
@@ -186,6 +201,9 @@ export function useSessionPreview({ client, userId, target: requestedTarget, vis
         }
         render();
       } catch (error) {
+        abandonWait = null;
+        // An older bridge refuses the wait field; ask plainly until a bridge offers it again.
+        store.waitable = false;
         if (isActive()) {
           let retain = false;
           const browserOffline = typeof navigator !== 'undefined' && !navigator.onLine;
@@ -205,9 +223,9 @@ export function useSessionPreview({ client, userId, target: requestedTarget, vis
         if (isActive()) { if (store.manualRequested > manualVersion) void poll(); else schedule(); }
       }
     };
-    refreshRef.current = () => { store.manualRequested++; if (timer) clearTimeout(timer); if (!busy) void poll(); };
+    refreshRef.current = () => { store.manualRequested++; if (timer) clearTimeout(timer); if (!busy) void poll(); else abandonWait?.(); };
     void poll();
-    return () => { active = false; clearTimeout(timer); refreshRef.current = () => {}; };
+    return () => { active = false; abandonWait = null; clearTimeout(timer); refreshRef.current = () => {}; };
   }, [client, userId, identity, target?.bridgeId, target?.sessionId, target?.preview.id, target?.file.id, visible, readable, documentVisible, sendCommand, epoch, store]);
   const refresh = useCallback(() => refreshRef.current(), []);
   const state: PreviewState = !target ? { kind: 'unregistered' } : !client || (!readable && !store.complete) ? { kind: 'offline' } : store.status;

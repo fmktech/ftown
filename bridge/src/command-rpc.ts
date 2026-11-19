@@ -36,7 +36,7 @@ import type { AttentionAnswerDelivery } from './attention-prompt-protocol.js';
 import { BridgeUpdateError, type BridgeUpdateCoordinator } from './bridge-update.js';
 import type { UpdateEffects } from './update-effects.js';
 import { validFileId, validPreviewId, validRevision } from './session-preview.js';
-import { PREVIEW_CHUNK_BYTES } from './preview-protocol.js';
+import { PREVIEW_CHUNK_BYTES, PREVIEW_MAX_WAIT_MS } from './preview-protocol.js';
 import type { DirectAddress } from './direct-transport/contract.js';
 import type { ModelRoutingService } from './quota/routing-service.js';
 import type { ModelRoutingConfig } from './quota/types.js';
@@ -306,12 +306,15 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
           const payload = command.payload;
           const keys = Object.keys(payload);
           const common = ['bridgeId', 'sessionId', 'previewId', 'fileId'];
-          const allowed = command.type === 'session_preview_status' ? [...common, 'knownRevision'] : [...common, 'revision', 'offset'];
+          const allowed = command.type === 'session_preview_status' ? [...common, 'knownRevision', 'waitMs'] : [...common, 'revision', 'offset'];
           if (keys.some(key => !allowed.includes(key)) || !('bridgeId' in payload) || payload.bridgeId !== bridgeId
             || !('sessionId' in payload) || typeof payload.sessionId !== 'string' || !/^[A-Za-z0-9_-]{1,200}$/.test(payload.sessionId)
             || !('previewId' in payload) || !validPreviewId(payload.previewId)
             || !('fileId' in payload) || !validFileId(payload.fileId)
             || (command.type === 'session_preview_status' && 'knownRevision' in payload && !validRevision(payload.knownRevision))
+            // Waiting only makes sense against a revision the caller already holds.
+            || (command.type === 'session_preview_status' && 'waitMs' in payload && (!('knownRevision' in payload) || typeof payload.waitMs !== 'number'
+              || !Number.isInteger(payload.waitMs) || payload.waitMs < 1 || payload.waitMs > PREVIEW_MAX_WAIT_MS))
             || (command.type === 'session_preview_chunk' && (!('revision' in payload) || !validRevision(payload.revision)
               || !('offset' in payload) || typeof payload.offset !== 'number' || !Number.isSafeInteger(payload.offset)
               || payload.offset < 0 || payload.offset % PREVIEW_CHUNK_BYTES !== 0))) {
@@ -319,7 +322,8 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
             break;
           }
           const result = command.type === 'session_preview_status'
-            ? await sessionController.getPreviewStatus(payload.sessionId, payload.previewId, payload.fileId, 'knownRevision' in payload && typeof payload.knownRevision === 'string' ? payload.knownRevision : undefined)
+            ? await sessionController.getPreviewStatus(payload.sessionId, payload.previewId, payload.fileId, 'knownRevision' in payload && typeof payload.knownRevision === 'string' ? payload.knownRevision : undefined,
+              'waitMs' in payload && typeof payload.waitMs === 'number' ? payload.waitMs : 0)
             : await sessionController.getPreviewChunk(payload.sessionId, payload.previewId, payload.fileId, 'revision' in payload && typeof payload.revision === 'string' ? payload.revision : '', 'offset' in payload && typeof payload.offset === 'number' ? payload.offset : -1);
           response = result.ok ? { requestId: command.requestId, success: true, data: result.preview }
             : { requestId: command.requestId, success: false, error: result.message, data: { code: result.code } };

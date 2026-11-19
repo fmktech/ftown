@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { PREVIEW_MAX_WAITERS, PREVIEW_MAX_WAIT_MS } from './preview-protocol.js';
 import { SessionController, type SessionStoreLike } from './session-controller.js';
 import type { Session } from './types.js';
 import { createCommandHandler, type CommandRpcDeps } from './command-rpc.js';
@@ -419,8 +420,8 @@ test('RPC requires fileId and threads it to the controller', async () => {
   const calls: Array<{ method: string; args: unknown[] }> = [];
   const statusState = { state: 'ready' as const, previewId: 'p', fileId: 'f', revision: 'r', totalBytes: 1 };
   const fake = {
-    getPreviewStatus: async (sessionId: string, previewId: string, fileId: string) => {
-      calls.push({ method: 'status', args: [sessionId, previewId, fileId] });
+    getPreviewStatus: async (sessionId: string, previewId: string, fileId: string, knownRevision?: string, waitMs?: number) => {
+      calls.push({ method: 'status', args: knownRevision === undefined ? [sessionId, previewId, fileId] : [sessionId, previewId, fileId, knownRevision, waitMs] });
       return { ok: true as const, preview: statusState };
     },
     getPreviewChunk: async (sessionId: string, previewId: string, fileId: string, revision: string, offset: number) => {
@@ -453,6 +454,21 @@ test('RPC requires fileId and threads it to the controller', async () => {
   await send('session_preview_status', { bridgeId: 'bridge-1', sessionId: 'sess-1', previewId, fileId }, 'r-ok');
   assert.equal(responses.at(-1)?.success, true);
   assert.deepEqual(calls.at(-1), { method: 'status', args: ['sess-1', previewId, fileId] });
+  // a wait is passed through with the revision it waits against
+  await send('session_preview_status', { bridgeId: 'bridge-1', sessionId: 'sess-1', previewId, fileId, knownRevision: revision, waitMs: 20_000 }, 'r-wait');
+  assert.equal(responses.at(-1)?.success, true);
+  assert.deepEqual(calls.at(-1), { method: 'status', args: ['sess-1', previewId, fileId, revision, 20_000] });
+  // a known revision without a wait asks for an immediate answer
+  await send('session_preview_status', { bridgeId: 'bridge-1', sessionId: 'sess-1', previewId, fileId, knownRevision: revision }, 'r-known');
+  assert.deepEqual(calls.at(-1), { method: 'status', args: ['sess-1', previewId, fileId, revision, 0] });
+  // a wait with nothing to wait against, or outside the accepted range, is invalid
+  const before = calls.length;
+  for (const bad of [{ waitMs: 1_000 }, { knownRevision: revision, waitMs: 0 }, { knownRevision: revision, waitMs: PREVIEW_MAX_WAIT_MS + 1 }, { knownRevision: revision, waitMs: '1000' }, { knownRevision: revision, waitMs: 1.5 }]) {
+    await send('session_preview_status', { bridgeId: 'bridge-1', sessionId: 'sess-1', previewId, fileId, ...bad }, 'r-bad-wait');
+    assert.equal(responses.at(-1)?.success, false);
+    assert.deepEqual(responses.at(-1)?.data, { code: 'invalid' });
+  }
+  assert.equal(calls.length, before);
   // valid chunk passes fileId through
   await send('session_preview_chunk', { bridgeId: 'bridge-1', sessionId: 'sess-1', previewId, fileId, revision, offset: 0 }, 'r-chunk');
   assert.equal(responses.at(-1)?.success, true);
@@ -544,4 +560,118 @@ test('CLI preview supports replace, --add, --remove, --clear with mutual exclusi
     assert.ok(output.some((line) => line.includes('.html') || line.includes('preview files') || line.includes('12')));
     assert.equal(requests.length, before);
   });
+});
+
+/** A registered single-file preview and the revision a browser would already hold. */
+async function waitingPreview(t: { after(fn: () => unknown): void }) {
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'ftown-preview-wait-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, 'page.html');
+  await writeFile(path, '<p>one</p>');
+  const { controller } = setup([makeSession(root)]);
+  (controller as unknown as { previewWaitCheckMs: number }).previewWaitCheckMs = 5;
+  const set = await controller.setPreview('sess-1', [path]);
+  assert.ok(set.ok);
+  if (!set.ok) throw new Error('unreachable');
+  const previewId = set.session.preview!.id;
+  const fileId = set.session.preview!.files[0].id;
+  const first = await controller.getPreviewStatus('sess-1', previewId, fileId);
+  assert.ok(first.ok && first.preview.state === 'ready');
+  if (!first.ok || first.preview.state !== 'ready') throw new Error('unreachable');
+  // The marker a browser needs before it may ask to wait.
+  assert.equal(first.preview.wait, true);
+  return { root, path, controller, previewId, fileId, revision: first.preview.revision };
+}
+
+test('a waiting status request is answered when the file is replaced, not before', async (t) => {
+  const { root, path, controller, previewId, fileId, revision } = await waitingPreview(t);
+  let answered = false;
+  const pending = controller.getPreviewStatus('sess-1', previewId, fileId, revision, 20_000).then(result => { answered = true; return result; });
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal(answered, false);
+  // Published the documented way: written beside the file, then renamed over it.
+  const next = join(root, '.page.html.tmp');
+  await writeFile(next, '<p>two</p>');
+  await rename(next, path);
+  const result = await pending;
+  assert.ok(result.ok && result.preview.state === 'ready');
+  if (result.ok && result.preview.state === 'ready') {
+    assert.equal(result.preview.revision, createHash('sha256').update('<p>two</p>').digest('hex'));
+    assert.notEqual(result.preview.revision, revision);
+  }
+});
+
+test('a waiting status request answers unchanged once its wait is over', async (t) => {
+  const { controller, previewId, fileId, revision } = await waitingPreview(t);
+  const started = Date.now();
+  const result = await controller.getPreviewStatus('sess-1', previewId, fileId, revision, 80);
+  assert.ok(Date.now() - started >= 70);
+  assert.ok(result.ok && result.preview.state === 'unchanged');
+});
+
+test('a file rewritten with the same content keeps the request waiting', async (t) => {
+  const { path, controller, previewId, fileId, revision } = await waitingPreview(t);
+  const started = Date.now();
+  const pending = controller.getPreviewStatus('sess-1', previewId, fileId, revision, 150);
+  await new Promise(resolve => setTimeout(resolve, 30));
+  await writeFile(path, '<p>one</p>');
+  const result = await pending;
+  assert.ok(result.ok && result.preview.state === 'unchanged');
+  assert.ok(Date.now() - started >= 140);
+});
+
+test('a waiting status request reports a deleted file at once', async (t) => {
+  const { path, controller, previewId, fileId, revision } = await waitingPreview(t);
+  const pending = controller.getPreviewStatus('sess-1', previewId, fileId, revision, 20_000);
+  await new Promise(resolve => setTimeout(resolve, 30));
+  await rm(path);
+  const result = await pending;
+  assert.ok(result.ok && result.preview.state === 'unavailable');
+});
+
+test('waiting ends at once when the bridge stops holding requests, and is never started while it is closed', async (t) => {
+  const { controller, previewId, fileId, revision } = await waitingPreview(t);
+  let open = true;
+  controller.setPreviewWaitGate(() => open);
+  const pending = controller.getPreviewStatus('sess-1', previewId, fileId, revision, 20_000);
+  await new Promise(resolve => setTimeout(resolve, 30));
+  open = false;
+  const started = Date.now();
+  const held = await pending;
+  assert.ok(held.ok && held.preview.state === 'unchanged');
+  const closed = await controller.getPreviewStatus('sess-1', previewId, fileId, revision, 20_000);
+  assert.ok(closed.ok && closed.preview.state === 'unchanged');
+  assert.ok(Date.now() - started < 1_000);
+});
+
+test('more waiting requests than the bridge holds are answered at once', async (t) => {
+  const { controller, previewId, fileId, revision } = await waitingPreview(t);
+  let open = true;
+  controller.setPreviewWaitGate(() => open);
+  // Started one after another: the file reader itself only allows a few reads at the same moment.
+  const held: ReturnType<typeof controller.getPreviewStatus>[] = [];
+  let settled = 0;
+  for (let i = 0; i < PREVIEW_MAX_WAITERS; i++) {
+    held.push(controller.getPreviewStatus('sess-1', previewId, fileId, revision, 20_000).finally(() => { settled++; }));
+    await new Promise(resolve => setTimeout(resolve, 15));
+  }
+  assert.equal(settled, 0);
+  const started = Date.now();
+  const extra = await controller.getPreviewStatus('sess-1', previewId, fileId, revision, 20_000);
+  assert.ok(extra.ok && extra.preview.state === 'unchanged');
+  assert.ok(Date.now() - started < 1_000);
+  open = false;
+  for (const result of await Promise.all(held)) assert.ok(result.ok && result.preview.state === 'unchanged');
+  // The slots are free again.
+  open = true;
+  const again = controller.getPreviewStatus('sess-1', previewId, fileId, revision, 60);
+  assert.ok((await again).ok);
+});
+
+test('a wait outside the accepted range is refused', async (t) => {
+  const { controller, previewId, fileId, revision } = await waitingPreview(t);
+  for (const waitMs of [-1, 1.5, PREVIEW_MAX_WAIT_MS + 1, Number.NaN]) {
+    const result = await controller.getPreviewStatus('sess-1', previewId, fileId, revision, waitMs);
+    assert.deepEqual(result, { ok: false, code: 'invalid', message: 'Invalid preview request' });
+  }
 });

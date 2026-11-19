@@ -1005,6 +1005,8 @@ program
       flushTerminalBuffer: (sid) => pump.flush(sid),
       destroyTerminal: (sid) => terminalManager.destroy(sid),
     });
+    // A held preview status must not keep an update waiting: once admission freezes, held requests answer within one check.
+    sessionController.setPreviewWaitGate(() => !updateAdmission.isFrozen);
 
     localApiServer.setSessionController(sessionController);
     const pullRequestReview = createPrReviewService({ bridgeId, loadSession: id => sessionController.get(id), revalidate: principal => security.policy.revalidate(principal, 'read') });
