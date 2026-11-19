@@ -2,8 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { generateEndpoint, open, seal } from '@security/crypto';
 import type { SecureApplication, SecureEnvelope } from '@security/protocol';
 import { SecureEndpointRuntime } from '../secure-endpoint-runtime';
-import { WebRtcPeer, toIceCandidateInit } from './webrtc-peer';
-import { PAIR_TIMEOUT_MS, PING_INTERVAL_MS, type SignalMessage } from './contract';
+import { WebRtcPeer, addressedAnswer, addressedPairId, toIceCandidateInit, validPeerAddress } from './webrtc-peer';
+import { ADDRESSED_TIMEOUT_MS, ADDRESSED_UFRAG_PREFIX, PAIR_TIMEOUT_MS, PING_INTERVAL_MS, type SignalMessage } from './contract';
 
 const ownerId = '00000000-0000-4000-8000-000000000001';
 class Channel {
@@ -133,5 +133,94 @@ describe('encrypted WebRTC peer', () => {
     await vi.advanceTimersByTimeAsync(PING_INTERVAL_MS);
     expect(f.connection.channel.readyState).toBe('closed'); expect(sibling.connection.channel.readyState).toBe('open');
     sibling.peer.close(); f.runtime.dispose(); sibling.runtime.dispose();
+  });
+});
+
+describe('connecting to a remembered address with no signaling', () => {
+  const FINGERPRINT = Array.from({ length: 32 }, (_, index) => index.toString(16).padStart(2, '0').toUpperCase()).join(':');
+  const address = { ip: '192.168.1.20', port: 47001, fingerprint: FINGERPRINT };
+  const PWD = 'ABCDEFGHIJKLMNOPQRSTUVWX';
+  const OFFER = ['v=0', 'a=ice-ufrag:abcd', `a=ice-pwd:${PWD}`, ''].join('\r\n');
+
+  /** A connection that reports the offer it was given as its local description, as a browser does. */
+  class AddressedConnection extends Connection {
+    localDescription: { sdp: string } | null = null; channelArgs: unknown[] = []; local: unknown;
+    override createDataChannel(...args: unknown[]) { this.channelArgs = args; return this.channel; }
+    override async createOffer() { return { type: 'offer', sdp: OFFER }; }
+    override async setLocalDescription(value?: unknown) { this.local = value; this.localDescription = { sdp: OFFER }; }
+  }
+  async function addressed(options: { address?: unknown } = {}) {
+    Connection.instances = []; vi.stubGlobal('RTCPeerConnection', AddressedConnection);
+    const browser = await generateEndpoint(ownerId, 'browser'); const bridge = await generateEndpoint(ownerId, 'bridge');
+    const runtime = new SecureEndpointRuntime(browser, [{ bridgeId: 'bridge-one', endpoint: bridge.endpoint, permissions: ['read', 'control', 'admin'] }]);
+    const signals: SignalMessage[] = [];
+    const peer = new WebRtcPeer({ bridgeId: 'bridge-one', clientId: 'tab', securityRuntime: runtime, sendSignal: message => signals.push(message),
+      address: (options.address ?? address) as typeof address });
+    const connecting = peer.connect();
+    connecting.catch(() => {});
+    return { peer, runtime, connecting, signals, bridge, browser, connection: () => Connection.instances[0] as AddressedConnection };
+  }
+
+  it('derives the same pair id as the bridge and writes the bridge\'s answer itself', async () => {
+    // The value the bridge's addressed-listener test pins for the same credentials.
+    expect(await addressedPairId('abcd', PWD)).toBe('aAH1KfcHwXRj-8L5ykn_qaR_F6l-WA_VYkrhOHl85rRk');
+    const lines = addressedAnswer(address, PWD).split('\r\n');
+    for (const line of ['a=ice-lite', 'a=setup:passive', 'a=mid:0', `a=ice-ufrag:${ADDRESSED_UFRAG_PREFIX}${PWD}`, `a=ice-pwd:${ADDRESSED_UFRAG_PREFIX}${PWD}`,
+      `a=fingerprint:sha-256 ${FINGERPRINT}`, 'c=IN IP4 192.168.1.20', 'm=application 47001 UDP/DTLS/SCTP webrtc-datachannel', 'a=candidate:1 1 UDP 1 192.168.1.20 47001 typ host']) expect(lines).toContain(line);
+  });
+
+  it('accepts only an address that can be written into SDP as it is', () => {
+    expect(validPeerAddress(address)).toBe(true);
+    for (const bad of [null, [], {}, { ...address, ip: '192.168.1.20\r\na=x' }, { ...address, ip: 'example.com' }, { ...address, ip: '999.1.1.1' }, { ...address, ip: 'fd00::1' },
+      { ...address, port: 0 }, { ...address, port: 70000 }, { ...address, port: '47001' }, { ...address, fingerprint: 'AA:BB' }, { ...address, fingerprint: FINGERPRINT.toLowerCase() },
+      { ...address, fingerprint: `${FINGERPRINT}\r\na=x` }]) expect(validPeerAddress(bad)).toBe(false);
+  });
+
+  it('sets its own offer unchanged, then the written answer, on a pre-negotiated channel, and signals nothing', async () => {
+    const f = await addressed();
+    await vi.waitFor(() => expect(f.connection()?.remote).toBeDefined());
+    const connection = f.connection();
+    expect(connection.channelArgs).toEqual(['', { negotiated: true, id: 0, ordered: true }]);
+    // The offer goes in exactly as the browser made it: no credential is rewritten.
+    expect(connection.local).toEqual({ type: 'offer', sdp: OFFER });
+    expect(connection.remote).toEqual({ type: 'answer', sdp: addressedAnswer(address, PWD) });
+    expect(connection.onicecandidate).toBeUndefined();
+    expect(f.signals).toEqual([]);
+    // The encrypted channel is bound to the pair id both sides derive from the ICE credentials.
+    const pairId = await addressedPairId('abcd', PWD); const channelName = `direct:webrtc:bridge-one:${pairId}`;
+    connection.channel.wire = async packet => {
+      const plain = JSON.parse(new TextDecoder().decode(await open(f.bridge, f.browser.endpoint, packet,
+        { ownerId, bridgeId: 'bridge-one', channel: channelName, recipientId: f.bridge.endpoint.id, purpose: packet.purpose })));
+      const now = Date.now();
+      connection.channel.receive(await seal(f.bridge, f.browser.endpoint, { type: 'ftown_encrypted', version: 1, senderId: f.bridge.endpoint.id, recipientId: f.browser.endpoint.id,
+        ownerId, bridgeId: 'bridge-one', channel: channelName, purpose: 'welcome', messageId: packet.messageId, createdAt: now, expiresAt: now + 120000, receiverEpoch: null },
+        new TextEncoder().encode(JSON.stringify({ type: 'welcome', challenge: plain.challenge, receiverEpoch: 'boot-one' }))));
+    };
+    connection.channel.open();
+    await f.connecting;
+    // Signals addressed to this peer are not for it, and closing sends none.
+    f.peer.handleSignal({ type: 'webrtc_answer', bridgeId: 'bridge-one', clientId: 'tab', pairId, payload: 'other-sdp' });
+    expect(connection.remote).toEqual({ type: 'answer', sdp: addressedAnswer(address, PWD) });
+    f.peer.close();
+    expect(f.signals).toEqual([]);
+    f.runtime.dispose();
+  });
+
+  it('gives up quickly when the address does not answer', async () => {
+    vi.useFakeTimers();
+    const f = await addressed();
+    const rejected = expect(f.connecting).rejects.toThrow('pair timeout');
+    await vi.advanceTimersByTimeAsync(ADDRESSED_TIMEOUT_MS);
+    await rejected;
+    expect(ADDRESSED_TIMEOUT_MS).toBeLessThan(PAIR_TIMEOUT_MS);
+    expect(f.signals).toEqual([]);
+    f.runtime.dispose();
+  });
+
+  it('refuses a malformed address before opening anything', async () => {
+    const f = await addressed({ address: { ...address, ip: '192.168.1.20\r\na=candidate:evil' } });
+    await expect(f.connecting).rejects.toThrow('invalid address');
+    expect(Connection.instances).toEqual([]);
+    f.runtime.dispose();
   });
 });

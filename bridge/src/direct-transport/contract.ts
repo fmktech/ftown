@@ -6,6 +6,29 @@
 
 export const DIRECT_PROTOCOL_VERSION = 1;
 export const DATA_CHANNEL_LABEL = 'ftown';
+/**
+ * Connecting to a bridge's fixed address with no signaling. The browser never changes its own offer. It writes the bridge's side
+ * of the exchange itself, giving the bridge an ICE username fragment (and password) of this prefix followed by the browser's own
+ * ICE password. The bridge reads both of the browser's ICE credentials back out of the first STUN request, so nothing has to be
+ * exchanged in advance except the bridge's address, port and certificate fingerprint.
+ */
+export const ADDRESSED_UFRAG_PREFIX = 'ftown+direct+v1/';
+/**
+ * Where a browser can reach this bridge without signaling, as `get_direct_address` answers it. Sent only inside the encrypted
+ * command channel to an approved browser. None of it is a credential: it says where to knock, and the encrypted hello on the
+ * connection still decides who the peer is.
+ */
+export interface DirectAddress {
+  port: number;
+  /** SHA-256 of the bridge's DTLS certificate, as SDP writes it. */
+  fingerprint: string;
+  /** The bridge's current non-loopback addresses (LAN, VPN). */
+  addresses: string[];
+}
+export const MAX_DIRECT_ADDRESSES = 16;
+
+/** The single data channel of an addressed connection: negotiated in advance on both sides, so no in-band open is needed. */
+export const ADDRESSED_CHANNEL_ID = 0;
 export const STUN_SERVERS = ['stun:stun.l.google.com:19302'];
 
 export const PAIR_TIMEOUT_MS = 4_000;
