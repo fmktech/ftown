@@ -505,10 +505,12 @@ export function useAllSessionEvents(
         void attempt.finally(() => { if (summaryAttempts.current.get(summaryKey) === attempt) summaryAttempts.current.delete(summaryKey); }).catch(() => {});
         if (await attempt) return;
       } else if (!unsupportedSummaryBridges.current.has(session.bridgeId)) {
+        // A read already in flight may have started before the change this read is meant to show (a reply, a dismissal). It is
+        // waited for, so answers are not applied out of order, but a resolving read then reads again instead of trusting it.
         const attempt = summaryAttempts.current.get(summaryKey);
-        if (attempt && await attempt) return;
+        if (attempt && await attempt && !resolving) return;
         const inFlight = attentionHydration.current.get(session.bridgeId);
-        if (inFlight) { await inFlight; return; }
+        if (inFlight) { await inFlight; if (!resolving) return; }
       }
       const release = await acquireRead();
       try {
