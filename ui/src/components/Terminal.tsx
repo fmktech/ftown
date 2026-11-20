@@ -1,5 +1,6 @@
 "use client";
 
+import { BridgeBadge, type BridgeIdentity } from "./BridgeBadge";
 import { useEffect, useRef, useState, useCallback, forwardRef, useImperativeHandle, type ReactNode } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -31,6 +32,7 @@ interface TerminalProps {
   sessionId: string | null;
   bridgeId: string | null;
   isRunning: boolean;
+  bridgeIdentity?: BridgeIdentity;
   headerActions?: ReactNode;
   sessionName?: string | null;
   pullRequestUrl?: string;
@@ -133,7 +135,7 @@ function TransportModeBadge({
   );
 }
 
-export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({ transport, sessionId, bridgeId, isRunning, headerActions, sessionName, pullRequestUrl, usage, persistedUsage, onMobileTap, shellType, onInterrupt }, ref) {
+export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Terminal({ transport, sessionId, bridgeId, isRunning, bridgeIdentity, headerActions, sessionName, pullRequestUrl, usage, persistedUsage, onMobileTap, shellType, onInterrupt }, ref) {
   const containerRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<XTerm | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -481,6 +483,7 @@ export const Terminal = forwardRef<TerminalHandle, TerminalProps>(function Termi
                     {sessionName}
                   </span>
                 )}
+                <BridgeBadge full bridge={bridgeIdentity} />
                 <PullRequestLink url={pullRequestUrl} />
               </div>
 

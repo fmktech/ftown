@@ -68,6 +68,10 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
       await testInfo.attach(`account-header-${viewport.name}`, { body: await page.screenshot({ fullPage: true }), contentType: "image/png" });
       if (viewport.name === "mobile") await page.getByRole("tab", { name: "Workspace", exact: true }).click();
       const row = page.locator('#dashboard-sidebar button[draggable="true"]').filter({ has: page.getByText(name, { exact: true }) });
+      const badge = row.locator(".bridge-owner");
+      await expect(badge).toHaveText(/^#\d+$/);
+      await badge.hover();
+      expect(await badge.getAttribute("title")).toBeTruthy();
       await expect(row.getByLabel("Account: coding", { exact: true })).toBeVisible();
       await testInfo.attach(`account-sidebar-${viewport.name}`, { body: await page.screenshot({ fullPage: true }), contentType: "image/png" });
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
