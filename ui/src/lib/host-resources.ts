@@ -14,3 +14,11 @@ export function validResources(value: unknown): value is HostResources {
     && count(r.freeRamBytes) && count(r.totalRamBytes) && r.freeRamBytes <= r.totalRamBytes
     && (r.freeDiskBytes === null || count(r.freeDiskBytes));
 }
+
+export function formatResources(sample?: HostResources): string {
+  if (!sample) return "";
+  const gib = (bytes: number) => (bytes / 2 ** 30).toFixed(1);
+  return `CPU ${sample.cpuPercent ?? "—"}${sample.cpuPercent === null ? "" : "%"} · RAM ${gib(sample.freeRamBytes)}/${gib(sample.totalRamBytes)} GiB free` +
+    (sample.freeDiskBytes === null ? "" : ` · disk ${gib(sample.freeDiskBytes)} GiB free`) +
+    ` · ${new Date(sample.sampledAt).toLocaleTimeString()}`;
+}

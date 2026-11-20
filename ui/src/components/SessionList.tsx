@@ -4,7 +4,6 @@ import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, typ
 import { createPortal } from "react-dom";
 import { Session } from "@/types";
 import { SessionActivity } from "@/hooks/useAllSessionEvents";
-import { BridgeInfo } from "@/hooks/useBridges";
 import { getSessionDropZone, resolveSessionDrop, type SessionDropZone } from "@/lib/session-drop";
 import { StatusDot } from "@/lib/StatusDot";
 import { usePersistentState, stringSetCodec } from "@/lib/use-persistent-state";
@@ -14,9 +13,6 @@ import { SessionStateIndicator } from "./SessionStateIndicator";
 import { HandoffDialog, SessionBlockBadge } from "./SessionBlockBadge";
 import { SessionCardChip, formatCardRollup, rollupChildCards } from "./SessionCardChip";
 import { PullRequestBadgePlaceholder, PullRequestLink } from "./PullRequestLink";
-import type { BridgeSecurityState } from "@security/protocol";
-import { bridgeConnectionLock, SecurityLockIcon } from "./SecurityLockIcon";
-import type { UpdateView } from "@/hooks/useBridgeUpdates";
 
 export function SessionAccountBadge({ account }: { account?: string }) {
   if (!account || account === "default") return null;
@@ -25,8 +21,8 @@ export function SessionAccountBadge({ account }: { account?: string }) {
 }
 
 interface SessionListProps {
+  bridges?: import("@/hooks/useBridges").BridgeInfo[];
   sessions: Session[];
-  bridges: BridgeInfo[];
   selectedSessionId: string | null;
   onSelectSession: (sessionId: string) => void;
   onReviewPullRequest?: (sessionId: string) => void;
@@ -39,19 +35,11 @@ interface SessionListProps {
   onHiddenProjectsChange?: (projects: Set<string>) => void;
   sessionActivity?: Map<string, SessionActivity>;
   collapsed?: boolean;
-  onCreateSession?: (bridgeId: string) => void;
-  onOpenSecurity?: (bridgeId: string) => void;
-  bridgeSecurityStates?: ReadonlyMap<string, BridgeSecurityState["status"]>;
-  bridgeUpdates?: ReadonlyMap<string, UpdateView>;
-  onOpenUpdates?: (bridgeId: string) => void;
-  onOpenModelRouting?: (bridgeId: string) => void;
   onHandoff?: (sessionId: string, input: { shellType?: string; model?: string; name?: string }) => Promise<void>;
   onDismissBlock?: (session: Session) => Promise<void>;
 }
 
-type ContextMenuState =
-  | { kind: "session"; session: Session; x: number; y: number }
-  | { kind: "bridge"; bridgeId: string; x: number; y: number };
+type ContextMenuState = { kind: "session"; session: Session; x: number; y: number };
 
 type DragState =
   | { kind: "bridge"; id: string }
@@ -372,56 +360,8 @@ function SessionContextMenu({
   );
 }
 
-function BridgeContextMenu({
-  menu,
-  isOnline,
-  onCreateSession,
-  onOpenSecurity,
-  onOpenUpdates,
-  onOpenModelRouting,
-  onClose,
-}: {
-  menu: Extract<ContextMenuState, { kind: "bridge" }>;
-  isOnline: boolean;
-  onCreateSession: (bridgeId: string) => void;
-  onOpenSecurity?: (bridgeId: string) => void;
-  onOpenUpdates?: (bridgeId: string) => void;
-  onOpenModelRouting?: (bridgeId: string) => void;
-  onClose: () => void;
-}) {
-  const menuRef = useRef<HTMLDivElement>(null);
-  useDismissContextMenu(onClose, menuRef);
-  const pos = useClampedMenuPosition(menu.x, menu.y, menuRef);
-  useEffect(() => { menuRef.current?.focus(); }, []);
-
-  return createPortal(
-    <div
-      ref={menuRef}
-      role="menu"
-      aria-label="Bridge actions"
-      tabIndex={-1}
-      style={{ ...contextMenuPanelStyle, top: pos.top, left: pos.left, outline: "none" }}
-    >
-      <ContextMenuButton
-        label="Create session"
-        disabled={!isOnline}
-        onClick={() => {
-          if (!isOnline) return;
-          onCreateSession(menu.bridgeId);
-          onClose();
-        }}
-      />
-      {onOpenSecurity && <ContextMenuButton largeOnMobile label="Security log" onClick={() => { onOpenSecurity(menu.bridgeId); onClose(); }} />}
-      {onOpenUpdates && <ContextMenuButton largeOnMobile label="Updates…" onClick={() => { onOpenUpdates(menu.bridgeId); onClose(); }} />}
-      {onOpenModelRouting && <ContextMenuButton largeOnMobile label="Model routing…" onClick={() => { onOpenModelRouting(menu.bridgeId); onClose(); }} />}
-    </div>,
-    document.body
-  );
-}
-
 export function SessionList({
-  bridges, onCreateSession, onOpenSecurity, onOpenUpdates, onOpenModelRouting,
-  sessions, bridgeSecurityStates, bridgeUpdates, onHiddenProjectsChange,
+  sessions, onHiddenProjectsChange,
   selectedSessionId,
   onSelectSession,
   onReviewPullRequest,
@@ -444,6 +384,7 @@ export function SessionList({
   const [dragOverZone, setDragOverZone] = useState<SessionDropZone | null>(null);
   const [hiddenProjects, setHiddenProjects] = usePersistentState<Set<string>>("ftown:hiddenProjects", EMPTY_ID_SET, stringSetCodec);
   useEffect(() => { onHiddenProjectsChange?.(hiddenProjects); }, [hiddenProjects, onHiddenProjectsChange]);
+  const [collapsedProjects, setCollapsedProjects] = usePersistentState<Set<string>>("ftown:collapsedProjects", EMPTY_ID_SET, stringSetCodec);
   const [collapsedSessions, setCollapsedSessions] = usePersistentState<Set<string>>(
     "ftown:collapsedSessions",
     EMPTY_ID_SET,
@@ -567,11 +508,8 @@ export function SessionList({
     return map;
   }, [sessions]);
 
-  const bridgeMenuAnchor = useRef<HTMLButtonElement>(null);
   const closeContextMenu = useCallback(() => {
     setContextMenu(null);
-    bridgeMenuAnchor.current?.focus();
-    bridgeMenuAnchor.current = null;
   }, []);
 
   function startEditing(session: Session): void {
@@ -1138,12 +1076,6 @@ export function SessionList({
     roots.push(root);
     projects.set(project, roots);
   }
-  const computers = new Map(sessions.map(session => [session.bridgeId, session.bridgeId]));
-  for (const id of bridgeSecurityStates?.keys() ?? []) computers.set(id, id);
-  for (const bridge of bridges) computers.set(bridge.bridgeId, bridge.hostname || bridge.bridgeId);
-  for (const [id, status] of bridgeSecurityStates ?? []) {
-    if (status === "revoked") computers.delete(id);
-  }
   function toggleProject(project: string) {
     setHiddenProjects(previous => {
       const next = new Set(previous);
@@ -1167,10 +1099,15 @@ export function SessionList({
               if (drag?.kind === "session" && roots.some(root => root.children.some(child => child.session.id === drag.id))) onSetSessionParent?.(drag.id, null);
               clearDragState();
             }}>
-            <strong className="min-w-0 truncate text-sm">{project || "No project"}</strong>
+            <button type="button" className="min-w-0 truncate py-1 text-left text-sm font-semibold" aria-expanded={!collapsedProjects.has(project)}
+              onClick={() => setCollapsedProjects(previous => {
+                const next = new Set(previous);
+                if (next.has(project)) next.delete(project); else next.add(project);
+                return next;
+              })}><span aria-hidden="true">{collapsedProjects.has(project) ? "▸ " : "▾ "}</span>{project || "No project"}</button>
             <button type="button" className="btn-ghost text-xs" aria-label={`Hide project ${project || "No project"}`} onClick={() => toggleProject(project)}>Hide</button>
           </div>}
-          {flattenSessionTree(roots, collapsedSessions).map(row => renderSessionRow(row.session, {
+          {(collapsed || !collapsedProjects.has(project)) && flattenSessionTree(roots, collapsedSessions).map(row => renderSessionRow(row.session, {
             depth: row.depth, hasChildren: row.hasChildren, descendantCount: row.descendantCount,
             isCollapsed: collapsedSessions.has(row.session.id), onToggleCollapse: () => toggleSessionCollapsed(row.session.id),
           }))}
@@ -1182,29 +1119,6 @@ export function SessionList({
           <button type="button" className="btn-ghost block text-xs" key={project} onClick={() => toggleProject(project)}>Show {project || "No project"}</button>)}
       </details>}
       {!sessions.length && !collapsed && <p className="p-4 text-xs text-[var(--text-muted)]">No sessions yet</p>}
-      {!collapsed && (onOpenUpdates || onOpenSecurity || onOpenModelRouting) && computers.size > 0 &&
-        <nav aria-label="Computer settings" className="mt-3 border-t border-[var(--border-subtle)] p-2">
-          {Array.from(computers, ([id, label]) => {
-            const lock = bridgeConnectionLock(bridgeSecurityStates?.get(id));
-            const update = bridgeUpdates?.get(id)?.status;
-            return <div key={id} data-bridge-row={id} className="flex items-center justify-between">
-              <button className="btn-ghost min-h-11 min-w-11 text-xs" aria-label={`Actions for ${label}`} aria-haspopup="menu"
-                aria-expanded={contextMenu?.kind === "bridge" && contextMenu.bridgeId === id}
-                onClick={event => {
-                  bridgeMenuAnchor.current = event.currentTarget;
-                  const rect = event.currentTarget.getBoundingClientRect();
-                  setContextMenu({ kind: "bridge", bridgeId: id, x: rect.left, y: rect.bottom });
-                }}>{label} {update && <span>v{update.currentVersion}{update.availability === "available" ? " ↑" : ""}</span>} ⋯</button>
-              {onOpenSecurity && <button aria-label={`Security log for ${label}`} title={lock.title}
-                style={{ color: "var(--text-muted)" }} onClick={() => onOpenSecurity(id)}>
-                <SecurityLockIcon state={lock.state} />
-              </button>}
-            </div>;
-          })}
-        </nav>}
-      {contextMenu?.kind === "bridge" && <BridgeContextMenu menu={contextMenu} isOnline={bridges.some(b => b.bridgeId === contextMenu.bridgeId)}
-        onCreateSession={onCreateSession ?? (() => {})} onOpenSecurity={onOpenSecurity} onOpenUpdates={onOpenUpdates}
-        onOpenModelRouting={onOpenModelRouting} onClose={closeContextMenu} />}
       {contextMenu?.kind === "session" && onStopSession && onRemoveSession && (
         <SessionContextMenu
           menu={contextMenu}

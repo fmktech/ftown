@@ -4,7 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { DeviceDisplayNameEditor } from "./DeviceDisplayNameEditor";
 import { SecurityAccessMap, type SecurityAccessMapProps } from "./SecurityAccessMap";
 import { bridgeConnectionLock } from "./SecurityLockIcon";
-import { SessionList } from "./SessionList";
+import { BridgesDialog } from "./BridgesDialog";
 import { deriveCurrentComputerIds } from "./Dashboard";
 import type { SecurityBridge } from "./SecurityPanel";
 import type { TerminalTransportMode } from "@/lib/direct-transport/contract";
@@ -69,21 +69,22 @@ it.each([
 });
 it("passes actual sidebar state independently of bridge presence and preserves the security navigation action", () => {
   const open = vi.fn();
-  const data = { sessions: [], bridges: [{ clientId: "client", bridgeId: "bridge", hostname: "alpha", connectedAt: "2026-10-26T12:00:00Z" }],
-    selectedSessionId: null, onSelectSession: vi.fn(), onOpenSecurity: open };
-  const view = render(<SessionList {...data} />);
+  HTMLDialogElement.prototype.showModal = function () { this.setAttribute("open", ""); };
+  HTMLDialogElement.prototype.close = function () { this.removeAttribute("open"); };
+  const data = { resources: new Map(), selected: null, onSelect: vi.fn(), create: vi.fn(), security: open, updates: vi.fn(), routing: vi.fn(), close: vi.fn() };
+  const computer = { id: "bridge", label: "alpha", ready: false, online: true };
+  const view = render(<BridgesDialog {...data} computers={[computer]} />);
   const button = screen.getByRole("button", { name: "Security log for alpha" });
   expect(button.title).toContain("Connection status unknown");
   expect(button.querySelector("svg")?.getAttribute("data-lock-state")).toBe("unknown");
-  view.rerender(<SessionList {...data} bridgeSecurityStates={new Map([["bridge", "unpaired"]])} />);
+  view.rerender(<BridgesDialog {...data} computers={[{ ...computer, connection: "unpaired" }]} />);
   expect(button.title).toContain("Approval required");
   expect(button.querySelector("svg")?.getAttribute("data-lock-state")).toBe("approval_needed");
-  view.rerender(<SessionList {...data} bridgeSecurityStates={new Map([["bridge", "ready"]])} />);
+  view.rerender(<BridgesDialog {...data} computers={[{ ...computer, connection: "ready" }]} />);
   expect(button.title).toContain("Encrypted connection");
   expect(button.querySelector("svg")?.getAttribute("data-lock-state")).toBe("secured");
-  expect(button.style.color).toBe("var(--text-muted)");
   fireEvent.click(button); expect(open).toHaveBeenCalledExactlyOnceWith("bridge");
-  expect(data.onSelectSession).not.toHaveBeenCalled();
+  expect(data.onSelect).not.toHaveBeenCalled();
 });
 
 it("embeds toolbar and selected controls as siblings of the selector, with independent current and selection markers", () => {
