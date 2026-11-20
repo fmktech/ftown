@@ -3,6 +3,8 @@ name: ftown
 description: >-
   Control ftown sessions and multi-provider routing: sessions
   (create/list/read/drive, archive/revive/remove), worktrees, and ftown mail.
+  Choose bridges by capacity, transfer folders between paired computers, and
+  launch workers under the same project across bridges.
   Handle human attention and questions routed to the parent first. Support
   HTML/Markdown previews, HTML preview replies, PR links, status cards and
   ftown board/events, the manager's plan list (ftown plan), and manager brief.
@@ -91,7 +93,7 @@ set `FTOWN_BRIDGE`, to run `sessions`, `status`, `board`, `events`,
 ftown bridges --probe
 ftown bridges --resources --json
 ftown sessions list --bridge my-laptop
-ftown sessions create --bridge my-laptop --project "App" --shell codex --workdir ~/src/app --prompt "Run the test suite"
+ftown sessions create --bridge my-laptop --project "App" --shell codex --workdir /srv/app --prompt "Run the test suite"
 ftown sessions screen <session-id> --bridge my-laptop --limit 100
 ```
 
@@ -99,11 +101,11 @@ The first command to another bridge goes through the relay and opens a direct
 link to it; later commands use that link (`ftown bridges` marks it `direct`).
 If no direct link can be made, commands keep using the relay.
 
-Before placing a worker, compare the local `resources` object and each entry in `peers` from `ftown bridges --resources --json`. Values include average CPU percent, RAM and disk in bytes, and the sample time in Unix milliseconds. A null reading means capacity is unknown. For a local child omit `--bridge`. For a peer child use `ftown sessions create --bridge <bridgeId> --parent --prompt "<task>"`.
+Use `ftown bridges --resources --json` to choose a host. Compare the local `resources` with each entry’s `peers[].resources`. Check `cpuPercent` (average utilization between samples), `freeRamBytes`, `totalRamBytes`, `freeDiskBytes` (bridge data volume), and `sampledAt` (Unix milliseconds). A null reading means unknown capacity. The dashboard’s new-session picker refreshes these readings every 15 seconds while open. The caller chooses the destination.
 
-Requests travel end-to-end encrypted over the account relay; the target bridge
-has to run an ftown version with cross-bridge control. Pass `--project <name>` when creating a root session. A child inherits its parent’s project. Use `--bridge <target> --parent` to create a child on another computer under the current session’s root. The root can also live on a third bridge. Account choices on a remote child come from its destination bridge. Security commands and `harness mail` operate on the local bridge.
-Not available in `--local`/`--solo` mode.
+The sidebar groups sessions by project, then root session, then children across bridges. Supply `--project <name>` for a new root. A child inherits its root’s project. Use `--parent` for a local child or `--bridge <target> --parent` for a remote child. When the caller is already a child, the new session joins the same root, even on a third bridge. Use an absolute `--workdir` on the destination. Account choices on a remote child come from its destination bridge. Security commands and `harness mail` operate on the local bridge. Cross-bridge control requires paired account bridges.
+
+For a worker that needs a folder from another machine, see **Copy a folder and launch a worker** in `references/sessions.md`. The recipient runs `ftown transfer receive`, the sender runs `ftown transfer send`, and the worker can start once the transfer reports `installed`. When the folder already exists on the destination, go straight to session creation. Use `ftown sessions list --remembered` to inspect last-known peer sessions from the local bridge.
 
 Read `references/sessions.md` for the session, mail and terminal command
 reference. Read `references/orchestrator.md` for practical worker coordination
@@ -323,7 +325,7 @@ does not copy, link, or read credentials between account directories.
 
 Choose an account when starting a session with `ftown sessions create
 --shell claude --account personal ...` (or `--shell codex`). A child started
-with `--parent` inherits the parent's account unless `--account` is supplied.
+on its root’s bridge inherits the root’s account unless `--account` is supplied. For a remote root, choose an account registered on the child’s bridge or use its default.
 To constrain future children, set `--allowed-accounts personal,work`; the
 bridge enforces this policy for CLI and API requests, intersecting a child's
 requested list with inherited restrictions so descendants can only narrow it.

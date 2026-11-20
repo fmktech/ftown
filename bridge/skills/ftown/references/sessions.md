@@ -453,10 +453,11 @@ Fan-out targets are messaged sequentially, one JSON result line per target.
 | `--shell` | Explicit harness override: `claude`, `cursor`, `codex`, `grok`, `muse`, `antigravity`, `pi`, `kimi-code`, `opencode`, `shell`, or Claude Code provider flavors `zai`, `kimi`, `deepseek`, `fireworks`. When omitted inside a session, inherits that session's harness; outside a session, defaults to `claude`. |
 | `--prompt` | Initial task — passed as a CLI launch argument to `claude`/Claude provider flavors/`cursor`/`codex`/`grok`/`muse`/`antigravity`/`pi` (typed after boot for other shells) |
 | `--workdir` | Working directory |
+| `--project <name>` | Required for a new root. Children inherit their root’s project. |
 | `--name` | Dashboard label |
 | `--effort <level>` | Reasoning effort for claude, codex, grok, muse and antigravity (opencode: `--model provider/model#<level>`) |
 | `--command` | Full command override, run exactly as written: skips the `--shell` builder and the flags it adds for unattended runs (a codex launched this way asks for approvals). Not for setting a model or effort. |
-| `--parent` | Set parent to `$FTOWN_SESSION_ID` |
+| `--parent` | Attach to the root of the calling session (`$FTOWN_SESSION_ID`), including when creating on another bridge. |
 | `--parent-id` | Explicit parent session UUID |
 | `--plan-item <id>` | Do plan item `p<n>` of the parent (requires `--parent` or `--parent-id`; see Plan list) |
 | `--worktree` | Create a bridge-owned git worktree for the session (see Worktrees) |
@@ -576,6 +577,26 @@ Set `parentSessionId` to `null` to detach it from its current parent and move it
 back to the project root. For a parent on another computer, include its bridge ID in `parentBridgeId`. New root sessions require a project name (`--project` on the CLI or `projectName` in the request body).
 
 Project visibility is saved on each client. Previous bridge and session hiding preferences no longer filter the sidebar. Use **Hide** on the projects you want to hide on that client. Run `ftown sessions list --remembered` to inspect the local bridge’s last peer snapshots. Browsers retain the last state received directly from each approved computer. A new browser needs to see a computer online once before it can show that computer’s sessions offline.
+
+## Copy a folder and launch a worker
+
+Use this workflow when a remote worker needs a one-time copy of local files. Both bridges must belong to the same account and be able to establish a direct link. The recipient needs an unused destination under an existing directory and enough space on that volume for both the snapshot and the extracted files. Keep the source stable during the copy. Transfers support ordinary files and directories and reject symlinks.
+
+1. On the **recipient** (here, `linux`), authorize the sender and reserve the destination. Save the returned receive ID.
+   ```bash
+   ftown transfer receive /srv/jobs/app-review --bridge mac
+   ```
+2. On the **sender** (`mac`), send the folder using that ID.
+   ```bash
+   ftown transfer send ./app --bridge linux --id <receive-id>
+   ftown transfer status <receive-id>
+   ```
+3. Check status on either computer until it reports `state: installed`. From the parent session on the sender, launch the child in the installed folder.
+   ```bash
+   ftown sessions create --bridge linux --parent --workdir /srv/jobs/app-review --prompt "Run the tests"
+   ```
+
+Use `ftown transfer list` to find local transfers or `ftown transfer cancel <receive-id>` to cancel one. If status is `retained`, the recipient has the verified snapshot. Correct the installation problem there and run `ftown transfer retry <receive-id>`, or use `ftown transfer discard <receive-id>` to remove that retained copy.
 
 ## If the CLI is missing
 

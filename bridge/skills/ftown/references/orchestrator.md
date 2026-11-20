@@ -8,6 +8,8 @@ bounded task, clear writable files and checks; save `session.id`. Omit `--shell`
 model and effort, run `ftown quota --json` and follow `quota.md` (owner
 tiers first); never route to `exhausted`.
 
+For cross-bridge delegation, use `ftown bridges --resources --json` to compare host capacity. If the destination needs files, follow **Copy a folder and launch a worker** in `sessions.md`.
+
 Keep the plan on the manager, not in a ticket system.
 Add steps with `ftown plan add` (`--after`/`--priority` set precedence;
 ready = every `after` done or dropped) and create each child with
