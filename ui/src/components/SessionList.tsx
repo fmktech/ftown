@@ -51,7 +51,7 @@ interface SessionListProps {
 type ContextMenuState = { kind: "session"; session: Session; x: number; y: number };
 
 type DragState =
-  | { kind: "bridge"; id: string }
+  | { kind: "project"; id: string }
   | { kind: "session"; id: string; bridgeId: string };
 
 function formatTimestamp(timestamp: string): string {
@@ -827,6 +827,7 @@ export function SessionList({
         }}
       >
       <button
+        data-session-select=""
         draggable
         onDragStart={(e) => handleDragStart(e, { kind: "session", id: session.id, bridgeId: session.bridgeId })}
         onDragEnd={handleDragEnd}
@@ -1194,7 +1195,9 @@ export function SessionList({
   function reorderProject(project: string, other: string) {
     const order = [...orderedProjects];
     const from = order.indexOf(project), to = order.indexOf(other);
-    [order[from], order[to]] = [order[to], order[from]];
+    if (from < 0 || to < 0 || from === to) return;
+    order.splice(from, 1);
+    order.splice(to, 0, project);
     setProjectOrder(new Set(order));
   }
   function toggleProject(project: string) {
@@ -1219,6 +1222,12 @@ export function SessionList({
           {!collapsed && <div className={`flex items-center justify-between px-2 py-1 ${dragOverKey === `project:${project}` ? "outline outline-[var(--accent)] -outline-offset-1" : ""}`}
             onDragOver={event => {
               const drag = dragRef.current;
+              if (drag?.kind === "project" && drag.id !== project) {
+                event.preventDefault();
+                event.dataTransfer.dropEffect = "move";
+                setDragOverKey(`project:${project}`);
+                return;
+              }
               if (drag?.kind !== "session") return;
               const session = sessions.find(row => row.id === drag.id && row.bridgeId === drag.bridgeId);
               if (session && canMoveToProject(session, project)) {
@@ -1237,14 +1246,16 @@ export function SessionList({
             onDrop={event => {
               event.preventDefault();
               const drag = dragRef.current;
-              if (drag?.kind === "session") {
+              if (drag?.kind === "project") reorderProject(drag.id, project);
+              else if (drag?.kind === "session") {
                 const session = sessions.find(row => row.id === drag.id && row.bridgeId === drag.bridgeId);
                 if (session && canMoveToProject(session, project)) moveToProject(session, project);
                 else if (roots.some(root => root.children.some(child => child.session.id === drag.id))) onSetSessionParent?.(drag.id, null);
               }
               clearDragState();
             }}>
-            <button type="button" className="min-w-0 truncate py-1 text-left text-sm font-semibold" aria-expanded={!collapsedProjects.has(project)}
+            <button type="button" draggable title="Drag to reorder projects" onDragStart={event => handleDragStart(event, { kind: "project", id: project })} onDragEnd={handleDragEnd}
+              className="min-w-0 cursor-grab truncate py-1 text-left text-sm font-semibold active:cursor-grabbing" aria-expanded={!collapsedProjects.has(project)}
               onClick={() => setCollapsedProjects(previous => {
                 const next = new Set(previous);
                 if (next.has(project)) next.delete(project); else next.add(project);

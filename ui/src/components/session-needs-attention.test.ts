@@ -12,7 +12,7 @@ beforeEach(() => localStorage.clear()); afterEach(cleanup);
 it("preserves ordinary session attention indicators without duplicate shortcut rows", () => {
   const rows = [session("child")]; const select = vi.fn();
   const view = render(createElement(SessionList, { sessions: rows, bridges: [], selectedSessionId: null, onSelectSession: select, sessionActivity: activity }));
-  const row = view.container.querySelector<HTMLButtonElement>('button[draggable="true"]')!;
+  const row = view.container.querySelector<HTMLButtonElement>('button[data-session-select]')!;
   expect(within(row).getByRole("img", { name: "Input needed" })).toBeTruthy(); expect(within(row).queryByText(notice.message)).toBeNull();
   expect(screen.queryByRole("region", { name: "Needs attention" })).toBeNull(); fireEvent.click(row); expect(select).toHaveBeenCalledWith("child");
 });

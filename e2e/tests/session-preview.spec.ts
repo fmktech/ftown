@@ -23,7 +23,7 @@ const separator = (page: Page) => page.getByRole("separator", { name: "Resize te
 async function selectSession(page: Page, name: string): Promise<void> {
   const workspace = page.getByRole("tab", { name: "Workspace", exact: true });
   if (await workspace.isVisible()) await workspace.click();
-  const row = page.locator('#dashboard-sidebar button[draggable="true"]')
+  const row = page.locator('#dashboard-sidebar button[data-session-select]')
     .filter({ has: page.getByText(name, { exact: true }) });
   await expect(row).toBeVisible();
   await row.getByText(name, { exact: true }).click();

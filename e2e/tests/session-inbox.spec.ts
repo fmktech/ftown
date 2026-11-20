@@ -53,7 +53,7 @@ test("mail nudge survives agent mail, highlights the trigger and shows the item 
   let idA = ""; let idB = "";
   const FTOWN_CLI = join(E2E_DIR, "..", "bridge", "dist", "ftown-cli.js");
   const HARNESS_CLI = join(E2E_DIR, "..", "bridge", "dist", "harness-cli.js");
-  const row = (name: string) => page.locator('#dashboard-sidebar button[draggable="true"]').filter({ has: page.getByText(name, { exact: true }) });
+  const row = (name: string) => page.locator('#dashboard-sidebar button[data-session-select]').filter({ has: page.getByText(name, { exact: true }) });
   try {
     const createdA = await bridgeApiFetch("POST", "/api/sessions", { body: { projectName: "E2E", shellType: "shell", name: nameA } });
     expect(createdA.status, JSON.stringify(createdA.body)).toBe(201);
@@ -238,7 +238,7 @@ test("an item raised while the terminal is focused shows in the side pane and le
   const name = `Focus ${stamp}`;
   let id = "";
   const FTOWN_CLI = join(E2E_DIR, "..", "bridge", "dist", "ftown-cli.js");
-  const row = (n: string) => page.locator('#dashboard-sidebar button[draggable="true"]').filter({ has: page.getByText(n, { exact: true }) });
+  const row = (n: string) => page.locator('#dashboard-sidebar button[data-session-select]').filter({ has: page.getByText(n, { exact: true }) });
   const focusedClass = () => page.evaluate(() => (document.activeElement as HTMLElement | null)?.className ?? "");
   try {
     const created = await bridgeApiFetch("POST", "/api/sessions", { body: { projectName: "E2E", shellType: "shell", name } });
@@ -272,7 +272,7 @@ test("a human prompt typed in the terminal leaves the agent_needs_input item in 
   const name = `Typed prompt ${stamp}`;
   let id = "";
   const FTOWN_CLI = join(E2E_DIR, "..", "bridge", "dist", "ftown-cli.js");
-  const row = page.locator('#dashboard-sidebar button[draggable="true"]').filter({ has: page.getByText(name, { exact: true }) });
+  const row = page.locator('#dashboard-sidebar button[data-session-select]').filter({ has: page.getByText(name, { exact: true }) });
   const openItems = async () => {
     const listed = await bridgeApiFetch("GET", `/api/sessions/${id}/attention`);
     return (listed.body as { events: Array<{ type: string; resolvedAt?: string }> }).events.filter(event => !event.resolvedAt).map(event => event.type).sort();
@@ -324,7 +324,7 @@ test("entering a waiting session from the Workspace list on a phone lands on the
     const navigation = page.getByRole("tablist", { name: "Workspace navigation" });
     await navigation.getByRole("tab", { name: "Workspace", exact: true }).click();
     await expect(waitingTrigger(page)).toBeVisible({ timeout: 30_000 });
-    const row = page.locator('#dashboard-sidebar button[draggable="true"]').filter({ has: page.getByText(name, { exact: true }) });
+    const row = page.locator('#dashboard-sidebar button[data-session-select]').filter({ has: page.getByText(name, { exact: true }) });
     await expect(row).toBeVisible({ timeout: 30_000 });
     await row.click();
     await expect(navigation.getByRole("tab", { name: "Waiting", exact: true })).toHaveAttribute("aria-selected", "true");
@@ -381,7 +381,7 @@ test("preview showing switches to the waiting item, file back, reply returns to 
     await writeFile(join(fixture.directory, "a.html"), previewSimpleHtml(`Pane ${stamp}`, 1), "utf8");
     const id = await fixture.create(name);
     await fixture.register(id, "a.html");
-    const row = page.locator('#dashboard-sidebar button[draggable="true"]').filter({ has: page.getByText(name, { exact: true }) });
+    const row = page.locator('#dashboard-sidebar button[data-session-select]').filter({ has: page.getByText(name, { exact: true }) });
     await expect(row).toBeVisible({ timeout: 30_000 });
     await row.click();
     const iframe = page.frameLocator('iframe[title="Preview: a.html"]');

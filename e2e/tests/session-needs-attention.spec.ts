@@ -7,7 +7,7 @@ async function postHook(sessionId: string, hookEvent: string, data: Record<strin
   const response = await bridgeApiFetch("POST", "/hook", { body: { ftown_session_id: sessionId, hook_event_name: hookEvent, ...data } });
   expect(response.status, JSON.stringify(response.body)).toBeGreaterThanOrEqual(200); expect(response.status).toBeLessThan(300);
 }
-function originalRow(page: Page, name: string) { return page.locator('#dashboard-sidebar button[draggable="true"]').filter({ has: page.getByText(name, { exact: true }) }); }
+function originalRow(page: Page, name: string) { return page.locator('#dashboard-sidebar button[data-session-select]').filter({ has: page.getByText(name, { exact: true }) }); }
 for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "mobile", width: 390, height: 844 }]) {
   test.describe(`${viewport.name} attention controls`, () => {
     test.use({ hasTouch: viewport.name === "mobile" });

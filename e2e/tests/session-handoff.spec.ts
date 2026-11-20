@@ -8,7 +8,7 @@ import { login, waitForBridgeOnline } from "../helpers/app";
 import { bridgeApiFetch } from "../helpers/bridge-api";
 
 function originalRow(page: Page, name: string) {
-  return page.locator('#dashboard-sidebar button[draggable="true"]').filter({ has: page.getByText(name, { exact: true }) });
+  return page.locator('#dashboard-sidebar button[data-session-select]').filter({ has: page.getByText(name, { exact: true }) });
 }
 
 interface SessionRow {

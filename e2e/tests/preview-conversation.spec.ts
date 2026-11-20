@@ -11,7 +11,7 @@ import { makeConversationAgent } from "../helpers/preview-conversation";
 async function select(page: Page, name: string) {
  const workspace = page.getByRole("tab", { name: "Workspace", exact: true });
  if (await workspace.isVisible()) await workspace.click();
- await page.locator('#dashboard-sidebar button[draggable="true"]').filter({ has: page.getByText(name, { exact: true }) }).getByText(name, { exact: true }).click();
+ await page.locator('#dashboard-sidebar button[data-session-select]').filter({ has: page.getByText(name, { exact: true }) }).getByText(name, { exact: true }).click();
 }
 async function openChat(page: Page) {
  await page.getByRole("button", { name: "Expand preview", exact: true }).click();

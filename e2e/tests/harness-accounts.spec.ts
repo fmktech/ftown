@@ -66,7 +66,7 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
       expect(created).toMatchObject({ account: "coding", status: "running" });
       await testInfo.attach(`account-header-${viewport.name}`, { body: await page.screenshot({ fullPage: true }), contentType: "image/png" });
       if (viewport.name === "mobile") await page.getByRole("tab", { name: "Workspace", exact: true }).click();
-      const row = page.locator('#dashboard-sidebar button[draggable="true"]').filter({ has: page.getByText(name, { exact: true }) });
+      const row = page.locator('#dashboard-sidebar button[data-session-select]').filter({ has: page.getByText(name, { exact: true }) });
       const badge = row.locator(".bridge-owner");
       await expect(badge).toHaveText(/^[A-Z]+$/);
       await badge.hover();
