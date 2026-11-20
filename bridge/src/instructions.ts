@@ -4,9 +4,6 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { codexHome, claudeConfigDir } from './config-dirs.js';
 
-export const INSTRUCTIONS_LOCAL = '/api/instructions';
-export const INSTRUCTIONS_WIRE = '/api/instructions/wire';
-export const INSTRUCTIONS_SYNC = '/api/instructions/sync';
 export const instructionLimit = 64 * 1024;
 export type Scope = 'global' | 'bridge';
 export const instructionPath = (scope: Scope, home = homedir()) => join(home, '.ftown', scope + '.md');

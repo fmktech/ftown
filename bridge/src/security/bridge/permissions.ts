@@ -1,4 +1,4 @@
-import { INSTRUCTIONS_LOCAL, INSTRUCTIONS_SYNC, INSTRUCTIONS_WIRE } from '../../instructions.js';
+import { INSTRUCTIONS_LOCAL, INSTRUCTIONS_SYNC, INSTRUCTIONS_WIRE } from '../../instructions-protocol.js';
 import { TRANSFER_LOCAL, TRANSFER_WIRE } from '../../folder-transfer-protocol.js';
 import type { ApplicationJson, EndpointPermission } from '../protocol.js';
 import { BridgeSecurityError } from './errors.js';

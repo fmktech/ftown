@@ -1,6 +1,7 @@
 import { apiResponse, loadPointer, setPeerTarget } from './cli-client.js';
 import { extractBridgeOption } from './peers-cli.js';
-import { INSTRUCTIONS_LOCAL, instructionLimit, readInstructions } from './instructions.js';
+import { INSTRUCTIONS_LOCAL } from './instructions-protocol.js';
+import { instructionLimit, readInstructions } from './instructions.js';
 
 const usage = 'Usage: ftown instructions show <global|bridge> [--bridge <peer>]\n       ftown instructions sync global --bridge <peer>';
 
