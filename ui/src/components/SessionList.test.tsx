@@ -86,7 +86,10 @@ it("keeps an empty project across reloads and offers placement and session creat
   fireEvent.click(screen.getByLabelText("Add session to Launch"));
   expect(add).toHaveBeenCalledWith("Launch");
   fireEvent.click(screen.getByLabelText("More actions for Launch"));
-  fireEvent.click(screen.getByRole("menuitem", { name: "Bridge settings" }));
+  HTMLDialogElement.prototype.showModal = function () { this.open = true; };
+  HTMLDialogElement.prototype.close = function () { this.open = false; };
+  fireEvent.click(screen.getByRole("menuitem", { name: "Project settings" }));
+  expect(screen.getByRole("dialog", { name: "Project settings" })).toBeTruthy();
   fireEvent.click(screen.getByLabelText("Studio"));
   expect(change).toHaveBeenCalledWith("Launch", ["desk"]);
   localStorage.clear();
@@ -105,8 +108,23 @@ it("offers an empty project in session actions when the project allows the ownin
   fireEvent.keyDown(section.getByLabelText("Session actions"), { key: "Enter" });
   const menu = within(screen.getByRole("menu", { name: "Session actions" }));
   expect(menu.queryByRole("menuitem", { name: "Move to Restricted" })).toBeNull();
-  expect(menu.queryByRole("menuitem", { name: "Move to Occupied" })).toBeNull();
+  expect(menu.getByRole("menuitem", { name: "Move to Occupied" })).toBeTruthy();
   fireEvent.click(menu.getByRole("menuitem", { name: "Move to Launch" }));
   expect(onMoveSessionToProject).toHaveBeenCalledWith(session, "Launch");
   localStorage.clear();
+});
+
+it("moves an assigned child into an occupied project as a new root", () => {
+  const parent: Session = { id: "parent", bridgeId: "desk", name: "Manager", projectName: "Source", status: "running", createdAt: "", updatedAt: "" };
+  const child = { ...parent, id: "child", name: "Child", parentSessionId: parent.id };
+  const move = vi.fn().mockResolvedValue(undefined);
+  render(<SessionList sessions={[parent, child, { ...parent, id: "other", projectName: "Target" }]}
+    selectedSessionId={null} onSelectSession={vi.fn()} onStopSession={vi.fn()} onRemoveSession={vi.fn()} onMoveSessionToProject={move} />);
+  const source = within(screen.getByRole("region", { name: "Source" }));
+  const expand = source.queryByLabelText("Expand children");
+  if (expand) fireEvent.click(expand);
+  const row = source.getByText("Child", { exact: true }).closest("button")!;
+  fireEvent.keyDown(within(row).getByLabelText("Session actions"), { key: "Enter" });
+  fireEvent.click(screen.getByRole("menuitem", { name: "Move to Target" }));
+  expect(move).toHaveBeenCalledWith(child, "Target", true);
 });
