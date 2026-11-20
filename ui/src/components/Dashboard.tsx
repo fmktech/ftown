@@ -36,11 +36,9 @@ import { CloudConnectionNotice } from "./CloudConnectionNotice";
 import { HeaderTooltip } from "./HeaderTooltip";
 import { SessionHeaderActions } from "./SessionHeaderActions";
 import { PushNotificationsControl, detachPushSubscription } from "./PushNotificationsControl";
-import { mergeBridgeOrder } from "@/lib/bridge-order";
 import { buildBridgeCommand, buildBridgeStartCommand } from "@/lib/bridge-command";
 import { StatusDot } from "@/lib/StatusDot";
-import { usePersistentState, useHiddenSet } from "@/lib/use-persistent-state";
-import { deriveSessionReachabilityStatus } from "@/lib/session-reachability";
+import { usePersistentState } from "@/lib/use-persistent-state";
 import { getSessionRelaunchLabel } from "@/lib/session-relaunch";
 import {
   DEFAULT_SIDEBAR_WIDTH,
@@ -150,9 +148,6 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [storedSidebarWidth, setStoredSidebarWidth] = usePersistentState<number>("ftown:sidebarWidth", DEFAULT_SIDEBAR_WIDTH);
   const sidebarWidth = clampSidebarWidth(storedSidebarWidth);
   const [sessionOrder, setSessionOrder] = usePersistentState<string[]>("ftown:sessionOrder", []);
-  const [bridgeOrder, setBridgeOrder] = usePersistentState<string[]>("ftown:bridgeOrder", []);
-  const { hidden: hiddenSessionIds, hide: handleHideSession, unhide: handleUnhideSession } = useHiddenSet("ftown:hiddenSessions");
-  const { hidden: hiddenBridgeIds, hide: hideBridge, unhide: handleUnhideBridge } = useHiddenSet("ftown:hiddenBridges");
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [showNavigation, setShowNavigation] = useState(false);
   const [showSecurity, setShowSecurity] = useState(false);
@@ -314,19 +309,6 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   }, [showNavigation, closeNavigation]);
   useEffect(() => { if (isDesktop) setShowNavigation(false); }, [isDesktop]);
 
-  // Keep bridgeOrder stable when bridges connect/disconnect; only append new ids (sorted).
-  useEffect(() => {
-    const knownIds: string[] = [];
-    for (const b of bridges) knownIds.push(b.bridgeId);
-    for (const s of rawSessions) {
-      if (!knownIds.includes(s.bridgeId)) knownIds.push(s.bridgeId);
-    }
-    setBridgeOrder((prev) => {
-      const next = mergeBridgeOrder(prev, knownIds);
-      if (next.length === prev.length && next.every((id, i) => id === prev[i])) return prev;
-      return next;
-    });
-  }, [bridges, rawSessions, setBridgeOrder]);
   const { sessionActivity, markSessionIdle, clearSessionAttention, answerSessionAttention, answerAttentionItem, dismissAttentionItem, refreshSessionAttention } = useAllSessionEvents(client, rawSessions, userId, rpc);
   // When each session's activity became idle: stamped from the live activity map
   // (hook events and optimistic interrupts) and kept for the Overview's `idle <n>m`.
@@ -399,36 +381,31 @@ PY`;
   const activeBridgeIds = useMemo(() => new Set(bridges.map((b) => b.bridgeId)), [bridges]);
 
   const sessions = useMemo(() => {
-    const mapped = rawSessions.map((s) => {
-      const status = deriveSessionReachabilityStatus(
-        s.status,
-        s.bridgeId,
-        activeBridgeIds,
-        directlyReachableBridgeIds,
-      );
-      return status === s.status ? s : { ...s, status };
-    });
-    if (sessionOrder.length === 0 && bridgeOrder.length === 0) return mapped;
+    const mapped = rawSessions;
+    if (sessionOrder.length === 0) return mapped;
     const orderMap = new Map(sessionOrder.map((id, i) => [id, i]));
     return [...mapped].sort((a, b) => {
-      const bridgeAi = bridgeOrder.indexOf(a.bridgeId);
-      const bridgeBi = bridgeOrder.indexOf(b.bridgeId);
-      const bOrderA = bridgeAi === -1 ? Infinity : bridgeAi;
-      const bOrderB = bridgeBi === -1 ? Infinity : bridgeBi;
-      if (bOrderA !== bOrderB) return bOrderA - bOrderB;
       const ai = orderMap.get(a.id) ?? Infinity;
       const bi = orderMap.get(b.id) ?? Infinity;
       return ai - bi;
     });
-  }, [rawSessions, activeBridgeIds, directlyReachableBridgeIds, sessionOrder, bridgeOrder]);
+  }, [rawSessions, sessionOrder]);
 
+  const [hiddenProjects, setHiddenProjects] = useState(new Set<string>());
+  const projectSessions = useMemo(() => {
+    const byId = new Map(sessions.map(session => [session.id, session]));
+    return sessions.filter(session => {
+      const root = session.parentSessionId ? byId.get(session.parentSessionId) ?? session : session;
+      return !hiddenProjects.has(root.projectName || "");
+    });
+  }, [sessions, hiddenProjects]);
   const selectedSession = sessions.find((s) => s.id === selectedSessionId) ?? null;
   useEffect(() => {
-    if (selectedSessionId && !sessions.some(session => session.id === selectedSessionId)) setSelectedSessionId(null);
-  }, [sessions, selectedSessionId]);
+    if (selectedSessionId && !projectSessions.some(session => session.id === selectedSessionId)) setSelectedSessionId(null);
+  }, [projectSessions, selectedSessionId]);
   const inboxReady = connectionStatus === "connected" ? new Set(readyBridges.map(bridge => bridge.bridgeId)) : new Set<string>();
   const canReply = (bridgeId: string) => !!securityRuntime?.bridge(bridgeId)?.permissions.includes("control");
-  const inbox = inboxEntries(sessions, sessionActivity, bridges, hiddenSessionIds, hiddenBridgeIds, inboxReady, canReply);
+  const inbox = inboxEntries(projectSessions, sessionActivity, bridges, new Set(), new Set(), inboxReady, canReply);
   // Parent-routed non-escalated items wait "with parent": they never count toward needs-you counts or pushes.
   const waitingCount = waitingInboxCount(inbox);
   const inboxRef = useRef(inbox);
@@ -525,31 +502,6 @@ PY`;
     setSessionOrder(orderedIds);
   }, [setSessionOrder]);
 
-  const handleReorderBridges = useCallback((orderedBridgeIds: string[]) => {
-    setBridgeOrder(orderedBridgeIds);
-
-    setSessionOrder((prevOrder) => {
-      const byBridge = new Map<string, string[]>();
-      for (const s of rawSessions) {
-        const arr = byBridge.get(s.bridgeId) ?? [];
-        arr.push(s.id);
-        byBridge.set(s.bridgeId, arr);
-      }
-
-      const orderMap = new Map(prevOrder.map((id, i) => [id, i]));
-      for (const [, ids] of byBridge) {
-        ids.sort((a, b) => (orderMap.get(a) ?? Infinity) - (orderMap.get(b) ?? Infinity));
-      }
-
-      const newOrder = orderedBridgeIds.flatMap((bid) => byBridge.get(bid) ?? []);
-      for (const [bid, ids] of byBridge) {
-        if (!orderedBridgeIds.includes(bid)) newOrder.push(...ids);
-      }
-
-      return newOrder;
-    });
-  }, [rawSessions, setBridgeOrder, setSessionOrder]);
-
   const handleStopSession = useCallback(() => {
     if (selectedSessionId) stopSession(selectedSessionId);
   }, [selectedSessionId, stopSession]);
@@ -584,14 +536,6 @@ PY`;
       setSelectedSessionId(null);
     }
   }, [removeSession, selectedSessionId, rawSessions, activeBridgeIds]);
-
-  const handleHideBridge = useCallback((bridgeId: string) => {
-    hideBridge(bridgeId);
-    const selected = rawSessions.find((s) => s.id === selectedSessionId);
-    if (selected?.bridgeId === bridgeId) {
-      setSelectedSessionId(null);
-    }
-  }, [hideBridge, rawSessions, selectedSessionId]);
 
   const handleCreateSessionOnBridge = useCallback((bridgeId: string) => {
     setSessionDefaults({ bridgeId });
@@ -801,6 +745,7 @@ PY`;
 
   const handleCloneSession = useCallback((session: Session) => {
     setSessionDefaults({
+      projectName: session.projectName,
       workingDir: session.workingDir,
       bridgeId: session.bridgeId,
       shellType: session.shellType,
@@ -884,7 +829,7 @@ PY`;
   }, []);
 
   return (
-    <PullRequestStatusProvider send={rpc.sendCommand} sessions={sessions.filter(s => s.id === selectedSessionId || (!hiddenSessionIds.has(s.id) && !hiddenBridgeIds.has(s.bridgeId)))} readyBridgeIds={readyBridges.map(b => b.bridgeId)} connected={connectionStatus === "connected"}>
+    <PullRequestStatusProvider send={rpc.sendCommand} sessions={projectSessions} readyBridgeIds={readyBridges.map(b => b.bridgeId)} connected={connectionStatus === "connected"}>
     <div
       ref={rootRef}
       className="h-dvh flex flex-col"
@@ -1310,7 +1255,7 @@ PY`;
                     color: "var(--text-muted)",
                   }}
                 >
-                  Bridges
+                  Projects
                 </span>
                 <div className="flex items-center gap-2">
                   <span
@@ -1353,9 +1298,9 @@ PY`;
           </section>}
           <div className="flex-1 overflow-y-auto">
             <SessionList
+              onHiddenProjectsChange={setHiddenProjects}
               sessions={sessions}
               bridges={bridges}
-              bridgeOrder={bridgeOrder}
               selectedSessionId={selectedSessionId}
               onSelectSession={handleSelectSession}
               onReviewPullRequest={handleReviewPullRequest}
@@ -1365,15 +1310,8 @@ PY`;
               onCloneSession={handleCloneSession}
               onSetSessionParent={setSessionParent}
               onReorderSessions={handleReorderSessions}
-              onReorderBridges={handleReorderBridges}
               sessionActivity={sessionActivity}
               collapsed={isDesktop && sidebarCollapsed}
-              hiddenSessionIds={hiddenSessionIds}
-              hiddenBridgeIds={hiddenBridgeIds}
-              onHideSession={handleHideSession}
-              onUnhideSession={handleUnhideSession}
-              onHideBridge={handleHideBridge}
-              onUnhideBridge={handleUnhideBridge}
               onCreateSession={handleCreateSessionOnBridge}
               onOpenSecurity={openSecurity}
               bridgeSecurityStates={bridgeSecurityStates}

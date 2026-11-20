@@ -419,6 +419,8 @@ export async function handoffSession(deps: SessionHandoffDeps, sessionId: string
     model: target.model,
     ...(session.account !== undefined ? { account: session.account } : {}),
     ...(session.allowedAccounts !== undefined ? { allowedAccounts: session.allowedAccounts } : {}),
+    projectName: session.projectName || "Unassigned",
+    parentBridgeId: session.parentBridgeId,
     parentSessionId: session.parentSessionId,
     ...(session.requireGreenPr ? { requireGreenPr: true } : {}),
   });

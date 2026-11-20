@@ -5,7 +5,6 @@ import { createPortal } from "react-dom";
 import { Session } from "@/types";
 import { SessionActivity } from "@/hooks/useAllSessionEvents";
 import { BridgeInfo } from "@/hooks/useBridges";
-import { reorderByDrop } from "@/lib/bridge-order";
 import { getSessionDropZone, resolveSessionDrop, type SessionDropZone } from "@/lib/session-drop";
 import { StatusDot } from "@/lib/StatusDot";
 import { usePersistentState, stringSetCodec } from "@/lib/use-persistent-state";
@@ -16,7 +15,7 @@ import { HandoffDialog, SessionBlockBadge } from "./SessionBlockBadge";
 import { SessionCardChip, formatCardRollup, rollupChildCards } from "./SessionCardChip";
 import { PullRequestBadgePlaceholder, PullRequestLink } from "./PullRequestLink";
 import type { BridgeSecurityState } from "@security/protocol";
-import { SecurityLockIcon, bridgeConnectionLock } from "./SecurityLockIcon";
+import { bridgeConnectionLock, SecurityLockIcon } from "./SecurityLockIcon";
 import type { UpdateView } from "@/hooks/useBridgeUpdates";
 
 export function SessionAccountBadge({ account }: { account?: string }) {
@@ -28,7 +27,6 @@ export function SessionAccountBadge({ account }: { account?: string }) {
 interface SessionListProps {
   sessions: Session[];
   bridges: BridgeInfo[];
-  bridgeOrder: string[];
   selectedSessionId: string | null;
   onSelectSession: (sessionId: string) => void;
   onReviewPullRequest?: (sessionId: string) => void;
@@ -38,15 +36,9 @@ interface SessionListProps {
   onCloneSession?: (session: Session) => void;
   onSetSessionParent?: (sessionId: string, parentSessionId: string | null) => void;
   onReorderSessions?: (orderedIds: string[]) => void;
-  onReorderBridges?: (orderedBridgeIds: string[]) => void;
+  onHiddenProjectsChange?: (projects: Set<string>) => void;
   sessionActivity?: Map<string, SessionActivity>;
   collapsed?: boolean;
-  hiddenSessionIds?: Set<string>;
-  onHideSession?: (sessionId: string) => void;
-  onUnhideSession?: (sessionId: string) => void;
-  hiddenBridgeIds?: Set<string>;
-  onHideBridge?: (bridgeId: string) => void;
-  onUnhideBridge?: (bridgeId: string) => void;
   onCreateSession?: (bridgeId: string) => void;
   onOpenSecurity?: (bridgeId: string) => void;
   bridgeSecurityStates?: ReadonlyMap<string, BridgeSecurityState["status"]>;
@@ -78,18 +70,6 @@ function formatTimestamp(timestamp: string): string {
   return `${Math.floor(diffHours / 24)}d`;
 }
 
-function bridgeLabel(bridgeId: string, bridges: BridgeInfo[]): string {
-  const info = bridges.find((b) => b.bridgeId === bridgeId);
-  if (info?.hostname && info.hostname !== "unknown") return info.hostname;
-  return bridgeId.length > 20 ? `${bridgeId.slice(0, 18)}…` : bridgeId;
-}
-
-function computeDropZone(e: React.DragEvent): "above" | "below" {
-  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-  const offset = e.clientY - rect.top;
-  return offset < rect.height / 2 ? "above" : "below";
-}
-
 interface SessionTreeNode {
   session: Session;
   children: SessionTreeNode[];
@@ -110,73 +90,11 @@ interface SessionRowTreeProps {
   onToggleCollapse: () => void;
 }
 
-interface SessionFolderGroup {
-  key: string;
-  path: string | null;
-  label: string;
-  roots: SessionTreeNode[];
-}
-
-function normalizeWorkingDir(workingDir?: string): string | null {
-  const trimmed = workingDir?.trim();
-  if (!trimmed) return null;
-  return trimmed.replace(/[\\/]+$/, "") || trimmed;
-}
-
-function workingDirLabel(workingDir: string | null): string {
-  if (workingDir === null) return "No folder";
-  const segments = workingDir.split(/[\\/]/).filter(Boolean);
-  return segments.at(-1) ?? workingDir;
-}
-
-/**
- * Add workspace folders only when they compact repeated roots across a bridge.
- * Singleton workspaces remain direct bridge children, avoiding a folder row
- * that would merely repeat metadata for one agent. Descendants stay attached
- * to their root and are never regrouped using a child's working directory.
- */
-function groupSessionRootsByFolder(roots: SessionTreeNode[]): SessionFolderGroup[] | null {
-  const byPath = new Map<string, SessionFolderGroup>();
-  for (const root of roots) {
-    const path = normalizeWorkingDir(root.session.workingDir);
-    const key = path ?? "\u0000no-folder";
-    const existing = byPath.get(key);
-    if (existing) {
-      existing.roots.push(root);
-    } else {
-      byPath.set(key, { key, path, label: workingDirLabel(path), roots: [root] });
-    }
-  }
-
-  const groups = [...byPath.values()];
-  if (groups.length < 2 || groups.every((group) => group.roots.length === 1)) return null;
-  return groups;
-}
-
-function FolderIcon(): ReactElement {
-  return (
-    <svg
-      aria-hidden="true"
-      viewBox="0 0 24 24"
-      width="15"
-      height="15"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      style={{ flexShrink: 0 }}
-    >
-      <path d="M3 6.75A1.75 1.75 0 0 1 4.75 5h4.1l2 2h8.4A1.75 1.75 0 0 1 21 8.75v8.5A1.75 1.75 0 0 1 19.25 19H4.75A1.75 1.75 0 0 1 3 17.25z" />
-    </svg>
-  );
-}
-
 /**
  * Build a parent→child forest from a pre-sorted list of sessions.
  *
  * A session nests under another only when its parentSessionId points to another
- * session present in the SAME list (callers pass per-bridge visible sessions).
+ * session present in the account-wide list.
  * Sessions with a missing, self-referential, or out-of-list parent become roots.
  * Ancestor cycles (A→B→A) are detected via a per-node walk and demoted to roots
  * so no node is lost and traversal can never loop. Sibling order mirrors the
@@ -379,9 +297,6 @@ function SessionContextMenu({
   onClone,
   onHandoff,
   onDismissBlock,
-  onHide,
-  onUnhide,
-  isHidden,
   onClose,
 }: {
   menu: Extract<ContextMenuState, { kind: "session" }>;
@@ -392,9 +307,6 @@ function SessionContextMenu({
   onClone: (session: Session) => void;
   onHandoff?: (session: Session) => void;
   onDismissBlock?: (session: Session) => Promise<void>;
-  onHide: (sessionId: string) => void;
-  onUnhide: (sessionId: string) => void;
-  isHidden: boolean;
   onClose: () => void;
 }) {
   const menuRef = useRef<HTMLDivElement>(null);
@@ -441,11 +353,6 @@ function SessionContextMenu({
       )}
       <ContextMenuButton largeOnMobile label="Rename" onClick={() => { onRename(menu.session); onClose(); }} />
       <ContextMenuButton largeOnMobile label="Clone" onClick={() => { onClone(menu.session); onClose(); }} />
-      {isHidden ? (
-        <ContextMenuButton largeOnMobile label="Unhide" onClick={() => { onUnhide(menu.session.id); onClose(); }} />
-      ) : (
-        <ContextMenuButton largeOnMobile label="Hide" onClick={() => { onHide(menu.session.id); onClose(); }} />
-      )}
       {isRunning && (
         <ContextMenuButton
           largeOnMobile
@@ -468,24 +375,18 @@ function SessionContextMenu({
 function BridgeContextMenu({
   menu,
   isOnline,
-  isHidden,
   onCreateSession,
   onOpenSecurity,
   onOpenUpdates,
   onOpenModelRouting,
-  onHide,
-  onUnhide,
   onClose,
 }: {
   menu: Extract<ContextMenuState, { kind: "bridge" }>;
   isOnline: boolean;
-  isHidden: boolean;
   onCreateSession: (bridgeId: string) => void;
   onOpenSecurity?: (bridgeId: string) => void;
   onOpenUpdates?: (bridgeId: string) => void;
   onOpenModelRouting?: (bridgeId: string) => void;
-  onHide: (bridgeId: string) => void;
-  onUnhide: (bridgeId: string) => void;
   onClose: () => void;
 }) {
   const menuRef = useRef<HTMLDivElement>(null);
@@ -513,20 +414,14 @@ function BridgeContextMenu({
       {onOpenSecurity && <ContextMenuButton largeOnMobile label="Security log" onClick={() => { onOpenSecurity(menu.bridgeId); onClose(); }} />}
       {onOpenUpdates && <ContextMenuButton largeOnMobile label="Updates…" onClick={() => { onOpenUpdates(menu.bridgeId); onClose(); }} />}
       {onOpenModelRouting && <ContextMenuButton largeOnMobile label="Model routing…" onClick={() => { onOpenModelRouting(menu.bridgeId); onClose(); }} />}
-      {isHidden ? (
-        <ContextMenuButton label="Unhide" onClick={() => { onUnhide(menu.bridgeId); onClose(); }} />
-      ) : (
-        <ContextMenuButton label="Hide" onClick={() => { onHide(menu.bridgeId); onClose(); }} />
-      )}
     </div>,
     document.body
   );
 }
 
 export function SessionList({
-  sessions,
-  bridges,
-  bridgeOrder,
+  bridges, onCreateSession, onOpenSecurity, onOpenUpdates, onOpenModelRouting,
+  sessions, bridgeSecurityStates, bridgeUpdates, onHiddenProjectsChange,
   selectedSessionId,
   onSelectSession,
   onReviewPullRequest,
@@ -536,21 +431,8 @@ export function SessionList({
   onCloneSession,
   onSetSessionParent,
   onReorderSessions,
-  onReorderBridges,
   sessionActivity,
   collapsed,
-  hiddenSessionIds,
-  onHideSession,
-  onUnhideSession,
-  hiddenBridgeIds,
-  onHideBridge,
-  onUnhideBridge,
-  onCreateSession,
-  onOpenSecurity,
-  bridgeSecurityStates,
-  bridgeUpdates,
-  onOpenUpdates,
-  onOpenModelRouting,
   onHandoff,
   onDismissBlock,
 }: SessionListProps) {
@@ -560,20 +442,10 @@ export function SessionList({
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [dragOverKey, setDragOverKey] = useState<string | null>(null);
   const [dragOverZone, setDragOverZone] = useState<SessionDropZone | null>(null);
-  const [hiddenExpanded, setHiddenExpanded] = useState(false);
-  const [hiddenBridgesExpanded, setHiddenBridgesExpanded] = useState(false);
-  const [collapsedBridges, setCollapsedBridges] = usePersistentState<Set<string>>(
-    "ftown:collapsedBridges",
-    EMPTY_ID_SET,
-    stringSetCodec,
-  );
+  const [hiddenProjects, setHiddenProjects] = usePersistentState<Set<string>>("ftown:hiddenProjects", EMPTY_ID_SET, stringSetCodec);
+  useEffect(() => { onHiddenProjectsChange?.(hiddenProjects); }, [hiddenProjects, onHiddenProjectsChange]);
   const [collapsedSessions, setCollapsedSessions] = usePersistentState<Set<string>>(
     "ftown:collapsedSessions",
-    EMPTY_ID_SET,
-    stringSetCodec,
-  );
-  const [collapsedFolders, setCollapsedFolders] = usePersistentState<Set<string>>(
-    "ftown:collapsedSessionFolders",
     EMPTY_ID_SET,
     stringSetCodec,
   );
@@ -589,18 +461,6 @@ export function SessionList({
   // this is persisted so reloads honor that choice instead of re-folding it.
   const seenParentsRef = useRef<Set<string>>(new Set());
   const collapseDefaultsReadyRef = useRef(false);
-  const hiddenSet = hiddenSessionIds ?? EMPTY_ID_SET;
-  const hiddenBridgeSet = hiddenBridgeIds ?? EMPTY_ID_SET;
-  const visibleSessions = useMemo(
-    () => sessions.filter((session) => !hiddenSet.has(session.id) && !hiddenBridgeSet.has(session.bridgeId)),
-    [hiddenBridgeSet, hiddenSet, sessions],
-  );
-
-  const hiddenSessions = useMemo(
-    () => sessions.filter((session) => hiddenSet.has(session.id) && !hiddenBridgeSet.has(session.bridgeId)),
-    [hiddenBridgeSet, hiddenSet, sessions],
-  );
-
   // seenParents stays a manually-persisted ref (not usePersistentState): the
   // default-collapse effect below must see the restored set synchronously in
   // the same mount commit, which state-based hydration cannot guarantee.
@@ -676,43 +536,6 @@ export function SessionList({
     }
   }, [editingSessionId]);
 
-  const onlineBridgeIds = useMemo(() => new Set(bridges.map((b) => b.bridgeId)), [bridges]);
-
-  const knownBridgeIds = useMemo(() => {
-    const ids = new Set<string>();
-    for (const b of bridges) ids.add(b.bridgeId);
-    for (const s of visibleSessions) ids.add(s.bridgeId);
-    return ids;
-  }, [bridges, visibleSessions]);
-
-  const orderedBridgeIds = useMemo(
-    () => bridgeOrder.filter((id) => knownBridgeIds.has(id)),
-    [bridgeOrder, knownBridgeIds],
-  );
-
-  const visibleBridgeIds = useMemo(
-    () => orderedBridgeIds.filter((id) => !hiddenBridgeSet.has(id)),
-    [orderedBridgeIds, hiddenBridgeSet],
-  );
-
-  const selectedBridgeId = useMemo(
-    () => sessions.find((session) => session.id === selectedSessionId)?.bridgeId ?? null,
-    [selectedSessionId, sessions],
-  );
-
-  // Selecting a session opens its bridge group. Collapse state is otherwise
-  // fully user-controlled: bridges the user expands stay expanded, and
-  // collapsing is never automatic.
-  useEffect(() => {
-    if (!selectedBridgeId) return;
-    setCollapsedBridges((current) => {
-      if (!current.has(selectedBridgeId)) return current;
-      const next = new Set(current);
-      next.delete(selectedBridgeId);
-      return next;
-    });
-  }, [selectedBridgeId, setCollapsedBridges]);
-
   useEffect(() => {
     if (selectedSessionId === null) return;
     const byId = new Map(sessions.map((session) => [session.id, session]));
@@ -730,42 +553,6 @@ export function SessionList({
     });
   }, [selectedSessionId, sessions, setCollapsedSessions]);
 
-  useEffect(() => {
-    if (selectedSessionId === null) return;
-    const byId = new Map(sessions.map((session) => [session.id, session]));
-    let root = byId.get(selectedSessionId);
-    const seen = new Set<string>();
-    while (root?.parentSessionId && !seen.has(root.parentSessionId)) {
-      seen.add(root.parentSessionId);
-      const parent = byId.get(root.parentSessionId);
-      if (!parent || parent.bridgeId !== root.bridgeId) break;
-      root = parent;
-    }
-    if (!root) return;
-    const folderKey = `${root.bridgeId}:${normalizeWorkingDir(root.workingDir) ?? "\u0000no-folder"}`;
-    setCollapsedFolders((current) => {
-      if (!current.has(folderKey)) return current;
-      const next = new Set(current);
-      next.delete(folderKey);
-      return next;
-    });
-  }, [selectedSessionId, sessions, setCollapsedFolders]);
-
-  const hiddenBridgeIdsList = useMemo(
-    () => orderedBridgeIds.filter((id) => hiddenBridgeSet.has(id)),
-    [orderedBridgeIds, hiddenBridgeSet],
-  );
-
-  const sessionsByBridge = useMemo(() => {
-    const map = new Map<string, Session[]>();
-    for (const s of visibleSessions) {
-      const arr = map.get(s.bridgeId) ?? [];
-      arr.push(s);
-      map.set(s.bridgeId, arr);
-    }
-    return map;
-  }, [visibleSessions]);
-
   /** parentId → rollup text for children card states, computed once per render. */
   const cardRollups = useMemo(() => {
     const parentIds = new Set<string>();
@@ -780,10 +567,11 @@ export function SessionList({
     return map;
   }, [sessions]);
 
-  const bridgeMenuAnchor = useRef<HTMLButtonElement | null>(null);
+  const bridgeMenuAnchor = useRef<HTMLButtonElement>(null);
   const closeContextMenu = useCallback(() => {
     setContextMenu(null);
-    bridgeMenuAnchor.current?.focus(); bridgeMenuAnchor.current = null;
+    bridgeMenuAnchor.current?.focus();
+    bridgeMenuAnchor.current = null;
   }, []);
 
   function startEditing(session: Session): void {
@@ -802,13 +590,6 @@ export function SessionList({
     e.preventDefault();
     e.stopPropagation();
     setContextMenu({ kind: "session", session, x: e.clientX, y: e.clientY });
-  }
-
-  function handleBridgeContextMenu(e: React.MouseEvent, bridgeId: string): void {
-    e.preventDefault();
-    e.stopPropagation();
-    bridgeMenuAnchor.current = null;
-    setContextMenu({ kind: "bridge", bridgeId, x: e.clientX, y: e.clientY });
   }
 
   function clearDragState(): void {
@@ -882,67 +663,6 @@ export function SessionList({
     setDragOverZone(zone);
   }
 
-  function handleBridgeDragOver(e: React.DragEvent, targetBridgeId: string): void {
-    e.preventDefault();
-    e.dataTransfer.dropEffect = "move";
-    const drag = dragRef.current;
-    if (!drag) {
-      rejectDragOver(e);
-      return;
-    }
-    if (drag.kind === "bridge") {
-      if (drag.id === targetBridgeId) {
-        rejectDragOver(e);
-        return;
-      }
-      setDragOverKey(`bridge:${targetBridgeId}`);
-      setDragOverZone(computeDropZone(e));
-      return;
-    }
-    if (drag.bridgeId !== targetBridgeId || !onSetSessionParent) {
-      rejectDragOver(e);
-      return;
-    }
-    setDragOverKey(`bridge:${targetBridgeId}`);
-    setDragOverZone("inside");
-  }
-
-  function handleBridgeDrop(e: React.DragEvent, targetBridgeId: string): void {
-    e.preventDefault();
-    const drag = dragRef.current;
-    if (!drag) {
-      clearDragState();
-      return;
-    }
-    if (drag.kind === "session") {
-      const action = resolveSessionDrop(
-        { id: drag.id, bridgeId: drag.bridgeId },
-        { kind: "bridge", bridgeId: targetBridgeId },
-      );
-      if (action?.type === "set-parent" && onSetSessionParent) {
-        onSetSessionParent(action.sessionId, action.parentSessionId);
-      }
-      clearDragState();
-      return;
-    }
-    if (drag.kind !== "bridge" || !onReorderBridges) {
-      clearDragState();
-      return;
-    }
-    const draggedId = drag.id;
-    if (draggedId === targetBridgeId) {
-      clearDragState();
-      return;
-    }
-
-    const zone = computeDropZone(e);
-    const reordered = reorderByDrop(orderedBridgeIds, draggedId, targetBridgeId, zone);
-    if (reordered) {
-      onReorderBridges(reordered);
-    }
-    clearDragState();
-  }
-
   function handleSessionDrop(e: React.DragEvent, targetSession: Session): void {
     e.preventDefault();
     const drag = dragRef.current;
@@ -994,12 +714,11 @@ export function SessionList({
 
     const draggedId = action.sessionId;
     const zone = action.zone;
-    const bridgeSessions = sessionsByBridge.get(targetSession.bridgeId) ?? [];
     // Compute indices against the full DFS tree order (the same order rendered),
     // not the raw flat array, so dragging matches what the user sees. Use an
     // empty collapsed set so collapsed subtrees keep their position and all
     // session ids remain in the persisted order.
-    const ids = flattenSessionTree(buildSessionTree(bridgeSessions), new Set<string>()).map(
+    const ids = flattenSessionTree(buildSessionTree(sessions), new Set<string>()).map(
       (row) => row.session.id,
     );
     const fromIdx = ids.indexOf(draggedId);
@@ -1013,36 +732,8 @@ export function SessionList({
     const insertIdx = zone === "above" ? ids.indexOf(targetSession.id) : ids.indexOf(targetSession.id) + 1;
     ids.splice(insertIdx, 0, draggedId);
 
-    const newOrder: string[] = [];
-    const seenBridges = new Set<string>();
-    for (const bid of orderedBridgeIds) {
-      seenBridges.add(bid);
-      if (bid === targetSession.bridgeId) {
-        newOrder.push(...ids);
-      } else {
-        newOrder.push(...(sessionsByBridge.get(bid)?.map((s) => s.id) ?? []));
-      }
-    }
-    for (const [bid, bridgeSessionsList] of sessionsByBridge) {
-      if (!seenBridges.has(bid)) {
-        newOrder.push(...bridgeSessionsList.map((s) => s.id));
-      }
-    }
-    onReorderSessions(newOrder);
+    onReorderSessions(ids);
     clearDragState();
-  }
-
-  function toggleBridgeCollapsed(bridgeId: string): void {
-    setCollapsedBridges((prev) => {
-      const next = new Set(prev);
-      if (next.has(bridgeId)) {
-        for (const visibleBridgeId of visibleBridgeIds) next.add(visibleBridgeId);
-        next.delete(bridgeId);
-      } else {
-        next.add(bridgeId);
-      }
-      return next;
-    });
   }
 
   function toggleSessionCollapsed(sessionId: string): void {
@@ -1052,20 +743,6 @@ export function SessionList({
       else next.add(sessionId);
       return next;
     });
-  }
-
-  if (visibleSessions.length === 0 && visibleBridgeIds.length === 0 && hiddenSessions.length === 0 && hiddenBridgeIdsList.length === 0) {
-    if (collapsed) return null;
-    return (
-      <div
-        className="flex flex-col items-center justify-center p-8 text-center fade-in"
-        style={{ color: "var(--text-faint)", fontSize: 11, gap: 8 }}
-      >
-        <span aria-hidden style={{ fontSize: 20, color: "var(--text-faint)" }}>›_</span>
-        <span style={{ color: "var(--text-muted)", fontSize: 12 }}>No sessions yet</span>
-        <span style={{ color: "var(--text-faint)" }}>Click + above to start your first session</span>
-      </div>
-    );
   }
 
   function renderSessionRow(session: Session, treeProps?: SessionRowTreeProps): ReactElement {
@@ -1454,371 +1131,77 @@ export function SessionList({
     );
   }
 
-  function renderBridgeFolder(bridgeId: string): ReactElement | null {
-    const bridgeSessions = sessionsByBridge.get(bridgeId) ?? [];
-    if (bridgeSessions.length === 0 && collapsed) return null;
-
-    const isBridgeCollapsed = collapsedBridges.has(bridgeId);
-    const isOnline = onlineBridgeIds.has(bridgeId);
-    const label = bridgeLabel(bridgeId, bridges);
-    const finishedSessions = bridgeSessions.filter(
-      (s) => s.status === "completed" || s.status === "error",
-    );
-    const dropKey = `bridge:${bridgeId}`;
-    const isDragOver = dragOverKey === dropKey;
-    const sessionTree = buildSessionTree(bridgeSessions);
-    const folderGroups = groupSessionRootsByFolder(sessionTree);
-
-    const renderTree = (roots: SessionTreeNode[], depthOffset = 0): ReactElement[] =>
-      flattenSessionTree(roots, collapsedSessions).map((row) =>
-        renderSessionRow(row.session, {
-          depth: row.depth + depthOffset,
-          hasChildren: row.hasChildren,
-          isCollapsed: collapsedSessions.has(row.session.id),
-          descendantCount: row.descendantCount,
-          onToggleCollapse: () => toggleSessionCollapsed(row.session.id),
-        }),
-      );
-
-    if (collapsed) {
-      return (
-        <div key={bridgeId} className="flex flex-col">
-          {bridgeSessions.map((session) => renderSessionRow(session))}
-        </div>
-      );
-    }
-
-    return (
-      <div
-        key={bridgeId}
-        className="flex flex-col"
-      >
-        <div
-          data-bridge-row={bridgeId}
-          className="min-h-[52px] py-[7px] md:min-h-0 md:py-[3px]"
-          onDragOver={(e) => handleBridgeDragOver(e, bridgeId)}
-          onDragLeave={() => { setDragOverKey(null); setDragOverZone(null); }}
-          onDrop={(e) => handleBridgeDrop(e, bridgeId)}
-          title="Drop a child session here to move it back to the bridge root"
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 6,
-            paddingInline: 9,
-            borderBottom: !isBridgeCollapsed ? "1px solid var(--border-subtle)" : "none",
-            borderTop: isDragOver && dragOverZone === "above" ? "2px solid var(--accent)" : "none",
-            ...(isDragOver && dragOverZone === "below" ? { borderBottom: "2px solid var(--accent)" } : {}),
-            boxShadow: isDragOver && dragOverZone === "inside" ? "inset 0 0 0 2px var(--accent)" : "none",
-            background: isDragOver && dragOverZone === "inside"
-              ? "var(--bg-hover)"
-              : "transparent",
-            fontFamily: "var(--font-mono)",
-            userSelect: "none",
-          }}
-          onContextMenu={(e) => handleBridgeContextMenu(e, bridgeId)}
-          onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
-          onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
-        >
-          <span
-            data-bridge-drag={bridgeId}
-            className="inline-flex min-h-11 min-w-11 items-center justify-center text-lg md:min-h-0 md:min-w-0 md:text-[10px]"
-            draggable
-            onDragStart={(e) => {
-              e.stopPropagation();
-              handleDragStart(e, { kind: "bridge", id: bridgeId });
-            }}
-            onDragEnd={handleDragEnd}
-            title={`Drag to reorder ${label}`}
-            style={{
-              cursor: "grab",
-              color: "var(--text-faint)",
-              lineHeight: 1,
-              padding: "0 2px",
-              flexShrink: 0,
-              letterSpacing: "-2px",
-            }}
-          >
-            ⠿
-          </span>
-          <button
-            type="button"
-            className="flex min-h-11 min-w-0 flex-1 items-center gap-2 text-sm md:min-h-0 md:gap-1.5 md:text-[11px]"
-            aria-expanded={!isBridgeCollapsed}
-            aria-label={`${isBridgeCollapsed ? "Expand" : "Collapse"} ${label}`}
-            title={label}
-            onClick={(e) => {
-              e.stopPropagation();
-              toggleBridgeCollapsed(bridgeId);
-            }}
-            style={{
-              background: "none",
-              border: "none",
-              cursor: "pointer",
-              color: "var(--text-faint)",
-              padding: 0,
-              textAlign: "left",
-              fontFamily: "var(--font-mono)",
-            }}
-          >
-            <span aria-hidden className="shrink-0 text-lg md:text-[10px]" style={{ width: 12, lineHeight: 1 }}>
-              {isBridgeCollapsed ? "▸" : "▾"}
-            </span>
-            <span
-              style={{
-                fontWeight: 600,
-                color: "var(--text-secondary)",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-                flex: 1,
-                minWidth: 0,
-              }}
-              title={label}
-            >
-              {label}
-            </span>
-          </button>
-          {bridgeUpdates && <span className="max-w-16 shrink-0 truncate text-[10px] text-[var(--text-faint)]" title={bridgeUpdates.get(bridgeId)?.status ? `Bridge version ${bridgeUpdates.get(bridgeId)!.status!.currentVersion}` : "Bridge version unknown"}>
-            {bridgeUpdates.get(bridgeId)?.status ? `v${bridgeUpdates.get(bridgeId)!.status!.currentVersion}${bridgeUpdates.get(bridgeId)!.status!.availability === "available" ? " ↑" : ""}` : bridgeUpdates.get(bridgeId)?.loading ? "Checking…" : "Unknown"}
-          </span>}
-          {onOpenUpdates && <button type="button" className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center md:min-h-11 md:min-w-11"
-            aria-label={`Actions for ${label}`} aria-haspopup="menu" aria-expanded={contextMenu?.kind === "bridge" && contextMenu.bridgeId === bridgeId}
-            style={{ color: "var(--text-muted)", background: "none", border: "none", cursor: "pointer" }}
-            onClick={event => { event.stopPropagation(); const rect = event.currentTarget.getBoundingClientRect(); bridgeMenuAnchor.current = event.currentTarget; setContextMenu({ kind: "bridge", bridgeId, x: rect.left, y: rect.bottom }); }}>⋯</button>}
-          {finishedSessions.length > 0 && onRemoveSession && (
-            <button
-              type="button"
-              className="inline-flex min-h-11 min-w-11 items-center justify-center text-lg md:min-h-0 md:min-w-0 md:text-[10px]"
-              disabled={!isOnline}
-              aria-label={`Clear completed sessions on ${label}`}
-              title={isOnline
-                ? `Clear ${finishedSessions.length} completed/error session${finishedSessions.length === 1 ? "" : "s"}`
-                : "Bridge is offline — sessions cannot be removed"}
-              onClick={(e) => {
-                e.stopPropagation();
-                const count = finishedSessions.length;
-                if (!window.confirm(`Remove ${count} completed/error session${count === 1 ? "" : "s"} from ${label}?`)) return;
-                // onlyIfFinished: the bridge re-checks status, so a session
-                // retried back to running since this render is not killed.
-                for (const s of finishedSessions) onRemoveSession(s.id, true);
-              }}
-              style={{
-                background: "none",
-                border: "none",
-                cursor: isOnline ? "pointer" : "default",
-                opacity: isOnline ? 1 : 0.4,
-                color: "var(--text-faint)",
-                padding: "0 2px",
-                lineHeight: 1,
-                flexShrink: 0,
-                fontFamily: "var(--font-mono)",
-              }}
-              onMouseEnter={(e) => { e.currentTarget.style.color = "var(--status-error)"; }}
-              onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-faint)"; }}
-            >
-              ✕
-            </button>
-          )}
-          {onOpenSecurity && <button type="button" aria-label={`Security log for ${label}`} title={`Security log for ${label}: ${bridgeConnectionLock(bridgeSecurityStates?.get(bridgeId)).title}`}
-            className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center text-sm md:min-h-6 md:min-w-6"
-            style={{ color: "var(--text-muted)", background: "none", border: "none", cursor: "pointer" }}
-            onClick={event => { event.stopPropagation(); onOpenSecurity(bridgeId); }}><SecurityLockIcon state={bridgeConnectionLock(bridgeSecurityStates?.get(bridgeId)).state} /></button>}
-          <StatusDot kind={isOnline ? "connected" : "disconnected"} />
-          {(bridgeSecurityStates === undefined || bridgeSecurityStates.get(bridgeId) === "ready") && (
-            <span style={{ fontSize: 10, color: "var(--text-faint)", fontVariantNumeric: "tabular-nums" }}>
-              {bridgeSessions.length}
-            </span>
-          )}
-        </div>
-        {!isBridgeCollapsed && (folderGroups === null
-          ? renderTree(sessionTree)
-          : folderGroups.flatMap((group) => {
-              if (group.roots.length === 1) return renderTree(group.roots);
-              const folderKey = `${bridgeId}:${group.key}`;
-              const isFolderCollapsed = collapsedFolders.has(folderKey);
-              return [
-                <div
-                  key={`folder:${bridgeId}:${group.key}`}
-                  role="group"
-                  aria-label={`Sessions in ${group.label}`}
-                  title={group.path ?? "Sessions without a working folder"}
-                  style={{ borderBottom: "1px solid var(--border-subtle)" }}
-                >
-                  <button
-                    type="button"
-                    aria-expanded={!isFolderCollapsed}
-                    aria-label={`${isFolderCollapsed ? "Expand" : "Collapse"} folder ${group.label}`}
-                    onClick={() => {
-                      setCollapsedFolders((current) => {
-                        const next = new Set(current);
-                        if (next.has(folderKey)) next.delete(folderKey);
-                        else next.add(folderKey);
-                        return next;
-                      });
-                    }}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 7,
-                      width: "100%",
-                      minWidth: 0,
-                      padding: "6px 12px 5px 17px",
-                      color: "var(--text-muted)",
-                      background: "transparent",
-                      border: "none",
-                      cursor: "pointer",
-                      textAlign: "left",
-                      fontFamily: "var(--font-mono)",
-                    }}
-                    onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
-                    onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
-                  >
-                    <span aria-hidden style={{ width: 8, flexShrink: 0, fontSize: 9, color: "var(--text-faint)" }}>
-                      {isFolderCollapsed ? "▸" : "▾"}
-                    </span>
-                    <FolderIcon />
-                    <span
-                      style={{
-                        flex: 1,
-                        minWidth: 0,
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                        fontSize: 11,
-                        fontWeight: 600,
-                      }}
-                    >
-                      {group.label}
-                    </span>
-                    <span
-                      aria-label={`${group.roots.length} root agents`}
-                      style={{ fontSize: 9, color: "var(--text-faint)", fontVariantNumeric: "tabular-nums" }}
-                    >
-                      {group.roots.length}
-                    </span>
-                  </button>
-                  {!isFolderCollapsed && renderTree(group.roots, 1)}
-                </div>,
-              ];
-            }))}
-      </div>
-    );
+  const projects = new Map<string, SessionTreeNode[]>();
+  for (const root of buildSessionTree(sessions)) {
+    const project = root.session.projectName || "";
+    const roots = projects.get(project) ?? [];
+    roots.push(root);
+    projects.set(project, roots);
   }
-
+  const computers = new Map(sessions.map(session => [session.bridgeId, session.bridgeId]));
+  for (const id of bridgeSecurityStates?.keys() ?? []) computers.set(id, id);
+  for (const bridge of bridges) computers.set(bridge.bridgeId, bridge.hostname || bridge.bridgeId);
+  function toggleProject(project: string) {
+    setHiddenProjects(previous => {
+      const next = new Set(previous);
+      if (next.has(project)) next.delete(project);
+      else next.add(project);
+      return next;
+    });
+  }
   return (
     <div className="flex flex-col">
-      {visibleBridgeIds.map((bridgeId) => renderBridgeFolder(bridgeId))}
-
-      {hiddenBridgeIdsList.length > 0 && !collapsed && (
-        <div className="flex flex-col">
-          <button
-            onClick={() => setHiddenBridgesExpanded((v) => !v)}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              padding: "8px 16px",
-              borderBottom: "1px solid var(--border-subtle)",
-              borderTop: "1px solid var(--border-subtle)",
-              background: "var(--bg-base)",
-              cursor: "pointer",
-              fontFamily: "var(--font-mono)",
-              fontSize: 11,
-              color: "var(--text-muted)",
-              letterSpacing: "0.06em",
-              textTransform: "uppercase",
+      {Array.from(projects, ([project, roots]) => hiddenProjects.has(project) ? null : (
+        <section key={project} aria-label={project || "No project"}>
+          {!collapsed && <div className="flex items-center justify-between px-2 py-1"
+            onDragOver={event => {
+              const drag = dragRef.current;
+              if (drag?.kind === "session" && roots.some(root => root.children.some(child => child.session.id === drag.id))) event.preventDefault();
             }}
-            onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
-            onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg-base)"; }}
-          >
-            <span>Hidden bridges ({hiddenBridgeIdsList.length})</span>
-            <span style={{ fontSize: 10, opacity: 0.6 }}>{hiddenBridgesExpanded ? "▾" : "▸"}</span>
-          </button>
-          {hiddenBridgesExpanded && hiddenBridgeIdsList.map((bridgeId) => renderBridgeFolder(bridgeId))}
-        </div>
-      )}
-
-      {hiddenSessions.length > 0 && !collapsed && (
-        <div className="flex flex-col">
-          <button
-            onClick={() => setHiddenExpanded((v) => !v)}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              padding: "8px 16px",
-              borderBottom: "1px solid var(--border-subtle)",
-              borderTop: "1px solid var(--border-subtle)",
-              background: "var(--bg-base)",
-              cursor: "pointer",
-              fontFamily: "var(--font-mono)",
-              fontSize: 11,
-              color: "var(--text-muted)",
-              letterSpacing: "0.06em",
-              textTransform: "uppercase",
-            }}
-            onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
-            onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg-base)"; }}
-          >
-            <span>Hidden ({hiddenSessions.length})</span>
-            <span style={{ fontSize: 10, opacity: 0.6 }}>{hiddenExpanded ? "▾" : "▸"}</span>
-          </button>
-          {hiddenExpanded && hiddenSessions.map((session) => {
-            const isSelected = session.id === selectedSessionId;
-            const displayName = session.name || session.prompt?.slice(0, 36) || "Session";
-            return (
-              <button
-                key={session.id}
-                onClick={() => onSelectSession(session.id)}
-                onContextMenu={(e) => handleContextMenu(e, session)}
-                style={{
-                  width: "100%",
-                  textAlign: "left",
-                  padding: "8px 16px 8px 28px",
-                  borderBottom: "1px solid var(--border-subtle)",
-                  borderLeft: `2px solid ${isSelected ? "var(--accent)" : "transparent"}`,
-                  background: isSelected ? "var(--bg-elevated)" : "transparent",
-                  cursor: "pointer",
-                  transition: "background 0.12s ease, border-color 0.12s ease",
-                  fontFamily: "var(--font-mono)",
-                  display: "block",
-                  opacity: 0.6,
-                }}
-                onMouseEnter={(e) => {
-                  if (!isSelected) e.currentTarget.style.background = "var(--bg-hover)";
-                }}
-                onMouseLeave={(e) => {
-                  if (!isSelected) e.currentTarget.style.background = "transparent";
-                }}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <HarnessIcon harness={session.shellType} size={16} />
-                  <span
-                    style={{
-                      fontSize: 11,
-                      color: isSelected ? "var(--text-primary)" : "var(--text-secondary)",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                      flex: 1,
-                      minWidth: 0,
-                    }}
-                  >
-                    {displayName}
-                  </span>
-                  {session.block && <SessionBlockBadge block={session.block} />}
-                  <SessionStateIndicator
-                    status={session.status}
-                    activity={sessionActivity?.get(session.id)?.activity}
-                    needsInput={Boolean(sessionActivity?.get(session.id)?.attention)}
-                  />
-                </div>
-              </button>
-            );
+            onDrop={event => {
+              event.preventDefault();
+              const drag = dragRef.current;
+              if (drag?.kind === "session" && roots.some(root => root.children.some(child => child.session.id === drag.id))) onSetSessionParent?.(drag.id, null);
+              clearDragState();
+            }}>
+            <strong className="min-w-0 truncate text-sm">{project || "No project"}</strong>
+            <button type="button" className="btn-ghost text-xs" aria-label={`Hide project ${project || "No project"}`} onClick={() => toggleProject(project)}>Hide</button>
+          </div>}
+          {flattenSessionTree(roots, collapsedSessions).map(row => renderSessionRow(row.session, {
+            depth: row.depth, hasChildren: row.hasChildren, descendantCount: row.descendantCount,
+            isCollapsed: collapsedSessions.has(row.session.id), onToggleCollapse: () => toggleSessionCollapsed(row.session.id),
+          }))}
+        </section>
+      ))}
+      {Array.from(projects.keys()).some(project => hiddenProjects.has(project)) && <details>
+        <summary className="cursor-pointer px-2 py-1 text-xs">Hidden projects</summary>
+        {Array.from(projects.keys()).filter(project => hiddenProjects.has(project)).map(project =>
+          <button type="button" className="btn-ghost block text-xs" key={project} onClick={() => toggleProject(project)}>Show {project || "No project"}</button>)}
+      </details>}
+      {!sessions.length && !collapsed && <p className="p-4 text-xs text-[var(--text-muted)]">No sessions yet</p>}
+      {!collapsed && (onOpenUpdates || onOpenSecurity || onOpenModelRouting) && computers.size > 0 &&
+        <nav aria-label="Computer settings" className="mt-3 border-t border-[var(--border-subtle)] p-2">
+          {Array.from(computers, ([id, label]) => {
+            const lock = bridgeConnectionLock(bridgeSecurityStates?.get(id));
+            const update = bridgeUpdates?.get(id)?.status;
+            return <div key={id} className="flex items-center justify-between">
+              <button className="btn-ghost text-xs" aria-label={`Actions for ${label}`} aria-haspopup="menu"
+                aria-expanded={contextMenu?.kind === "bridge" && contextMenu.bridgeId === id}
+                onClick={event => {
+                  bridgeMenuAnchor.current = event.currentTarget;
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  setContextMenu({ kind: "bridge", bridgeId: id, x: rect.left, y: rect.bottom });
+                }}>{label} {update && <span>v{update.currentVersion}{update.availability === "available" ? " ↑" : ""}</span>} ⋯</button>
+              {onOpenSecurity && <button aria-label={`Security log for ${label}`} title={lock.title}
+                style={{ color: "var(--text-muted)" }} onClick={() => onOpenSecurity(id)}>
+                <SecurityLockIcon state={lock.state} />
+              </button>}
+            </div>;
           })}
-        </div>
-      )}
-
+        </nav>}
+      {contextMenu?.kind === "bridge" && <BridgeContextMenu menu={contextMenu} isOnline={bridges.some(b => b.bridgeId === contextMenu.bridgeId)}
+        onCreateSession={onCreateSession ?? (() => {})} onOpenSecurity={onOpenSecurity} onOpenUpdates={onOpenUpdates}
+        onOpenModelRouting={onOpenModelRouting} onClose={closeContextMenu} />}
       {contextMenu?.kind === "session" && onStopSession && onRemoveSession && (
         <SessionContextMenu
           menu={contextMenu}
@@ -1827,9 +1210,6 @@ export function SessionList({
           onStop={onStopSession}
           onRemove={onRemoveSession}
           onClone={onCloneSession ?? (() => {})}
-          onHide={onHideSession ?? (() => {})}
-          onUnhide={onUnhideSession ?? (() => {})}
-          isHidden={hiddenSet.has(contextMenu.session.id)}
           onHandoff={onHandoff ? (session) => setHandoffTarget(session) : undefined}
           onDismissBlock={onDismissBlock}
           onClose={closeContextMenu}
@@ -1840,20 +1220,6 @@ export function SessionList({
           sessionName={handoffTarget.name}
           onClose={() => setHandoffTarget(null)}
           onSubmit={(input) => onHandoff(handoffTarget.id, input)}
-        />
-      )}
-      {contextMenu?.kind === "bridge" && (
-        <BridgeContextMenu
-          menu={contextMenu}
-          isOnline={onlineBridgeIds.has(contextMenu.bridgeId)}
-          isHidden={hiddenBridgeSet.has(contextMenu.bridgeId)}
-          onCreateSession={onCreateSession ?? (() => {})}
-          onOpenSecurity={onOpenSecurity}
-          onOpenUpdates={onOpenUpdates}
-          onOpenModelRouting={onOpenModelRouting}
-          onHide={onHideBridge ?? (() => {})}
-          onUnhide={onUnhideBridge ?? (() => {})}
-          onClose={closeContextMenu}
         />
       )}
     </div>

@@ -45,6 +45,8 @@ export interface AccountsFile { version: 1; accounts: HarnessAccount[] }
 export type HarnessAccountSummary = Omit<HarnessAccount, 'configDir'> & { isDefault: boolean };
 
 export interface Session {
+  /** Restored from this client’s last authenticated owner snapshot. */
+  lastKnownOnly?: true;
   id: string;
   name: string;
   prompt?: string;
@@ -67,6 +69,8 @@ export interface Session {
   grokSessionId?: string;
   antigravitySessionId?: string;
   command?: string;
+  projectName?: string;
+  parentBridgeId?: string;
   parentSessionId?: string;
   requireGreenPr?: boolean;
   pullRequestUrl?: string;
@@ -221,6 +225,8 @@ export interface CreateSessionPayload {
   env?: Record<string, string>;
   initialInput?: string;
   initialInputDelay?: number;
+  projectName?: string;
+  parentBridgeId?: string;
   parentSessionId?: string;
   createMissingWorkingDir?: boolean;
 }
@@ -240,6 +246,7 @@ export interface RenameSessionPayload {
 
 export interface UpdateSessionParentPayload {
   sessionId: string;
+  parentBridgeId?: string;
   parentSessionId: string | null;
 }
 

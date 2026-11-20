@@ -1,3 +1,4 @@
+import { setPeerTarget } from './cli-client.js';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -627,3 +628,20 @@ test('attention wait budget ignores wall-clock jumps', async () => {
     });
   }
 });
+
+test('remote create with --parent forwards the caller ID and its owning bridge', async () => withFakeClock(async () => fixture(async requests => {
+  setPeerTarget('destination');
+  process.env.FTOWN_SESSION_ID = 'nested-caller';
+  try {
+    assert.equal(await runSessions(['create', '--parent', '--shell', 'shell']), 0);
+    const forwarded = requests[0].body as { bridge: string; path: string; body: unknown };
+    assert.equal(forwarded.bridge, 'destination');
+    assert.equal(forwarded.path, '/api/sessions');
+    assert.deepEqual(forwarded.body, { shellType: 'shell', parentSessionId: 'nested-caller', parentBridgeId: 'bridge' });
+  } finally { setPeerTarget(null); }
+})));
+
+test('remembered list reads the local bridge cache', async () => fixture(async requests => {
+  assert.equal(await runSessions(['list', '--remembered']), 0);
+  assert.ok(requests[0].url.endsWith('/api/peers/sessions'));
+}));

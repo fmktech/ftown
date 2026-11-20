@@ -573,7 +573,9 @@ To move a session under a different parent, PATCH it with the new parent's id:
 ```
 
 Set `parentSessionId` to `null` to detach it from its current parent and move it
-back to the bridge root. Parent and child must belong to the same bridge.
+back to the project root. For a parent on another computer, include its bridge ID in `parentBridgeId`. New root sessions require a project name (`--project` on the CLI or `projectName` in the request body).
+
+Project visibility is saved on each client. Previous bridge and session hiding preferences no longer filter the sidebar. Use **Hide** on the projects you want to hide on that client. Run `ftown sessions list --remembered` to inspect the local bridge’s last peer snapshots. Browsers retain the last state received directly from each approved computer. A new browser needs to see a computer online once before it can show that computer’s sessions offline.
 
 ## If the CLI is missing
 

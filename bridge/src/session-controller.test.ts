@@ -790,3 +790,22 @@ it('keeps a link incarnation for equivalent URLs and replaces it after unlink', 
   await h.controller.update('sess-1', { pullRequestUrl: 'https://github.com/owner/repo/pull/1' });
   assert.notEqual(h.store.sessions.get('sess-1')!.pullRequestLinkId, first);
 });
+
+it('moves under the root on a third machine and rejects moves with remote children', async () => {
+  const child = makeSession({ id: 'worker', bridgeId: 'destination' });
+  let remoteChildren = true;
+  const h = setup([child], { sessionFactory: {
+    hasRemoteChildren: async () => remoteChildren,
+    loadRemoteParent: async (owner: string, id: string) => {
+      if (owner === 'source' && id === 'caller') return makeSession({ id, bridgeId: owner, parentSessionId: 'manager', parentBridgeId: 'third' });
+      assert.deepEqual([owner, id], ['third', 'manager']);
+      return makeSession({ id, bridgeId: owner, projectName: 'Shared' });
+    },
+  } as NonNullable<SessionControllerDeps['sessionFactory']> });
+  const move = () => h.controller.update(child.id, { parent: { value: 'caller', bridgeId: 'source' } });
+  assert.deepEqual(await move(), { ok: false, code: 'invalid', message: 'Session with children cannot be reparented' });
+  remoteChildren = false;
+  const result = await move();
+  assert.ok(result.ok);
+  assert.deepEqual([result.session.parentSessionId, result.session.parentBridgeId, result.session.projectName], ['manager', 'third', 'Shared']);
+});

@@ -24,6 +24,8 @@ import type { AttentionItem } from './attention-events.js';
 import { PreviewChatStore } from './preview-chat.js';
 import { BridgePushNotifier } from './push-notifier.js';
 import { LocalApiServer } from './local-api-server.js';
+import { parsePeerSessions, startPeerSessionCache } from './peer-session-cache.js';
+import { parseRemoteParent, sessionRequestPrincipal } from './session-parent.js';
 import { PeerControl } from './peer-control.js';
 import { PeerLinks } from './peer-link.js';
 import { launchCapabilities, probeLaunchCapabilities } from './harness-registry.js';
@@ -902,7 +904,41 @@ program
       );
     };
 
+    // Direct bridge-to-bridge links: cross-bridge requests leave the relay once a link to the peer is open.
+    let peerLinkAdmission: Promise<void> = Promise.resolve();
+    const peerLinks = new PeerLinks({
+      bridgeId, endpointId: security.endpoint.id, peers: () => security.peerBridges(),
+      onRevoked: listener => security.onRevoked(listener),
+      execute: (packet, route) => executeSecurePacket(security, packet, route, async message => {
+        if (!ready) throw new BridgeStartingError();
+        return localApiServer.dispatchSecure(message);
+      }, accept => {
+        const accepted = peerLinkAdmission.then(accept);
+        peerLinkAdmission = accepted.then(() => undefined, () => undefined);
+        return accepted;
+      }),
+    });
+    const peerControl = new PeerControl(security, centrifugo, peerLinks);
     const sessionFactoryDeps: CreateFtownSessionDeps = {
+      loadRemoteParent: async (owner, id) => {
+        const actor = sessionRequestPrincipal.getStore();
+        if (actor && !security.permitsPeerLookup(actor)) throw new Error('Parent session unavailable');
+        const result = await peerControl.http(owner, 'GET', '/api/sessions/' + encodeURIComponent(id));
+        if (result.status !== 200) throw new Error('Parent session unavailable');
+        if (actor) {
+          await security.revalidate(actor);
+          if (!security.permitsPeerLookup(actor)) throw new Error('Parent session unavailable');
+        }
+        return parseRemoteParent(result.body);
+      },
+      hasRemoteChildren: async id => {
+        const snapshots = await Promise.all((await peerControl.list()).map(async peer => {
+          const result = await peerControl.http(peer.bridgeId, 'GET', '/api/sessions');
+          if (result.status !== 200) throw new Error('Cannot verify children on peer bridge');
+          return parsePeerSessions(result.body, peer.bridgeId);
+        }));
+        return snapshots.some(rows => rows.some(row => row.parentSessionId === id && (row.parentBridgeId ?? bridgeId) === bridgeId));
+      },
       store,
       updateAdmission,
       runner,
@@ -1156,6 +1192,7 @@ program
       routing: modelRouting,
     }, sessionId, request);
     localApiServer.setHandoff(runHandoff);
+    const peerCache = await startPeerSessionCache(peerControl, join(dataDir, "peer-sessions-" + security.endpoint.id + ".json"));
     const dispatchCommand = async (message: VerifiedApplication): Promise<ApplicationJson> => {
       if (!ready) return { type: 'command_response', response: { requestId: message.envelope.messageId, success: false, error: 'bridge_offline' } };
       const route = message.application.route;
@@ -1182,21 +1219,7 @@ program
     };
     localApiServer.setSecurity(security, { protocolVersion: 1, ownerId: auth.ownerId, bridgeId, endpoint: security.endpoint,
       relayUserId: userId }, dispatchCommand, updateEffects);
-    // Direct bridge-to-bridge links: cross-bridge requests leave the relay once a link to the peer is open.
-    let peerLinkAdmission: Promise<void> = Promise.resolve();
-    const peerLinks = new PeerLinks({
-      bridgeId, endpointId: security.endpoint.id, peers: () => security.peerBridges(),
-      onRevoked: listener => security.onRevoked(listener),
-      execute: (packet, route) => executeSecurePacket(security, packet, route, async message => {
-        if (!ready) throw new BridgeStartingError();
-        return localApiServer.dispatchSecure(message);
-      }, accept => {
-        const accepted = peerLinkAdmission.then(accept);
-        peerLinkAdmission = accepted.then(() => undefined, () => undefined);
-        return accepted;
-      }),
-    });
-    localApiServer.setPeerControl(new PeerControl(security, centrifugo, peerLinks), peerLinks, join(dataDir, 'folder-transfers'));
+    localApiServer.setPeerControl(peerControl, peerLinks, join(dataDir, 'folder-transfers'), peerCache.list);
 
     // Solo: the hub child must be healthy before connecting (L1 gates the
     // transport, not the front). A failed hub is fatal for solo — exit cleanly
@@ -1261,6 +1284,7 @@ program
       shutdownRun ??= (async () => {
         console.log('\n[Bridge] Shutting down...');
         try {
+          await peerCache.stop();
           await pullRequestEvents.stop();
           attentionStore.stopNotifications();
           stopPushSessionObserver();

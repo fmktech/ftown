@@ -48,7 +48,7 @@ entrypoint with `--repair`.
 ```bash
 ftown sessions list
 ftown sessions create --prompt "Review the auth module" --workdir "$PWD" --parent
-ftown sessions create --shell claude --account personal --prompt "Review the auth module"
+ftown sessions create --project "App" --shell claude --account personal --prompt "Review the auth module"
 ftown sessions create --parent --allowed-accounts personal,work --prompt "Delegate account-scoped work"
 ftown sessions screen <session-id> --limit 200
 ftown sessions attention --message "Please review the migration plan" --title "Review requested"
@@ -90,7 +90,7 @@ set `FTOWN_BRIDGE`, to run `sessions`, `status`, `board`, `events`,
 ```bash
 ftown bridges --probe
 ftown sessions list --bridge my-laptop
-ftown sessions create --bridge my-laptop --shell codex --workdir ~/src/app --prompt "Run the test suite"
+ftown sessions create --bridge my-laptop --project "App" --shell codex --workdir ~/src/app --prompt "Run the test suite"
 ftown sessions screen <session-id> --bridge my-laptop --limit 100
 ```
 
@@ -99,9 +99,7 @@ link to it; later commands use that link (`ftown bridges` marks it `direct`).
 If no direct link can be made, commands keep using the relay.
 
 Requests travel end-to-end encrypted over the account relay; the target bridge
-has to run an ftown version with cross-bridge control. Security commands
-(pairing, devices, revocation) never work across bridges. `--parent` links
-cannot cross bridges, and `harness mail` only reaches sessions on this bridge.
+has to run an ftown version with cross-bridge control. Pass `--project <name>` when creating a root session. A child inherits its parent’s project. Use `--bridge <target> --parent` to create a child on another computer under the current session’s root. The root can also live on a third bridge. Account choices on a remote child come from its destination bridge. Security commands and `harness mail` operate on the local bridge.
 Not available in `--local`/`--solo` mode.
 
 Read `references/sessions.md` for the session, mail and terminal command

@@ -30,6 +30,7 @@ function renderModal() {
       isOpen
       onClose={vi.fn()}
       onSubmit={onSubmit}
+      defaults={{ projectName: "Test project" }}
       bridges={[]}
       sendCommand={vi.fn(async () => ({ requestId: "test", success: true }))}
     />,
@@ -87,7 +88,7 @@ const parent: Session = { id: "parent", name: "Manager", bridgeId: "a", shellTyp
 function accountsModal(overrides: { sessions?: Session[]; defaults?: SessionDefaults; sendCommand?: (command: Command) => Promise<CommandResponse> } = {}) {
   const onSubmit = vi.fn(async () => undefined);
   const sendCommand = overrides.sendCommand ?? vi.fn(async () => ({ requestId: "accounts", success: true, data: { accounts } }));
-  const result = render(<NewSessionModal isOpen onClose={vi.fn()} onSubmit={onSubmit} bridges={bridges} sessions={overrides.sessions} defaults={overrides.defaults} sendCommand={sendCommand} />);
+  const result = render(<NewSessionModal isOpen onClose={vi.fn()} onSubmit={onSubmit} bridges={bridges} sessions={overrides.sessions} defaults={{ projectName: "Test project", ...overrides.defaults }} sendCommand={sendCommand} />);
   return { ...result, onSubmit, sendCommand };
 }
 
@@ -141,7 +142,7 @@ it("shows the typed starting message after the picker exhausts its bounded backo
 
 it("shows the typed bridge startup refusal from session creation", async () => {
   const onSubmit = vi.fn(async () => { throw new Error("Bridge is starting"); });
-  render(<NewSessionModal isOpen onClose={vi.fn()} onSubmit={onSubmit} bridges={bridges}
+  render(<NewSessionModal isOpen onClose={vi.fn()} onSubmit={onSubmit} bridges={bridges} defaults={{ projectName: "Test project" }}
     sendCommand={vi.fn(async () => ({ requestId: "accounts", success: true, data: { accounts } }))} />);
   await waitFor(() => expect((screen.getByLabelText("Account") as HTMLSelectElement).disabled).toBe(false));
   fireEvent.click(screen.getByRole("button", { name: "Create Session" }));

@@ -66,7 +66,7 @@ function acceptSessionRow(value: unknown): Session | null {
 function isSessionRow(value: unknown): value is Session {
   if (!value || typeof value !== "object") return false;
   const row = value as Record<string, unknown>;
-  const optionalStrings = ["prompt", "model", "workingDir", "shellType", "account", "claudeSessionId", "cursorSessionId", "codexSessionId", "piSessionId", "piSessionFile", "opencodeSessionId", "museSessionId", "grokSessionId", "antigravitySessionId", "command", "parentSessionId", "loopId"];
+  const optionalStrings = ["projectName", "parentBridgeId", "prompt", "model", "workingDir", "shellType", "account", "claudeSessionId", "cursorSessionId", "codexSessionId", "piSessionId", "piSessionFile", "opencodeSessionId", "museSessionId", "grokSessionId", "antigravitySessionId", "command", "parentSessionId", "loopId"];
   return (row.preview === undefined || isPreviewDescriptor(row.preview))
     && optionalStrings.every(key => row[key] === undefined || typeof row[key] === "string")
     && (row.allowedAccounts === undefined || (Array.isArray(row.allowedAccounts) && row.allowedAccounts.every(id => typeof id === "string")))
@@ -132,6 +132,8 @@ export interface CreateSessionOptions {
   shellType?: ShellType;
   account?: string;
   allowedAccounts?: string[];
+  projectName?: string;
+  parentBridgeId?: string;
   parentSessionId?: string;
   claudeSessionId?: string;
   cursorSessionId?: string;
@@ -246,7 +248,39 @@ export function useSessions(
     sessionPositionRef.current = { offset: 0, epoch: "" };
     sessionNeedsSnapshotRef.current = true;
     updateSessions(() => []);
-  }, [userId, updateSessions]);
+    const runtime = client?.securityRuntime;
+    if (!userId || !runtime?.identity?.endpoint.id || !runtime.pinnedBridges) return;
+    const prefix = JSON.stringify([userId, runtime.identity.endpoint.id]);
+    const loaded = new Map<string, string>();
+    function restore() {
+      if (!runtime) return;
+      const pins = runtime.pinnedBridges().filter(pin => pin.permissions.includes("read") && !["revoked", "key_changed"].includes(runtime.state(pin.bridgeId).status));
+      const keys = new Map(pins.map(pin => [pin.bridgeId, prefix + ":" + JSON.stringify([pin.bridgeId, pin.endpoint.id])]));
+      const rows: Session[] = [];
+      try {
+        for (const key of Object.keys(localStorage)) {
+          if (!key.startsWith(prefix + ":")) continue;
+          const [owner] = JSON.parse(key.slice(prefix.length + 1));
+          const replacement = keys.get(owner);
+          if ((replacement && replacement !== key) || ["revoked", "key_changed"].includes(runtime.state(owner).status)) localStorage.removeItem(key);
+        }
+        for (const [owner, key] of keys) {
+          if (loaded.get(owner) === key) continue;
+          const stored = JSON.parse(localStorage.getItem(key) || "[]");
+          if (Array.isArray(stored)) rows.push(...stored.filter((row): row is Session => isSessionRow(row) && row.bridgeId === owner).map(row => ({ ...row, lastKnownOnly: true as const })));
+        }
+      } catch { /* Storage may be unavailable. */ }
+      updateSessions(previous => {
+        const current = previous.filter(row => keys.has(row.bridgeId) && (!loaded.has(row.bridgeId) || loaded.get(row.bridgeId) === keys.get(row.bridgeId)));
+        const ids = new Set(current.map(row => row.id));
+        return [...current, ...rows.filter(row => !ids.has(row.id))];
+      });
+      loaded.clear();
+      for (const [owner, key] of keys) loaded.set(owner, key);
+    }
+    restore();
+    return runtime.onChange(restore);
+  }, [client, userId, updateSessions]);
 
   useEffect(() => {
     if (!userId) return;
@@ -317,6 +351,15 @@ export function useSessions(
       try { publishCommand(command); } catch { rollback(command.requestId); }
     };
 
+    function rememberOwner(bridgeId: string, next: Session[]) {
+      const runtime = client?.securityRuntime;
+      const pin = runtime?.bridge(bridgeId);
+      if (pin?.permissions?.includes("read") && runtime?.identity?.endpoint.id && !["revoked", "key_changed"].includes(runtime.state(bridgeId).status)) {
+        const summaries = next.filter(row => row.bridgeId === bridgeId).map(({ id, name, bridgeId, status, projectName, parentSessionId, parentBridgeId, createdAt, updatedAt }) =>
+          ({ id, name, bridgeId, status, projectName, parentSessionId, parentBridgeId, createdAt, updatedAt }));
+        try { localStorage.setItem(JSON.stringify([userId, runtime.identity.endpoint.id]) + ":" + JSON.stringify([bridgeId, pin.endpoint.id]), JSON.stringify(summaries)); } catch {}
+      }
+    }
     const unregisterResponse = onResponse((response: CommandResponse) => {
       if (!active) return;
       pruneRequests();
@@ -382,7 +425,11 @@ export function useSessions(
           merged.set(row.id, mergeSessionSnapshot(merged.get(row.id), row));
           observe(row.id);
         }
-        return [...merged.values()];
+        const next = [...merged.values()];
+        if (authoritative) {
+          rememberOwner(bridgeId, next);
+        }
+        return next;
       });
     });
     // The first command-ready signal may follow security enrollment. Later
@@ -434,6 +481,7 @@ export function useSessions(
             return current ? prev.map(s => s.id === incoming.id ? incoming : s) : [incoming, ...prev];
           });
         }
+        rememberOwner(data.session.bridgeId, sessionsRef.current);
       });
       sessionsSub.on("subscribed", context => {
         if (!active) return;
@@ -553,6 +601,8 @@ export function useSessions(
         shellType,
         ...(options?.account !== undefined ? { account: options.account } : {}),
         ...(options?.allowedAccounts !== undefined ? { allowedAccounts: options.allowedAccounts } : {}),
+        projectName: options?.projectName,
+        parentBridgeId: options?.parentBridgeId,
         ...(options?.parentSessionId ? { parentSessionId: options.parentSessionId } : {}),
         claudeSessionId: options?.claudeSessionId,
         cursorSessionId: options?.cursorSessionId,
@@ -693,7 +743,7 @@ export function useSessions(
     (sessionId: string, parentSessionId: string | null) => {
       if (!userId) return;
 
-      const payload: UpdateSessionParentPayload = { sessionId, parentSessionId };
+      const payload: UpdateSessionParentPayload = { sessionId, parentSessionId, parentBridgeId: sessionsRef.current.find(s => s.id === parentSessionId)?.bridgeId };
       const command: Command = {
         type: "update_session_parent",
         payload,

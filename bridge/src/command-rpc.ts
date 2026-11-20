@@ -525,6 +525,8 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
               grokSessionId: payload.grokSessionId,
               antigravitySessionId: payload.antigravitySessionId,
               env: payload.env,
+              projectName: payload.projectName,
+              parentBridgeId: payload.parentBridgeId,
               parentSessionId: payload.parentSessionId,
               initialInput: payload.initialInput,
               initialInputDelay: payload.initialInputDelay,
@@ -619,7 +621,7 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
           }
 
           const result = await sessionController.update(payload.sessionId, {
-            parent: { value: payload.parentSessionId },
+            parent: { value: payload.parentSessionId, bridgeId: payload.parentBridgeId },
           });
           response = result.ok
             ? { requestId: command.requestId, success: true, data: { session: toDashboardWireSession(result.session) } }

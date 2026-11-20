@@ -54,6 +54,8 @@ export interface Session {
   model?: string;
   account?: string;
   allowedAccounts?: string[];
+  projectName?: string;
+  parentBridgeId?: string;
   parentSessionId?: string;
   pullRequestUrl?: string;
   /** Historical automation provenance; new sessions cannot set it. */

@@ -61,6 +61,8 @@ export interface Session {
   grokSessionId?: string;
   antigravitySessionId?: string;
   env?: Record<string, string>;
+  projectName?: string;
+  parentBridgeId?: string;
   parentSessionId?: string;
   requireGreenPr?: boolean;
   pullRequestUrl?: string;
@@ -178,6 +180,8 @@ export interface CreateSessionPayload {
   museSessionId?: string;
   grokSessionId?: string;
   antigravitySessionId?: string;
+  projectName?: string;
+  parentBridgeId?: string;
   parentSessionId?: string;
   requireGreenPr?: boolean;
   /** @deprecated Ignored compatibility input. Ordinary sessions use task + parent. */
@@ -216,6 +220,7 @@ export interface RenameSessionPayload {
 
 export interface UpdateSessionParentPayload {
   sessionId: string;
+  parentBridgeId?: string;
   parentSessionId: string | null;
 }
 

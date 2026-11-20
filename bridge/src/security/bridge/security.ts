@@ -308,6 +308,13 @@ export class BridgeSecurityService implements Omit<BridgeSecurity, 'adoptAccount
   }
   /** Cross-bridge control: the other bridges of this account's current trusted ledger (revocations applied), never this one. Empty
    *  outside account mode, while no trusted ledger is held, or while this bridge is not itself active in it. */
+  permitsPeerLookup(principal: VerifiedPrincipal): boolean {
+    const endpoint = principal.endpoint;
+    if (endpoint.kind === 'local-cli') return true;
+    const view = this.trustedView;
+    return !this.closed && this.status.own === 'active' && !!view &&
+      [...view.devices, ...view.bridges].some(member => member.endpoint.id === endpoint.id && member.endpoint.publicKey === endpoint.publicKey);
+  }
   peerBridges(): LedgerBridge[] {
     const trusted = this.trustedView;
     if (this.closed || trusted === null || this.status.own !== 'active') return [];
