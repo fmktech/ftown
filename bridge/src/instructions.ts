@@ -6,6 +6,7 @@ import { codexHome, claudeConfigDir } from './config-dirs.js';
 
 export const INSTRUCTIONS_LOCAL = '/api/instructions';
 export const INSTRUCTIONS_WIRE = '/api/instructions/wire';
+export const INSTRUCTIONS_SYNC = '/api/instructions/sync';
 export const instructionLimit = 64 * 1024;
 export type Scope = 'global' | 'bridge';
 export const instructionPath = (scope: Scope, home = homedir()) => join(home, '.ftown', scope + '.md');
@@ -33,21 +34,21 @@ export function readInstructions(scope: Scope, home = homedir()): string {
 }
 
 // Equal timestamps use a stable content order so every bridge picks the same winner.
-export function pullGlobal(remote: ReturnType<typeof readRevision>, home = homedir()): void {
+export function mergeGlobal(value: unknown, home = homedir()) {
+  const remote = value as Partial<ReturnType<typeof readRevision>> | null;
+  if (!remote || typeof remote.text !== 'string' || Buffer.byteLength(remote.text) > instructionLimit
+    || typeof remote.version !== 'number' || !Number.isSafeInteger(remote.version) || remote.version < 0
+    || !Number.isFinite(new Date(remote.version).getTime())) throw new Error('Invalid instruction revision');
   const file = instructionPath('global', home);
   const local = readRevision('global', home);
-  if (remote.version < local.version || (remote.version === local.version && remote.text <= local.text)) return;
+  if (remote.version < local.version || (remote.version === local.version && remote.text <= local.text)) return local;
   const temp = file + '.' + randomUUID();
   try {
     writeFileSync(temp, remote.text, { flag: 'wx', mode: 0o600 });
     const timestamp = new Date(remote.version);
     utimesSync(temp, timestamp, timestamp);
-    if (local.text && local.text !== remote.text) {
-      const backup = temp + '.bak';
-      writeFileSync(backup, local.text, { flag: 'wx', mode: 0o600 });
-      console.error('Previous instructions saved to ' + backup);
-    }
     renameSync(temp, file);
+    return { text: remote.text, version: remote.version };
   } finally { rmSync(temp, { force: true }); }
 }
 

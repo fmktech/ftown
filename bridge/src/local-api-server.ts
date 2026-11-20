@@ -1,4 +1,4 @@
-import { INSTRUCTIONS_LOCAL, INSTRUCTIONS_WIRE, readRevision } from './instructions.js';
+import { INSTRUCTIONS_LOCAL, INSTRUCTIONS_SYNC, INSTRUCTIONS_WIRE, mergeGlobal, readRevision } from './instructions.js';
 import { TransferJournal } from './folder-transfer-journal.js';
 import { FolderTransfers, transferError } from './folder-transfer.js';
 import { TRANSFER_LOCAL, TRANSFER_WIRE } from './folder-transfer-protocol.js';
@@ -252,16 +252,48 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
 
   async closeTransfers(): Promise<void> { await this.transfers?.close(); }
 
-  private async dispatchInstructions(message: VerifiedApplication, wire: boolean): Promise<ApplicationJson> {
+  private instructionTimer?: NodeJS.Timeout;
+
+  startInstructionSync(ownBridgeId: string): void {
+    if (this.instructionTimer) return;
+    let running = false;
+    const tick = async () => {
+      if (running || !this.peerControl) return;
+      running = true;
+      try {
+        const peers = await this.peerControl.list();
+        // One initiator per pair avoids simultaneous offers. Either side can supply the winning file.
+        await Promise.allSettled(peers.filter(peer => ownBridgeId < peer.bridgeId).map(peer => this.syncInstructions(peer.bridgeId)));
+      } finally { running = false; }
+    };
+    this.instructionTimer = setInterval(() => { void tick().catch(() => undefined); }, 30_000);
+    this.instructionTimer.unref();
+  }
+
+  private async syncInstructions(target: string) {
+    const peers = this.peerControl;
+    if (!peers || !await peers.connectDirect(target)) throw new Error('Direct bridge link unavailable');
+    const result = await peers.directHttp(target, INSTRUCTIONS_SYNC, readRevision('global'));
+    if (result.status !== 200) return result;
+    return { status: 200, body: mergeGlobal(result.body) };
+  }
+
+  private async dispatchInstructions(message: VerifiedApplication, path: string): Promise<ApplicationJson> {
+    const wire = path !== INSTRUCTIONS_LOCAL;
     const { endpoint } = message.principal;
     if (wire ? endpoint.kind !== 'bridge' || !this.security!.peerBridges().some(peer => peer.endpoint.id === endpoint.id)
       : endpoint.kind !== 'local-cli') return { status: 403, body: { error: 'permission_denied' } };
     await this.security!.revalidate(message.principal);
-    const body = (message.application.data as { body?: { scope?: unknown; bridge?: unknown } } | null)?.body;
-    if (body?.scope !== 'global' && body?.scope !== 'bridge') return { status: 400, body: { error: 'Invalid scope' } };
+    const body = (message.application.data as { body?: { scope?: unknown; bridge?: unknown; action?: unknown } } | null)?.body;
     try {
+      if (path === INSTRUCTIONS_SYNC) return { status: 200, body: mergeGlobal(body) };
+      if (body?.scope !== 'global' && body?.scope !== 'bridge') return { status: 400, body: { error: 'Invalid scope' } };
       if (wire) return { status: 200, body: readRevision(body.scope) };
       if (typeof body.bridge !== 'string') return { status: 400, body: { error: 'Missing peer' } };
+      if (body.action === 'sync') {
+        if (body.scope !== 'global') throw new Error('Only global instructions are shared');
+        return await this.syncInstructions(body.bridge);
+      }
       if (!await this.peerControl?.connectDirect(body.bridge)) return { status: 503, body: { error: 'Direct bridge link unavailable' } };
       return await this.peerControl!.directHttp(body.bridge, INSTRUCTIONS_WIRE, { scope: body.scope });
     } catch (error) { return { status: 400, body: { error: error instanceof Error ? error.message : 'Instruction request failed' } }; }
@@ -366,7 +398,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     }
     if (route.kind !== 'http') throw new Error('Invalid application route');
     const routePath = route.path.split('?')[0];
-    if (routePath === INSTRUCTIONS_LOCAL || routePath === INSTRUCTIONS_WIRE) return this.dispatchInstructions(message, routePath === INSTRUCTIONS_WIRE);
+    if (routePath === INSTRUCTIONS_LOCAL || routePath === INSTRUCTIONS_WIRE || routePath === INSTRUCTIONS_SYNC) return this.dispatchInstructions(message, routePath);
     if (routePath === TRANSFER_LOCAL || routePath === TRANSFER_WIRE) return this.dispatchTransfer(message, routePath);
     if (routePath === '/api/peers' || routePath.startsWith('/api/peers/')) return this.dispatchPeers(message, route.method, route.path);
     if ((route.method === 'PUT' || route.method === 'DELETE') && /^\/api\/sessions\/[A-Za-z0-9_-]{1,200}\/preview$/.test(route.path.split('?')[0])
@@ -1023,6 +1055,8 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   }
 
   stop(): void {
+    clearInterval(this.instructionTimer);
+    this.instructionTimer = undefined;
     for (const wake of this.localEventWaiters) wake();
     this.recoveryStopped = true;
     this.recoveryEpoch++;

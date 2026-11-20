@@ -7,7 +7,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { cleanup, PeerConnection } from 'node-datachannel';
 import { LocalApiServer } from './local-api-server.js';
-import { INSTRUCTIONS_LOCAL, INSTRUCTIONS_WIRE } from './instructions.js';
+import { INSTRUCTIONS_LOCAL, INSTRUCTIONS_SYNC, INSTRUCTIONS_WIRE } from './instructions.js';
 import { TRANSFER_LOCAL, TRANSFER_WIRE, TRANSFER_REQUEST_TTL_MS } from './folder-transfer-protocol.js';
 import { generateEndpoint } from './security/crypto.js';
 import { accountIdOf, ledgerChallenge, ledgerLastIssuedAt, ledgerRevocations, nextTransition, verifyLedger } from './security/ledger/ledger.js';
@@ -314,6 +314,14 @@ test('a local instruction request reads the paired bridge file over the direct l
   assert.deepEqual(await ask(), { status: 200, body: { text: 'Peer guidance', version } });
   const signaled = transport.sent;
   assert.deepEqual(await ask(), { status: 200, body: { text: 'Peer guidance', version } });
+  const machineFile = join(home, '.ftown', 'bridge.md');
+  await writeFile(machineFile, 'Desk only');
+  const newest = { text: 'Edited on Studio', version: version + 1000 };
+  assert.deepEqual(await peers.directHttp('Desk', INSTRUCTIONS_SYNC, newest), { status: 200, body: newest });
+  assert.deepEqual(await peers.directHttp('Desk', INSTRUCTIONS_SYNC, { text: 'Stale Studio copy', version }),
+    { status: 200, body: newest });
+  assert.equal(await readFile(join(home, '.ftown', 'global.md'), 'utf8'), newest.text);
+  assert.equal(await readFile(machineFile, 'utf8'), 'Desk only');
   assert.equal(transport.sent, signaled);
 });
 
@@ -578,7 +586,7 @@ test('the encrypted relay cannot admit folder transfer or instruction requests',
   const channel = CHANNEL(w);
   const route = { transport: 'cloud' as const, channel, bridgeId: recipient.bridgeId, pairId: null };
   const id = crypto.randomUUID();
-  for (const path of [TRANSFER_WIRE, TRANSFER_LOCAL, INSTRUCTIONS_LOCAL, INSTRUCTIONS_WIRE]) {
+  for (const path of [TRANSFER_WIRE, TRANSFER_LOCAL, INSTRUCTIONS_LOCAL, INSTRUCTIONS_SYNC, INSTRUCTIONS_WIRE]) {
     const packet = await sender.sealToPeer(peer, 'application',
       { type: 'application', route: { kind: 'http', method: 'POST', path, requestId: id }, data: {}, mcp: null },
       channel, id, recipient.receiverEpoch, TRANSFER_REQUEST_TTL_MS);

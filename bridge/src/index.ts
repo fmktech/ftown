@@ -1197,6 +1197,7 @@ program
       }),
     });
     localApiServer.setPeerControl(new PeerControl(security, centrifugo, peerLinks), peerLinks, join(dataDir, 'folder-transfers'));
+    localApiServer.startInstructionSync(security.bridgeId);
 
     // Solo: the hub child must be healthy before connecting (L1 gates the
     // transport, not the front). A failed hub is fatal for solo — exit cleanly

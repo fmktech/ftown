@@ -691,11 +691,11 @@ saved and `ftown setup` can retry.
 
 Run `ftown setup` on each bridge. Setup adds two file references to the user-level Codex `AGENTS.md` and Claude `CLAUDE.md`, including registered accounts. Existing instructions stay in place. Edit `~/.ftown/global.md` for guidance that applies everywhere and `~/.ftown/bridge.md` for machine-specific details. New agent sessions can read both files offline.
 
-To distribute a global edit, run these commands **on the receiving bridge**, replacing `studio` with the source bridge name or ID.
+Each bridge keeps its own files. Paired bridges automatically sync `global.md` over a direct link, checking every 30 seconds. Edits made offline participate when the bridges reconnect. The latest edit wins on both machines. Sync preserves the last-edit timestamp across hops and breaks ties by comparing file contents. Accurate bridge clocks matter. Each file can hold up to 64 KiB of Markdown.
+
+To sync immediately or inspect a peer’s machine-specific instructions:
 
 ```sh
-ftown instructions show global --bridge studio
-ftown instructions pull global --bridge studio
+ftown instructions sync global --bridge studio
+ftown instructions show bridge --bridge studio
 ```
-
-Pull compares last-edit timestamps in milliseconds and keeps the newest version. It preserves that timestamp across hops. Equal timestamps use a deterministic text comparison. Bridge clocks should agree. A fresh setup starts at version zero. When replacing different, nonempty contents, pull prints the backup path. Sharing is explicit. Each bridge keeps its copy until the next pull. To inspect another machine's guidance, use `ftown instructions show bridge --bridge studio`. Both bridges must be online and paired. File contents travel over their direct link. Each file can hold up to 64 KiB of Markdown.

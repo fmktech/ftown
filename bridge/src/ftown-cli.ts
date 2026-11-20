@@ -44,7 +44,7 @@ Subcommands:
   worktrees  List or prune bridge-owned git worktrees
   plan       Manager plan list (add, start, done, drop, todo, edit, rm)
   bridges    List the other bridges of this account (--probe to check which answer)
-  instructions  Read bridge guidance or pull shared global instructions
+  instructions  Read bridge guidance or sync shared global instructions
   transfer   Copy a folder once between paired bridges`;
 }
 

@@ -1,4 +1,4 @@
-import { INSTRUCTIONS_LOCAL, INSTRUCTIONS_WIRE } from '../../instructions.js';
+import { INSTRUCTIONS_LOCAL, INSTRUCTIONS_SYNC, INSTRUCTIONS_WIRE } from '../../instructions.js';
 import { TRANSFER_LOCAL, TRANSFER_WIRE } from '../../folder-transfer-protocol.js';
 import type { ApplicationJson, EndpointPermission } from '../protocol.js';
 import { BridgeSecurityError } from './errors.js';
@@ -28,8 +28,9 @@ export function classifyHttp(method: string, path: string): OperationPermission 
   const url = new URL(path, 'http://bridge.invalid');
   if (url.origin !== 'http://bridge.invalid' || url.pathname.split('/').some(part => part === '.' || part === '..')
     || path.split('?')[0] !== url.pathname) return deny();
+  if (url.pathname === INSTRUCTIONS_SYNC) return method === 'POST' && !url.search ? result('control', 'instructions_sync') : deny();
   if (url.pathname === INSTRUCTIONS_LOCAL || url.pathname === INSTRUCTIONS_WIRE) {
-    return method === 'POST' && !url.search ? result('read', url.pathname === INSTRUCTIONS_LOCAL ? 'instructions_local' : 'instructions_wire') : deny();
+    return method === 'POST' && !url.search ? result(url.pathname === INSTRUCTIONS_LOCAL ? 'control' : 'read', url.pathname === INSTRUCTIONS_LOCAL ? 'instructions_local' : 'instructions_wire') : deny();
   }
   if (url.pathname === TRANSFER_LOCAL || url.pathname === TRANSFER_WIRE) {
     return method === 'POST' && !url.search ? result('control', url.pathname === TRANSFER_LOCAL ? 'transfer_local' : 'transfer_wire') : deny();
