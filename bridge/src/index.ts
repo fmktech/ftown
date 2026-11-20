@@ -1221,7 +1221,7 @@ program
     };
     localApiServer.setSecurity(security, { protocolVersion: 1, ownerId: auth.ownerId, bridgeId, endpoint: security.endpoint,
       relayUserId: userId }, dispatchCommand, updateEffects);
-    localApiServer.setPeerControl(peerControl, peerLinks, join(dataDir, 'folder-transfers'), peerCache.list);
+    localApiServer.setPeerControl(peerControl, peerLinks, join(dataDir, 'folder-transfers'), peerCache.list, hostResources);
 
     // Solo: the hub child must be healthy before connecting (L1 gates the
     // transport, not the front). A failed hub is fatal for solo — exit cleanly

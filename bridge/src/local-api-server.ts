@@ -1,3 +1,4 @@
+import { peerResources, type HostResources } from './host-resources.js';
 import { TransferJournal } from './folder-transfer-journal.js';
 import { FolderTransfers, transferError } from './folder-transfer.js';
 import { TRANSFER_LOCAL, TRANSFER_WIRE } from './folder-transfer-protocol.js';
@@ -240,11 +241,13 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
 
   private peerControl: PeerControl | null = null;
   /** Cross-bridge control: forwards the local CLI's requests to other bridges of this account. */
+  private hostResources?: () => Promise<HostResources>;
   private rememberedPeerSessions?: () => Promise<unknown[]>;
   private peerLinks: PeerLinks | null = null;
   private transfers: FolderTransfers | null = null;
 
-  setPeerControl(peers: PeerControl, links?: PeerLinks, transferStateDir?: string, remembered?: () => Promise<unknown[]>): void {
+  setPeerControl(peers: PeerControl, links?: PeerLinks, transferStateDir?: string, remembered?: () => Promise<unknown[]>, hostResources?: () => Promise<HostResources>): void {
+    this.hostResources = hostResources;
     this.rememberedPeerSessions = remembered;
     this.peerControl = peers;
     this.peerLinks = links ?? null;
@@ -281,10 +284,20 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     await this.security.revalidate(message.principal);
     try {
       if (url.pathname === '/api/peers/sessions' && method === 'GET') {
-        return applicationJson({ sessions: await this.rememberedPeerSessions?.() ?? [] });
+        return { status: 200, body: applicationJson({ sessions: await this.rememberedPeerSessions?.() ?? [] }) };
       }
       if (url.pathname === '/api/peers' && method === 'GET') {
-        const peers = await this.peerControl.list(url.searchParams.get('probe') === '1');
+        const control = this.peerControl;
+        const peers = await control.list(url.searchParams.get('probe') === '1');
+        if (url.searchParams.get('resources') === '1') {
+          const [resources, reports] = await Promise.all([
+            this.hostResources?.() ?? null,
+            Promise.all(peers.map(async peer => ({ ...peer, resources: await peerResources(control, peer.bridgeId) }))),
+          ]);
+          await this.security.revalidate(message.principal);
+          const approved = new Set((await control.list()).map(peer => peer.endpointId));
+          return { status: 200, body: applicationJson({ bridgeId: this.security.bridgeId, resources, peers: reports.filter(peer => approved.has(peer.endpointId)) }) };
+        }
         return { status: 200, body: applicationJson({ bridgeId: this.security.bridgeId, peers }) };
       }
       if (url.pathname === '/api/peers/http' && method === 'POST') {
@@ -360,6 +373,11 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     }
     if (route.kind !== 'http') throw new Error('Invalid application route');
     const routePath = route.path.split('?')[0];
+    if (routePath === '/api/host-resources' && route.method === 'GET') {
+      await this.security.revalidate(message.principal);
+      if (!this.hostResources) return { status: 503, body: { error: 'Host resources unavailable' } };
+      return { status: 200, body: applicationJson({ bridgeId: this.security.bridgeId, resources: await this.hostResources() }) };
+    }
     if (routePath === TRANSFER_LOCAL || routePath === TRANSFER_WIRE) return this.dispatchTransfer(message, routePath);
     if (routePath === '/api/peers' || routePath.startsWith('/api/peers/')) return this.dispatchPeers(message, route.method, route.path);
     if ((route.method === 'PUT' || route.method === 'DELETE') && /^\/api\/sessions\/[A-Za-z0-9_-]{1,200}\/preview$/.test(route.path.split('?')[0])

@@ -89,6 +89,7 @@ set `FTOWN_BRIDGE`, to run `sessions`, `status`, `board`, `events`,
 
 ```bash
 ftown bridges --probe
+ftown bridges --resources --json
 ftown sessions list --bridge my-laptop
 ftown sessions create --bridge my-laptop --project "App" --shell codex --workdir ~/src/app --prompt "Run the test suite"
 ftown sessions screen <session-id> --bridge my-laptop --limit 100
@@ -97,6 +98,8 @@ ftown sessions screen <session-id> --bridge my-laptop --limit 100
 The first command to another bridge goes through the relay and opens a direct
 link to it; later commands use that link (`ftown bridges` marks it `direct`).
 If no direct link can be made, commands keep using the relay.
+
+Before placing a worker, compare the local `resources` object and each entry in `peers` from `ftown bridges --resources --json`. Values include average CPU percent, RAM and disk in bytes, and the sample time in Unix milliseconds. A null reading means capacity is unknown. For a local child omit `--bridge`. For a peer child use `ftown sessions create --bridge <bridgeId> --parent --prompt "<task>"`.
 
 Requests travel end-to-end encrypted over the account relay; the target bridge
 has to run an ftown version with cross-bridge control. Pass `--project <name>` when creating a root session. A child inherits its parent’s project. Use `--bridge <target> --parent` to create a child on another computer under the current session’s root. The root can also live on a third bridge. Account choices on a remote child come from its destination bridge. Security commands and `harness mail` operate on the local bridge.

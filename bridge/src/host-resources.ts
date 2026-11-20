@@ -1,3 +1,5 @@
+import { z } from 'zod';
+import type { PeerControl } from './peer-control.js';
 import { cpus, freemem, totalmem } from 'node:os';
 import { statfs } from 'node:fs/promises';
 
@@ -29,4 +31,21 @@ export function hostResourceSampler(dataDir: string) {
       .then(freeDiskBytes => ({ sampledAt: now, cpuPercent, freeRamBytes, totalRamBytes, freeDiskBytes }));
     return cached;
   };
+}
+
+const bytes = z.number().int().nonnegative().safe();
+const resourceReport = z.object({
+  sampledAt: bytes, cpuPercent: z.number().min(0).max(100).nullable(),
+  freeRamBytes: bytes, totalRamBytes: bytes, freeDiskBytes: bytes.nullable(),
+});
+export type HostResources = z.infer<typeof resourceReport>;
+
+export async function peerResources(peers: Pick<PeerControl, 'http'>, bridgeId: string): Promise<HostResources | null> {
+  try {
+    const reply = await peers.http(bridgeId, 'GET', '/api/host-resources', undefined, 5000);
+    if (reply.status !== 200) return null;
+    const report = z.object({ bridgeId: z.literal(bridgeId), resources: resourceReport }).safeParse(reply.body);
+    if (report.success && report.data.resources.freeRamBytes <= report.data.resources.totalRamBytes) return report.data.resources;
+  } catch { /* An unavailable peer has no current reading. */ }
+  return null;
 }
