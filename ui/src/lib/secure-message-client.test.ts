@@ -4,7 +4,7 @@ import type { EndpointIdentity, SecureApplication, SecureEnvelope } from '@secur
 import { generateEndpoint, open, seal } from '@security/crypto';
 import type { LedgerCheckpoint } from '@security/ledger/protocol';
 import { applicationJson, SecureEndpointRuntime, type LedgerBridgeAuthority } from './secure-endpoint-runtime';
-import { isDirectCommand, isDirectRead, SecureMessageClient, type DirectCommandSender, type ReadyRetryPolicy } from './secure-message-client';
+import { heldReadMs, isDirectCommand, isDirectRead, SecureMessageClient, type DirectCommandSender, type ReadyRetryPolicy } from './secure-message-client';
 
 const ownerId = '00000000-0000-4000-8000-000000000001';
 const userId = 'owner@example.test';
@@ -437,6 +437,20 @@ describe('dashboard commands over a direct channel', () => {
     expect(route.requestId).not.toBe('usage-one');
     expect(data).toMatchObject({ type: 'get_session_usage', requestId: route.requestId, payload: { sessionId: 'session-one', bridgeId: 'bridge-a' } });
     expect(seen).toEqual([{ type: 'command_response', response: { requestId: 'usage-one', success: true, data: { sessions: [{ id: 'session-two', bridgeId: 'bridge-a' }] } } }]);
+    client.dispose(); runtime.dispose();
+  });
+
+  it('gives a read that asks its bridge to hold the answer that much longer on the direct channel', async () => {
+    expect(heldReadMs('session_preview_status', { waitMs: 20_000 })).toBe(20_000);
+    // Only the preview status may be held, and only for a whole number of milliseconds a bridge accepts.
+    for (const [command, payload] of [['list_sessions', { waitMs: 20_000 }], ['session_preview_status', {}], ['session_preview_status', { waitMs: 0 }],
+      ['session_preview_status', { waitMs: 30_001 }], ['session_preview_status', { waitMs: 1.5 }], ['session_preview_status', { waitMs: '20000' }]] as const) expect(heldReadMs(command, payload)).toBe(0);
+    const { runtime, raw, client } = await setup();
+    const direct = answering({ state: 'unchanged' }); client.setDirectCommands(direct);
+    const payload = { sessionId: 'session-one', previewId: '12345678-1234-4234-8234-123456789abc', fileId: '22345678-2234-4234-8234-123456789abc', knownRevision: 'a'.repeat(64), waitMs: 20_000 };
+    await expect(client.request({ type: 'session_preview_status', requestId: 'held', payload })).resolves.toMatchObject({ requestId: 'held', success: true });
+    expect(raw.publish).not.toHaveBeenCalled();
+    expect(direct.mock.calls[0][3]).toBe(28_000);
     client.dispose(); runtime.dispose();
   });
 

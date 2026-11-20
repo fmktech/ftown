@@ -13,9 +13,10 @@ import type { Session, SessionUsage } from './types.js';
 import type { WorktreeApi } from './coordination/contract-b.js';
 import { GitWorktrees } from './worktrees.js';
 import { normalizePullRequestUrl } from './pull-request-url.js';
+import { lstat } from 'node:fs/promises';
 import { currentPreview, preparePreview, preparePreviewAdd, PreviewError, previewChunk, previewStatus, SessionPreviewReader, validFileId, validPreviewId, validRevision } from './session-preview.js';
 import type { SessionPreviewChunk, SessionPreviewSource, SessionPreviewStatus } from './preview-protocol.js';
-import { PREVIEW_CHUNK_BYTES } from './preview-protocol.js';
+import { PREVIEW_CHUNK_BYTES, PREVIEW_MAX_WAITERS, PREVIEW_MAX_WAIT_MS, PREVIEW_WAIT_CHECK_MS } from './preview-protocol.js';
 import { PreviewChatError, PreviewChatStore, validateChatInput } from './preview-chat.js';
 import { PREVIEW_CHAT_AGENT_SHELLS } from './preview-chat-protocol.js';
 import type { PreviewChatErrorCode, PreviewChatInput, PreviewChatPage, PreviewChatWriteResult } from './preview-chat-protocol.js';
@@ -619,20 +620,67 @@ export class SessionController {
     });
   }
 
-  async getPreviewStatus(sessionId: string, previewId: string, fileId: string, knownRevision?: string): Promise<SessionControllerResult<{ preview: SessionPreviewStatus }>> {
-    if (!validPreviewId(previewId) || !validFileId(fileId) || (knownRevision !== undefined && !validRevision(knownRevision))) return { ok: false, code: 'invalid', message: 'Invalid preview request' };
+  /** Whether status requests may be held open. Closed while the bridge prepares an update, so held requests end within one check. */
+  private previewWaitGate: () => boolean = () => true;
+  private previewWaiters = 0;
+  protected previewWaitCheckMs = PREVIEW_WAIT_CHECK_MS;
+  setPreviewWaitGate(open: () => boolean): void { this.previewWaitGate = open; }
+
+  /**
+   * The status of one preview file. With `knownRevision` and `waitMs`, an unchanged file holds the answer until the file changes on
+   * disk or the wait ends, so an open preview costs one request per wait instead of one per second.
+   */
+  async getPreviewStatus(sessionId: string, previewId: string, fileId: string, knownRevision?: string, waitMs = 0): Promise<SessionControllerResult<{ preview: SessionPreviewStatus }>> {
+    if (!Number.isInteger(waitMs) || waitMs < 0 || waitMs > PREVIEW_MAX_WAIT_MS) return { ok: false, code: 'invalid', message: 'Invalid preview request' };
+    const deadline = Date.now() + waitMs;
+    let holding = false;
+    try {
+      for (;;) {
+        const read = await this.readPreviewStatus(sessionId, previewId, fileId, knownRevision);
+        const result = read.result;
+        if (!result.ok || result.preview.state !== 'unchanged' || read.signature === null || Date.now() >= deadline || !this.previewWaitGate()) return result;
+        if (!holding) {
+          if (this.previewWaiters >= PREVIEW_MAX_WAITERS) return result;
+          this.previewWaiters++; holding = true;
+        }
+        if (!await this.previewFileChanged(read.filePath, read.signature, deadline)) return result;
+      }
+    } finally { if (holding) this.previewWaiters--; }
+  }
+
+  /** What `lstat` says about a file, as one comparable string: a different string means the file was replaced or rewritten. */
+  private async previewFileSignature(path: string): Promise<string> {
+    try { const info = await lstat(path); return `${info.dev}:${info.ino}:${info.size}:${info.mtimeMs}:${info.ctimeMs}`; }
+    catch { return 'missing'; }
+  }
+
+  /** Resolves true once the file no longer matches `signature`, false when the deadline passes or waiting is closed first. */
+  private async previewFileChanged(path: string, signature: string, deadline: number): Promise<boolean> {
+    for (;;) {
+      await new Promise<void>(resolve => { setTimeout(resolve, Math.max(1, Math.min(this.previewWaitCheckMs, deadline - Date.now()))).unref(); });
+      if (await this.previewFileSignature(path) !== signature) return true;
+      if (Date.now() >= deadline || !this.previewWaitGate()) return false;
+    }
+  }
+
+  /** One read of the status. `signature` is the file's state taken before the read, so a change during or after it is never missed. */
+  private async readPreviewStatus(sessionId: string, previewId: string, fileId: string, knownRevision?: string): Promise<{ result: SessionControllerResult<{ preview: SessionPreviewStatus }>; signature: string | null; filePath: string }> {
+    const outcome = (result: SessionControllerResult<{ preview: SessionPreviewStatus }>, signature: string | null = null, filePath = '') => ({ result, signature, filePath });
+    if (!validPreviewId(previewId) || !validFileId(fileId) || (knownRevision !== undefined && !validRevision(knownRevision))) return outcome({ ok: false, code: 'invalid', message: 'Invalid preview request' });
     const selected = await this.previewSnapshot(sessionId, previewId);
-    if (!selected) return { ok: false, code: 'not_found', message: 'Session not found' };
-    if (!selected.source || !selected.source.files.some((file) => file.id === fileId)) return { ok: true, preview: { state: 'unregistered' } };
+    if (!selected) return outcome({ ok: false, code: 'not_found', message: 'Session not found' });
+    const entry = selected.source?.files.find((file) => file.id === fileId);
+    if (!selected.source || !entry) return outcome({ ok: true, preview: { state: 'unregistered' } });
+    const signature = await this.previewFileSignature(entry.filePath);
     try {
       const data = await this.previewReader.read(selected.session, selected.source, fileId);
       const current = await this.previewSnapshot(sessionId, previewId);
-      if (!current?.source || current.session.workingDir !== selected.session.workingDir || JSON.stringify(current.source) !== JSON.stringify(selected.source) || !current.source.files.some((file) => file.id === fileId)) return { ok: true, preview: { state: 'unregistered' } };
-      return { ok: true, preview: previewStatus(previewId, fileId, data, knownRevision) };
+      if (!current?.source || current.session.workingDir !== selected.session.workingDir || JSON.stringify(current.source) !== JSON.stringify(selected.source) || !current.source.files.some((file) => file.id === fileId)) return outcome({ ok: true, preview: { state: 'unregistered' } });
+      return outcome({ ok: true, preview: previewStatus(previewId, fileId, data, knownRevision) }, signature, entry.filePath);
     } catch (error) {
       const current = await this.previewSnapshot(sessionId, previewId);
-      if (!current?.source || current.session.workingDir !== selected.session.workingDir || JSON.stringify(current.source) !== JSON.stringify(selected.source) || !current.source.files.some((file) => file.id === fileId)) return { ok: true, preview: { state: 'unregistered' } };
-      return { ok: true, preview: { state: 'unavailable', previewId, fileId, reason: error instanceof PreviewError ? error.reason : 'unavailable' } };
+      if (!current?.source || current.session.workingDir !== selected.session.workingDir || JSON.stringify(current.source) !== JSON.stringify(selected.source) || !current.source.files.some((file) => file.id === fileId)) return outcome({ ok: true, preview: { state: 'unregistered' } });
+      return outcome({ ok: true, preview: { state: 'unavailable', previewId, fileId, reason: error instanceof PreviewError ? error.reason : 'unavailable' } });
     }
   }
 

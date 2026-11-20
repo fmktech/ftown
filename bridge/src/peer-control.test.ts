@@ -1,8 +1,13 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { test, type TestContext } from 'node:test';
+import { after, test, type TestContext } from 'node:test';
+import { createHash, randomBytes } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
+import { cleanup, PeerConnection } from 'node-datachannel';
+import { LocalApiServer } from './local-api-server.js';
+import { TRANSFER_LOCAL, TRANSFER_WIRE, TRANSFER_REQUEST_TTL_MS } from './folder-transfer-protocol.js';
 import { generateEndpoint } from './security/crypto.js';
 import { accountIdOf, ledgerChallenge, ledgerLastIssuedAt, ledgerRevocations, nextTransition, verifyLedger } from './security/ledger/ledger.js';
 import { generateAuthKey } from './security/ledger/proof.js';
@@ -394,4 +399,158 @@ test('a failed link attempt backs off instead of retrying on every request', asy
   assert.equal(offers, 1);
   // The one attempt says why it failed: nothing else reports it, the request itself succeeded over the relay.
   assert.deepEqual(logged, ['[Peers] Direct link to Desk not opened: Link refused (403)']);
+});
+
+after(() => cleanup());
+
+test('two paired bridges copy a multi-MiB snapshot over native WebRTC and never send bulk via the relay', { timeout: 60_000 }, async t => {
+  const w = await world();
+  const sender = await bridge(t, w, w.studio, w.both);
+  const recipient = await bridge(t, w, w.desk, w.both);
+  const sourceApi = new LocalApiServer();
+  const targetApi = new LocalApiServer();
+  const dir = await mkdtemp(join(tmpdir(), 'ftown-folder-loopback-'));
+  const source = join(dir, 'source');
+  const target = join(dir, 'target');
+  await mkdir(join(source, 'sub', 'empty'), { recursive: true });
+  const file = join(source, 'sub', 'fixture');
+  const fixtureMiB = 64;
+  const fixture = randomBytes(fixtureMiB * 1024 ** 2);
+  const expected = createHash('sha256').update(fixture).digest('hex');
+  await writeFile(file, fixture);
+  await chmod(file, 0o754);
+  await writeFile(join(source, 'empty-file'), '');
+  await chmod(dir, 0o2700);
+
+  const setup = async (security: BridgeSecurityService, api: LocalApiServer) => {
+    api.setSecurity(security, { protocolVersion: 1, ownerId: w.root.accountId, bridgeId: security.bridgeId,
+      endpoint: security.endpoint, relayUserId: w.root.accountId }, async () => null);
+    const cli = await generateEndpoint(w.root.accountId, 'local-cli');
+    await security.policy.provisionLocalEndpoint(cli.endpoint);
+    const principal = await security.policy.principal(cli.endpoint.id);
+    return async (body: unknown) => {
+      const answer = await api.dispatchSecure({
+        principal, application: { route: { kind: 'http', method: 'POST', path: TRANSFER_LOCAL }, data: { body } },
+      } as VerifiedApplication) as { status: number; body: { id: string; state: string; error?: string; bytes: number; entries?: number } };
+      assert.equal(answer.status, 200, JSON.stringify(answer.body));
+      return answer.body;
+    };
+  };
+  const sourceCLI = await setup(sender, sourceApi);
+  const targetCLI = await setup(recipient, targetApi);
+  let highWater = 0;
+  function links(security: BridgeSecurityService, api: LocalApiServer): PeerLinks {
+    return new PeerLinks({
+      bridgeId: security.bridgeId, endpointId: security.endpoint.id, peers: () => security.peerBridges(),
+      log: message => t.diagnostic(message),
+      factory: name => {
+        const pc = new PeerConnection(name, { iceServers: [] });
+        return {
+          setRemoteDescription: (sdp, type) => pc.setRemoteDescription(sdp, type as 'offer' | 'answer'),
+          localDescription: () => pc.localDescription(),
+          createDataChannel: label => {
+            const channel = pc.createDataChannel(label);
+            return {
+              sendMessage(message) {
+                const sent = channel.sendMessage(message);
+                highWater = Math.max(highWater, channel.bufferedAmount());
+                return sent;
+              },
+              sendMessageBinary(message) {
+                const sent = channel.sendMessageBinary(message);
+                highWater = Math.max(highWater, channel.bufferedAmount());
+                return sent;
+              },
+              bufferedAmount: () => channel.bufferedAmount(),
+              isOpen: () => channel.isOpen(),
+              close: () => channel.close(),
+              onOpen: cb => channel.onOpen(cb),
+              onClosed: cb => channel.onClosed(cb),
+              onError: cb => channel.onError(cb),
+              onMessage: cb => channel.onMessage(cb),
+            };
+          },
+          gatheringState: () => pc.gatheringState(),
+          onGatheringStateChange: cb => pc.onGatheringStateChange(cb),
+          onLocalCandidate: cb => pc.onLocalCandidate(cb),
+          onStateChange: cb => pc.onStateChange(cb),
+          onDataChannel: cb => pc.onDataChannel(cb),
+          close: () => pc.close(),
+        };
+      },
+      execute: (packet, route) => executeSecurePacket(security, packet, route, message => api.dispatchSecure(message)),
+    });
+  }
+  const sourceLinks = links(sender, sourceApi);
+  const targetLinks = links(recipient, targetApi);
+  t.after(async () => {
+    await Promise.all([sourceApi.closeTransfers(), targetApi.closeTransfers()]);
+    sourceLinks.closeAll();
+    targetLinks.closeAll();
+    await rm(dir, { recursive: true, force: true });
+  });
+  const toTarget = relay(w, recipient, message => targetApi.dispatchSecure(message));
+  const toSource = relay(w, sender, message => sourceApi.dispatchSecure(message));
+  const peers = new PeerControl(sender, toTarget, sourceLinks);
+  sourceApi.setPeerControl(peers, sourceLinks, join(dir, 'sender-journal'));
+  targetApi.setPeerControl(new PeerControl(recipient, toSource, targetLinks), targetLinks, join(dir, 'recipient-journal'));
+
+  await assert.rejects(peers.http('Desk', 'POST', TRANSFER_WIRE, { chunk: 'fixture' }), /dedicated direct/);
+  assert.equal(toTarget.sent, 0);
+  const invitation = await targetCLI({ action: 'receive', bridge: 'Studio', path: target });
+  const started = performance.now();
+  const initial = await sourceCLI({ action: 'send', bridge: 'Desk', path: source, id: invitation.id });
+  assert.equal(initial.state, 'connecting');
+  let last = initial;
+  for (;;) {
+    last = await sourceCLI({ action: 'status', id: invitation.id });
+    if (!['connecting', 'copying', 'verifying', 'installing'].includes(last.state)) break;
+    await delay(15, undefined, { signal: t.signal });
+  }
+  const elapsed = (performance.now() - started) / 1000;
+  assert.equal(last.state, 'installed', last.error);
+  assert.equal(last.entries, 4);
+  assert.equal((await targetCLI({ action: 'status', id: invitation.id })).bytes, last.bytes);
+  assert.equal(toTarget.sent, 2, 'relay carried only hello and link signaling');
+  assert.equal(toSource.sent, 0);
+  assert.equal(createHash('sha256').update(await readFile(join(target, 'sub', 'fixture'))).digest('hex'), expected);
+  assert.deepEqual((await readdir(target)).sort(), ['empty-file', 'sub']);
+  assert.deepEqual(await readdir(join(target, 'sub', 'empty')), []);
+  assert.equal((await stat(join(target, 'sub', 'fixture'))).mode & 0o7777, 0o600);
+  assert.equal((await stat(target)).mode & 0o7777, 0o700);
+  assert.equal((await stat(join(target, 'sub'))).mode & 0o7777, 0o700);
+  assert.deepEqual(await readdir(join(dir, 'recipient-journal')), []);
+  assert.ok(!(await readdir(dir)).some(name => name.startsWith('.ftown-transfer-')));
+  t.diagnostic(`${fixtureMiB} MiB in ${elapsed.toFixed(2)} s (${(fixtureMiB / elapsed).toFixed(2)} MiB/s), sender DataChannel buffered high-water ${highWater} bytes`);
+
+  const cancelledTarget = join(dir, 'cancelled');
+  const second = await targetCLI({ action: 'receive', bridge: 'Studio', path: cancelledTarget });
+  await sourceCLI({ action: 'send', bridge: 'Desk', path: source, id: second.id });
+  await sourceCLI({ action: 'cancel', id: second.id });
+  for (;;) {
+    const status = await sourceCLI({ action: 'status', id: second.id });
+    if (status.state === 'cancelled') break;
+    assert.ok(['connecting', 'copying'].includes(status.state), JSON.stringify(status));
+    await delay(15, undefined, { signal: t.signal });
+  }
+  assert.equal((await targetCLI({ action: 'status', id: second.id })).state, 'cancelled');
+  assert.ok(!(await readdir(dir)).some(name => name.startsWith('.ftown-transfer-')));
+  assert.equal(toTarget.sent, 2, 'a second transfer reused the direct link');
+});
+
+test('the encrypted relay cannot admit a folder transfer request', async t => {
+  const w = await world();
+  const sender = await bridge(t, w, w.studio, w.both);
+  const recipient = await bridge(t, w, w.desk, w.both);
+  const peer = sender.peerBridges()[0];
+  const channel = CHANNEL(w);
+  const route = { transport: 'cloud' as const, channel, bridgeId: recipient.bridgeId, pairId: null };
+  const id = crypto.randomUUID();
+  for (const path of [TRANSFER_WIRE, TRANSFER_LOCAL]) {
+    const packet = await sender.sealToPeer(peer, 'application',
+      { type: 'application', route: { kind: 'http', method: 'POST', path, requestId: id }, data: {}, mcp: null },
+      channel, id, recipient.receiverEpoch, TRANSFER_REQUEST_TTL_MS);
+    await assert.rejects(recipient.acceptApplication(packet, route), (error: unknown) =>
+      error instanceof BridgeSecurityError && error.code === 'wrong_context');
+  }
 });

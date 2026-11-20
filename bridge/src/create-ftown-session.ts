@@ -10,6 +10,9 @@ import {
   HARNESSES,
   harnessAcceptsPromptAsCliArg,
   InvalidShellTypeError,
+  InvalidEffortError,
+  validateEffort,
+  validateEffortLevel,
   normalizeShellType,
   opencodeLaunchEnv,
   SHELL_ALIASES,
@@ -30,7 +33,7 @@ import type { UpdateAdmission } from './update-admission.js';
 import type { SessionStore } from './session-store.js';
 import type { CreateSessionPayload, Session, ShellType } from './types.js';
 
-export { WorktreeError, InvalidShellTypeError, normalizeShellType, SHELL_ALIASES };
+export { WorktreeError, InvalidShellTypeError, InvalidEffortError, normalizeShellType, SHELL_ALIASES };
 
 export type CreateSessionWorktreeInput = true | { branch?: string; base?: string };
 
@@ -97,6 +100,8 @@ export interface CreateFtownSessionInput {
   workingDir?: string;
   shellType?: ShellType;
   model?: string;
+  /** Reasoning effort (validated: validateEffort). */
+  effort?: string;
   account?: string;
   allowedAccounts?: string[];
   claudeSessionId?: string;
@@ -319,6 +324,7 @@ export type RelaunchCommandSource = Pick<
   | 'shellType'
   | 'workingDir'
   | 'model'
+  | 'effort'
   | 'claudeSessionId'
   | 'cursorSessionId'
   | 'codexSessionId'
@@ -359,10 +365,10 @@ export function deriveRelaunchCommand(session: RelaunchCommandSource): {
     shellType,
     workingDir: session.workingDir,
     model: session.model,
+    effort: session.effort,
   };
   const builderDefault = buildSessionCommand(builderBase);
-  const builderResume = buildSessionCommand({
-    ...builderBase,
+  const resumeFields = {
     claudeSessionId: session.claudeSessionId,
     cursorSessionId: session.cursorSessionId,
     codexSessionId: session.codexSessionId,
@@ -375,7 +381,14 @@ export function deriveRelaunchCommand(session: RelaunchCommandSource): {
     // resume explicitly. Id-based harnesses ignore this and key off their id
     // fields.
     resume: true,
-  });
+  };
+  const builderResume = buildSessionCommand({ ...builderBase, ...resumeFields });
+  // Commands an older bridge built, before reviewed approvals were the default, are still builder-generated: they are rebuilt
+  // with the current flags (and resumed), not replayed verbatim.
+  const legacyApprovalBuilds = [
+    buildSessionCommand({ ...builderBase, legacyApprovals: true }),
+    buildSessionCommand({ ...builderBase, ...resumeFields, legacyApprovals: true }),
+  ];
   const isLegacyPiBuilder = shellType === 'pi' && [
     buildPiCommand({ model: session.model, includeFtownExtension: false }),
     buildPiCommand({ model: session.model, resume: true, includeFtownExtension: false }),
@@ -384,6 +397,7 @@ export function deriveRelaunchCommand(session: RelaunchCommandSource): {
     Boolean(session.command) &&
     session.command !== builderDefault &&
     session.command !== builderResume &&
+    !legacyApprovalBuilds.includes(session.command) &&
     !isLegacyPiBuilder;
   return { command: isCustom ? session.command : builderResume, isCustom };
 }
@@ -573,8 +587,11 @@ async function createFtownSessionImpl(
     selectedAccountEnv = accountEnv(selected);
   }
   if (account === 'default' && !harness) throw new AccountSelectionError('account_harness_mismatch', 'Account default requires a Claude or Codex harness');
+  // Checked against the harness actually launched, which may be inherited from the parent.
+  const effort = validateEffort(shellType ?? 'claude', input.effort);
   const effectiveBaseInput: CreateFtownSessionInput = {
     ...input,
+    effort,
     ...(shellType !== undefined ? { shellType } : {}),
   };
   const isAgent = shellType !== 'shell';
@@ -660,6 +677,7 @@ async function createFtownSessionImpl(
       workingDir,
       shellType,
       model: input.model,
+      ...(effort ? { effort } : {}),
       ...(account ? { account } : {}),
       ...(allowedAccounts ? { allowedAccounts } : {}),
       claudeSessionId: input.claudeSessionId,
@@ -848,6 +866,8 @@ export function parseCreateSessionBody(
     workingDir: typeof body.workingDir === 'string' ? body.workingDir : undefined,
     shellType,
     model: typeof body.model === 'string' ? body.model : undefined,
+    // The level's form is checked here; whether the harness takes one, once the harness is known (it may be inherited).
+    effort: body.effort === undefined ? undefined : validateEffortLevel(body.effort),
     account: typeof body.account === 'string' ? body.account : undefined,
     allowedAccounts: Array.isArray(body.allowedAccounts) && body.allowedAccounts.every(v => typeof v === 'string') ? body.allowedAccounts as string[] : undefined,
     claudeSessionId:

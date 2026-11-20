@@ -26,6 +26,7 @@ import { BridgePushNotifier } from './push-notifier.js';
 import { LocalApiServer } from './local-api-server.js';
 import { PeerControl } from './peer-control.js';
 import { PeerLinks } from './peer-link.js';
+import { launchCapabilities, probeLaunchCapabilities } from './harness-registry.js';
 import { startAddressedListener, type AddressedSetup } from './direct-transport/addressed-setup.js';
 import { executeSecurePacket } from './security/bridge/execute.js';
 import { BrowserAccess } from './browser-access.js';
@@ -547,7 +548,12 @@ program
         reconnect: () => reconnectRelay(),
       });
       accountRelay = relay;
-      releaseForRestart = async () => { relay.stop(); localApiServer.stop(); await ledgerSecurity.close(); };
+      releaseForRestart = async () => {
+        await localApiServer.closeTransfers();
+        relay.stop();
+        localApiServer.stop();
+        await ledgerSecurity.close();
+      };
       // A browser that enrolled moments ago may not be in this replica yet: its refused request pulls the server ledger (rate-limited),
       // so the browser's retry succeeds without waiting for the relay.
       if (!subscribeApprovalRequired(ledgerSecurity, () => relay.onUnknownEndpoint())) {
@@ -987,6 +993,11 @@ program
     });
 
     // Session operations shared by local HTTP and dashboard RPC.
+    // Which launch defaults the installed codex and claude understand; until it answers, the current defaults are assumed.
+    void probeLaunchCapabilities().then(() => {
+      if (!launchCapabilities.codexApproveForMe) console.log('[Bridge] codex predates --approve-for-me: codex sessions keep the bypass flags');
+      if (!launchCapabilities.claudeAutoMode) console.log('[Bridge] claude predates auto mode: claude sessions keep their default permission mode');
+    }).catch(() => {});
     const sessionController = new SessionController({
       store,
       runner,
@@ -1005,6 +1016,8 @@ program
       flushTerminalBuffer: (sid) => pump.flush(sid),
       destroyTerminal: (sid) => terminalManager.destroy(sid),
     });
+    // A held preview status must not keep an update waiting: once admission freezes, held requests answer within one check.
+    sessionController.setPreviewWaitGate(() => !updateAdmission.isFrozen);
 
     localApiServer.setSessionController(sessionController);
     const pullRequestReview = createPrReviewService({ bridgeId, loadSession: id => sessionController.get(id), revalidate: principal => security.policy.revalidate(principal, 'read') });
@@ -1183,7 +1196,7 @@ program
         return accepted;
       }),
     });
-    localApiServer.setPeerControl(new PeerControl(security, centrifugo, peerLinks), peerLinks);
+    localApiServer.setPeerControl(new PeerControl(security, centrifugo, peerLinks), peerLinks, join(dataDir, 'folder-transfers'));
 
     // Solo: the hub child must be healthy before connecting (L1 gates the
     // transport, not the front). A failed hub is fatal for solo — exit cleanly
@@ -1265,7 +1278,10 @@ program
           }
         } finally {
           // The port and the pointer would outlive a same-PID re-exec, so no earlier failure may skip them.
-          try { localApiServer.stop(); } finally { cleanupPointer(); }
+          try { await localApiServer.closeTransfers(); }
+          finally {
+            try { localApiServer.stop(); } finally { cleanupPointer(); }
+          }
         }
         await terminalOutput.stop();
         loopbackServer.closeAll();

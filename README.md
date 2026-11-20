@@ -164,6 +164,42 @@ The file travels through the existing encrypted connection and runs in an iframe
 - Auto-refreshing bridge tokens (30-day refresh tokens)
 - Connection diagnostics overlay for troubleshooting
 
+### Copy a folder between bridges
+
+Both bridges must be paired to the same account and able to open a direct
+connection. Bulk data travels over the encrypted direct link with one write
+acknowledgment per batch of up to 16 MiB. The recipient reserves an unused destination and installs the
+verified folder with a directory rename.
+
+On the recipient, choose an unused destination under an existing directory.
+On the sender, pass the ID printed by the recipient:
+
+```sh
+# Recipient
+ftown transfer receive ~/snapshots/data --bridge my-mac
+
+# Sender
+ftown transfer send ./data --bridge my-linux --id <receive-id>
+```
+
+Run `ftown transfer list` or `ftown transfer status <receive-id>` locally on
+either bridge. Cancel with `ftown transfer cancel <receive-id>`. An unused
+invitation expires after 15 minutes. An incomplete copy is removed after two
+minutes without a block.
+
+The recipient checks the snapshot checksum, the file list, and each file's
+contents before installing the directory atomically. Snapshots include ordinary
+files and directories, including empty ones. Symlinks and privileged file modes
+are rejected. Installed directories and files are private to the bridge user.
+During extraction the recipient needs space for both the received snapshot and
+the extracted tree.
+
+If installation fails after the checksum passes, the recipient retains the
+snapshot across restarts. Use `ftown transfer retry <receive-id>` on the
+recipient after correcting the installation problem, or use
+`ftown transfer discard <receive-id>` to remove the retained copy. The transfer
+creates a one-time snapshot. Stop writes to the source while it is being read.
+
 ## Prerequisites
 
 - Node.js 22+

@@ -1,3 +1,4 @@
+import { TRANSFER_LOCAL, TRANSFER_WIRE } from '../../folder-transfer-protocol.js';
 import type { ApplicationJson, EndpointPermission } from '../protocol.js';
 import { BridgeSecurityError } from './errors.js';
 import { SESSION_BOARD_CHUNK_BYTES } from '../../session-board-protocol.js';
@@ -26,6 +27,9 @@ export function classifyHttp(method: string, path: string): OperationPermission 
   const url = new URL(path, 'http://bridge.invalid');
   if (url.origin !== 'http://bridge.invalid' || url.pathname.split('/').some(part => part === '.' || part === '..')
     || path.split('?')[0] !== url.pathname) return deny();
+  if (url.pathname === TRANSFER_LOCAL || url.pathname === TRANSFER_WIRE) {
+    return method === 'POST' && !url.search ? result('control', url.pathname === TRANSFER_LOCAL ? 'transfer_local' : 'transfer_wire') : deny();
+  }
   if (url.pathname === '/api/sessions') {
     if (method === 'GET') return result('read', 'sessions_list');
     if (method === 'POST') return result('control', 'sessions_create');

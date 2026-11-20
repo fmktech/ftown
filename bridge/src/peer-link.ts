@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { PeerConnection } from 'node-datachannel';
 import { STUN_SERVERS } from './direct-transport/contract.js';
 import type { InboundTransportContext, SecureEnvelope } from './security/protocol.js';
@@ -50,6 +51,8 @@ const DEFAULT_TIMINGS: PeerLinkTimings = { gatherMs: 3_000, gatherQuietMs: 300, 
 
 export interface LinkDataChannel {
   sendMessage(msg: string): boolean;
+  sendMessageBinary?(message: Buffer): boolean;
+  bufferedAmount?(): number;
   isOpen(): boolean;
   close(): void;
   onOpen(cb: () => void): void;
@@ -119,7 +122,14 @@ class PeerLink {
   bind(dc: LinkDataChannel): void {
     if (this.dc || this.closed) { try { dc.close(); } catch { /* gone */ } return; }
     this.dc = dc;
-    dc.onMessage(message => { if (typeof message === 'string') this.receive(message); else this.close(); });
+    dc.onMessage(message => {
+      if (typeof message === 'string') this.receive(message);
+      else if (this.owner.isPeer(this.peer) && !this.closed) {
+        this.lastUsed = Date.now();
+        this.owner.receiveBinary(this.peer.endpoint.id, peerLinkChannel(this.owner.bridgeId, this.pairId),
+          Buffer.isBuffer(message) ? message : Buffer.from(message));
+      }
+    });
     dc.onClosed(() => this.close());
     dc.onError(() => this.close());
     const open = () => {
@@ -177,9 +187,30 @@ class PeerLink {
   private write(message: string): boolean {
     if (!this.isOpen || message.length > MAX_MESSAGE_CHARS) return false;
     this.lastUsed = Date.now();
-    try { for (const frame of frameMessage(message)) if (!this.dc!.sendMessage(frame)) return false; }
+    try {
+      const dc = this.dc!;
+      for (const frame of frameMessage(message)) {
+        // The native channel returns false when it queues a valid send. Ordered
+        // frames are delivered once the SCTP send buffer drains.
+        if (!dc.sendMessage(frame) && !(dc.isOpen() && dc.bufferedAmount)) return false;
+      }
+    }
     catch { return false; }
     return true;
+  }
+
+  async sendBinary(frame: Buffer, signal: AbortSignal): Promise<void> {
+    const dc = this.dc;
+    if (!dc?.sendMessageBinary) throw new PeerLinkError('unsent');
+    const deadline = performance.now() + 15_000;
+    while ((dc.bufferedAmount?.() ?? 0) > 2 * 1024 * 1024) {
+      if (!this.isOpen || performance.now() >= deadline) throw new PeerLinkError('lost');
+      await delay(2, undefined, { signal });
+    }
+    signal.throwIfAborted();
+    if (!this.isOpen || !this.owner.isPeer(this.peer)) throw new PeerLinkError('lost');
+    if (!dc.sendMessageBinary(frame) && !dc.isOpen()) throw new PeerLinkError('lost');
+    this.lastUsed = Date.now();
   }
 
   private receive(frame: string): void {
@@ -239,6 +270,22 @@ export class PeerLinks {
   private open(peerBridgeId: string): PeerLink | undefined {
     for (const link of this.links) if (link.peer.bridgeId === peerBridgeId && link.isOpen && this.isPeer(link.peer)) return link;
     return undefined;
+  }
+
+  private binaryHandler?: (endpoint: string, channel: string, frame: Buffer) => void;
+
+  setBinaryHandler(handler: (endpoint: string, channel: string, frame: Buffer) => void): void {
+    this.binaryHandler = handler;
+  }
+
+  receiveBinary(endpoint: string, channel: string, frame: Buffer): void {
+    this.binaryHandler?.(endpoint, channel, frame);
+  }
+
+  async sendBinary(peerBridgeId: string, frame: Buffer, signal: AbortSignal): Promise<void> {
+    const link = this.open(peerBridgeId);
+    if (!link) throw new PeerLinkError('unsent');
+    await link.sendBinary(frame, signal);
   }
 
   /** The channel name requests to `peerBridgeId` must be sealed for, when a link to it is open. */

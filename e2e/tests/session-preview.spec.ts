@@ -8,6 +8,11 @@ import { UI_BASE_URL } from "../helpers/config";
 import { publishLedgerHeadNotice } from "../helpers/security-nudge";
 import { assertSanitized, atomicHtml, clickPreviewLinkAndExpectSelected, createPreviewFixture, inPreviewFrame, observePreviewTransport, previewHtml, previewMarkdown, previewSimpleHtml, sessionRecord } from "../helpers/session-preview";
 
+/**
+ * How long to wait for the next "unchanged" answer. The dashboard no longer asks every second: the bridge holds the status request
+ * until the file changes or its wait (PREVIEW_WAIT_MS, twenty seconds) is over, so an unchanged answer can take that long.
+ */
+const UNCHANGED_ANSWER_MS = 40_000;
 const iframe = (page: Page, fileName: string) => page.locator(`iframe[title="Preview: ${fileName}"]`);
 const documentFrame = (page: Page, fileName: string) => page.frameLocator(`iframe[title="Preview: ${fileName}"]`);
 const previewRegion = (page: Page) => page.locator('[aria-label="Session preview"]');
@@ -59,7 +64,7 @@ async function noHorizontalOverflow(page: Page): Promise<void> {
 }
 
 test("real CLI preview is encrypted, interactive, revision-consistent and isolated across sessions", async ({ page, context }, info) => {
-  test.setTimeout(240_000);
+  test.setTimeout(330_000);
   await page.setViewportSize({ width: 1440, height: 900 });
   let cpuSession: CDPSession | undefined;
   const cpuRate = process.env.FTOWN_PREVIEW_CPU_RATE;
@@ -233,7 +238,7 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
     await accountRead;
     const afterTrustRefresh = transport.reads.filter(entry => entry.previewId === registration && entry.state === "unchanged").length;
     await expect.poll(() => transport.reads.filter(entry => entry.previewId === registration && entry.state === "unchanged").length,
-      { timeout: 15_000 }).toBeGreaterThan(afterTrustRefresh);
+      { timeout: UNCHANGED_ANSWER_MS }).toBeGreaterThan(afterTrustRefresh);
     await expect(iframe(page, fileName)).toBeVisible();
     await expect(iframe(page, fileName)).toHaveAttribute("data-preview-node", suffix);
     await expect(iframe(page, fileName)).not.toHaveAttribute("data-preview-interrupted", "true");
@@ -250,12 +255,13 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
     await expect(cloudState).toHaveAttribute("aria-label", /^Cloud connected/, { timeout: 30_000 });
     const afterReconnect = transport.reads.filter(entry => entry.previewId === registration && entry.state === "unchanged").length;
     await expect.poll(() => transport.reads.filter(entry => entry.previewId === registration && entry.state === "unchanged").length,
-      { timeout: 30_000 }).toBeGreaterThan(afterReconnect);
+      { timeout: UNCHANGED_ANSWER_MS }).toBeGreaterThan(afterReconnect);
     await expect(iframe(page, fileName)).toHaveAttribute("data-preview-node", suffix);
     await expect(iframe(page, fileName)).not.toHaveAttribute("data-preview-interrupted", "true");
     await expect(count).toHaveText("Count: 1");
     const unchanged = transport.reads.filter((entry) => entry.previewId === registration && entry.state === "unchanged").length;
-    await expect.poll(() => transport.reads.filter((entry) => entry.previewId === registration && entry.state === "unchanged").length).toBeGreaterThan(unchanged);
+    await expect.poll(() => transport.reads.filter((entry) => entry.previewId === registration && entry.state === "unchanged").length,
+      { timeout: UNCHANGED_ANSWER_MS }).toBeGreaterThan(unchanged);
     await expect(count).toHaveText("Count: 1");
 
     await expect(separator(page)).toBeVisible();

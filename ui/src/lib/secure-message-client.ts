@@ -4,6 +4,7 @@ import { SecurityError } from "@security/crypto";
 import { accountChannel } from "@security/ledger/channels";
 import { classifyCommand } from "@security/bridge/permissions";
 import type { ApplicationJson } from "@security/protocol";
+import { PREVIEW_MAX_WAIT_MS } from "../../../bridge/src/preview-protocol";
 import { UNRECOVERED_SUBSCRIBED_CONTEXT, type MessageClient, type MessageEvents, type MessageSubscription, type MessagePublishOptions } from "./message-client";
 import { applicationJson, SecureEndpointRuntime } from "./secure-endpoint-runtime";
 
@@ -114,6 +115,15 @@ export function isDirectRead(command: string, payload: unknown): boolean {
   return operation.permission === "read" && !operation.mutating;
 }
 
+/**
+ * How long a read asks its bridge to hold the answer (a preview status waiting for the file to change), or 0. The direct answer
+ * is given that much longer before the read is repeated over the relay.
+ */
+export function heldReadMs(command: string, payload: unknown): number {
+  const wait = command === "session_preview_status" && record(payload) ? payload.waitMs : 0;
+  return typeof wait === "number" && Number.isInteger(wait) && wait > 0 && wait <= PREVIEW_MAX_WAIT_MS ? wait : 0;
+}
+
 /** The raw broker is private to this adapter, including signaling and terminal I/O. */
 export class SecureMessageClient implements MessageClient {
   readonly commandTimeoutMs = 40_000;
@@ -159,7 +169,7 @@ export class SecureMessageClient implements MessageClient {
     let handle: { answer: Promise<ApplicationJson> } | null;
     try {
       handle = await this.direct(bridgeId, { ...route, requestId: directId }, { ...data, requestId: directId },
-        read ? DIRECT_READ_TIMEOUT_MS : Math.max(1, deadline - Date.now()));
+        read ? DIRECT_READ_TIMEOUT_MS + heldReadMs(route.command, payload) : Math.max(1, deadline - Date.now()));
     } catch { return false; }
     if (!handle) return false;
     const again = () => { if (!this.closed) void relay().catch(() => {}); };

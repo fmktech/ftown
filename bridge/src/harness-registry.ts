@@ -1,3 +1,4 @@
+import { execFile } from 'node:child_process';
 /**
  * Single source of truth for the supported harnesses ("shell types").
  *
@@ -20,6 +21,13 @@ export function shellQuote(value: string, platform: NodeJS.Platform = process.pl
 export interface BuildCommandInput {
   workingDir?: string;
   model?: string;
+  /** Reasoning effort, for harnesses in EFFORT_SHELLS; validated by validateEffort before it gets here. */
+  effort?: string;
+  /**
+   * Build the command as ftown did before reviewed approvals became the default (codex without --approve-for-me, claude
+   * without auto mode). Only for recognising commands stored by older bridges; never for a launch.
+   */
+  legacyApprovals?: boolean;
   claudeSessionId?: string;
   cursorSessionId?: string;
   codexSessionId?: string;
@@ -96,16 +104,25 @@ export function buildCursorAgentCommand(options: {
 
 export function buildCodexCommand(options: {
   model?: string;
+  effort?: string;
   codexSessionId?: string;
   initialPrompt?: string;
+  legacyApprovals?: boolean;
 }): string {
   // --dangerously-bypass-hook-trust silences the interactive hook-trust review
   // for our installed ~/.codex/hooks.json entries (harmless warning banner).
-  const parts = [
-    'codex',
-    '--dangerously-bypass-approvals-and-sandbox',
-    '--dangerously-bypass-hook-trust',
-  ];
+  const parts = ['codex'];
+  if (options.legacyApprovals || !launchCapabilities.codexApproveForMe) {
+    parts.push('--dangerously-bypass-approvals-and-sandbox');
+  } else {
+    // Commands run in codex's workspace-write sandbox, and anything beyond it is put to codex's automatic reviewer instead of
+    // a person (nobody is watching an ftown session). Network stays open: the ftown CLI reaches the bridge over localhost,
+    // and builds and git need it; leaving it closed would put every one of those calls through review.
+    parts.push('--approve-for-me', '-c', 'sandbox_workspace_write.network_access=true');
+  }
+  parts.push('--dangerously-bypass-hook-trust');
+  // A config override, so it also applies to a resumed thread (codex restores the thread, not its effort).
+  if (options.effort?.trim()) parts.push('-c', shellQuote(`model_reasoning_effort="${options.effort.trim()}"`));
 
   if (options.codexSessionId?.trim()) {
     // Resume must not replay the original prompt — codex restores the thread.
@@ -127,6 +144,7 @@ export function buildCodexCommand(options: {
 
 export function buildGrokCommand(options: {
   model?: string;
+  effort?: string;
   grokSessionId?: string;
   initialPrompt?: string;
 }): string {
@@ -143,6 +161,7 @@ export function buildGrokCommand(options: {
   if (options.model?.trim()) {
     parts.push('-m', shellQuote(options.model.trim()));
   }
+  if (options.effort?.trim()) parts.push('--reasoning-effort', shellQuote(options.effort.trim()));
 
   if (options.initialPrompt?.trim()) {
     // The positional prompt is auto-submitted by the grok TUI.
@@ -247,6 +266,7 @@ export function buildKimiCodeCommand(options: { model?: string; resume?: boolean
 export function buildMuseCommand(options: {
   workingDir?: string;
   model?: string;
+  effort?: string;
   museSessionId?: string;
   initialPrompt?: string;
 }): string {
@@ -268,6 +288,7 @@ export function buildMuseCommand(options: {
   if (options.model?.trim()) {
     parts.push('--model', shellQuote(options.model.trim()));
   }
+  if (options.effort?.trim()) parts.push('--reasoning-effort', shellQuote(options.effort.trim()));
 
   if (options.initialPrompt?.trim()) {
     // The positional prompt is auto-submitted by the muse TUI.
@@ -279,6 +300,7 @@ export function buildMuseCommand(options: {
 
 export function buildAntigravityCommand(options: {
   model?: string;
+  effort?: string;
   antigravitySessionId?: string;
   initialPrompt?: string;
 }): string {
@@ -296,6 +318,7 @@ export function buildAntigravityCommand(options: {
   if (options.model?.trim()) {
     parts.push('--model', shellQuote(options.model.trim()));
   }
+  if (options.effort?.trim()) parts.push('--effort', shellQuote(options.effort.trim()));
 
   if (options.initialPrompt?.trim()) {
     // -i submits the initial prompt and keeps the interactive TUI open.
@@ -305,14 +328,19 @@ export function buildAntigravityCommand(options: {
   return parts.join(' ');
 }
 
-/** claude CLI launch — shared by 'claude' and every claude-rebadged provider flavor. */
-function buildClaudeCommand(input: BuildCommandInput): string {
+/**
+ * claude CLI launch — shared by 'claude' and every claude-rebadged provider flavor. `autoMode`: start in Claude's auto
+ * permission mode, where a classifier decides what needs asking; only for Anthropic's own models, so not for the flavors.
+ */
+function buildClaudeCommand(input: BuildCommandInput, autoMode = false): string {
   const parts = ['claude', '--allow-dangerously-skip-permissions'];
+  if (autoMode && !input.legacyApprovals && launchCapabilities.claudeAutoMode) parts.push('--permission-mode', 'auto');
   const mod = claudeModLaunchPath();
   if (mod) parts.push('--plugin-dir', shellQuote(mod));
   if (input.model?.trim()) {
     parts.push('--model', shellQuote(input.model.trim()));
   }
+  if (input.effort?.trim()) parts.push('--effort', shellQuote(input.effort.trim()));
   if (input.claudeSessionId?.trim()) {
     parts.push('--resume', shellQuote(input.claudeSessionId.trim()));
   } else if (input.initialPrompt?.trim()) {
@@ -322,7 +350,7 @@ function buildClaudeCommand(input: BuildCommandInput): string {
 }
 
 const CLAUDE_SPEC = {
-  buildCommand: buildClaudeCommand,
+  buildCommand: (input: BuildCommandInput) => buildClaudeCommand(input, true),
   hooked: true,
   promptAsCliArg: true,
   resumeField: 'claudeSessionId',
@@ -364,6 +392,8 @@ export const HARNESSES = {
     buildCommand: (input) =>
       buildCodexCommand({
         model: input.model,
+        effort: input.effort,
+        legacyApprovals: input.legacyApprovals,
         codexSessionId: input.codexSessionId,
         initialPrompt: input.initialPrompt,
       }),
@@ -383,6 +413,7 @@ export const HARNESSES = {
     buildCommand: (input) =>
       buildGrokCommand({
         model: input.model,
+        effort: input.effort,
         grokSessionId: input.grokSessionId,
         initialPrompt: input.initialPrompt,
       }),
@@ -401,6 +432,7 @@ export const HARNESSES = {
       buildMuseCommand({
         workingDir: input.workingDir,
         model: input.model,
+        effort: input.effort,
         museSessionId: input.museSessionId,
         initialPrompt: input.initialPrompt,
       }),
@@ -417,6 +449,7 @@ export const HARNESSES = {
     buildCommand: (input) =>
       buildAntigravityCommand({
         model: input.model,
+        effort: input.effort,
         antigravitySessionId: input.antigravitySessionId,
         initialPrompt: input.initialPrompt,
       }),
@@ -501,6 +534,60 @@ export const ACCEPTED_SHELL_TYPES: readonly string[] = Object.freeze([
   ...SHELL_TYPES,
   ...Object.keys(SHELL_ALIASES),
 ]);
+
+/**
+ * Harnesses whose launch command takes a reasoning effort from `ftown sessions create --effort`. opencode is absent: it takes
+ * effort as a `#<level>` suffix on the model. Claude-rebadged provider flavors share the claude builder, so they take it too.
+ */
+const EFFORT_BASES = new Set(['claude', 'codex', 'grok', 'muse', 'antigravity']);
+const EFFORT_LEVEL = /^[a-z]{1,16}$/;
+
+export class InvalidEffortError extends Error {
+  readonly status = 400;
+  readonly code = 'invalid_effort';
+}
+
+/** The effort to launch with, or undefined; throws InvalidEffortError for a malformed level or a harness that takes none. */
+/** A well-formed effort level, or undefined for none; throws InvalidEffortError otherwise. */
+export function validateEffortLevel(effort: unknown): string | undefined {
+  if (effort === undefined || effort === null || effort === '') return undefined;
+  if (typeof effort !== 'string' || !EFFORT_LEVEL.test(effort.trim())) throw new InvalidEffortError('effort must be a level such as low, medium, high, xhigh or max');
+  return effort.trim();
+}
+
+export function validateEffort(shellType: string, input: unknown): string | undefined {
+  const effort = validateEffortLevel(input);
+  if (effort === undefined) return undefined;
+  const spec = (HARNESSES as Record<string, HarnessSpec>)[shellType];
+  const base = spec?.providerBase ?? shellType;
+  if (!EFFORT_BASES.has(base)) {
+    throw new InvalidEffortError(shellType === 'opencode'
+      ? 'opencode takes effort as a #<level> suffix on --model, for example provider/model#high'
+      : `${shellType} sessions take no effort level`);
+  }
+  return effort;
+}
+
+/**
+ * What the installed CLIs support, for the launch defaults. Assumed current until probeLaunchCapabilities says otherwise, so
+ * a launch never waits for the probe and tests see the default commands.
+ */
+export const launchCapabilities = { codexApproveForMe: true, claudeAutoMode: true };
+
+type HelpReader = (cli: 'codex' | 'claude') => Promise<string | null>;
+const readHelp: HelpReader = cli => new Promise(resolve => {
+  execFile(cli, ['--help'], { encoding: 'utf8', timeout: 10_000, maxBuffer: 1024 * 1024 }, (error, stdout) => resolve(error ? null : stdout));
+});
+
+/**
+ * Checks once, at bridge start, whether the installed codex knows --approve-for-me and claude knows the auto permission mode.
+ * An older CLI keeps the launch flags it understands. A CLI that is missing or does not answer changes nothing.
+ */
+export async function probeLaunchCapabilities(read: HelpReader = readHelp): Promise<void> {
+  const [codex, claude] = await Promise.all([read('codex'), read('claude')]);
+  if (codex !== null) launchCapabilities.codexApproveForMe = codex.includes('--approve-for-me');
+  if (claude !== null) launchCapabilities.claudeAutoMode = /--permission-mode[\s\S]{0,400}"auto"/.test(claude);
+}
 
 export class InvalidShellTypeError extends Error {
   readonly status = 400;

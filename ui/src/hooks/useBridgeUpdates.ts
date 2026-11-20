@@ -45,26 +45,44 @@ function accepted(value: unknown, bridgeId: string, operationId: string, target:
   return op && op.id === operationId && op.targetVersion === target ? { bridgeId, operation: op } : null;
 }
 
+/**
+ * How long an answer stands before the dashboard asks again on its own. A bridge looks for a new release at most every thirty
+ * minutes, so asking more often only repeats the same answer. An update in progress is followed on its own short timer.
+ */
+export const UPDATE_STATUS_FRESH_MS = 10 * 60_000;
+
 /** Owns request coalescing, generation fences and one-shot mutation reconciliation. */
 export class BridgeUpdatesController {
   private values = new Map<string, UpdateView>();
   private active = new Set<string>();
   private epochs = new Map<string, number>();
   private reads = new Map<string, Promise<void>>();
+  /** When each bridge last gave a valid status, for `checkIfStale`. Cleared when the bridge leaves the active set. */
+  private answeredAt = new Map<string, number>();
   private disposed = false;
-  constructor(private readonly send: Send, private readonly changed: () => void, private readonly uuid: () => string = () => crypto.randomUUID()) {}
+  constructor(private readonly send: Send, private readonly changed: () => void, private readonly uuid: () => string = () => crypto.randomUUID(),
+    private readonly now: () => number = () => Date.now()) {}
   get(id: string): UpdateView { return this.values.get(id) ?? empty(); }
   private put(id: string, next: UpdateView) { if (!this.disposed) { this.values.set(id, next); this.changed(); } }
-  setActive(ids: readonly string[]) {
+  /** Replaces the set of reachable bridges and returns the ones that just joined it: only those need a first read. */
+  setActive(ids: readonly string[]): string[] {
     const next = new Set(ids);
     for (const id of this.active) if (!next.has(id)) {
-      this.epochs.set(id, (this.epochs.get(id) ?? 0) + 1); this.reads.delete(id);
+      this.epochs.set(id, (this.epochs.get(id) ?? 0) + 1); this.reads.delete(id); this.answeredAt.delete(id);
       const old = this.get(id); this.put(id, { ...old, status: null, loading: false, message: old.operation ? "Reconnecting to check update status." : "Computer offline or not approved." });
     }
-    for (const id of next) if (!this.active.has(id)) this.epochs.set(id, (this.epochs.get(id) ?? 0) + 1);
+    const joined = [...next].filter(id => !this.active.has(id));
+    for (const id of joined) this.epochs.set(id, (this.epochs.get(id) ?? 0) + 1);
     this.active = next;
+    return joined;
   }
-  dispose() { this.disposed = true; this.active.clear(); this.reads.clear(); }
+  dispose() { this.disposed = true; this.active.clear(); this.reads.clear(); this.answeredAt.clear(); }
+  /** A background read: skipped while the last valid answer is younger than `UPDATE_STATUS_FRESH_MS`. */
+  checkIfStale(bridgeId: string): Promise<void> {
+    const answered = this.answeredAt.get(bridgeId);
+    if (answered !== undefined && this.now() - answered < UPDATE_STATUS_FRESH_MS) return Promise.resolve();
+    return this.check(bridgeId);
+  }
   activate() { this.disposed = false; }
   async check(bridgeId: string, refresh = false): Promise<void> {
     if (this.disposed || !this.active.has(bridgeId)) return;
@@ -78,6 +96,7 @@ export class BridgeUpdatesController {
         if (this.disposed || !this.active.has(bridgeId) || this.epochs.get(bridgeId) !== epoch) return;
         const status = response.success ? parseBridgeUpdateStatus(response.data, bridgeId) : null;
         if (!status) { this.put(bridgeId, { ...this.get(bridgeId), status: null, loading: false, message: responseCode(response) === "permission_denied" ? "This device cannot read update information for this computer." : "Update information unavailable. This bridge may need a manual upgrade." }); return; }
+        this.answeredAt.set(bridgeId, this.now());
         const prior = this.get(bridgeId);
         const op = prior.operation;
         const match = op && status.operation?.id === op.id && status.operation.targetVersion === op.target;
@@ -123,10 +142,11 @@ export function useBridgeUpdates(send: Send, activeIds: readonly string[]) {
   useEffect(() => { controller.activate(); return () => controller.dispose(); }, [controller]);
   useEffect(() => {
     const ids = key ? key.split("\0") : [];
-    controller.setActive(ids); ids.forEach(id => void controller.check(id));
-    const periodic = setInterval(() => ids.forEach(id => void controller.check(id)), 60_000);
+    // Only a bridge that just became reachable is read here: another bridge coming or going must not re-read the rest.
+    controller.setActive(ids).forEach(id => void controller.check(id));
+    const periodic = setInterval(() => ids.forEach(id => void controller.checkIfStale(id)), 60_000);
     const active = setInterval(() => ids.forEach(id => { if (controller.get(id).operation) void controller.check(id); }), 3_000);
-    const visible = () => { if (document.visibilityState === "visible") ids.forEach(id => void controller.check(id)); };
+    const visible = () => { if (document.visibilityState === "visible") ids.forEach(id => void controller.checkIfStale(id)); };
     document.addEventListener("visibilitychange", visible);
     return () => { clearInterval(periodic); clearInterval(active); document.removeEventListener("visibilitychange", visible); };
   }, [controller, key]);

@@ -31,6 +31,10 @@ export interface BuildSessionCommandInput {
   shellType?: ShellType;
   workingDir?: string;
   model?: string;
+  /** Reasoning effort; see validateEffort. */
+  effort?: string;
+  /** See BuildCommandInput.legacyApprovals: recognition of commands older bridges stored, never a launch. */
+  legacyApprovals?: boolean;
   claudeSessionId?: string;
   cursorSessionId?: string;
   codexSessionId?: string;

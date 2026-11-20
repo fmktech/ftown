@@ -616,3 +616,100 @@ it('treats the old bridge preview shape as no preview and never fetches', async 
   await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
   expect(sendCommand).not.toHaveBeenCalled();
 });
+
+/** A bridge that can hold status requests: the first answer is immediate, later ones stay pending until the test settles them. */
+async function waitingBridge(waitable = true) {
+  const { createHash } = await import('node:crypto');
+  const page = (html: string) => { const digest = createHash('sha256').update(html).digest(); return { html, digest, revision: digest.toString('hex') }; };
+  let current = page('<p>one</p>');
+  Object.defineProperty(globalThis.crypto, 'subtle', { configurable: true, value: { digest: async () => Uint8Array.from(current.digest).buffer } });
+  const statuses: Array<{ payload: Record<string, unknown>; answer: (state: 'ready' | 'unchanged') => void }> = [];
+  const answerFor = (state: 'ready' | 'unchanged'): CommandResponse => ({ requestId: 'x', success: true,
+    data: { state, previewId: id, fileId, revision: current.revision, totalBytes: current.html.length, ...(waitable ? { wait: true } : {}) } });
+  const sendCommand = vi.fn((command: Command): Promise<CommandResponse> => {
+    if (command.type === 'session_preview_chunk') return Promise.resolve({ requestId: 'x', success: true,
+      data: { state: 'chunk', previewId: id, fileId, revision: current.revision, totalBytes: current.html.length, offset: 0, dataBase64: btoa(current.html), done: true } });
+    const payload = command.payload as Record<string, unknown>;
+    if (!('waitMs' in payload)) { statuses.push({ payload, answer: () => {} }); return Promise.resolve(answerFor('knownRevision' in payload ? 'unchanged' : 'ready')); }
+    return new Promise(resolve => { statuses.push({ payload, answer: state => resolve(answerFor(state)) }); });
+  });
+  return { sendCommand, statuses, publish: (html: string) => { current = page(html); } };
+}
+
+it('holds one status request open instead of asking every second, and shows a change as soon as the bridge answers', async () => {
+  const bridge = await waitingBridge();
+  const hook = renderHook(() => useSessionPreview({ client, userId: 'user', target, visible: true, readable: true, securityGeneration: 0, sendCommand: bridge.sendCommand }));
+  await act(async () => {});
+  expect(hook.result.current.state).toMatchObject({ kind: 'ready', html: '<p>one</p>' });
+  // The first request cannot wait: there is nothing to compare against yet.
+  expect(bridge.statuses).toHaveLength(1);
+  expect(bridge.statuses[0].payload).not.toHaveProperty('waitMs');
+  await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+  expect(bridge.statuses).toHaveLength(2);
+  expect(bridge.statuses[1].payload).toMatchObject({ waitMs: 20_000 });
+  expect(bridge.statuses[1].payload).toHaveProperty('knownRevision');
+  // Thirty seconds of an idle preview: still that one request.
+  await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+  expect(bridge.statuses).toHaveLength(2);
+  bridge.publish('<p>two</p>');
+  await act(async () => { bridge.statuses[1].answer('ready'); });
+  expect(hook.result.current.state).toMatchObject({ kind: 'ready', html: '<p>two</p>' });
+  // The next request follows after the usual pause and waits again.
+  await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+  expect(bridge.statuses).toHaveLength(3);
+  expect(bridge.statuses[2].payload).toMatchObject({ waitMs: 20_000 });
+  // A wait that ends unchanged is followed by another, never by a burst.
+  await act(async () => { bridge.statuses[2].answer('unchanged'); });
+  expect(bridge.statuses).toHaveLength(3);
+  await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+  expect(bridge.statuses).toHaveLength(4);
+});
+
+it('never asks an older bridge to wait', async () => {
+  const bridge = await waitingBridge(false);
+  renderHook(() => useSessionPreview({ client, userId: 'user', target, visible: true, readable: true, securityGeneration: 0, sendCommand: bridge.sendCommand }));
+  await act(async () => {});
+  await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+  expect(bridge.statuses.length).toBeGreaterThanOrEqual(4);
+  for (const status of bridge.statuses) expect(status.payload).not.toHaveProperty('waitMs');
+});
+
+it('runs a manual refresh at once while a status request is held open', async () => {
+  const bridge = await waitingBridge();
+  const hook = renderHook(() => useSessionPreview({ client, userId: 'user', target, visible: true, readable: true, securityGeneration: 0, sendCommand: bridge.sendCommand }));
+  await act(async () => {});
+  await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+  expect(bridge.statuses).toHaveLength(2);
+  if (hook.result.current.state.kind !== 'ready') throw new Error('expected ready');
+  const key = hook.result.current.state.key;
+  await act(async () => { hook.result.current.refresh(); });
+  // The refresh did not wait for the held request, and asked for an immediate answer.
+  expect(bridge.statuses).toHaveLength(3);
+  expect(bridge.statuses[2].payload).not.toHaveProperty('waitMs');
+  if (hook.result.current.state.kind !== 'ready') throw new Error('expected ready');
+  expect(hook.result.current.state.key).not.toBe(key);
+  // The abandoned request answering later changes nothing and starts nothing.
+  const shown = hook.result.current.state.key;
+  await act(async () => { bridge.statuses[1].answer('unchanged'); });
+  expect(bridge.statuses).toHaveLength(3);
+  expect(hook.result.current.state).toMatchObject({ kind: 'ready', key: shown });
+});
+
+it('stops asking a bridge to wait after a failed request, until the bridge offers it again', async () => {
+  const bridge = await waitingBridge();
+  const hook = renderHook(() => useSessionPreview({ client, userId: 'user', target, visible: true, readable: true, securityGeneration: 0, sendCommand: bridge.sendCommand }));
+  await act(async () => {});
+  await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+  expect(bridge.statuses[1].payload).toHaveProperty('waitMs');
+  bridge.sendCommand.mockImplementationOnce(async () => ({ requestId: 'x', success: false, error: 'Invalid preview request', data: { code: 'invalid' } }));
+  await act(async () => { bridge.statuses[1].answer('unchanged'); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+  // The refused request is followed by a plain one.
+  await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+  const plain = bridge.statuses.at(-1)!;
+  expect(plain.payload).not.toHaveProperty('waitMs');
+  expect(hook.result.current.state.kind).toBe('ready');
+  // That answer carried the marker again, so the following request waits.
+  await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+  expect(bridge.statuses.at(-1)!.payload).toHaveProperty('waitMs');
+});

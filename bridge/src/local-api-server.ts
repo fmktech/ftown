@@ -1,3 +1,6 @@
+import { TransferJournal } from './folder-transfer-journal.js';
+import { FolderTransfers, transferError } from './folder-transfer.js';
+import { TRANSFER_LOCAL, TRANSFER_WIRE } from './folder-transfer-protocol.js';
 import type { BrowserAccess } from './browser-access.js';
 import { createServer } from 'node:http';
 import { EventEmitter } from 'node:events';
@@ -37,6 +40,7 @@ import {
   createFtownSession,
   deriveRelaunchCommand,
   InvalidShellTypeError,
+  InvalidEffortError,
   parseCreateSessionBody,
   PlanItemError,
   ProviderAuthMissingError,
@@ -236,7 +240,35 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   private peerControl: PeerControl | null = null;
   /** Cross-bridge control: forwards the local CLI's requests to other bridges of this account. */
   private peerLinks: PeerLinks | null = null;
-  setPeerControl(peers: PeerControl, links?: PeerLinks): void { this.peerControl = peers; this.peerLinks = links ?? null; }
+  private transfers: FolderTransfers | null = null;
+
+  setPeerControl(peers: PeerControl, links?: PeerLinks, transferStateDir?: string): void {
+    this.peerControl = peers;
+    this.peerLinks = links ?? null;
+    this.transfers = new FolderTransfers(peers, transferStateDir ? new TransferJournal(transferStateDir) : undefined);
+    links?.setBinaryHandler((endpoint, channel, frame) => this.transfers?.binary(endpoint, channel, frame));
+  }
+
+  async closeTransfers(): Promise<void> { await this.transfers?.close(); }
+
+  private async dispatchTransfer(message: VerifiedApplication, path: string): Promise<ApplicationJson> {
+    const { endpoint } = message.principal;
+    const wire = path === TRANSFER_WIRE;
+    if (wire
+      ? endpoint.kind !== 'bridge' || !this.security!.peerBridges().some(peer => peer.endpoint.id === endpoint.id)
+      : endpoint.kind !== 'local-cli') {
+      return { status: 403, body: { error: 'permission_denied' } };
+    }
+    if (!this.transfers) return { status: 503, body: { error: 'Paired bridge transfers unavailable' } };
+    await this.security!.revalidate(message.principal);
+    const body = (message.application.data as { body?: ApplicationJson } | null)?.body;
+    try {
+      const result = wire ? await this.transfers.wire(endpoint.id, body, message.envelope.channel) : await this.transfers.local(body);
+      return { status: 200, body: applicationJson(result) };
+    } catch (error) {
+      return { status: 400, body: { error: transferError(error) } };
+    }
+  }
   /** GET /api/peers and POST /api/peers/http, for the OS-local CLI only (a browser or a peer bridge never relays through this bridge). */
   private async dispatchPeers(message: VerifiedApplication, method: string, path: string): Promise<ApplicationJson> {
     const url = new URL(path, 'http://localhost');
@@ -318,6 +350,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     }
     if (route.kind !== 'http') throw new Error('Invalid application route');
     const routePath = route.path.split('?')[0];
+    if (routePath === TRANSFER_LOCAL || routePath === TRANSFER_WIRE) return this.dispatchTransfer(message, routePath);
     if (routePath === '/api/peers' || routePath.startsWith('/api/peers/')) return this.dispatchPeers(message, route.method, route.path);
     if ((route.method === 'PUT' || route.method === 'DELETE') && /^\/api\/sessions\/[A-Za-z0-9_-]{1,200}\/preview$/.test(route.path.split('?')[0])
       && message.principal.endpoint.kind !== 'local-cli') return { status: 403, body: { error: 'permission_denied', code: 'permission_denied' } };
@@ -374,7 +407,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     await this.security.revalidate(message.principal);
     void this.handleApiRoute(request, response as unknown as ServerResponse, new URL(route.path, 'http://localhost').pathname,
       new URL(route.path, 'http://localhost')).catch(error => {
-        if (error instanceof BadRequestError || error instanceof WorktreeError || error instanceof PlanItemError || error instanceof InvalidShellTypeError) jsonResponse(response as unknown as ServerResponse, 400, { error: error.message });
+        if (error instanceof BadRequestError || error instanceof WorktreeError || error instanceof PlanItemError || error instanceof InvalidShellTypeError || error instanceof InvalidEffortError) jsonResponse(response as unknown as ServerResponse, 400, { error: error.message });
         else if (error instanceof RouteError) jsonResponse(response as unknown as ServerResponse, error.status, { error: error.message });
         else if (error instanceof AttentionError) jsonResponse(response as unknown as ServerResponse, error.status, { error: error.message, code: error.code });
         else jsonResponse(response as unknown as ServerResponse, 500, { error: 'bridge_error', code: 'bridge_error' });

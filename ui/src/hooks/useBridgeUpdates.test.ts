@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { BridgeUpdatesController, parseBridgeUpdateStatus } from "./useBridgeUpdates";
+import { BridgeUpdatesController, UPDATE_STATUS_FRESH_MS, parseBridgeUpdateStatus } from "./useBridgeUpdates";
 import type { Command, CommandResponse } from "@/types";
 import type { BridgeUpdateStatus } from "../../../bridge/src/update-protocol";
 
@@ -18,6 +18,31 @@ describe("authenticated bridge update controller", () => {
     const a = c.check("a"); const a2 = c.check("a"); await c.check("b");
     expect(send).toHaveBeenCalledTimes(2); expect(c.get("b").status?.currentVersion).toBe("2.0.0");
     waiting.resolve(success(status("a"))); await Promise.all([a, a2]); expect(c.get("a").status?.bridgeId).toBe("a");
+  });
+  it("reads only the bridges that just became reachable", () => {
+    const c = new BridgeUpdatesController(async () => success(status("a")), () => {}, () => "r");
+    expect(c.setActive(["a", "b"])).toEqual(["a", "b"]);
+    // Bridge c arriving, or b leaving, is no reason to ask a again.
+    expect(c.setActive(["a", "b", "c"])).toEqual(["c"]);
+    expect(c.setActive(["a", "c"])).toEqual([]);
+    // A bridge that went away and came back may be running another version.
+    expect(c.setActive(["a", "b", "c"])).toEqual(["b"]);
+  });
+  it("skips background reads while the last answer is fresh, and still reads on request", async () => {
+    let now = 1_000_000;
+    const send = vi.fn(async () => success(status("a")));
+    const c = new BridgeUpdatesController(send, () => {}, () => "r", () => now); c.setActive(["a"]);
+    await c.check("a"); expect(send).toHaveBeenCalledTimes(1);
+    now += UPDATE_STATUS_FRESH_MS - 1; await c.checkIfStale("a"); expect(send).toHaveBeenCalledTimes(1);
+    await c.check("a", true); expect(send).toHaveBeenCalledTimes(2);
+    now += UPDATE_STATUS_FRESH_MS; await c.checkIfStale("a"); expect(send).toHaveBeenCalledTimes(3);
+    // Leaving the reachable set forgets the answer: the bridge is read again when it returns.
+    c.setActive([]); c.setActive(["a"]); await c.checkIfStale("a"); expect(send).toHaveBeenCalledTimes(4);
+  });
+  it("keeps asking in the background when the last read gave no valid status", async () => {
+    const send = vi.fn(async (): Promise<CommandResponse> => ({ requestId: "r", success: false, error: "x" }));
+    const c = new BridgeUpdatesController(send, () => {}, () => "r", () => 5); c.setActive(["a"]);
+    await c.check("a"); await c.checkIfStale("a"); expect(send).toHaveBeenCalledTimes(2);
   });
   it("drops stale replies and capabilities across disconnects", async () => {
     const waiting = deferred<CommandResponse>(); const c = new BridgeUpdatesController(() => waiting.promise, () => {}, () => "r");
