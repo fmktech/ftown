@@ -1,3 +1,4 @@
+import { resolveSessionParent, type RemoteParentLookup } from './session-parent.js';
 import { assertSessionCanLaunch } from './retired-automation.js';
 import { v4 as uuidv4 } from 'uuid';
 import { existsSync, mkdirSync, statSync } from 'node:fs';
@@ -60,6 +61,8 @@ export interface CreatePlanStoreDep {
 }
 
 export interface CreateFtownSessionDeps {
+  loadRemoteParent?: RemoteParentLookup;
+  hasRemoteChildren?: (id: string) => Promise<boolean>;
   store: SessionStore;
   updateAdmission?: UpdateAdmission;
   runner: ProcessRunner;
@@ -114,6 +117,8 @@ export interface CreateFtownSessionInput {
   grokSessionId?: string;
   antigravitySessionId?: string;
   env?: Record<string, string>;
+  projectName?: string;
+  parentBridgeId?: string;
   parentSessionId?: string;
   initialInput?: string;
   initialInputDelay?: number;
@@ -126,18 +131,6 @@ export interface CreateFtownSessionInput {
   planItem?: string;
   /** Require a linked PR with green/merged checks before the card can be set to done. */
   requireGreenPr?: boolean;
-}
-
-export async function resolveParentSessionId(
-  store: SessionStore,
-  parentSessionId: string | undefined,
-): Promise<string | undefined> {
-  if (!parentSessionId) return undefined;
-  const proposed = await store.loadSession(parentSessionId);
-  if (!proposed) {
-    throw new Error('Parent session not found');
-  }
-  return proposed.parentSessionId ?? proposed.id;
 }
 
 interface ChildBriefingParams {
@@ -520,30 +513,25 @@ async function createFtownSessionImpl(
 ): Promise<Session> {
   const prompt = input.prompt?.trim() ?? '';
 
-  let parentSessionId: string | undefined;
-  let parentName: string | undefined;
-  let parentWorkingDir: string | undefined;
-  let parentSession: Session | null = null;
-  let resolvedParentSession: Session | null = null;
   const requestedParentId = input.parentSessionId;
-  if (input.parentSessionId) {
-    parentSession = await deps.store.loadSession(input.parentSessionId);
-    parentSessionId = await resolveParentSessionId(deps.store, input.parentSessionId);
-    if (parentSessionId) {
-      resolvedParentSession = await deps.store.loadSession(parentSessionId);
-      parentName = resolvedParentSession?.name ?? parentSessionId.slice(0, 8);
-      parentWorkingDir = resolvedParentSession?.workingDir;
-    }
-  }
-
+  const relationship = requestedParentId ? await resolveSessionParent(deps.store, deps.bridgeId, requestedParentId, input.parentBridgeId, deps.loadRemoteParent) : undefined;
+  const parentSession = relationship?.direct;
+  const resolvedParentSession = relationship?.root;
+  const parentSessionId = resolvedParentSession?.id;
+  const parentName = resolvedParentSession?.name;
+  const localRoot = resolvedParentSession?.bridgeId === deps.bridgeId ? resolvedParentSession : undefined;
+  const parentWorkingDir = localRoot?.workingDir;
+  const projectName = resolvedParentSession?.projectName || (typeof input.projectName === 'string' && input.projectName.trim()) || (relationship ? 'Unassigned' : undefined);
+  if (!projectName) throw new Error('Project name is required');
+  if (projectName.length > 256) throw new Error('Project name exceeds 256 characters');
   if (input.account !== undefined && typeof input.account !== 'string') throw new AccountSelectionError('unknown_account', 'account must be a registered account id');
   if (input.allowedAccounts !== undefined && (!Array.isArray(input.allowedAccounts) || !input.allowedAccounts.every(id => typeof id === 'string'))) throw new AccountSelectionError('unknown_account', 'allowedAccounts must be an array of account ids');
   const registeredAccounts = loadAccounts().accounts;
   const registeredIds = new Set(registeredAccounts.map(entry => entry.id));
   if (input.allowedAccounts?.some(id => id !== 'default' && (!/^[a-z0-9-]{1,32}$/.test(id) || !registeredIds.has(id)))) throw new AccountSelectionError('unknown_account', 'allowedAccounts contains an unknown account id');
-  let account = input.account ?? resolvedParentSession?.account;
-  const resolvedPolicy = resolvedParentSession?.allowedAccounts;
-  const directPolicy = parentSession?.allowedAccounts;
+  let account = input.account ?? localRoot?.account;
+  const resolvedPolicy = localRoot?.allowedAccounts;
+  const directPolicy = parentSession?.bridgeId === deps.bridgeId ? parentSession.allowedAccounts : undefined;
   // An alias may impose a narrower policy than its resolved parent; preserve both restrictions.
   const parentPolicy = resolvedPolicy && directPolicy
     ? resolvedPolicy.filter(id => directPolicy.includes(id))
@@ -667,6 +655,8 @@ async function createFtownSessionImpl(
     const sessionId = uuidv4();
     const session: Session = {
       id: sessionId,
+      projectName,
+      parentBridgeId: resolvedParentSession?.bridgeId,
       name: sessionName,
       command,
       prompt: prompt || undefined,
@@ -717,7 +707,7 @@ async function createFtownSessionImpl(
             childName: session.name,
             childId: sessionId,
             parentName,
-            parentId: requestedParentId ?? parentSessionId,
+            parentId: parentSessionId,
             requireGreenPr: input.requireGreenPr,
           })
         : undefined;
@@ -889,6 +879,8 @@ export function parseCreateSessionBody(
     antigravitySessionId:
       typeof body.antigravitySessionId === 'string' ? body.antigravitySessionId : undefined,
     env: env && typeof env === 'object' ? env : undefined,
+    projectName: typeof body.projectName === 'string' ? body.projectName : undefined,
+    parentBridgeId: typeof body.parentBridgeId === 'string' ? body.parentBridgeId : undefined,
     parentSessionId,
     initialInput: typeof body.initialInput === 'string' ? body.initialInput : undefined,
     initialInputDelay:

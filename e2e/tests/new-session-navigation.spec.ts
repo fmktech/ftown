@@ -18,7 +18,7 @@ for (const mobile of [false, true]) {
       return (result.body as { sessions: SessionRow[] }).sessions;
     }
     try {
-      const prior = await bridgeApiFetch("POST", "/api/sessions", { body: { shellType: "shell", name: priorName } });
+      const prior = await bridgeApiFetch("POST", "/api/sessions", { body: { projectName: "E2E", shellType: "shell", name: priorName } });
       expect(prior.status).toBe(201);
       const priorId = (prior.body as { session: SessionRow }).session.id;
       owned.add(priorId);

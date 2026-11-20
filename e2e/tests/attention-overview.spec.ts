@@ -67,7 +67,7 @@ async function finish(child: { done: Promise<ChildResult>; output: () => { stdou
 }
 
 async function createSession(name: string, body: Record<string, unknown>): Promise<string> {
-  const created = await bridgeApiFetch("POST", "/api/sessions", { body: { name, ...body } });
+  const created = await bridgeApiFetch("POST", "/api/sessions", { body: { projectName: "E2E", name, ...body } });
   expect(created.status, JSON.stringify(created.body)).toBe(201);
   const id = (created.body as { session?: { id?: string } }).session?.id;
   expect(id).toBeTruthy();

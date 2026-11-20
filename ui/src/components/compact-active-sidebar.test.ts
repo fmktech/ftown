@@ -32,113 +32,7 @@ afterEach(() => {
   cleanup();
 });
 
-describe("sidebar bridge groups", () => {
-  it("makes the full hostname a disclosure control while keeping drag and cleanup independent", () => {
-    const hostname = "development-machine-with-a-long-readable-hostname.example.test";
-    const onSelectSession = vi.fn();
-    const onRemoveSession = vi.fn();
-    const { container } = render(createElement(SessionList, {
-      sessions: [session("finished", "bridge-a", "Finished task", { status: "completed" })],
-      bridges: [{ ...bridges[0], hostname }], bridgeOrder: ["bridge-a"], selectedSessionId: null,
-      onSelectSession, onRemoveSession,
-    }));
-    const disclosure = screen.getByRole("button", { name: `Collapse ${hostname}` });
-    expect(disclosure.title).toBe(hostname);
-    expect(within(disclosure).getByText(hostname).title).toBe(hostname);
-    expect(within(disclosure).queryAllByRole("button")).toHaveLength(0);
-    const drag = container.querySelector('[data-bridge-drag="bridge-a"]')!;
-    expect(drag.getAttribute("draggable")).toBe("true");
-    expect(drag.getAttribute("title")).toContain(hostname);
-    const clear = screen.getByRole("button", { name: `Clear completed sessions on ${hostname}` });
-    expect(disclosure.parentElement).toBe(clear.parentElement);
-    expect(disclosure.contains(clear)).toBe(false);
-    fireEvent.click(within(disclosure).getByText(hostname));
-    expect(screen.getByRole("button", { name: `Expand ${hostname}` }).getAttribute("aria-expanded")).toBe("false");
-    expect(screen.queryByText("Finished task")).toBeNull();
-    expect(onSelectSession).not.toHaveBeenCalled();
-    expect(onRemoveSession).not.toHaveBeenCalled();
-  });
-
-  it("selecting a session expands its bridge and never collapses others", async () => {
-    const sessions = [
-      session("session-a", "bridge-a", "Alpha session"),
-      session("session-b", "bridge-b", "Beta session"),
-    ];
-    const props = {
-      sessions,
-      bridges,
-      bridgeOrder: ["bridge-a", "bridge-b"],
-      onSelectSession: vi.fn(),
-    };
-    const { rerender } = render(
-      createElement(SessionList, { ...props, selectedSessionId: null }),
-    );
-
-    // Default: everything expanded. Collapse both manually — user's choice.
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Collapse alpha" })).toBeTruthy();
-      expect(screen.getByRole("button", { name: "Collapse beta" })).toBeTruthy();
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Collapse alpha" }));
-    fireEvent.click(screen.getByRole("button", { name: "Collapse beta" }));
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Expand alpha" })).toBeTruthy();
-      expect(screen.getByRole("button", { name: "Expand beta" })).toBeTruthy();
-    });
-
-    // Selecting a session on beta opens beta; alpha stays as the user left it.
-    rerender(createElement(SessionList, { ...props, selectedSessionId: "session-b" }));
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Expand alpha" })).toBeTruthy();
-      expect(screen.getByRole("button", { name: "Collapse beta" })).toBeTruthy();
-    });
-    expect(screen.getByText("Beta session")).toBeTruthy();
-
-    // Moving the selection back to alpha opens alpha WITHOUT re-collapsing
-    // beta — no one-expanded-at-a-time behavior.
-    rerender(createElement(SessionList, { ...props, selectedSessionId: "session-a" }));
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Collapse alpha" })).toBeTruthy();
-      expect(screen.getByRole("button", { name: "Collapse beta" })).toBeTruthy();
-    });
-  });
-
-  it("manual expansion survives session-list updates (no auto-recollapse)", async () => {
-    const sessions = [
-      session("session-a", "bridge-a", "Alpha session"),
-      session("session-b", "bridge-b", "Beta session"),
-    ];
-    const props = {
-      sessions,
-      bridges,
-      bridgeOrder: ["bridge-a", "bridge-b"],
-      selectedSessionId: null,
-      onSelectSession: vi.fn(),
-    };
-    // Simulate the mobile churn that used to trigger auto-collapse: fresh
-    // props identity on every poll cycle.
-    const { rerender } = render(createElement(SessionList, { ...props }));
-
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Collapse alpha" })).toBeTruthy();
-      expect(screen.getByRole("button", { name: "Collapse beta" })).toBeTruthy();
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: "Collapse alpha" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "Expand alpha" })).toBeTruthy());
-
-    for (let i = 0; i < 3; i += 1) {
-      rerender(createElement(SessionList, {
-        ...props,
-        sessions: sessions.map((s) => ({ ...s, updatedAt: new Date().toISOString() })),
-      }));
-    }
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Expand alpha" })).toBeTruthy();
-      expect(screen.getByRole("button", { name: "Collapse beta" })).toBeTruthy();
-    });
-  });
-
+describe("sidebar project groups", () => {
   it("keeps the provider icon beside selected and compact session names", async () => {
     render(createElement(SessionList, {
       sessions: [
@@ -146,7 +40,6 @@ describe("sidebar bridge groups", () => {
         session("session-b", "bridge-a", "Compact session"),
       ],
       bridges: [bridges[0]],
-      bridgeOrder: ["bridge-a"],
       selectedSessionId: "session-a",
       onSelectSession: vi.fn(),
     }));
@@ -158,40 +51,34 @@ describe("sidebar bridge groups", () => {
     }
   });
 
-  it("groups repeated root-agent folders without regrouping their subagents", async () => {
+  it("retains hidden projects on remount and allows restoring them in compact mode", () => {
+    const props = { sessions: [session("root", "bridge-a", "Manager", { projectName: "Shared" })],
+      bridges, selectedSessionId: null, onSelectSession: vi.fn() };
+    const first = render(createElement(SessionList, props));
+    fireEvent.click(screen.getByRole("button", { name: "Hide project Shared" }));
+    first.unmount();
+    render(createElement(SessionList, { ...props, collapsed: true }));
+    expect(screen.queryByRole("region", { name: "Shared" })).toBeNull();
+    fireEvent.click(screen.getByText("Hidden projects"));
+    fireEvent.click(screen.getByRole("button", { name: "Show Shared" }));
+    expect(screen.getByRole("region", { name: "Shared" })).toBeTruthy();
+  });
+
+  it("hides and restores a project with sessions on two computers", () => {
     render(createElement(SessionList, {
       sessions: [
-        session("agent-a", "bridge-a", "Agent A", { workingDir: "/projects/acme" }),
-        session("agent-a-child", "bridge-a", "Agent A child", {
-          workingDir: "/projects/other",
-          parentSessionId: "agent-a",
-        }),
-        session("agent-b", "bridge-a", "Agent B", { workingDir: "/projects/acme/" }),
-        session("agent-c", "bridge-a", "Agent C", { workingDir: "/projects/other" }),
-      ],
-      bridges: [bridges[0]],
-      bridgeOrder: ["bridge-a"],
-      selectedSessionId: "agent-a-child",
-      onSelectSession: vi.fn(),
+        session("parent", "bridge-a", "Manager", { projectName: "Shared" }),
+        session("child", "bridge-b", "Remote child", { parentSessionId: "parent" }),
+        session("legacy", "bridge-a", "Legacy session"),
+      ], bridges, selectedSessionId: "child", onSelectSession: vi.fn(),
     }));
-
-    const acmeGroup = await screen.findByRole("group", { name: "Sessions in acme" });
-    expect(within(acmeGroup).getByText("Agent A")).toBeTruthy();
-    expect(within(acmeGroup).getByText("Agent A child")).toBeTruthy();
-    expect(within(acmeGroup).getByText("Agent B")).toBeTruthy();
-    expect(within(acmeGroup).getByLabelText("2 root agents")).toBeTruthy();
-    expect(screen.queryByRole("group", { name: "Sessions in other" })).toBeNull();
-    expect(screen.getByText("Agent C")).toBeTruthy();
-
-    fireEvent.click(within(acmeGroup).getByRole("button", { name: "Collapse folder acme" }));
-    expect(within(acmeGroup).queryByText("Agent A")).toBeNull();
-    expect(within(acmeGroup).queryByText("Agent B")).toBeNull();
-    expect(screen.getByText("Agent C")).toBeTruthy();
-    expect(localStorage.getItem("ftown:collapsedSessionFolders")).toContain("bridge-a:/projects/acme");
-
-    fireEvent.click(within(acmeGroup).getByRole("button", { name: "Expand folder acme" }));
-    expect(within(acmeGroup).getByText("Agent A")).toBeTruthy();
-    expect(within(acmeGroup).getByText("Agent B")).toBeTruthy();
+    expect(within(screen.getByRole("region", { name: "Shared" })).getByText("Remote child")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Hide project Shared" }));
+    expect(screen.queryByText("Remote child")).toBeNull();
+    expect(screen.getByText("Legacy session")).toBeTruthy();
+    fireEvent.click(screen.getByText("Hidden projects"));
+    fireEvent.click(screen.getByRole("button", { name: "Show Shared" }));
+    expect(screen.getByText("Remote child")).toBeTruthy();
   });
 
   it("shows verbose activity only for the expanded row and keeps age beside its indicator", async () => {
@@ -205,7 +92,6 @@ describe("sidebar bridge groups", () => {
         session("session-b", "bridge-a", "Compact session"),
       ],
       bridges: [bridges[0]],
-      bridgeOrder: ["bridge-a"],
       selectedSessionId: "session-a",
       onSelectSession: vi.fn(),
       sessionActivity,
@@ -226,7 +112,6 @@ describe("sidebar bridge groups", () => {
         createdAt: "2026-08-11T12:00:00Z",
       })],
       bridges: [bridges[0]],
-      bridgeOrder: ["bridge-a"],
       selectedSessionId: "session-a",
       onSelectSession: vi.fn(),
     }));

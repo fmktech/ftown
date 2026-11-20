@@ -19,7 +19,7 @@ interface SessionRow {
 }
 
 async function createSession(body: Record<string, unknown>): Promise<string> {
-  const response = await bridgeApiFetch("POST", "/api/sessions", { body });
+  const response = await bridgeApiFetch("POST", "/api/sessions", { body: { projectName: "E2E", ...body } });
   expect(response.status, JSON.stringify(response.body)).toBe(201);
   const id = (response.body as { session: { id: string } }).session.id;
   expect(id).toBeTruthy();

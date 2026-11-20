@@ -50,6 +50,7 @@ export async function waitForBridgeOnline(page: Page): Promise<void> {
 export async function createShellSession(page: Page, name: string, bridgeId: string = readBridgePointer().bridgeId): Promise<void> {
   await page.getByRole("button", { name: "Create a new session", exact: true }).click();
   await expect(page.getByText("New Session", { exact: true })).toBeVisible();
+  await page.getByLabel("Project", { exact: true }).fill("E2E");
   await page.locator("#ns-shell-type").selectOption("shell");
   await page.locator("#ns-bridge").selectOption(bridgeId);
   await page.locator('input[placeholder="Optional name for this session"]').fill(name);

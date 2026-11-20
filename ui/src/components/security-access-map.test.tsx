@@ -70,7 +70,7 @@ it.each([
 it("passes actual sidebar state independently of bridge presence and preserves the security navigation action", () => {
   const open = vi.fn();
   const data = { sessions: [], bridges: [{ clientId: "client", bridgeId: "bridge", hostname: "alpha", connectedAt: "2026-10-26T12:00:00Z" }],
-    bridgeOrder: ["bridge"], selectedSessionId: null, onSelectSession: vi.fn(), onOpenSecurity: open };
+    selectedSessionId: null, onSelectSession: vi.fn(), onOpenSecurity: open };
   const view = render(<SessionList {...data} />);
   const button = screen.getByRole("button", { name: "Security log for alpha" });
   expect(button.title).toContain("Connection status unknown");

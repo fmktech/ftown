@@ -25,7 +25,6 @@ function renderList(sessions: Session[]) {
     <SessionList
       sessions={sessions}
       bridges={[{ bridgeId: "bridge", clientId: "client", hostname: "workstation", connectedAt: stamp }]}
-      bridgeOrder={["bridge"]}
       selectedSessionId={null}
       onSelectSession={vi.fn()}
     />,
@@ -34,8 +33,8 @@ function renderList(sessions: Session[]) {
 
 it("keeps an ordinary child folded under its parent", async () => {
   renderList([
-    session({ id: "parent", name: "Handoff parent" }),
-    session({ id: "child", name: "Handoff child", parentSessionId: "parent", shellType: "muse" }),
+    session({ id: "parent", projectName: "Platform", name: "Handoff parent" }),
+    session({ id: "child", bridgeId: "remote", name: "Handoff child", parentSessionId: "parent", shellType: "muse" }),
   ]);
   expect(await screen.findByRole("button", { name: "Expand children" })).toBeTruthy();
   expect(screen.queryByText("Handoff child")).toBeNull();
@@ -43,9 +42,10 @@ it("keeps an ordinary child folded under its parent", async () => {
 
 it("shows a blocked child on the board by expanding its parent once", async () => {
   renderList([
-    session({ id: "parent", name: "Handoff parent" }),
+    session({ id: "parent", projectName: "Platform", name: "Handoff parent" }),
     session({
       id: "child",
+      bridgeId: "remote",
       name: "Handoff child",
       parentSessionId: "parent",
       shellType: "muse",

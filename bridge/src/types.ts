@@ -61,6 +61,8 @@ export interface Session {
   grokSessionId?: string;
   antigravitySessionId?: string;
   env?: Record<string, string>;
+  projectName?: string;
+  parentBridgeId?: string;
   parentSessionId?: string;
   requireGreenPr?: boolean;
   pullRequestUrl?: string;
@@ -147,7 +149,7 @@ export interface Command {
   requestId: string;
 }
 
-export type CommandType = 'get_pull_request_review' | 'get_pull_request_review_chunk' | 'preview_chat_list' | 'preview_chat_send' | 'preview_chat_reply' | 'get_pull_request_statuses' | 'session_preview_status' | 'session_preview_chunk' | 'get_bridge_update' | 'get_direct_address' | 'update_bridge' | 'security_devices' | 'security_invite' | 'security_revoke' | 'ledger_head' | 'ledger_chain' | 'create_session' | 'stop_session' | 'list_sessions' | 'get_history' | 'dismiss_session_block' | 'retry_session' | 'send_message' | 'rename_session' | 'remove_session' | 'bridge_exec' | 'clear_terminal' | 'update_session_parent' | 'get_session_usage' | 'get_sessions_usage' | 'get_session_attention' | 'get_attention_summary' | 'resolve_session_attention' | 'answer_session_attention' | 'get_session_board'
+export type CommandType = 'get_pull_request_review' | 'get_pull_request_review_chunk' | 'preview_chat_list' | 'preview_chat_send' | 'preview_chat_reply' | 'get_pull_request_statuses' | 'session_preview_status' | 'session_preview_chunk' | 'get_bridge_update' | 'get_direct_address' | 'update_bridge' | 'security_devices' | 'security_invite' | 'security_revoke' | 'ledger_head' | 'ledger_chain' | 'create_session' | 'stop_session' | 'list_sessions' | 'get_host_resources' | 'get_history' | 'dismiss_session_block' | 'retry_session' | 'send_message' | 'rename_session' | 'remove_session' | 'bridge_exec' | 'clear_terminal' | 'update_session_parent' | 'get_session_usage' | 'get_sessions_usage' | 'get_session_attention' | 'get_attention_summary' | 'resolve_session_attention' | 'answer_session_attention' | 'get_session_board'
   | 'get_model_routing' | 'set_model_routing' | 'get_accounts' | 'handoff_session' | 'list_native_sessions';
 
 export interface GetSessionAttentionPayload { bridgeId: string; sessionId: string }
@@ -178,6 +180,8 @@ export interface CreateSessionPayload {
   museSessionId?: string;
   grokSessionId?: string;
   antigravitySessionId?: string;
+  projectName?: string;
+  parentBridgeId?: string;
   parentSessionId?: string;
   requireGreenPr?: boolean;
   /** @deprecated Ignored compatibility input. Ordinary sessions use task + parent. */
@@ -216,6 +220,7 @@ export interface RenameSessionPayload {
 
 export interface UpdateSessionParentPayload {
   sessionId: string;
+  parentBridgeId?: string;
   parentSessionId: string | null;
 }
 

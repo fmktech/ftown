@@ -44,6 +44,7 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
       await page.evaluate(vars => localStorage.setItem("ftown:envVars", JSON.stringify(vars)), env);
       await page.getByRole("button", { name: "Create a new session", exact: true }).click();
       const modal = page.getByRole("dialog", { name: "New Session", exact: true });
+      await modal.getByLabel("Project", { exact: true }).fill("E2E");
       await modal.getByLabel("Shell Type", { exact: true }).selectOption("codex");
       await modal.locator("#ns-bridge").selectOption(bridgeId!);
       const picker = modal.getByLabel("Account", { exact: true });

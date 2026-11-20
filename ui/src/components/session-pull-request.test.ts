@@ -50,7 +50,7 @@ describe("session PR destinations", () => {
   it("renders a native compact sibling link without selecting the session", () => {
     const onSelectSession = vi.fn();
     const { container } = render(createElement(SessionList, {
-      sessions: [session], bridges: [], bridgeOrder: ["bridge"], selectedSessionId: null, onSelectSession,
+      sessions: [session], bridges: [], selectedSessionId: null, onSelectSession,
     }));
     const original = container.querySelector<HTMLButtonElement>('button[draggable="true"]')!;
     const wrapper = original.parentElement!;
@@ -91,7 +91,7 @@ describe("session PR destinations", () => {
     const onSelectSession = vi.fn();
     const { container } = render(createElement(SessionList, {
       sessions: [session, { ...session, id: "observer", name: "Observer", pullRequestUrl: undefined }],
-      bridges: [], bridgeOrder: ["bridge"], selectedSessionId: "observer", onSelectSession,
+      bridges: [], selectedSessionId: "observer", onSelectSession,
       onStopSession: vi.fn(), onRemoveSession: vi.fn(),
       sessionActivity: new Map([[session.id, { activity: "idle" as const, attention: {
         type: "agent_needs_input" as const, title: "Review requested", message: "Please review", receivedAt: 1,
@@ -128,7 +128,7 @@ describe("session PR destinations", () => {
     const onReviewPullRequest = vi.fn();
     const view = render(createElement(SessionList, {
       sessions: [session, { ...session, id: "observer", name: "Observer", pullRequestUrl: undefined }],
-      bridges: [], bridgeOrder: ["bridge"], selectedSessionId: "observer", onSelectSession, onReviewPullRequest,
+      bridges: [], selectedSessionId: "observer", onSelectSession, onReviewPullRequest,
       onStopSession: vi.fn(), onRemoveSession: vi.fn(),
     }));
     const row = view.container.querySelector<HTMLElement>('[data-session-row="target"]')!;
@@ -159,7 +159,7 @@ describe("session PR destinations", () => {
 
   it("updates and removes review actions when the linked PR changes", () => {
     const onReviewPullRequest = vi.fn();
-    const props = { sessions: [session], bridges: [], bridgeOrder: ["bridge"], selectedSessionId: null,
+    const props = { sessions: [session], bridges: [], selectedSessionId: null,
       onSelectSession: vi.fn(), onReviewPullRequest, onStopSession: vi.fn(), onRemoveSession: vi.fn() };
     const view = render(createElement(SessionList, props));
     expect(screen.getByRole("button", { name: /Review pull request: PR #123/ })).toBeTruthy();
@@ -174,7 +174,7 @@ describe("session PR destinations", () => {
 
   it("uses replaced metadata and omits the PR action after clearing", () => {
     const props = {
-      sessions: [session], bridges: [], bridgeOrder: ["bridge"], selectedSessionId: null,
+      sessions: [session], bridges: [], selectedSessionId: null,
       onSelectSession: vi.fn(), onStopSession: vi.fn(), onRemoveSession: vi.fn(),
     };
     const view = render(createElement(SessionList, props));
@@ -201,8 +201,7 @@ describe("session PR destinations", () => {
       totalTokens: 1345, models: [], harness: "codex", collectedAt: "2026-10-23T12:00:00Z",
     };
     const { container } = render(createElement(SessionList, {
-      sessions: [{ ...session, usage }], bridges: [], bridgeOrder: ["bridge"],
-      selectedSessionId: session.id, onSelectSession: () => {},
+      sessions: [{ ...session, usage }], bridges: [], selectedSessionId: session.id, onSelectSession: () => {},
     }));
     expect(container.textContent).not.toContain("1.2K in");
     expect(container.querySelector('[title^="Input:"]')).toBeNull();
@@ -243,7 +242,7 @@ describe("session PR destinations", () => {
     const onSelectSession = vi.fn();
     const { container } = render(createElement(SessionList, {
       sessions: [{ ...session, pullRequestUrl }], bridges: [],
-      bridgeOrder: ["bridge"], selectedSessionId: null, onSelectSession,
+      selectedSessionId: null, onSelectSession,
       onStopSession: vi.fn(), onRemoveSession: vi.fn(),
     }));
     expect(container.querySelector("a")).toBeNull();

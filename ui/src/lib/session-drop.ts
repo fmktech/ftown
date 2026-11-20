@@ -44,7 +44,7 @@ export function resolveSessionDrop(
   dragged: DraggedSession,
   target: SessionDropTarget,
 ): SessionDropAction | null {
-  if (dragged.bridgeId !== target.bridgeId) return null;
+  if (dragged.bridgeId !== target.bridgeId && (target.kind === "bridge" || target.zone !== "inside")) return null;
   if (target.kind === "bridge") {
     return {
       type: "set-parent",

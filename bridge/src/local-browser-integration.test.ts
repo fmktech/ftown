@@ -101,7 +101,7 @@ test('real encrypted enrollment controls sessions and streams local events while
     await h.pair();
     assert.deepEqual((await h.rpc('list_sessions')).response.data.sessions, []);
     const events = h.request({ type: 'application', route: { kind: 'http', requestId: randomUUID(), method: 'GET', path: '/api/browser/events?after=0' }, data: {}, mcp: null }, true);
-    const created = await h.rpc('create_session', { shellType: 'shell', command: 'printf local', name: 'PRIVATE session', workingDir: h.dataDir });
+    const created = await h.rpc('create_session', { projectName: 'Integration', shellType: 'shell', command: 'printf local', name: 'PRIVATE session', workingDir: h.dataDir });
     assert.equal(created.response.success, true);
     const id = created.response.data.session.id;
     assert.ok(h.launched.includes(id)); assert.equal((await h.store.loadSession(id))?.name, 'PRIVATE session');
@@ -116,7 +116,7 @@ test('an attention answer always gets one typed error through the encrypted comm
   const h = await harness();
   try {
     await h.pair();
-    const created = await h.rpc('create_session', { shellType: 'shell', command: 'printf local', name: 'Child', workingDir: h.dataDir });
+    const created = await h.rpc('create_session', { projectName: 'Integration', shellType: 'shell', command: 'printf local', name: 'Child', workingDir: h.dataDir });
     assert.equal(created.response.success, true);
     const sessionId = created.response.data.session.id as string;
     // A durable notice with no question: the bridge answers, it never stays silent.

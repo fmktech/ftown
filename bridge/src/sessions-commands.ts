@@ -134,8 +134,8 @@ function formatUsageTable(rows: UsageRow[]): string {
 }
 
 interface SessionsOptions {
-  plain?: boolean; json?: boolean; shell?: string; prompt?: string; workdir?: string;
-  name?: string; command?: string; model?: string; effort?: string; parentId?: string; parent?: boolean;
+  remembered?: boolean; plain?: boolean; json?: boolean; shell?: string; prompt?: string; workdir?: string;
+  project?: string; name?: string; command?: string; model?: string; effort?: string; parentId?: string; parent?: boolean;
   createWorkdir?: boolean; worktree?: boolean; branch?: string; base?: string;
   keepWorktree?: boolean; forceWorktree?: boolean; to?: string;
   offset?: string; limit?: string; pattern?: string;
@@ -159,7 +159,7 @@ function sessionProgram(): Command {
     .option('--plain', 'Human-readable output where supported');
   const run = (name: SessionCommand, args: string[], cmd: Command): Promise<void> => executeSessionCommand(name, args, cmd.opts<SessionsOptions>());
 
-  command('list', 'List sessions').action((_opts, cmd: Command) => run('list', [], cmd));
+  command('list', 'List sessions').option('--remembered', 'List peer sessions remembered by this computer').action((_opts, cmd: Command) => run('list', [], cmd));
   command('create', 'Spawn a new agent session')
     .option('--shell <type>', 'Harness override; otherwise inherit the current session')
     .option('--prompt <text>', 'Initial message').option('--workdir <path>', 'Working directory')
@@ -168,6 +168,7 @@ function sessionProgram(): Command {
     .option('--branch <name>', 'Worktree branch (requires --worktree)')
     .option('--base <ref>', 'Base ref for the worktree branch (requires --worktree)')
     .option('--name <label>', 'Dashboard name').option('--command <cmd>', 'Full command override')
+    .option('--project <name>', 'Project name')
     .option('--parent', 'Link to the current session').option('--parent-id <uuid>', 'Explicit parent session')
     .option('--plan-item <id>', 'Start this todo item (p<n>) on the parent plan; requires --parent or --parent-id')
     .option('--require-green-pr', 'Require a green linked PR before the child can set its card to done')
@@ -544,7 +545,8 @@ async function executeSessionCommand(cmd: SessionCommand, rest: string[], option
       }
 
       case 'list': {
-        const { data } = await api('GET', '/api/sessions');
+        if (options.remembered && currentPeerTarget()) throw new Error('--remembered reads this computer’s cache; omit --bridge');
+        const { data } = await api('GET', options.remembered ? '/api/peers/sessions' : '/api/sessions');
         console.log(jsonOut ? JSON.stringify(data, null, 2) : formatSessionList(data));
         break;
       }
@@ -561,9 +563,6 @@ async function executeSessionCommand(cmd: SessionCommand, rest: string[], option
         const useParent = !!options.parent;
         const planItem = options.planItem;
 
-        if ((parentId || useParent) && currentPeerTarget() !== null) {
-          throw new Error('--parent/--parent-id cannot link sessions across bridges; create the child without a parent');
-        }
         if (planItem !== undefined && !/^p\d{1,6}$/.test(planItem)) {
           throw new Error('--plan-item must be a plan item id like p1, p12');
         }
@@ -587,7 +586,11 @@ async function executeSessionCommand(cmd: SessionCommand, rest: string[], option
         if (command) body.command = command;
         if (model) body.model = model;
         if (options.effort) body.effort = options.effort;
-        if (parentId) body.parentSessionId = parentId;
+        if (options.project) body.projectName = options.project;
+        if ((parentId || useParent) && currentPeerTarget()) {
+          body.parentBridgeId = loadPointer().bridgeId;
+          body.parentSessionId = parentId || selfSessionId();
+        } else if (parentId) body.parentSessionId = parentId;
         else if (useParent) body.parentSessionId = true;
         if (planItem) body.planItem = planItem;
         if (options.requireGreenPr) body.requireGreenPr = true;

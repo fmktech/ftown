@@ -39,7 +39,7 @@ function startCli(sessionId: string, args: string[]) {
 }
 
 async function createSession(name: string, extra: Record<string, unknown>): Promise<string> {
-  const created = await bridgeApiFetch("POST", "/api/sessions", { body: { name, ...extra } });
+  const created = await bridgeApiFetch("POST", "/api/sessions", { body: { projectName: "E2E", name, ...extra } });
   expect(created.status, JSON.stringify(created.body)).toBe(201);
   const id = (created.body as { session?: { id?: string } }).session?.id;
   expect(id).toBeTruthy(); return id!;

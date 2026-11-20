@@ -164,6 +164,7 @@ test("capture real isolated workspace, phone and access panel", async ({ browser
     demoOwned = true;
     await provisionCodex(bridge.home, directory);
     const agent = await bridgeApiFetch("POST", "/api/sessions", { bridgeHome: bridge.home, body: {
+      projectName: "E2E",
       shellType: "codex", model: AI_MODEL, name: AI_NAME, workingDir: DEMO_WORKSPACE, prompt: INITIAL_PROMPT,
     } });
     expect(agent.status).toBe(201);

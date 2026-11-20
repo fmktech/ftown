@@ -441,7 +441,7 @@ describe("retirement reconciliation through actual hook callbacks", () => {
   });
   it("renders retirement in the real SessionList fed by hook state", () => {
     const h = harness(true);
-    function Sidebar() { const { sessions } = useSessions(h.client, "user", h.rpc); return createElement(SessionList, { sessions, bridges: [], bridgeOrder: ["a"], selectedSessionId: null, onSelectSession: () => {} }); }
+    function Sidebar() { const { sessions } = useSessions(h.client, "user", h.rpc); return createElement(SessionList, { sessions, bridges: [], selectedSessionId: null, onSelectSession: () => {} }); }
     render(createElement(Sidebar)); h.reply(h.request(), [row("visible-retired")], "a"); expect(screen.queryByText("visible-retired")).not.toBeNull();
     h.recover(); h.reply(h.request(), [], "a"); expect(screen.queryByText("visible-retired")).toBeNull();
   });
@@ -736,4 +736,39 @@ describe("native session id validation through the actual hook", () => {
     h.reply(h.request(), [row("valid"), { ...row("invalid"), [key]: 42 }], "a");
     expect(h.ids()).toEqual(["valid"]);
   });
+});
+
+it("ignores foreign remembered rows and reconciles from the owner", () => {
+  const h = setup(true);
+  Object.assign(h.client, { securityRuntime: { bridge: () => ({}), state: () => ({ status: "offline" }) } });
+  const remote = row("worker", "b", { status: "running", parentSessionId: "manager", projectName: "Shared" });
+  const replyFromPeer = () => act(() => h.responses.forEach(callback => callback({
+    requestId: h.request(), success: true, data: { bridgeId: "a", sessions: [], rememberedSessions: [remote] },
+  })));
+  replyFromPeer();
+  expect(h.ids()).toEqual([]);
+  h.publication(remote);
+  expect(h.ids()).toEqual(["worker"]);
+  h.refresh();
+  h.reply(h.request(), [], "b");
+  h.refresh();
+  replyFromPeer();
+  expect(h.ids()).toEqual([]);
+});
+
+it("restores last state only for the same approved owner endpoint", () => {
+  const h = harness(true);
+  const pin = { bridgeId: "a", endpoint: { id: "key-a" }, permissions: ["read"] };
+  const runtime = { identity: { endpoint: { id: "browser" } }, snapshot: () => [], pinnedBridges: () => [pin], bridge: () => pin,
+    state: () => ({ status: "offline" }), onChange: () => () => {} };
+  Object.assign(h.client, { securityRuntime: runtime });
+  const mount = () => renderHook(() => useSessions(h.client, "user", h.rpc));
+  const first = mount();
+  h.reply(h.request(), [row("worker", "a", { status: "running" })], "a");
+  first.unmount();
+  const second = mount();
+  expect(second.result.current.sessions).toEqual([row("worker", "a", { status: "running", lastKnownOnly: true })]);
+  second.unmount();
+  pin.endpoint.id = "replacement";
+  expect(mount().result.current.sessions).toEqual([]);
 });

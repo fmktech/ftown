@@ -1,12 +1,13 @@
 # Worker coordination examples
 
 Read `../SKILL.md` for identity, reporting and cleanup, and
-`sessions.md` for commands. No special orchestrator mode is needed.
+`sessions.md` for commands.
 
-List existing sessions before creating another worker. Give each worker a
-bounded task, clear writable files and checks; save `session.id`. Omit `--shell` to inherit your harness. Before picking a CLI,
+List sessions first. Scope each task, files and checks; save `session.id`. Omit `--shell` to inherit your harness. Before picking a CLI,
 model and effort, run `ftown quota --json` and follow `quota.md` (owner
 tiers first); never route to `exhausted`.
+
+For cross-bridge delegation, use `ftown bridges --resources --json` to compare host capacity. If the destination needs files, follow **Copy a folder and launch a worker** in `sessions.md`.
 
 Keep the plan on the manager, not in a ticket system.
 Add steps with `ftown plan add` (`--after`/`--priority` set precedence;
@@ -22,16 +23,13 @@ ftown attention list
 ftown harness mail send <worker-id> --type task "Check the expired-token case"
 ```
 
-Loop: keep the plan on the manager, create children with `--plan-item`,
-`ftown board --wait --until any-done` (or `any-blocked`/`any-ready`/
-`all-done`), act, repeat until all are done. Children keep cards current;
+Wait on the board for `any-done`, `any-blocked`, `any-ready` or `all-done`; act and repeat. Children keep cards current;
 progress goes on the card, never as mail. A child's question comes to you
 first: answer from facts you hold with `ftown attention answer`, or
 escalate preferences and irreversible choices
 with `ftown attention escalate --note`. Mail is for directed
 instructions, results and escalations; read it with
-`ftown harness mail read`. Each mail batch nudges at most once (a digest
-may be appended). Use `ftown sessions screen <worker-id> --limit 100`
+`ftown harness mail read`. Use `ftown sessions screen <worker-id> --limit 100`
 only to investigate. Parallel tasks need disjoint write
 ownership and serialized shared resources. Children set their card to
 done and report to the parent; you raise one "Work complete" notice
