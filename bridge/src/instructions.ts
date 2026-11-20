@@ -1,4 +1,5 @@
-import { constants, appendFileSync, closeSync, fstatSync, mkdirSync, openSync, readSync, readFileSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { constants, appendFileSync, closeSync, fstatSync, futimesSync, renameSync, rmSync, utimesSync, mkdirSync, openSync, readSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { codexHome, claudeConfigDir } from './config-dirs.js';
@@ -9,7 +10,7 @@ export const instructionLimit = 64 * 1024;
 export type Scope = 'global' | 'bridge';
 export const instructionPath = (scope: Scope, home = homedir()) => join(home, '.ftown', scope + '.md');
 
-export function readInstructions(scope: Scope, home = homedir()): string {
+export function readRevision(scope: Scope, home = homedir()) {
   const fd = openSync(instructionPath(scope, home), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const stat = fstatSync(fd);
@@ -22,8 +23,32 @@ export function readInstructions(scope: Scope, home = homedir()): string {
       size += count;
     }
     if (size !== stat.size) throw new Error('Instruction file changed while reading');
-    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(buffer.subarray(0, size));
+    const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(buffer.subarray(0, size));
+    return { text, version: Math.round(stat.mtimeMs) };
   } finally { closeSync(fd); }
+}
+
+export function readInstructions(scope: Scope, home = homedir()): string {
+  return readRevision(scope, home).text;
+}
+
+// Equal timestamps use a stable content order so every bridge picks the same winner.
+export function pullGlobal(remote: ReturnType<typeof readRevision>, home = homedir()): void {
+  const file = instructionPath('global', home);
+  const local = readRevision('global', home);
+  if (remote.version < local.version || (remote.version === local.version && remote.text <= local.text)) return;
+  const temp = file + '.' + randomUUID();
+  try {
+    writeFileSync(temp, remote.text, { flag: 'wx', mode: 0o600 });
+    const timestamp = new Date(remote.version);
+    utimesSync(temp, timestamp, timestamp);
+    if (local.text && local.text !== remote.text) {
+      const backup = temp + '.bak';
+      writeFileSync(backup, local.text, { flag: 'wx', mode: 0o600 });
+      console.error('Previous instructions saved to ' + backup);
+    }
+    renameSync(temp, file);
+  } finally { rmSync(temp, { force: true }); }
 }
 
 export function installInstructions(home = homedir(), env = process.env, harness?: 'claude' | 'codex'): void {
@@ -31,7 +56,10 @@ export function installInstructions(home = homedir(), env = process.env, harness
   for (const scope of ['global', 'bridge'] as const) {
     const file = instructionPath(scope, home);
     mkdirSync(dirname(file), { recursive: true });
-    try { writeFileSync(file, '', { flag: 'wx', mode: 0o600 }); }
+    try {
+      const fd = openSync(file, 'wx', 0o600);
+      try { futimesSync(fd, new Date(0), new Date(0)); } finally { closeSync(fd); }
+    }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
     refs.push('Read the ' + scope + ' ftown instructions in `' + file + '`.');
   }

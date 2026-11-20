@@ -308,11 +308,12 @@ test('a local instruction request reads the paired bridge file over the direct l
   const cli = await generateEndpoint(w.root.accountId, 'local-cli');
   await studio.policy.provisionLocalEndpoint(cli.endpoint);
   const principal = await studio.policy.principal(cli.endpoint.id);
+  const version = Math.round((await stat(join(home, '.ftown', 'global.md'))).mtimeMs);
   const ask = () => local.dispatchSecure({ principal, application: { route: { kind: 'http', method: 'POST', path: INSTRUCTIONS_LOCAL },
     data: { body: { scope: 'global', bridge: 'Desk' } } } } as VerifiedApplication);
-  assert.deepEqual(await ask(), { status: 200, body: { text: 'Peer guidance' } });
+  assert.deepEqual(await ask(), { status: 200, body: { text: 'Peer guidance', version } });
   const signaled = transport.sent;
-  assert.deepEqual(await ask(), { status: 200, body: { text: 'Peer guidance' } });
+  assert.deepEqual(await ask(), { status: 200, body: { text: 'Peer guidance', version } });
   assert.equal(transport.sent, signaled);
 });
 

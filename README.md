@@ -698,4 +698,4 @@ ftown instructions show global --bridge studio
 ftown instructions pull global --bridge studio
 ```
 
-The pull replaces the local global file and prints a backup path if it had different, nonempty contents. Sharing is explicit. Each bridge keeps its copy until the next pull. To inspect another machine's guidance, use `ftown instructions show bridge --bridge studio`. Both bridges must be online and paired. File contents travel over their direct link. Each file can hold up to 64 KiB of Markdown.
+Pull compares last-edit timestamps in milliseconds and keeps the newest version. It preserves that timestamp across hops. Equal timestamps use a deterministic text comparison. Bridge clocks should agree. A fresh setup starts at version zero. When replacing different, nonempty contents, pull prints the backup path. Sharing is explicit. Each bridge keeps its copy until the next pull. To inspect another machine's guidance, use `ftown instructions show bridge --bridge studio`. Both bridges must be online and paired. File contents travel over their direct link. Each file can hold up to 64 KiB of Markdown.

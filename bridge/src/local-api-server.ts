@@ -1,4 +1,4 @@
-import { INSTRUCTIONS_LOCAL, INSTRUCTIONS_WIRE, readInstructions } from './instructions.js';
+import { INSTRUCTIONS_LOCAL, INSTRUCTIONS_WIRE, readRevision } from './instructions.js';
 import { TransferJournal } from './folder-transfer-journal.js';
 import { FolderTransfers, transferError } from './folder-transfer.js';
 import { TRANSFER_LOCAL, TRANSFER_WIRE } from './folder-transfer-protocol.js';
@@ -260,7 +260,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     const body = (message.application.data as { body?: { scope?: unknown; bridge?: unknown } } | null)?.body;
     if (body?.scope !== 'global' && body?.scope !== 'bridge') return { status: 400, body: { error: 'Invalid scope' } };
     try {
-      if (wire) return { status: 200, body: { text: readInstructions(body.scope) } };
+      if (wire) return { status: 200, body: readRevision(body.scope) };
       if (typeof body.bridge !== 'string') return { status: 400, body: { error: 'Missing peer' } };
       if (!await this.peerControl?.connectDirect(body.bridge)) return { status: 503, body: { error: 'Direct bridge link unavailable' } };
       return await this.peerControl!.directHttp(body.bridge, INSTRUCTIONS_WIRE, { scope: body.scope });
