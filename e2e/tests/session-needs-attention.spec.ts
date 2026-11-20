@@ -43,7 +43,8 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
         await page.goto("about:blank"); await postHook(first, "UserPromptSubmit"); await page.goto("/dashboard"); await waitForBridgeOnline(page); await workspace();
         // C1: a prompt never auto-resolves explicit items, so both stay waiting.
         await expect(page.getByRole("button", { name: "Inbox, 2 waiting" })).toBeVisible();
-        await page.getByRole("button", { name: `Hide project ${secondName}`, exact: true }).click();
+        await page.getByRole("button", { name: `More actions for ${secondName}`, exact: true }).click();
+        await page.getByRole("menuitem", { name: "Hide project" }).click();
         await expect(originalRow(page, secondName)).toHaveCount(0);
         await expect(page.getByRole("button", { name: "Inbox, 1 waiting" })).toBeVisible();
         await page.getByText("Hidden projects", { exact: true }).click();
