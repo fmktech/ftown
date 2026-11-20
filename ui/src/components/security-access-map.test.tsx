@@ -71,7 +71,7 @@ it("passes actual sidebar state independently of bridge presence and preserves t
   const open = vi.fn();
   HTMLDialogElement.prototype.showModal = function () { this.setAttribute("open", ""); };
   HTMLDialogElement.prototype.close = function () { this.removeAttribute("open"); };
-  const data = { resources: new Map(), selected: null, onSelect: vi.fn(), create: vi.fn(), security: open, updates: vi.fn(), routing: vi.fn(), close: vi.fn() };
+  const data = { resources: new Map(), create: vi.fn(), security: open, updates: vi.fn(), routing: vi.fn(), close: vi.fn() };
   const computer = { id: "bridge", label: "alpha", ready: false, online: true };
   const view = render(<BridgesDialog {...data} computers={[computer]} />);
   const button = screen.getByRole("button", { name: "Security log for alpha" });
@@ -84,7 +84,6 @@ it("passes actual sidebar state independently of bridge presence and preserves t
   expect(button.title).toContain("Encrypted connection");
   expect(button.querySelector("svg")?.getAttribute("data-lock-state")).toBe("secured");
   fireEvent.click(button); expect(open).toHaveBeenCalledExactlyOnceWith("bridge");
-  expect(data.onSelect).not.toHaveBeenCalled();
 });
 
 it("embeds toolbar and selected controls as siblings of the selector, with independent current and selection markers", () => {

@@ -144,7 +144,6 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
     return link.attentionId ? { attentionId: link.attentionId, sessionHint: link.sessionId } : null;
   });
   const [showBridges, setShowBridges] = useState(false);
-  const [preferredBridge, setPreferredBridge] = usePersistentState<string | null>("ftown:preferredBridge", null);
   const [placements, setPlacements] = usePersistentState<Array<[string, string[]]>>(`ftown:projectBridges:${accountId ?? userId}`, []);
   const projectBridges = useMemo(() => new Map(placements), [placements]);
   const [showNewSession, setShowNewSession] = useState(false);
@@ -289,7 +288,6 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   useEffect(() => securityRuntime?.onChange(() => setSecurityGeneration(value => value + 1)), [securityRuntime]);
   const readyBridges = useMemo(() => bridges.filter(bridge => securityRuntime?.state(bridge.bridgeId).status === "ready"), [bridges, securityRuntime, securityGeneration]);
   const [resourcesByBridge, setResourcesByBridge] = useState(new Map<string, HostResources>());
-  const preferredDefaults = useMemo(() => preferredBridge && readyBridges.some(b => b.bridgeId === preferredBridge) ? { bridgeId: preferredBridge } : undefined, [preferredBridge, readyBridges]);
   const statsCommand = useRef(rpc.sendCommand);
   statsCommand.current = rpc.sendCommand;
   const statsTargets = JSON.stringify(readyBridges.map(bridge => bridge.bridgeId));
@@ -1345,7 +1343,7 @@ PY`;
               })}
               projectStorageKey={`ftown:projects:${accountId ?? userId}`}
               onAddSession={hasBridges ? projectName => {
-                setSessionDefaults({ ...preferredDefaults, projectName });
+                setSessionDefaults({ projectName });
                 setShowNewSession(true);
               } : undefined}
               onHiddenProjectsChange={setHiddenProjects}
@@ -1423,12 +1421,7 @@ PY`;
         id: b.bridgeId, number: bridgeIdentities.get(b.bridgeId)?.number, label: bridgeIdentities.get(b.bridgeId)?.name || b.label || b.bridgeId, connection: b.security.status,
         online: connectionStatus === "connected" && activeBridgeIds.has(b.bridgeId),
         ready: connectionStatus === "connected" && readyBridges.some(bridge => bridge.bridgeId === b.bridgeId),
-      }))} resources={resourcesByBridge} selected={preferredBridge} close={() => setShowBridges(false)}
-        onSelect={id => {
-          setPreferredBridge(id);
-          setShowBridges(false);
-          if (selectedSession?.bridgeId !== id) handleSelectSession(sessions.find(session => session.bridgeId === id)?.id ?? null);
-        }}
+      }))} resources={resourcesByBridge} close={() => setShowBridges(false)}
         create={id => { setShowBridges(false); handleCreateSessionOnBridge(id); }}
         updates={setUpdateBridgeId} security={id => { setShowBridges(false); openSecurity(id); }}
         routing={setModelRoutingBridgeId} />}
@@ -1448,7 +1441,7 @@ PY`;
         projectBridges={projectBridges}
         resourcesByBridge={resourcesByBridge}
         sessions={sessions}
-        defaults={sessionDefaults ?? preferredDefaults}
+        defaults={sessionDefaults}
         sendCommand={rpc.sendCommand}
       />
       {/* Portals to document.body, but React events still bubble through this tree: keep it a direct child of the root, which has no handlers. */}
