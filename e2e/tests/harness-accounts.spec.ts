@@ -41,10 +41,9 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
       if (viewport.name === "mobile") await page.getByRole("tab", { name: "Workspace", exact: true }).click();
       await page.getByRole("button", { name: "Computers", exact: true }).click();
       await expect(page.locator(`[data-bridge-row="${bridgeId}"]`).first()).toBeVisible({ timeout: 30_000 });
-      await page.locator(`[data-bridge-row="${bridgeId}"]`).getByRole("button", { name: "Use computer" }).click();
       const env = { PATH: `${fakeBin}${delimiter}${process.env.PATH ?? "/usr/bin:/bin"}`, ACCOUNT_TEST_RECEIPT: receipt };
       await page.evaluate(vars => localStorage.setItem("ftown:envVars", JSON.stringify(vars)), env);
-      await page.getByRole("button", { name: "Create a new session", exact: true }).click();
+      await page.locator(`[data-bridge-row="${bridgeId}"]`).getByRole("button", { name: "Create session", exact: true }).click();
       const modal = page.getByRole("dialog", { name: "New Session", exact: true });
       await modal.getByLabel("Project", { exact: true }).fill("E2E");
       await modal.getByLabel("Shell Type", { exact: true }).selectOption("codex");
@@ -69,7 +68,7 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
       if (viewport.name === "mobile") await page.getByRole("tab", { name: "Workspace", exact: true }).click();
       const row = page.locator('#dashboard-sidebar button[draggable="true"]').filter({ has: page.getByText(name, { exact: true }) });
       const badge = row.locator(".bridge-owner");
-      await expect(badge).toHaveText(/^#\d+$/);
+      await expect(badge).toHaveText(/^[A-Z]+$/);
       await badge.hover();
       expect(await badge.getAttribute("title")).toBeTruthy();
       await expect(row.getByLabel("Account: coding", { exact: true })).toBeVisible();

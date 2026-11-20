@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import { bridgeLetter } from "./BridgeBadge";
 import type { HostResources } from "@/lib/host-resources";
 
 import type { BridgeSecurityState } from "@security/protocol";
@@ -18,8 +19,6 @@ interface Computer {
 interface Props {
   computers: Computer[];
   resources: ReadonlyMap<string, HostResources>;
-  selected: string | null;
-  onSelect: (id: string) => void;
   create: (id: string) => void;
   updates: (id: string) => void;
   security: (id: string) => void;
@@ -27,7 +26,16 @@ interface Props {
   close: () => void;
 }
 
-export function BridgesDialog({ computers, resources, selected, onSelect, create, updates, security, routing, close }: Props) {
+function ActionIcon({ action }: { action: "create" | "updates" | "routing" }) {
+  const paths = {
+    create: "M4 4h16v16H4z M12 8v8 M8 12h8",
+    updates: "M20 5v5h-5 M4 19v-5h5 M5 9a7.5 7.5 0 0 1 12-4l3 4 M4 15l3 4a7.5 7.5 0 0 0 12-4",
+    routing: "M4 6h7 M15 6h5 M4 12h2 M10 12h10 M4 18h10 M18 18h2 M11 3v6 M7 9v6 M15 15v6",
+  };
+  return <svg aria-hidden="true" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d={paths[action]} /></svg>;
+}
+
+export function BridgesDialog({ computers, resources, create, updates, security, routing, close }: Props) {
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => {
     const dialog = ref.current;
@@ -43,7 +51,7 @@ export function BridgesDialog({ computers, resources, selected, onSelect, create
       const sample = bridge.online ? resources.get(bridge.id) : undefined;
       const lock = bridgeConnectionLock(bridge.connection);
       return <section key={bridge.id} data-bridge-row={bridge.id} aria-label={bridge.label} className="computer-card">
-        <header><span className="bridge-index">#{bridge.number ?? "—"}</span><strong title={bridge.label}>{bridge.label}</strong>
+        <header><span className="bridge-index">{bridge.number ? bridgeLetter(bridge.number) : "—"}</span><strong title={bridge.label}>{bridge.label}</strong>
           <span className="computer-status" data-online={bridge.online}>{bridge.online ? "Online" : "Offline"}</span></header>
         {sample ? <dl className="computer-load" title={`Sampled at ${new Date(sample.sampledAt).toLocaleTimeString()}`}>
           <div><dt>CPU</dt><dd>{sample.cpuPercent === null ? "—" : sample.cpuPercent + "%"}</dd>
@@ -52,11 +60,20 @@ export function BridgesDialog({ computers, resources, selected, onSelect, create
             {sample.totalRamBytes > 0 && <meter aria-label="RAM usage" min={0} max={sample.totalRamBytes} value={sample.totalRamBytes - sample.freeRamBytes} />}</div>
           <div><dt>Disk free</dt><dd>{sample.freeDiskBytes === null ? "—" : gib(sample.freeDiskBytes)}</dd></div>
         </dl> : <p className="computer-load-empty">Load unavailable</p>}
-        <div className="computer-primary"><button disabled={!bridge.ready} aria-pressed={selected === bridge.id} onClick={() => onSelect(bridge.id)}>{selected === bridge.id ? "Selected computer" : "Use computer"}</button>
-          <button disabled={!bridge.ready} onClick={() => create(bridge.id)}>Create session</button></div>
-        <footer><button onClick={() => updates(bridge.id)}>Updates…</button>
-          <button aria-label={`Security log for ${bridge.label}`} title={lock.title} onClick={() => security(bridge.id)}><SecurityLockIcon state={lock.state} />Security log</button>
-          <button onClick={() => routing(bridge.id)}>Model routing…</button></footer>
+        <div role="toolbar" aria-label={`Actions for ${bridge.label}`} className="computer-toolbar"
+          onKeyDown={event => {
+            if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
+            const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("button:enabled"));
+            const current = buttons.indexOf(event.target as HTMLButtonElement);
+            if (current < 0) return;
+            event.preventDefault();
+            buttons[(current + (event.key === "ArrowRight" ? 1 : -1) + buttons.length) % buttons.length].focus();
+          }}>
+          <button disabled={!bridge.ready} aria-label="Create session" title="Create session" onClick={() => create(bridge.id)}><ActionIcon action="create" /></button>
+          <button aria-label="Updates…" title="Check for updates" onClick={() => updates(bridge.id)}><ActionIcon action="updates" /></button>
+          <button aria-label={`Security log for ${bridge.label}`} title={`Security log · ${lock.title}`} onClick={() => security(bridge.id)}><SecurityLockIcon state={lock.state} /></button>
+          <button aria-label="Model routing…" title="Model routing" onClick={() => routing(bridge.id)}><ActionIcon action="routing" /></button>
+        </div>
       </section>;
     })}</div>
   </dialog>;
