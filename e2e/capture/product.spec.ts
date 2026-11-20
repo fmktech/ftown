@@ -46,7 +46,7 @@ async function outputDirectory(): Promise<string> {
 }
 
 function sessionRow(page: Page, name: string) {
-  return page.locator('#dashboard-sidebar button[draggable="true"]').filter({ has: page.getByText(name, { exact: true }) });
+  return page.locator('#dashboard-sidebar button[data-session-select]').filter({ has: page.getByText(name, { exact: true }) });
 }
 async function noOverflow(page: Page) {
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);

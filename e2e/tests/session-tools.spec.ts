@@ -24,7 +24,7 @@ async function sessionCommand<T>(sessionId: string, args: string[]): Promise<T> 
 }
 
 function originalRow(page: Page, name: string) {
-  return page.locator('#dashboard-sidebar button[draggable="true"]')
+  return page.locator('#dashboard-sidebar button[data-session-select]')
     .filter({ has: page.getByText(name, { exact: true }) });
 }
 
@@ -38,7 +38,7 @@ async function expectBadgeGeometry(row: Locator) {
     const link = hitTarget?.querySelector<HTMLElement>("[data-pull-request-badge-visual]");
     const menu = element.querySelector<HTMLElement>('[aria-label="Session actions"]');
     const placeholder = element.querySelector<HTMLElement>("[data-pull-request-placeholder]");
-    const button = element.querySelector<HTMLButtonElement>('button[draggable="true"]');
+    const button = element.querySelector<HTMLButtonElement>('button[data-session-select]');
     if (!link || !hitTarget || !menu || !placeholder || !button) throw new Error("Missing PR badge geometry elements");
     const rect = (target: Element) => {
       const box = target.getBoundingClientRect();

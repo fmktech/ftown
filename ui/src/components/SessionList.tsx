@@ -826,6 +826,7 @@ export function SessionList({
         }}
       >
       <button
+        data-session-select=""
         draggable
         onDragStart={(e) => handleDragStart(e, { kind: "session", id: session.id, bridgeId: session.bridgeId })}
         onDragEnd={handleDragEnd}

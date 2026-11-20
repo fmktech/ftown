@@ -52,7 +52,7 @@ describe("session PR destinations", () => {
     const { container } = render(createElement(SessionList, {
       sessions: [session], bridges: [], selectedSessionId: null, onSelectSession,
     }));
-    const original = container.querySelector<HTMLButtonElement>('button[draggable="true"]')!;
+    const original = container.querySelector<HTMLButtonElement>('button[data-session-select]')!;
     const wrapper = original.parentElement!;
     const badge = within(wrapper).getByRole("link", { name: description }) as HTMLAnchorElement;
     const placeholder = original.querySelector<HTMLElement>('[data-pull-request-placeholder]')!;
@@ -97,7 +97,7 @@ describe("session PR destinations", () => {
         type: "agent_needs_input" as const, title: "Review requested", message: "Please review", receivedAt: 1,
       } }]]),
     }));
-    const original = container.querySelector<HTMLButtonElement>('button[draggable="true"]')!;
+    const original = container.querySelector<HTMLButtonElement>('button[data-session-select]')!;
     const trigger = within(original).getByRole("button", { name: "Session actions" });
     fireEvent.keyDown(trigger, { key: "Enter" });
     const menu = screen.getByRole("menu", { name: "Session actions" });

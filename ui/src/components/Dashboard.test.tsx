@@ -382,7 +382,7 @@ describe("attention navigation preserves the request", () => {
   it.each([true, false])("keeps notices when selecting sessions and only dismisses explicitly (desktop=%s)", async desktop => {
     window.matchMedia = vi.fn().mockReturnValue({ matches: desktop, addEventListener: vi.fn(), removeEventListener: vi.fn() });
     const { container } = dashboard();
-    const original = Array.from(container.querySelectorAll<HTMLButtonElement>('button[draggable="true"]')).find(row => row.textContent?.includes("Regular shell"))!;
+    const original = Array.from(container.querySelectorAll<HTMLButtonElement>('button[data-session-select]')).find(row => row.textContent?.includes("Regular shell"))!;
     fireEvent.click(original);
     const notice = { type: "agent_needs_input" as const, title: "Review requested", message: "Inspect the result before continuing", receivedAt: 10 };
     state.activity = new Map([["ordinary", { activity: "idle", attention: notice }]]);
