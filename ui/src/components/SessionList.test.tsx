@@ -44,7 +44,7 @@ it("keeps a just-opened context menu through the scroll that was already under w
   try {
     const session: Session = { id: "s1", name: "Scrolled", bridgeId: "a", shellType: "claude", status: "running", createdAt: "2026-11-16", updatedAt: "2026-11-16" };
     const { container } = render(<SessionList sessions={[session]} bridges={[{ bridgeId: "a", hostname: "Computer", clientId: "client", connectedAt: "2026-11-16" }]}
-      bridgeOrder={["a"]} selectedSessionId={null} onSelectSession={() => {}} onStopSession={() => {}} onRemoveSession={() => {}} />);
+      selectedSessionId={null} onSelectSession={() => {}} onStopSession={() => {}} onRemoveSession={() => {}} />);
     fireEvent.contextMenu(screen.getByText("Scrolled", { exact: true }));
     expect(screen.getByRole("menu", { name: "Session actions" })).toBeTruthy();
     // The list reports a scroll that began before the menu opened (same frame): the menu stays.

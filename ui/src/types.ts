@@ -178,7 +178,7 @@ export type CommandType =
   | 'get_bridge_update' | 'get_direct_address' | 'update_bridge' | 'get_pull_request_statuses' | 'get_pull_request_review' | 'get_pull_request_review_chunk'
   | 'get_model_routing' | 'set_model_routing'
   | 'get_session_attention' | 'resolve_session_attention' | 'answer_session_attention' | 'get_session_board' | 'send_message'
-  | 'create_session' | 'stop_session' | 'list_sessions' | 'get_history'
+  | 'create_session' | 'stop_session' | 'list_sessions' | 'get_host_resources' | 'get_history'
   | 'dismiss_session_block' | 'retry_session' | 'handoff_session' | 'rename_session' | 'remove_session' | 'bridge_exec'
   | 'list_native_sessions'
   | 'update_session_parent'

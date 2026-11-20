@@ -759,7 +759,7 @@ it("ignores foreign remembered rows and reconciles from the owner", () => {
 it("restores last state only for the same approved owner endpoint", () => {
   const h = harness(true);
   const pin = { bridgeId: "a", endpoint: { id: "key-a" }, permissions: ["read"] };
-  const runtime = { identity: { endpoint: { id: "browser" } }, pinnedBridges: () => [pin], bridge: () => pin,
+  const runtime = { identity: { endpoint: { id: "browser" } }, snapshot: () => [], pinnedBridges: () => [pin], bridge: () => pin,
     state: () => ({ status: "offline" }), onChange: () => () => {} };
   Object.assign(h.client, { securityRuntime: runtime });
   const mount = () => renderHook(() => useSessions(h.client, "user", h.rpc));

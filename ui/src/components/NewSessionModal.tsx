@@ -22,6 +22,7 @@ export interface SessionDefaults {
 }
 
 interface NewSessionModalProps {
+  resourcesByBridge?: ReadonlyMap<string, import("@/lib/host-resources").HostResources>;
   isOpen: boolean;
   onClose: () => void;
   onSubmit: (prompt: string, options: CreateSessionOptions) => void | Promise<void>;
@@ -344,7 +345,15 @@ function ProviderTokenHint({ provider, envVar, flavor }: { provider: string; env
   );
 }
 
-export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, sendCommand, sessions = EMPTY_SESSIONS }: NewSessionModalProps) {
+function formatResources(sample?: import("@/lib/host-resources").HostResources): string {
+  if (!sample) return "";
+  const gib = (bytes: number) => (bytes / 2 ** 30).toFixed(1);
+  return ` · CPU ${sample.cpuPercent ?? "—"}${sample.cpuPercent === null ? "" : "%"} · RAM ${gib(sample.freeRamBytes)}/${gib(sample.totalRamBytes)} GiB free` +
+    (sample.freeDiskBytes === null ? "" : ` · disk ${gib(sample.freeDiskBytes)} GiB free`) +
+    ` · ${new Date(sample.sampledAt).toLocaleTimeString()}`;
+}
+
+export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, resourcesByBridge, defaults, sendCommand, sessions = EMPTY_SESSIONS }: NewSessionModalProps) {
   const [name, setName] = useState("");
   const [workingDir, setWorkingDir] = useState("");
   const [topShell, setTopShell] = useState<TopShell>("claude");
@@ -987,7 +996,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
               >
                 {bridges.map((b) => (
                   <option key={b.bridgeId} value={b.bridgeId}>
-                    {b.bridgeId} ({b.hostname})
+                    {b.bridgeId} ({b.hostname}){formatResources(resourcesByBridge?.get(b.bridgeId))}
                   </option>
                 ))}
               </select>

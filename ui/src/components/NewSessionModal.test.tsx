@@ -328,3 +328,10 @@ it("starts a fresh modal opening with the default account after a canceled selec
   await waitFor(() => expect((screen.getByLabelText("Account") as HTMLSelectElement).disabled).toBe(false));
   expect((screen.getByLabelText("Account") as HTMLSelectElement).value).toBe("default");
 });
+
+it("shows CPU, RAM and disk space beside the reporting computer", () => {
+  render(<NewSessionModal isOpen onClose={vi.fn()} onSubmit={vi.fn()} bridges={bridges}
+    resourcesByBridge={new Map([["b", { sampledAt: 1, cpuPercent: 62, freeRamBytes: 4 * 2 ** 30, totalRamBytes: 16 * 2 ** 30, freeDiskBytes: 21 * 2 ** 30 }]])}
+    sendCommand={vi.fn(async () => ({ requestId: "accounts", success: true, data: { accounts } }))} />);
+  expect(screen.getByRole("option", { name: /second.*CPU 62%.*RAM 4.0\/16.0 GiB free.*disk 21.0 GiB free/ })).toBeTruthy();
+});

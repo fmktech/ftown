@@ -25,6 +25,7 @@ import { PreviewChatStore } from './preview-chat.js';
 import { BridgePushNotifier } from './push-notifier.js';
 import { LocalApiServer } from './local-api-server.js';
 import { parsePeerSessions, startPeerSessionCache } from './peer-session-cache.js';
+import { hostResourceSampler } from './host-resources.js';
 import { parseRemoteParent, sessionRequestPrincipal } from './session-parent.js';
 import { PeerControl } from './peer-control.js';
 import { PeerLinks } from './peer-link.js';
@@ -1193,6 +1194,7 @@ program
     }, sessionId, request);
     localApiServer.setHandoff(runHandoff);
     const peerCache = await startPeerSessionCache(peerControl, join(dataDir, "peer-sessions-" + security.endpoint.id + ".json"));
+    const hostResources = hostResourceSampler(dataDir);
     const dispatchCommand = async (message: VerifiedApplication): Promise<ApplicationJson> => {
       if (!ready) return { type: 'command_response', response: { requestId: message.envelope.messageId, success: false, error: 'bridge_offline' } };
       const route = message.application.route;
@@ -1204,7 +1206,7 @@ program
         return { type: 'command_response', response: { requestId: route.requestId, success: true } };
       }
       let result: CommandResponse | undefined;
-      await createCommandHandler({ bridgeId, security, sessionController, attentionStore, updates, updateEffects, pullRequestStatuses,
+      await createCommandHandler({ bridgeId, hostResources, security, sessionController, attentionStore, updates, updateEffects, pullRequestStatuses,
         directAddress: () => addressed?.address() ?? null, pullRequestReview,
         modelRouting: () => modelRouting,
         // Commands may arrive during bootstrap; only board reads resolve this late-bound source.

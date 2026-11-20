@@ -81,6 +81,7 @@ interface ExecError {
 export interface CommandRpcDeps {
   bridgeId: string;
   security?: BridgeSecurityService;
+  hostResources?: ReturnType<typeof import('./host-resources.js').hostResourceSampler>;
   sessionController: SessionController;
   pullRequestStatuses?: PullRequestStatusService;
   pullRequestReview?: PrReviewService;
@@ -552,6 +553,11 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
           break;
         }
 
+        case 'get_host_resources': {
+          if (!deps.hostResources || (command.payload as { bridgeId?: string })?.bridgeId !== bridgeId) throw new Error('Host resources unavailable');
+          response = { requestId: command.requestId, success: true, data: { bridgeId, hostResources: await deps.hostResources() } };
+          break;
+        }
         case 'list_sessions': {
           // Only this bridge's own sessions: a data dir can still hold records of another bridge identity (a shared dir, or one left
           // from before an identity reset), and browsers reject a whole list that names any other bridge.

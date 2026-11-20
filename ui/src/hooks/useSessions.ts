@@ -353,7 +353,8 @@ export function useSessions(
 
     function rememberOwner(bridgeId: string, next: Session[]) {
       const runtime = client?.securityRuntime;
-      const pin = runtime?.bridge(bridgeId);
+      if (!runtime?.identity?.endpoint.id) return;
+      const pin = runtime.bridge(bridgeId);
       if (pin?.permissions?.includes("read") && runtime?.identity?.endpoint.id && !["revoked", "key_changed"].includes(runtime.state(bridgeId).status)) {
         const summaries = next.filter(row => row.bridgeId === bridgeId).map(({ id, name, bridgeId, status, projectName, parentSessionId, parentBridgeId, createdAt, updatedAt }) =>
           ({ id, name, bridgeId, status, projectName, parentSessionId, parentBridgeId, createdAt, updatedAt }));

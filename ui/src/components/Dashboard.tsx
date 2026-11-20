@@ -1,5 +1,6 @@
 "use client";
 
+import { validResources, type HostResources } from "@/lib/host-resources";
 import { useState, useCallback, useMemo, useEffect, useRef, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
 import type { MessageClient } from "@/lib/message-client";
 import { isPreviewDescriptor } from "@/lib/session-preview";
@@ -280,6 +281,33 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const securityRuntime = client?.securityRuntime;
   useEffect(() => securityRuntime?.onChange(() => setSecurityGeneration(value => value + 1)), [securityRuntime]);
   const readyBridges = useMemo(() => bridges.filter(bridge => securityRuntime?.state(bridge.bridgeId).status === "ready"), [bridges, securityRuntime, securityGeneration]);
+  const [resourcesByBridge, setResourcesByBridge] = useState(new Map<string, HostResources>());
+  const statsCommand = useRef(rpc.sendCommand);
+  statsCommand.current = rpc.sendCommand;
+  const statsTargets = JSON.stringify(readyBridges.map(bridge => bridge.bridgeId));
+  useEffect(() => {
+    if (!showNewSession) return;
+    setResourcesByBridge(new Map());
+    let active = true;
+    const targets: string[] = JSON.parse(statsTargets);
+    const pending = new Set<string>();
+    const refresh = () => {
+      for (const bridgeId of targets) {
+        if (pending.has(bridgeId)) continue;
+        pending.add(bridgeId);
+        void statsCommand.current({ type: "get_host_resources", requestId: crypto.randomUUID(), payload: { bridgeId } }).then(reply => {
+          const data = reply.data as { bridgeId?: unknown; hostResources?: unknown } | undefined;
+          const sample = data?.hostResources;
+          if (active && reply.success && data?.bridgeId === bridgeId && validResources(sample)) {
+            setResourcesByBridge(previous => new Map(previous).set(bridgeId, sample));
+          }
+        }).catch(() => {}).finally(() => pending.delete(bridgeId));
+      }
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 15_000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [showNewSession, statsTargets, client, userId]);
   const updateIds = connectionStatus === "connected" ? readyBridges.map(bridge => bridge.bridgeId) : [];
   const updates = useBridgeUpdates(rpc.sendCommand, updateIds);
   const updateViews = new Map(bridges.map(bridge => [bridge.bridgeId, updates.get(bridge.bridgeId)]));
@@ -1387,6 +1415,7 @@ PY`;
         onClose={() => { setShowNewSession(false); setSessionDefaults(undefined); }}
         onSubmit={handleCreateSession}
         bridges={readyBridges}
+        resourcesByBridge={resourcesByBridge}
         sessions={sessions}
         defaults={sessionDefaults}
         sendCommand={rpc.sendCommand}

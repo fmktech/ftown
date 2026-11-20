@@ -1905,9 +1905,9 @@ describe('reasoning effort', () => {
 
       const shellParent = { ...fakeSession('shell-parent'), shellType: 'shell' as const };
       await assert.rejects(createFtownSession(fakeDeps([shellParent]).deps, { parentSessionId: 'shell-parent', workingDir: work, effort: 'high' }), /shell sessions take no effort level/);
-      await assert.rejects(createFtownSession(fakeDeps().deps, { shellType: 'opencode', workingDir: work, effort: 'high' }), /#<level> suffix/);
+      await assert.rejects(createFtownSession(fakeDeps().deps, { projectName: 'Test project', shellType: 'opencode', workingDir: work, effort: 'high' }), /#<level> suffix/);
       // No harness named and no parent: a claude session.
-      const plain = await createFtownSession(fakeDeps().deps, { workingDir: work, effort: 'max' });
+      const plain = await createFtownSession(fakeDeps().deps, { projectName: 'Test project', workingDir: work, effort: 'max' });
       assert.match(plain.command, /^claude .*--effort 'max'/);
       assert.equal(plain.effort, 'max');
     } finally { rmSync(work, { recursive: true, force: true }); }
