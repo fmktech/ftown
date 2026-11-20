@@ -1298,8 +1298,8 @@ export function SessionList({
         }}>
           <input autoFocus aria-label="Project name" maxLength={256} value={newProject} className="min-w-0 flex-1"
             onChange={event => setNewProject(event.target.value)} onKeyDown={event => { if (event.key === "Escape") setNewProject(null); }} />
-          <button disabled={!newProject.trim()} type="submit">Create</button>
-          <button type="button" onClick={() => setNewProject(null)}>Cancel</button>
+          <button className="btn-accent" disabled={!newProject.trim()} type="submit">Create</button>
+          <button type="button" className="btn-ghost" onClick={() => setNewProject(null)}>Cancel</button>
         </form>)}
       {contextMenu?.kind === "session" && onStopSession && onRemoveSession && (
         <SessionContextMenu
