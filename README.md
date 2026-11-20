@@ -642,9 +642,9 @@ The dashboard can check an approved bridge for a stable update. Assisted updates
 are enabled by default for an unsupervised single bridge on POSIX, started from
 its installed CLI with `ftown start` and the default FTown home and data directory.
 Use `ftown start --no-allow-updates` to disable them; older bridges may need
-`ftown start --allow-updates`. Updates still require explicit confirmation and
-never install in the background. Stop all running or pending sessions first; the
-update briefly disconnects the bridge. Windows, Solo, development builds, custom
+`ftown start --allow-updates`. Supported bridges check for a stable release every 30 minutes and update automatically.
+You can also start an update from Computers. Running tmux sessions stay active while
+the bridge restarts and reattaches. Updates wait for direct sessions to finish. Windows, Solo, development builds, custom
 instances and service-managed bridges use their normal manager or manual setup
 instructions. If the latest release requires a newer Node version, upgrade Node
 on that computer before updating the bridge.

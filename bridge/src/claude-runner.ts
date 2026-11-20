@@ -227,9 +227,12 @@ export class ProcessRunner extends EventEmitter<ProcessRunnerEvents> {
     }
   }
 
-  /** Includes pending creation and stopping generations, not just attached PTYs. */
-  hasLiveGenerations(): boolean {
-    return this.generations.size > 0 || this.activeProcesses.size > 0;
+  canDetachForUpdate(persistedTmuxIds: ReadonlySet<string>): boolean {
+    for (const id of new Set([...this.generations.keys(), ...this.activeProcesses.keys()])) {
+      if (!persistedTmuxIds.has(id) || this.runtimes.get(id) !== 'tmux' ||
+          !this.activeProcesses.has(id) || this.generations.get(id)?.stopping !== false) return false;
+    }
+    return true;
   }
 
   isRunning(sessionId: string): boolean {
