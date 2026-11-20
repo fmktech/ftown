@@ -55,7 +55,8 @@ describe("sidebar project groups", () => {
     const props = { sessions: [session("root", "bridge-a", "Manager", { projectName: "Shared" })],
       bridges, selectedSessionId: null, onSelectSession: vi.fn() };
     const first = render(createElement(SessionList, props));
-    fireEvent.click(screen.getByRole("button", { name: "Hide project Shared" }));
+    fireEvent.click(screen.getByRole("button", { name: "More actions for Shared" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Hide project" }));
     first.unmount();
     render(createElement(SessionList, { ...props, collapsed: true }));
     expect(screen.queryByRole("region", { name: "Shared" })).toBeNull();
@@ -73,7 +74,8 @@ describe("sidebar project groups", () => {
       ], bridges, selectedSessionId: "child", onSelectSession: vi.fn(),
     }));
     expect(within(screen.getByRole("region", { name: "Shared" })).getByText("Remote child")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Hide project Shared" }));
+    fireEvent.click(screen.getByRole("button", { name: "More actions for Shared" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Hide project" }));
     expect(screen.queryByText("Remote child")).toBeNull();
     expect(screen.getByText("Legacy session")).toBeTruthy();
     fireEvent.click(screen.getByText("Hidden projects"));
@@ -120,4 +122,17 @@ describe("sidebar project groups", () => {
     expect(screen.queryByText("8/11/2026")).toBeNull();
   });
 
+});
+
+it("preserves the chosen project order across reloads and a changed session inventory", () => {
+  const sessions = ["Alpha", "Beta", "Gamma"].map(project => session(project, "bridge-a", project, { projectName: project }));
+  const props = { sessions, selectedSessionId: null, onSelectSession: vi.fn() };
+  const view = render(createElement(SessionList, props));
+  fireEvent.click(screen.getByRole("button", { name: "More actions for Beta" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Move up" }));
+  const names = () => screen.getAllByRole("region").map(region => region.getAttribute("aria-label"));
+  expect(names()).toEqual(["Beta", "Alpha", "Gamma"]);
+  view.unmount();
+  render(createElement(SessionList, { ...props, sessions: [...sessions].reverse() }));
+  expect(names()).toEqual(["Beta", "Alpha", "Gamma"]);
 });

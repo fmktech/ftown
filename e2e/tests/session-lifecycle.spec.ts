@@ -1,6 +1,6 @@
 import { expect, type Page, type TestInfo } from "@playwright/test";
 import { randomUUID } from "node:crypto";
-import { rm, rmdir } from "node:fs/promises";
+import { mkdir, rm, rmdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { test } from "../helpers/fixtures";
 import {
@@ -12,7 +12,7 @@ import {
   runMarkerInTerminal,
 } from "../helpers/app";
 import { sessionIdsFor, waitForNewSessionId } from "../helpers/centrifugo";
-import { bridgeApiFetch } from "../helpers/bridge-api";
+import { bridgeApiFetch, readBridgePointer } from "../helpers/bridge-api";
 import { restartBridge } from "../helpers/bridge-process";
 import { BRIDGE_HOME, seedClaudeTranscript } from "../helpers/bridge-fixtures";
 
@@ -165,6 +165,39 @@ test.describe("session lifecycle", () => {
         await rmdir(dirname(transcript)).catch(() => undefined);
         await rm(workingDir, { recursive: true, force: true });
       }
+    }
+  });
+
+  test("move a legacy No project session into a new empty project", async ({ page }) => {
+    const id = randomUUID();
+    const name = `Legacy worker ${id}`;
+    const project = `First session ${id}`;
+    const directory = join(BRIDGE_HOME, ".ftown", "data", "sessions", id);
+    // Current creation requires a project. Seed a pre-project record in the isolated test bridge.
+    const stamp = new Date().toISOString();
+    await mkdir(directory, { recursive: true });
+    try {
+      await writeFile(join(directory, "session.json"), JSON.stringify({
+        id, name, bridgeId: readBridgePointer().bridgeId, command: "/bin/sh", shellType: "shell",
+        status: "completed", createdAt: stamp, updatedAt: stamp,
+      }));
+      await login(page);
+      await waitForBridgeOnline(page);
+      const source = page.getByRole("region", { name: "No project", exact: true }).getByRole("button", { name: new RegExp(name) });
+      await expect(source).toBeVisible();
+      await page.getByRole("button", { name: "+ Create project", exact: true }).click();
+      await page.getByLabel("Project name", { exact: true }).fill(project);
+      await page.getByRole("button", { name: "Create", exact: true }).click();
+      const target = page.getByRole("region", { name: project, exact: true });
+      await source.dragTo(target.getByRole("button", { name: project, exact: true }));
+      await expect.poll(async () => {
+        const result = await bridgeApiFetch("GET", `/api/sessions/${id}`);
+        return (result.body as { session?: { projectName?: string } }).session?.projectName;
+      }).toBe(project);
+      await page.reload();
+      await expect(target.getByRole("button", { name: new RegExp(name) })).toBeVisible();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
     }
   });
 

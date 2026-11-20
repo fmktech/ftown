@@ -181,7 +181,7 @@ export type CommandType =
   | 'create_session' | 'stop_session' | 'list_sessions' | 'get_host_resources' | 'get_history'
   | 'dismiss_session_block' | 'retry_session' | 'handoff_session' | 'rename_session' | 'remove_session' | 'bridge_exec'
   | 'list_native_sessions'
-  | 'update_session_parent'
+  | 'update_session_parent' | 'move_session_to_project'
   | 'get_session_usage' | 'get_sessions_usage' | 'get_attention_summary';
 
 export interface Command {

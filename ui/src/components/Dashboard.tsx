@@ -282,7 +282,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   // session management consumes this shared transport.
   const rpc = useBridgeRpc(client, userId);
   const { bridgeExec } = rpc;
-  const { sessions: rawSessions, createSession, stopSession, retrySession, handoffSession, dismissSessionBlock, renameSession, setSessionParent, removeSession } = useSessions(client, userId, rpc,
+  const { sessions: rawSessions, createSession, stopSession, retrySession, handoffSession, dismissSessionBlock, moveSessionToProject, renameSession, setSessionParent, removeSession } = useSessions(client, userId, rpc,
     !inboxOpen && selectedSessionId === usageViewSessionId && (isDesktop || mobileTab !== "sessions") ? usageViewSessionId : null);
   const { bridges, prepareLocalAccess } = useBridges(client, userId, transport);
   const securityRuntime = client?.securityRuntime;
@@ -1354,6 +1354,7 @@ PY`;
               onSelectSession={handleSelectSession}
               onReviewPullRequest={handleReviewPullRequest}
               onRenameSession={renameSession}
+              onMoveSessionToProject={moveSessionToProject}
               onStopSession={stopSession}
               onRemoveSession={handleRemoveSession}
               onCloneSession={handleCloneSession}

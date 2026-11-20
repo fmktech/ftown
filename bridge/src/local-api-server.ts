@@ -1981,7 +1981,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       return;
     }
 
-    // PATCH /api/sessions/:id — rename, reparent and/or associate a pull request
+    // PATCH /api/sessions/:id — update session metadata
     if (sessionMatch && req.method === 'PATCH') {
       const sessionId = sessionMatch[1];
       const body = await parseBody(req);
@@ -1989,7 +1989,9 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       const hasParentField = Object.prototype.hasOwnProperty.call(body, 'parentSessionId');
       const hasPullRequestField = Object.prototype.hasOwnProperty.call(body, 'pullRequestUrl');
 
-      if (name === undefined && !hasParentField && !hasPullRequestField) {
+      const hasProjectField = Object.prototype.hasOwnProperty.call(body, 'projectName');
+
+      if (name === undefined && !hasParentField && !hasPullRequestField && !hasProjectField) {
         jsonResponse(res, 400, { error: 'Nothing to update' });
         return;
       }
@@ -2004,6 +2006,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         ...(name === undefined ? {} : { name }),
         ...(hasParentField ? { parent: { value: body.parentSessionId, bridgeId: typeof body.parentBridgeId === "string" ? body.parentBridgeId : undefined } } : {}),
         ...(hasPullRequestField ? { pullRequestUrl: body.pullRequestUrl as string | null } : {}),
+        ...(hasProjectField ? { projectName: body.projectName } : {}),
       });
       if (!result.ok) {
         jsonResponse(res, result.code === 'not_found' ? 404 : 400, { error: result.message });

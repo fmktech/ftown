@@ -635,6 +635,20 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
           break;
         }
 
+        case 'move_session_to_project': {
+          const payload = command.payload as { sessionId?: unknown; projectName?: unknown } | undefined;
+          if (typeof payload?.sessionId !== 'string' || !payload.sessionId || typeof payload.projectName !== 'string') {
+            response = { requestId: command.requestId, success: false, error: 'Missing or invalid sessionId or projectName' };
+            break;
+          }
+
+          const result = await sessionController.update(payload.sessionId, { projectName: payload.projectName });
+          response = result.ok
+            ? { requestId: command.requestId, success: true, data: { session: toDashboardWireSession(result.session) } }
+            : { requestId: command.requestId, success: false, error: result.message };
+          break;
+        }
+
         case 'rename_session': {
           const payload = command.payload as RenameSessionPayload;
           if (!payload.sessionId || !payload.name) {

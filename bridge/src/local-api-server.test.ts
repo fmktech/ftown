@@ -956,6 +956,24 @@ describe('LocalApiServer explicit session attention and PR metadata', () => {
     assert.equal(existsSync(join(f.store.sessionDir(f.sample.id), 'attention.json')), false);
   });
 
+  it('persists a project move for an unassigned session through PATCH', async (t) => {
+    const f = await sessionToolsFixture(t);
+    const path = `/api/sessions/${f.sample.id}`;
+    const response = await api(f.port, f.token, 'PATCH', path, { projectName: ' Launch ' });
+
+    assert.equal(response.status, 200);
+    assert.equal((response.data.session as Session).projectName, 'Launch');
+    assert.equal(f.published.at(-1)?.projectName, 'Launch');
+    const reloaded = new SessionStore(join(f.store.sessionDir(f.sample.id), '../..'));
+    assert.equal((await reloaded.loadSession(f.sample.id))?.projectName, 'Launch');
+
+    for (const projectName of ['Another project', ' ', null, 'X'.repeat(257)]) {
+      assert.equal((await api(f.port, f.token, 'PATCH', path, { projectName })).status, 400);
+    }
+    assert.equal((await reloaded.loadSession(f.sample.id))?.projectName, 'Launch');
+    assert.equal(f.published.length, 1);
+  });
+
   it('attaches, replaces, reloads and clears PR metadata through the existing PATCH path', async (t) => {
     const f = await sessionToolsFixture(t);
     const path = `/api/sessions/${f.sample.id}`;

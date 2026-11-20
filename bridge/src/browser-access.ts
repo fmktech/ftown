@@ -24,7 +24,7 @@ function canonical(value: unknown): string {
 }
 class HttpError extends Error { constructor(public status: number, public code: string, message: string) { super(message); } }
 const fail = (status: number, code: string, message: string): never => { throw new HttpError(status, code, message); };
-const commandTypes = new Set(['preview_chat_list', 'preview_chat_send', 'preview_chat_reply', 'create_session', 'stop_session', 'list_sessions', 'get_host_resources', 'get_accounts', 'get_history', 'dismiss_session_block', 'retry_session', 'handoff_session', 'send_message', 'rename_session', 'remove_session', 'bridge_exec', 'clear_terminal', 'update_session_parent', 'get_session_usage', 'get_sessions_usage', 'get_session_attention', 'get_attention_summary', 'get_session_board', 'resolve_session_attention', 'answer_session_attention', ...RETIRED_AUTOMATION_COMMANDS]);
+const commandTypes = new Set(['preview_chat_list', 'preview_chat_send', 'preview_chat_reply', 'create_session', 'stop_session', 'list_sessions', 'get_host_resources', 'get_accounts', 'get_history', 'dismiss_session_block', 'retry_session', 'handoff_session', 'send_message', 'rename_session', 'remove_session', 'bridge_exec', 'clear_terminal', 'update_session_parent', 'move_session_to_project', 'get_session_usage', 'get_sessions_usage', 'get_session_attention', 'get_attention_summary', 'get_session_board', 'resolve_session_attention', 'answer_session_attention', ...RETIRED_AUTOMATION_COMMANDS]);
 
 /** Loopback browser consent and control. No cloud dependency and no raw persisted tokens. */
 export class BrowserAccess {

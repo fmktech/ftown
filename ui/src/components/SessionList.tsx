@@ -28,6 +28,7 @@ interface SessionListProps {
   selectedSessionId: string | null;
   onSelectSession: (sessionId: string) => void;
   onReviewPullRequest?: (sessionId: string) => void;
+  onMoveSessionToProject?: (session: Session, project: string) => Promise<void>;
   onRenameSession?: (sessionId: string, name: string) => void;
   onStopSession?: (sessionId: string) => void;
   onRemoveSession?: (sessionId: string, onlyIfFinished?: boolean) => void;
@@ -283,9 +284,41 @@ function ContextMenuButton({
   );
 }
 
+function ProjectMenu({ anchor, onClose, onSettings, onHide, moveUp, moveDown }: {
+  anchor: HTMLButtonElement;
+  onClose: () => void;
+  onSettings?: () => void;
+  onHide: () => void;
+  moveUp?: () => void;
+  moveDown?: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  useDismissContextMenu(onClose, ref);
+  const rect = anchor.getBoundingClientRect();
+  const pos = useClampedMenuPosition(rect.left, rect.bottom, ref);
+  useEffect(() => { ref.current?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus(); }, []);
+  function act(action?: () => void) { onClose(); anchor.focus(); action?.(); }
+  return createPortal(<div ref={ref} role="menu" aria-label="Project actions" style={{ ...contextMenuPanelStyle, ...pos }}
+    onKeyDown={event => {
+      if (event.key === "Escape") { event.stopPropagation(); act(); return; }
+      if (event.key === "Tab") { onClose(); anchor.focus(); return; }
+      const items = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("button:not(:disabled)"));
+      const index = items.indexOf(document.activeElement as HTMLButtonElement);
+      const next = { ArrowDown: index + 1, ArrowUp: index - 1, Home: 0, End: items.length - 1 }[event.key];
+      if (next !== undefined) { event.preventDefault(); items[(next + items.length) % items.length].focus(); }
+    }}>
+    {onSettings && <ContextMenuButton largeOnMobile label="Bridge settings" onClick={() => act(onSettings)} />}
+    <ContextMenuButton largeOnMobile label="Move up" disabled={!moveUp} onClick={() => act(moveUp)} />
+    <ContextMenuButton largeOnMobile label="Move down" disabled={!moveDown} onClick={() => act(moveDown)} />
+    <ContextMenuButton largeOnMobile label="Hide project" onClick={() => act(onHide)} />
+  </div>, document.body);
+}
+
 function SessionContextMenu({
   menu,
   onRename,
+  moveProjects,
+  onMoveToProject,
   onReviewPullRequest,
   onStop,
   onRemove,
@@ -296,6 +329,8 @@ function SessionContextMenu({
 }: {
   menu: Extract<ContextMenuState, { kind: "session" }>;
   onRename: (session: Session) => void;
+  moveProjects: string[];
+  onMoveToProject: (project: string) => void;
   onReviewPullRequest?: (sessionId: string) => void;
   onStop: (sessionId: string) => void;
   onRemove: (sessionId: string) => void;
@@ -346,6 +381,12 @@ function SessionContextMenu({
       {menu.session.block && onDismissBlock && (
         <ContextMenuButton largeOnMobile label="Dismiss badge" onClick={() => { void onDismissBlock(menu.session).catch(console.error); onClose(); }} />
       )}
+      {moveProjects.map(project => (
+        <ContextMenuButton key={project} largeOnMobile label={`Move to ${project}`} onClick={() => {
+          onMoveToProject(project);
+          onClose();
+        }} />
+      ))}
       <ContextMenuButton largeOnMobile label="Rename" onClick={() => { onRename(menu.session); onClose(); }} />
       <ContextMenuButton largeOnMobile label="Clone" onClick={() => { onClone(menu.session); onClose(); }} />
       {isRunning && (
@@ -373,6 +414,7 @@ export function SessionList({
   onSelectSession,
   onReviewPullRequest,
   onRenameSession,
+  onMoveSessionToProject,
   onStopSession,
   onRemoveSession,
   onCloneSession,
@@ -389,8 +431,12 @@ export function SessionList({
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [dragOverKey, setDragOverKey] = useState<string | null>(null);
   const [dragOverZone, setDragOverZone] = useState<SessionDropZone | null>(null);
+  const [projectOrder, setProjectOrder] = usePersistentState<Set<string>>(`${projectStorageKey}:order`, EMPTY_ID_SET, stringSetCodec);
+  const [projectMenu, setProjectMenu] = useState<{ project: string; anchor: HTMLButtonElement } | null>(null);
+  const closeProjectMenu = useCallback(() => setProjectMenu(null), []);
   const [savedProjects, setSavedProjects] = usePersistentState<Set<string>>(projectStorageKey, EMPTY_ID_SET, stringSetCodec);
   const [editingProject, setEditingProject] = useState<string | null>(null);
+  const [moveError, setMoveError] = useState<string | null>(null);
   const [newProject, setNewProject] = useState<string | null>(null);
   const [hiddenProjects, setHiddenProjects] = usePersistentState<Set<string>>("ftown:hiddenProjects", EMPTY_ID_SET, stringSetCodec);
   useEffect(() => { onHiddenProjectsChange?.(hiddenProjects); }, [hiddenProjects, onHiddenProjectsChange]);
@@ -1088,6 +1134,27 @@ export function SessionList({
     projects.set(project, roots);
   }
   for (const project of savedProjects) if (!projects.has(project)) projects.set(project, []);
+  function canMoveToProject(session: Session, project: string): boolean {
+    return Boolean(onMoveSessionToProject && !session.parentSessionId && !session.projectName
+      && project && projects.get(project)?.length === 0 && !hiddenProjects.has(project)
+      && (projectBridges?.get(project)?.includes(session.bridgeId) ?? true));
+  }
+
+  function moveToProject(session: Session, project: string) {
+    if (!onMoveSessionToProject || !canMoveToProject(session, project)) return;
+    setMoveError(null);
+    void onMoveSessionToProject(session, project)
+      .catch(error => setMoveError(error instanceof Error ? error.message : "Could not move session"));
+  }
+
+  const orderedProjects = [...new Set([...projectOrder, ...projects.keys()])];
+  const visibleProjects = orderedProjects.filter(name => projects.has(name) && !hiddenProjects.has(name));
+  function reorderProject(project: string, other: string) {
+    const order = [...orderedProjects];
+    const from = order.indexOf(project), to = order.indexOf(other);
+    [order[from], order[to]] = [order[to], order[from]];
+    setProjectOrder(new Set(order));
+  }
   function toggleProject(project: string) {
     setHiddenProjects(previous => {
       const next = new Set(previous);
@@ -1098,17 +1165,37 @@ export function SessionList({
   }
   return (
     <div className="flex flex-col">
-      {Array.from(projects, ([project, roots]) => hiddenProjects.has(project) ? null : (
+      {moveError && <p role="alert" className="px-2 py-1 text-xs text-[var(--status-error)]">{moveError}</p>}
+      {visibleProjects.map((project, index) => {
+        const roots = projects.get(project)!;
+        return (
         <section key={project} aria-label={project || "No project"}>
-          {!collapsed && <div className="flex items-center justify-between px-2 py-1"
+          {!collapsed && <div className={`flex items-center justify-between px-2 py-1 ${dragOverKey === `project:${project}` ? "outline outline-[var(--accent)] -outline-offset-1" : ""}`}
             onDragOver={event => {
               const drag = dragRef.current;
-              if (drag?.kind === "session" && roots.some(root => root.children.some(child => child.session.id === drag.id))) event.preventDefault();
+              if (drag?.kind !== "session") return;
+              const session = sessions.find(row => row.id === drag.id && row.bridgeId === drag.bridgeId);
+              if (session && canMoveToProject(session, project)) {
+                event.preventDefault();
+                event.dataTransfer.dropEffect = "move";
+                setDragOverKey(`project:${project}`);
+              } else if (roots.some(root => root.children.some(child => child.session.id === drag.id))) {
+                event.preventDefault();
+              }
+            }}
+            onDragLeave={event => {
+              if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) {
+                setDragOverKey(key => key === `project:${project}` ? null : key);
+              }
             }}
             onDrop={event => {
               event.preventDefault();
               const drag = dragRef.current;
-              if (drag?.kind === "session" && roots.some(root => root.children.some(child => child.session.id === drag.id))) onSetSessionParent?.(drag.id, null);
+              if (drag?.kind === "session") {
+                const session = sessions.find(row => row.id === drag.id && row.bridgeId === drag.bridgeId);
+                if (session && canMoveToProject(session, project)) moveToProject(session, project);
+                else if (roots.some(root => root.children.some(child => child.session.id === drag.id))) onSetSessionParent?.(drag.id, null);
+              }
               clearDragState();
             }}>
             <button type="button" className="min-w-0 truncate py-1 text-left text-sm font-semibold" aria-expanded={!collapsedProjects.has(project)}
@@ -1120,9 +1207,15 @@ export function SessionList({
             <div className="flex shrink-0 items-center gap-1">
               {project && <button type="button" className="btn-ghost px-2" disabled={!onAddSession}
                 aria-label={`Add session to ${project}`} onClick={() => onAddSession?.(project)}>+</button>}
-              {project && onProjectBridgesChange && <button type="button" className="btn-ghost px-1" aria-label={`Bridge settings for ${project}`}
-                aria-expanded={editingProject === project} onClick={() => setEditingProject(editingProject === project ? null : project)}>⚙</button>}
-            <button type="button" className="btn-ghost text-xs" aria-label={`Hide project ${project || "No project"}`} onClick={() => toggleProject(project)}>Hide</button></div>
+              <button type="button" className="btn-ghost px-2" aria-haspopup="menu" aria-expanded={projectMenu?.project === project}
+                aria-label={`More actions for ${project || "No project"}`}
+                onClick={event => setProjectMenu({ project, anchor: event.currentTarget })}>…</button>
+              {projectMenu?.project === project && <ProjectMenu anchor={projectMenu.anchor} onClose={closeProjectMenu}
+                onHide={() => toggleProject(project)}
+                onSettings={project && onProjectBridgesChange ? () => setEditingProject(editingProject === project ? null : project) : undefined}
+                moveUp={index > 0 ? () => reorderProject(project, visibleProjects[index - 1]) : undefined}
+                moveDown={index + 1 < visibleProjects.length ? () => reorderProject(project, visibleProjects[index + 1]) : undefined} />}
+            </div>
           </div>}
           {!collapsed && editingProject === project && onProjectBridgesChange && <fieldset className="mx-2 space-y-1 rounded border border-[var(--border-muted)] p-2 text-xs">
             <legend>Allowed bridges</legend>
@@ -1140,7 +1233,7 @@ export function SessionList({
             isCollapsed: collapsedSessions.has(row.session.id), onToggleCollapse: () => toggleSessionCollapsed(row.session.id),
           }))}
         </section>
-      ))}
+      ); })}
       {Array.from(projects.keys()).some(project => hiddenProjects.has(project)) && <details>
         <summary className="cursor-pointer px-2 py-1 text-xs">Hidden projects</summary>
         {Array.from(projects.keys()).filter(project => hiddenProjects.has(project)).map(project =>
@@ -1166,6 +1259,8 @@ export function SessionList({
         <SessionContextMenu
           menu={contextMenu}
           onRename={startEditing}
+          moveProjects={Array.from(projects.keys()).filter(project => canMoveToProject(contextMenu.session, project))}
+          onMoveToProject={project => moveToProject(contextMenu.session, project)}
           onReviewPullRequest={onReviewPullRequest}
           onStop={onStopSession}
           onRemove={onRemoveSession}

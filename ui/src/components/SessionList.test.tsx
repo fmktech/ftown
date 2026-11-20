@@ -85,8 +85,28 @@ it("keeps an empty project across reloads and offers placement and session creat
   render(<SessionList {...props} />);
   fireEvent.click(screen.getByLabelText("Add session to Launch"));
   expect(add).toHaveBeenCalledWith("Launch");
-  fireEvent.click(screen.getByLabelText("Bridge settings for Launch"));
+  fireEvent.click(screen.getByLabelText("More actions for Launch"));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Bridge settings" }));
   fireEvent.click(screen.getByLabelText("Studio"));
   expect(change).toHaveBeenCalledWith("Launch", ["desk"]);
+  localStorage.clear();
+});
+
+it("offers an empty project in session actions when the project allows the owning bridge", () => {
+  localStorage.setItem("ftown:projects", JSON.stringify(["Launch", "Restricted", "Occupied"]));
+  const session: Session = { id: "root", name: "Unassigned session", bridgeId: "desk", shellType: "shell",
+    status: "completed", createdAt: "", updatedAt: "" };
+  const onMoveSessionToProject = vi.fn().mockResolvedValue(undefined);
+  render(<SessionList sessions={[session, { ...session, id: "occupied", projectName: "Occupied" }]}
+    selectedSessionId={null} onSelectSession={vi.fn()} onStopSession={vi.fn()} onRemoveSession={vi.fn()}
+    projectBridges={new Map([["Restricted", ["studio"]]])} onMoveSessionToProject={onMoveSessionToProject} />);
+
+  const section = within(screen.getByRole("region", { name: "No project" }));
+  fireEvent.keyDown(section.getByLabelText("Session actions"), { key: "Enter" });
+  const menu = within(screen.getByRole("menu", { name: "Session actions" }));
+  expect(menu.queryByRole("menuitem", { name: "Move to Restricted" })).toBeNull();
+  expect(menu.queryByRole("menuitem", { name: "Move to Occupied" })).toBeNull();
+  fireEvent.click(menu.getByRole("menuitem", { name: "Move to Launch" }));
+  expect(onMoveSessionToProject).toHaveBeenCalledWith(session, "Launch");
   localStorage.clear();
 });

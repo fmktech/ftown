@@ -498,6 +498,31 @@ test('answer_session_attention: live waiter on mail channel skips mail; missing 
   assert.equal((await attentionStore.waitForItem('session', orphan.id, 0)).resolution, 'answered');
 });
 
+test('move_session_to_project routes to the owning bridge and returns the updated session', async () => {
+  const updates: unknown[] = [];
+  const responses: CommandResponse[] = [];
+  const sessionController = {
+    update: async (id: string, input: { projectName: string }) => {
+      updates.push([id, input]);
+      return { ok: true, session: { id, bridgeId: 'owner', projectName: input.projectName } };
+    },
+  } as unknown as SessionController;
+  const handler = createCommandHandler({ bridgeId: 'owner', sessionController,
+    publishCommandResponse: async response => { responses.push(response); } });
+
+  await handler({ type: 'move_session_to_project', requestId: 'other-bridge',
+    payload: { sessionId: 'session', bridgeId: 'elsewhere', projectName: 'Launch' } });
+  await handler({ type: 'move_session_to_project', requestId: 'missing-project',
+    payload: { sessionId: 'session', bridgeId: 'owner' } });
+  await handler({ type: 'move_session_to_project', requestId: 'move',
+    payload: { sessionId: 'session', bridgeId: 'owner', projectName: 'Launch' } });
+
+  assert.deepEqual(updates, [['session', { projectName: 'Launch' }]]);
+  assert.deepEqual(responses.map(response => [response.requestId, response.success]),
+    [['missing-project', false], ['move', true]]);
+  assert.equal((responses[1].data as { session: Session }).session.projectName, 'Launch');
+});
+
 test('update_session_parent rejects a missing or invalid parentSessionId', async () => {
   const responses: CommandResponse[] = [];
   const session = {

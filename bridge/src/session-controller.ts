@@ -55,6 +55,7 @@ export interface SessionUpdateInput {
   name?: string;
   parent?: { value: unknown; bridgeId?: string };
   pullRequestUrl?: string | null;
+  projectName?: unknown;
 }
 
 /** Narrow structural slice of SessionStore so tests can use in-memory fakes. */
@@ -297,9 +298,8 @@ export class SessionController {
   }
 
   /**
-   * Rename and/or reparent in ONE load-mutate-save-publish pass (the HTTP
-   * PATCH route updates both fields atomically; the RPC adapter calls with a
-   * single field). Reparenting flattens to the proposed parent's root so
+   * Update metadata in one load-mutate-save-publish pass.
+   * Reparenting flattens to the proposed parent's root so
    * session trees stay one level deep.
    */
   async update(
@@ -335,6 +335,17 @@ export class SessionController {
     if (input.name !== undefined) {
       if (typeof input.name !== 'string' || !input.name) {
         return { ok: false, code: 'invalid', message: 'Invalid name' };
+      }
+    }
+
+    let projectName: string | undefined;
+    if (input.projectName !== undefined) {
+      projectName = typeof input.projectName === 'string' ? input.projectName.trim() : '';
+      if (!projectName || projectName.length > 256 || input.parent) {
+        return { ok: false, code: 'invalid', message: 'Invalid project move' };
+      }
+      if (session.parentSessionId || (session.projectName && session.projectName !== projectName)) {
+        return { ok: false, code: 'conflict', message: 'Only unassigned root sessions can be moved to a project' };
       }
     }
 
@@ -389,6 +400,7 @@ export class SessionController {
     // Validate the entire update before touching the loaded object: some store
     // implementations return shared references rather than detached snapshots.
     if (input.name !== undefined) session.name = input.name;
+    if (projectName) session.projectName = projectName;
     if (input.parent) {
       if (parentProject) session.projectName = parentProject;
       session.parentSessionId = parentSessionId;
