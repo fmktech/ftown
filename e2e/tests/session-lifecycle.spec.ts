@@ -168,6 +168,23 @@ test.describe("session lifecycle", () => {
     }
   });
 
+  test("drag project headings to reorder and retain the order after reload", async ({ page }) => {
+    await login(page);
+    const names = ["A", "B", "C"].map(prefix => prefix + randomUUID());
+    for (const name of names) {
+      await page.getByRole("button", { name: "+ Create project", exact: true }).click();
+      await page.getByLabel("Project name", { exact: true }).fill(name);
+      await page.getByRole("button", { name: "Create", exact: true }).click();
+    }
+    const heading = (name: string) => page.getByRole("button", { name, exact: true });
+    await heading(names[2]).dragTo(heading(names[0]));
+    const regions = page.locator("#dashboard-sidebar section").filter({ has: page.getByRole("button", { name: new RegExp(names.join("|")) }) });
+    const order = () => regions.evaluateAll(nodes => nodes.map(node => node.getAttribute("aria-label")));
+    await expect.poll(order).toEqual([names[2], names[0], names[1]]);
+    await page.reload();
+    await expect.poll(order).toEqual([names[2], names[0], names[1]]);
+  });
+
   test("move a legacy No project session into a new empty project", async ({ page }) => {
     const id = randomUUID();
     const name = `Legacy worker ${id}`;
