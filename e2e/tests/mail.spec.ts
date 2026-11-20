@@ -23,7 +23,7 @@ function sleep(ms: number): Promise<void> {
 
 async function createShellSessionApi(name: string): Promise<string> {
   const res = await bridgeApiFetch("POST", "/api/sessions", {
-    body: { shellType: "shell", name },
+    body: { projectName: "E2E", shellType: "shell", name },
   });
   expect(res.status, "POST /api/sessions must create a shell session").toBe(201);
   return (res.body as { session: WireSessionLite }).session.id;

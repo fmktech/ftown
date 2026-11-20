@@ -1184,8 +1184,8 @@ export function SessionList({
           {Array.from(computers, ([id, label]) => {
             const lock = bridgeConnectionLock(bridgeSecurityStates?.get(id));
             const update = bridgeUpdates?.get(id)?.status;
-            return <div key={id} className="flex items-center justify-between">
-              <button className="btn-ghost text-xs" aria-label={`Actions for ${label}`} aria-haspopup="menu"
+            return <div key={id} data-bridge-row={id} className="flex items-center justify-between">
+              <button className="btn-ghost min-h-11 min-w-11 text-xs" aria-label={`Actions for ${label}`} aria-haspopup="menu"
                 aria-expanded={contextMenu?.kind === "bridge" && contextMenu.bridgeId === id}
                 onClick={event => {
                   bridgeMenuAnchor.current = event.currentTarget;

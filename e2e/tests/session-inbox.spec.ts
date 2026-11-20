@@ -16,7 +16,7 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
     test.setTimeout(180_000); await page.setViewportSize({ width: viewport.width, height: viewport.height }); await login(page); await waitForBridgeOnline(page);
     const name = `Inbox reply ${Date.now().toString(36)}`; let id = "";
     try {
-      const created = await bridgeApiFetch("POST", "/api/sessions", { body: { shellType: "shell", name } }); expect(created.status, JSON.stringify(created.body)).toBe(201);
+      const created = await bridgeApiFetch("POST", "/api/sessions", { body: { projectName: "E2E", shellType: "shell", name } }); expect(created.status, JSON.stringify(created.body)).toBe(201);
       id = (created.body as { session: { id: string } }).session.id; expect(id).toBeTruthy();
       const message = `Please review this full request.\n${"LongUnbrokenReference".repeat(25)}`;
       await execute(process.execPath, [join(E2E_DIR, "..", "bridge", "dist", "ftown-cli.js"), "sessions", "attention", "--title", "Review requested", "--message", message], { env: { ...process.env, HOME: BRIDGE_HOME, FTOWN_SESSION_ID: id }, timeout: 30_000 });
@@ -55,10 +55,10 @@ test("mail nudge survives agent mail, highlights the trigger and shows the item 
   const HARNESS_CLI = join(E2E_DIR, "..", "bridge", "dist", "harness-cli.js");
   const row = (name: string) => page.locator('#dashboard-sidebar button[draggable="true"]').filter({ has: page.getByText(name, { exact: true }) });
   try {
-    const createdA = await bridgeApiFetch("POST", "/api/sessions", { body: { shellType: "shell", name: nameA } });
+    const createdA = await bridgeApiFetch("POST", "/api/sessions", { body: { projectName: "E2E", shellType: "shell", name: nameA } });
     expect(createdA.status, JSON.stringify(createdA.body)).toBe(201);
     idA = (createdA.body as { session: { id: string } }).session.id;
-    const createdB = await bridgeApiFetch("POST", "/api/sessions", { body: { shellType: "shell", name: nameB } });
+    const createdB = await bridgeApiFetch("POST", "/api/sessions", { body: { projectName: "E2E", shellType: "shell", name: nameB } });
     expect(createdB.status, JSON.stringify(createdB.body)).toBe(201);
     idB = (createdB.body as { session: { id: string } }).session.id;
     // A raises an attention request via the real CLI.
@@ -129,7 +129,7 @@ test("replying to one of two open items clears exactly that one", async ({ page 
   const name = `Two items ${stamp}`; let id = "";
   const FTOWN_CLI = join(E2E_DIR, "..", "bridge", "dist", "ftown-cli.js");
   try {
-    const created = await bridgeApiFetch("POST", "/api/sessions", { body: { shellType: "shell", name } });
+    const created = await bridgeApiFetch("POST", "/api/sessions", { body: { projectName: "E2E", shellType: "shell", name } });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
     id = (created.body as { session: { id: string } }).session.id;
     const msg1 = `First ${stamp}`, msg2 = `Second ${stamp}`;
@@ -183,7 +183,7 @@ test("a second page sees reply and dismiss without reload", async ({ page, brows
     await login(page2); await waitForBridgeOnline(page2);
     const stamp = Date.now().toString(36);
     const name = `Cross tab ${stamp}`;
-    const created = await bridgeApiFetch("POST", "/api/sessions", { body: { shellType: "shell", name } });
+    const created = await bridgeApiFetch("POST", "/api/sessions", { body: { projectName: "E2E", shellType: "shell", name } });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
     id = (created.body as { session: { id: string } }).session.id;
     const msg1 = `First ${stamp}`;
@@ -241,7 +241,7 @@ test("an item raised while the terminal is focused shows in the side pane and le
   const row = (n: string) => page.locator('#dashboard-sidebar button[draggable="true"]').filter({ has: page.getByText(n, { exact: true }) });
   const focusedClass = () => page.evaluate(() => (document.activeElement as HTMLElement | null)?.className ?? "");
   try {
-    const created = await bridgeApiFetch("POST", "/api/sessions", { body: { shellType: "shell", name } });
+    const created = await bridgeApiFetch("POST", "/api/sessions", { body: { projectName: "E2E", shellType: "shell", name } });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
     id = (created.body as { session: { id: string } }).session.id;
     await expect(row(name)).toBeVisible({ timeout: 30_000 });
@@ -278,7 +278,7 @@ test("a human prompt typed in the terminal leaves the agent_needs_input item in 
     return (listed.body as { events: Array<{ type: string; resolvedAt?: string }> }).events.filter(event => !event.resolvedAt).map(event => event.type).sort();
   };
   try {
-    const created = await bridgeApiFetch("POST", "/api/sessions", { body: { shellType: "shell", name } });
+    const created = await bridgeApiFetch("POST", "/api/sessions", { body: { projectName: "E2E", shellType: "shell", name } });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
     id = (created.body as { session: { id: string } }).session.id;
     await execute(process.execPath, [FTOWN_CLI, "sessions", "attention", "--title", "Typed prompt", "--message", `Please review ${stamp}`], { env: { ...process.env, HOME: BRIDGE_HOME, FTOWN_SESSION_ID: id }, timeout: 30_000 });
@@ -317,7 +317,7 @@ test("entering a waiting session from the Workspace list on a phone lands on the
   let id = "";
   const FTOWN_CLI = join(E2E_DIR, "..", "bridge", "dist", "ftown-cli.js");
   try {
-    const created = await bridgeApiFetch("POST", "/api/sessions", { body: { shellType: "shell", name } });
+    const created = await bridgeApiFetch("POST", "/api/sessions", { body: { projectName: "E2E", shellType: "shell", name } });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
     id = (created.body as { session: { id: string } }).session.id;
     await execute(process.execPath, [FTOWN_CLI, "sessions", "attention", "--title", "Phone", "--message", `Please review ${stamp}`], { env: { ...process.env, HOME: BRIDGE_HOME, FTOWN_SESSION_ID: id }, timeout: 30_000 });
@@ -352,7 +352,7 @@ test("mobile Workspace tab keeps its name with a waiting description", async ({ 
   let id = "";
   const FTOWN_CLI = join(E2E_DIR, "..", "bridge", "dist", "ftown-cli.js");
   try {
-    const created = await bridgeApiFetch("POST", "/api/sessions", { body: { shellType: "shell", name } });
+    const created = await bridgeApiFetch("POST", "/api/sessions", { body: { projectName: "E2E", shellType: "shell", name } });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
     id = (created.body as { session: { id: string } }).session.id;
     await execute(process.execPath, [FTOWN_CLI, "sessions", "attention", "--title", "Mobile", "--message", `Please review ${stamp}`], { env: { ...process.env, HOME: BRIDGE_HOME, FTOWN_SESSION_ID: id }, timeout: 30_000 });

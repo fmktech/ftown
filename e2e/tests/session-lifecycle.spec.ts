@@ -12,7 +12,7 @@ import {
   runMarkerInTerminal,
 } from "../helpers/app";
 import { sessionIdsFor, waitForNewSessionId } from "../helpers/centrifugo";
-import { bridgeApiFetch, readBridgePointer } from "../helpers/bridge-api";
+import { bridgeApiFetch } from "../helpers/bridge-api";
 import { restartBridge } from "../helpers/bridge-process";
 import { BRIDGE_HOME, seedClaudeTranscript } from "../helpers/bridge-fixtures";
 
@@ -50,7 +50,7 @@ async function statusOf(sid: string): Promise<string | undefined> {
 
 async function createGroupedSession(name: string, parentSessionId?: string): Promise<string> {
   const res = await bridgeApiFetch("POST", "/api/sessions", {
-    body: { shellType: "shell", name, parentSessionId },
+    body: { projectName: "E2E", shellType: "shell", name, parentSessionId },
   });
   expect(res.status, `create grouped session: ${JSON.stringify(res.body)}`).toBe(201);
   const id = (res.body as SessionEnvelope).session?.id;
@@ -126,7 +126,7 @@ test.describe("session lifecycle", () => {
     let sid: string | undefined;
     try {
       const created = await bridgeApiFetch("POST", "/api/sessions", {
-        body: { shellType: "shell", name, workingDir, createMissingWorkingDir: true, claudeSessionId: nativeId },
+        body: { projectName: "E2E", shellType: "shell", name, workingDir, createMissingWorkingDir: true, claudeSessionId: nativeId },
       });
       expect(created.status, `create session: ${JSON.stringify(created.body)}`).toBe(201);
       sid = (created.body as SessionEnvelope).session?.id;
@@ -203,7 +203,7 @@ test.describe("session lifecycle", () => {
     }
   });
 
-  test("drag a child to another parent and back to the bridge root", async ({ page }) => {
+  test("drag a child to another parent and back to the project root", async ({ page }) => {
     const accountId = sharedAccountId();
     await login(page);
     await waitForBridgeOnline(page);
@@ -234,9 +234,8 @@ test.describe("session lifecycle", () => {
 
       await parentBRow.getByRole("button", { name: "Expand children" }).click();
       await expect(childRow).toBeVisible();
-      const bridgeRoot = page.locator(`[data-bridge-row="${readBridgePointer().bridgeId}"]`);
-      await expect(bridgeRoot).toHaveAttribute("title", "Drop a child session here to move it back to the bridge root");
-      await childRow.dragTo(bridgeRoot);
+      const projectHeader = page.getByRole("region", { name: "E2E", exact: true }).getByText("E2E", { exact: true });
+      await childRow.dragTo(projectHeader);
       await expect.poll(() => parentOf(child), { timeout: 20_000 }).toBeNull();
     } finally {
       await removeSessionQuietly(child);

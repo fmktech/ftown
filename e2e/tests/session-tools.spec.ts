@@ -169,14 +169,14 @@ for (const viewport of [
 
     try {
       for (const name of [targetName, otherName]) {
-        const response = await bridgeApiFetch("POST", "/api/sessions", { body: { shellType: "shell", name } });
+        const response = await bridgeApiFetch("POST", "/api/sessions", { body: { projectName: "E2E", shellType: "shell", name } });
         expect(response.status, JSON.stringify(response.body)).toBe(201);
         const id = (response.body as SessionResult).session?.id;
         expect(id).toBeTruthy();
         created.push(id);
       }
       const [targetId, otherId] = created;
-      const child = await bridgeApiFetch("POST", "/api/sessions", { body: { shellType: "shell", name: childName, parentSessionId: targetId } });
+      const child = await bridgeApiFetch("POST", "/api/sessions", { body: { projectName: "E2E", shellType: "shell", name: childName, parentSessionId: targetId } });
       expect(child.status, JSON.stringify(child.body)).toBe(201);
       const childId = (child.body as SessionResult).session?.id;
       expect(childId).toBeTruthy();

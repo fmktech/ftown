@@ -69,7 +69,7 @@ interface CreatedSession {
  * bridge HOME whose slug we control for transcript seeding.
  */
 async function createSession(body: Record<string, unknown>): Promise<CreatedSession> {
-  const res = await bridgeApiFetch("POST", "/api/sessions", { body });
+  const res = await bridgeApiFetch("POST", "/api/sessions", { body: { projectName: "E2E", ...body } });
   expect(res.status, `create session: ${JSON.stringify(res.body)}`).toBe(201);
   const session = (res.body as { session: CreatedSession }).session;
   expect(session.id).toBeTruthy();

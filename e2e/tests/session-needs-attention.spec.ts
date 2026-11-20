@@ -21,7 +21,7 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
       const closeInbox = async () => inbox.getByRole("button", { name: "Back to workspace", exact: true }).click();
       try {
         for (const name of [firstName, secondName, idleName]) {
-          const response = await bridgeApiFetch("POST", "/api/sessions", { body: { shellType: "shell", name } }); expect(response.status, JSON.stringify(response.body)).toBe(201);
+          const response = await bridgeApiFetch("POST", "/api/sessions", { body: { projectName: "E2E", shellType: "shell", name } }); expect(response.status, JSON.stringify(response.body)).toBe(201);
           const id = (response.body as { session: { id: string } }).session.id; expect(id).toBeTruthy(); ids.push(id);
         }
         const [first, second, idle] = ids;

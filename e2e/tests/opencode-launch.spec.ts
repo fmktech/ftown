@@ -81,6 +81,7 @@ test("opencode child reaches idle with its prompt and a failed launch records a 
   try {
     const created = await bridgeApiFetch("POST", "/api/sessions", {
       body: {
+        projectName: "E2E",
         shellType: "opencode",
         model: MODEL,
         prompt: PROMPT,
@@ -120,6 +121,7 @@ test("opencode child reaches idle with its prompt and a failed launch records a 
 
     const failedCreate = await bridgeApiFetch("POST", "/api/sessions", {
       body: {
+        projectName: "E2E",
         shellType: "opencode",
         model: MODEL,
         prompt: PROMPT,
