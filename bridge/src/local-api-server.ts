@@ -1,3 +1,4 @@
+import { INSTRUCTIONS_LOCAL, INSTRUCTIONS_WIRE, readInstructions } from './instructions.js';
 import { TransferJournal } from './folder-transfer-journal.js';
 import { FolderTransfers, transferError } from './folder-transfer.js';
 import { TRANSFER_LOCAL, TRANSFER_WIRE } from './folder-transfer-protocol.js';
@@ -251,6 +252,21 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
 
   async closeTransfers(): Promise<void> { await this.transfers?.close(); }
 
+  private async dispatchInstructions(message: VerifiedApplication, wire: boolean): Promise<ApplicationJson> {
+    const { endpoint } = message.principal;
+    if (wire ? endpoint.kind !== 'bridge' || !this.security!.peerBridges().some(peer => peer.endpoint.id === endpoint.id)
+      : endpoint.kind !== 'local-cli') return { status: 403, body: { error: 'permission_denied' } };
+    await this.security!.revalidate(message.principal);
+    const body = (message.application.data as { body?: { scope?: unknown; bridge?: unknown } } | null)?.body;
+    if (body?.scope !== 'global' && body?.scope !== 'bridge') return { status: 400, body: { error: 'Invalid scope' } };
+    try {
+      if (wire) return { status: 200, body: { text: readInstructions(body.scope) } };
+      if (typeof body.bridge !== 'string') return { status: 400, body: { error: 'Missing peer' } };
+      if (!await this.peerControl?.connectDirect(body.bridge)) return { status: 503, body: { error: 'Direct bridge link unavailable' } };
+      return await this.peerControl!.directHttp(body.bridge, INSTRUCTIONS_WIRE, { scope: body.scope });
+    } catch (error) { return { status: 400, body: { error: error instanceof Error ? error.message : 'Instruction request failed' } }; }
+  }
+
   private async dispatchTransfer(message: VerifiedApplication, path: string): Promise<ApplicationJson> {
     const { endpoint } = message.principal;
     const wire = path === TRANSFER_WIRE;
@@ -350,6 +366,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     }
     if (route.kind !== 'http') throw new Error('Invalid application route');
     const routePath = route.path.split('?')[0];
+    if (routePath === INSTRUCTIONS_LOCAL || routePath === INSTRUCTIONS_WIRE) return this.dispatchInstructions(message, routePath === INSTRUCTIONS_WIRE);
     if (routePath === TRANSFER_LOCAL || routePath === TRANSFER_WIRE) return this.dispatchTransfer(message, routePath);
     if (routePath === '/api/peers' || routePath.startsWith('/api/peers/')) return this.dispatchPeers(message, route.method, route.path);
     if ((route.method === 'PUT' || route.method === 'DELETE') && /^\/api\/sessions\/[A-Za-z0-9_-]{1,200}\/preview$/.test(route.path.split('?')[0])

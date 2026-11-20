@@ -14,13 +14,14 @@ import { runPlan } from './plan-cli.js';
 import { runAccounts } from './accounts-cli.js';
 import { executeCli, isCliEntry } from './cli-entry.js';
 import { setPeerTarget } from './cli-client.js';
+import { runInstructions } from './instructions-cli.js';
 import { runTransfer } from './transfer-cli.js';
 import { PEER_GROUPS, extractBridgeOption, runBridges } from './peers-cli.js';
 export { isCliEntry } from './cli-entry.js';
 
 export function usage(): string {
   return `Usage: ftown [bridge options]
-       ftown <setup|start|sessions|harness|env|accounts|security|quota|status|board|events|attention|brief|worktrees|plan|bridges> [args...]
+       ftown <setup|start|sessions|harness|env|accounts|security|quota|status|board|events|attention|brief|worktrees|plan|bridges|transfer|instructions> [args...]
 
 With no subcommand, start the bridge. Run setup explicitly before the first start.
 Add --bridge <name|id> (or set FTOWN_BRIDGE) to run sessions, status, board, events, attention, brief,
@@ -43,6 +44,7 @@ Subcommands:
   worktrees  List or prune bridge-owned git worktrees
   plan       Manager plan list (add, start, done, drop, todo, edit, rm)
   bridges    List the other bridges of this account (--probe to check which answer)
+  instructions  Read bridge guidance or pull shared global instructions
   transfer   Copy a folder once between paired bridges`;
 }
 
@@ -50,6 +52,7 @@ export async function runFtown(argv: string[], start: (argv: string[]) => Promis
   const [group, ...rawArgs] = argv;
   if (['--help', '-h', 'help'].includes(group)) { console.log(usage()); return 0; }
   if (!group || group.startsWith('-')) return start(argv);
+  if (group === 'instructions') return runInstructions(rawArgs);
   if (group === 'transfer') return runTransfer(rawArgs);
   let args = rawArgs;
   // Cross-bridge control: --bridge <target> (or FTOWN_BRIDGE) forwards this command's requests to another bridge of the account.

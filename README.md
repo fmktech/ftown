@@ -686,3 +686,16 @@ chaos/qemu/patches is GPL-2.0-or-later (derived from QEMU); everything else is M
 Registering an account with `ftown accounts add` sets up its harness hooks and
 skill link. Use `--no-setup` to defer this; if setup fails, the account remains
 saved and `ftown setup` can retry.
+
+### Shared agent instructions
+
+Run `ftown setup` on each bridge. Setup adds two file references to the user-level Codex `AGENTS.md` and Claude `CLAUDE.md`, including registered accounts. Existing instructions stay in place. Edit `~/.ftown/global.md` for guidance that applies everywhere and `~/.ftown/bridge.md` for machine-specific details. New agent sessions can read both files offline.
+
+To distribute a global edit, run these commands **on the receiving bridge**, replacing `studio` with the source bridge name or ID.
+
+```sh
+ftown instructions show global --bridge studio
+ftown instructions pull global --bridge studio
+```
+
+The pull replaces the local global file and prints a backup path if it had different, nonempty contents. Sharing is explicit. Each bridge keeps its copy until the next pull. To inspect another machine's guidance, use `ftown instructions show bridge --bridge studio`. Both bridges must be online and paired. File contents travel over their direct link. Each file can hold up to 64 KiB of Markdown.

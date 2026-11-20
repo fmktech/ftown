@@ -1,3 +1,4 @@
+import { INSTRUCTIONS_LOCAL, INSTRUCTIONS_WIRE } from './instructions.js';
 import { TRANSFER_LOCAL, TRANSFER_WIRE, TRANSFER_REQUEST_TTL_MS } from './folder-transfer-protocol.js';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
@@ -124,6 +125,7 @@ export class PeerControl {
   async http(target: string, method: string, path: string, body?: unknown, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<{ status: number; body: ApplicationJson }> {
     if (!(PEER_HTTP_METHODS as readonly string[]).includes(method)) throw new PeerTargetError(400, 'Unsupported method');
     if (typeof path !== 'string' || !path.startsWith('/api/') || path.length > 16_384) throw new PeerTargetError(400, 'Invalid path');
+    if ([INSTRUCTIONS_LOCAL, INSTRUCTIONS_WIRE].includes(path.split('?')[0])) throw new PeerTargetError(400, 'Instructions require a direct link');
     if (path.split('?')[0] === TRANSFER_LOCAL || path.split('?')[0] === TRANSFER_WIRE) {
       throw new PeerTargetError(400, 'Folder transfers use the dedicated direct transfer API');
     }
@@ -156,7 +158,7 @@ export class PeerControl {
     await this.direct.sendBinary(target, frame, signal);
   }
 
-  async directHttp(target: string, path: typeof TRANSFER_WIRE, body: unknown): Promise<{ status: number; body: ApplicationJson }> {
+  async directHttp(target: string, path: typeof TRANSFER_WIRE | typeof INSTRUCTIONS_WIRE, body: unknown): Promise<{ status: number; body: ApplicationJson }> {
     const peer = this.resolve(target);
     const route = this.directPath(peer);
     if (!route) throw new PeerTargetError(503, 'Direct bridge link unavailable');

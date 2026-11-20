@@ -7,6 +7,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { cleanup, PeerConnection } from 'node-datachannel';
 import { LocalApiServer } from './local-api-server.js';
+import { INSTRUCTIONS_LOCAL, INSTRUCTIONS_WIRE } from './instructions.js';
 import { TRANSFER_LOCAL, TRANSFER_WIRE, TRANSFER_REQUEST_TTL_MS } from './folder-transfer-protocol.js';
 import { generateEndpoint } from './security/crypto.js';
 import { accountIdOf, ledgerChallenge, ledgerLastIssuedAt, ledgerRevocations, nextTransition, verifyLedger } from './security/ledger/ledger.js';
@@ -257,7 +258,7 @@ interface Linked { peers: PeerControl; transport: ReturnType<typeof relay>; stud
   studio: BridgeSecurityService; desk: BridgeSecurityService; settle: () => Promise<void> }
 
 /** Studio drives Desk. Desk serves `echo`, plus the link offer endpoint exactly as the local API server does (peer bridges only). */
-async function linked(t: TestContext, w: World, deskChain: Chain = w.both): Promise<Linked> {
+async function linked(t: TestContext, w: World, deskChain: Chain = w.both, api?: LocalApiServer): Promise<Linked> {
   const studio = await bridge(t, w, w.studio, w.both);
   const desk = await bridge(t, w, w.desk, deskChain);
   const connections: FakeConnection[] = [];
@@ -270,7 +271,7 @@ async function linked(t: TestContext, w: World, deskChain: Chain = w.both): Prom
       const offer = (message.application.data as { body: { pairId: string; sdp: string } }).body;
       return { status: 200, body: await deskLinks.accept(peer, offer.pairId, offer.sdp) };
     }
-    return echo(message);
+    return api ? api.dispatchSecure(message) : echo(message);
   };
   const quiet = { log: () => undefined, factory };
   const deskLinks: PeerLinks = new PeerLinks({ ...quiet, bridgeId: desk.bridgeId, endpointId: desk.endpoint.id, peers: () => desk.peerBridges(),
@@ -284,6 +285,36 @@ async function linked(t: TestContext, w: World, deskChain: Chain = w.both): Prom
   const settle = async () => { await peers.linked('Desk').catch(() => false); };
   return { peers, transport, studioLinks, deskLinks, connections, studio, desk, settle };
 }
+
+test('a local instruction request reads the paired bridge file over the direct link', async t => {
+  const home = await mkdtemp(join(tmpdir(), 'ftown-peer-guidance-'));
+  const oldHome = process.env.HOME;
+  process.env.HOME = home;
+  t.after(async () => {
+    if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+    await rm(home, { recursive: true, force: true });
+  });
+  await mkdir(join(home, '.ftown'));
+  await writeFile(join(home, '.ftown', 'global.md'), 'Peer guidance');
+  const w = await world();
+  const remote = new LocalApiServer();
+  const local = new LocalApiServer();
+  const { peers, desk, studio, transport } = await linked(t, w, w.both, remote);
+  for (const [api, security] of [[local, studio], [remote, desk]] as const) {
+    api.setSecurity(security, { protocolVersion: 1, ownerId: w.root.accountId, bridgeId: security.bridgeId,
+      endpoint: security.endpoint, relayUserId: w.root.accountId }, async () => null);
+  }
+  local.setPeerControl(peers);
+  const cli = await generateEndpoint(w.root.accountId, 'local-cli');
+  await studio.policy.provisionLocalEndpoint(cli.endpoint);
+  const principal = await studio.policy.principal(cli.endpoint.id);
+  const ask = () => local.dispatchSecure({ principal, application: { route: { kind: 'http', method: 'POST', path: INSTRUCTIONS_LOCAL },
+    data: { body: { scope: 'global', bridge: 'Desk' } } } } as VerifiedApplication);
+  assert.deepEqual(await ask(), { status: 200, body: { text: 'Peer guidance' } });
+  const signaled = transport.sent;
+  assert.deepEqual(await ask(), { status: 200, body: { text: 'Peer guidance' } });
+  assert.equal(transport.sent, signaled);
+});
 
 test('the first request opens a direct link and later requests bypass the relay', async t => {
   const w = await world();
@@ -538,7 +569,7 @@ test('two paired bridges copy a multi-MiB snapshot over native WebRTC and never 
   assert.equal(toTarget.sent, 2, 'a second transfer reused the direct link');
 });
 
-test('the encrypted relay cannot admit a folder transfer request', async t => {
+test('the encrypted relay cannot admit folder transfer or instruction requests', async t => {
   const w = await world();
   const sender = await bridge(t, w, w.studio, w.both);
   const recipient = await bridge(t, w, w.desk, w.both);
@@ -546,7 +577,7 @@ test('the encrypted relay cannot admit a folder transfer request', async t => {
   const channel = CHANNEL(w);
   const route = { transport: 'cloud' as const, channel, bridgeId: recipient.bridgeId, pairId: null };
   const id = crypto.randomUUID();
-  for (const path of [TRANSFER_WIRE, TRANSFER_LOCAL]) {
+  for (const path of [TRANSFER_WIRE, TRANSFER_LOCAL, INSTRUCTIONS_LOCAL, INSTRUCTIONS_WIRE]) {
     const packet = await sender.sealToPeer(peer, 'application',
       { type: 'application', route: { kind: 'http', method: 'POST', path, requestId: id }, data: {}, mcp: null },
       channel, id, recipient.receiverEpoch, TRANSFER_REQUEST_TTL_MS);

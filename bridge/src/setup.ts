@@ -19,6 +19,7 @@ import { ensureFtownOnPath } from './ensure-ftown-path.js';
 import { readSetupState, writeSetupState, assertSetupReady, acquireSetupLock, assertSetupVersion } from './setup-state.js';
 import { runSetupMigrations } from './setup-migrations.js';
 import { loadAccounts, type HarnessAccount } from './accounts.js';
+import { installInstructions } from './instructions.js';
 import { claudeConfigDir, codexHome } from './config-dirs.js';
 import { assertUpdateReservationAllowed } from './update-handoff.js';
 import {
@@ -44,6 +45,7 @@ export function packageVersion(root = packageRoot()): string {
 }
 
 async function installIntegrations(root: string): Promise<IntegrationResult[]> {
+  installInstructions();
   const notify = installNotifyScript(join(root, 'hooks', 'notify.sh'));
   installPiExtension(join(root, 'pi-extension', 'ftown.js'));
   installClaudeMod(join(root, 'claude-mod'));
@@ -118,6 +120,7 @@ export async function setupAccount(account: HarnessAccount): Promise<Integration
     if (!canonicalNotifyReady()) throw new Error('ftown notify script is not installed; run ftown setup');
     const notify = canonicalNotifyPath();
     const result = await withAccountEnv(account, async () => {
+      installInstructions(homedir(), process.env, account.harness);
       if (account.harness === 'claude') {
         if (!installClaudeHooks(notify)) throw new Error('Claude hook setup failed');
         return { name: 'claude', status: 'installed' } as IntegrationResult;
