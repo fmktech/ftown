@@ -170,6 +170,7 @@ interface UseSessionsResult {
   retrySession: (sessionId: string) => void;
   dismissSessionBlock: (session: Session) => Promise<void>;
   handoffSession: (sessionId: string, options?: { shellType?: string; model?: string; name?: string }) => Promise<Session>;
+  moveSessionToProject: (session: Session, projectName: string) => Promise<void>;
   renameSession: (sessionId: string, name: string) => void;
   setSessionParent: (sessionId: string, parentSessionId: string | null) => void;
   removeSession: (sessionId: string, onlyIfFinished?: boolean, ownerOnline?: boolean) => void;
@@ -724,6 +725,27 @@ export function useSessions(
     }));
   }, [sendCommand, updateSessions]);
 
+  const moveSessionToProject = useCallback(async (session: Session, projectName: string) => {
+    const identity = identityRef.current;
+    const response = await sendCommand({
+      type: "move_session_to_project",
+      requestId: uuidv4(),
+      payload: { sessionId: session.id, bridgeId: session.bridgeId, projectName },
+    });
+    if (!response.success) throw new Error(response.error ?? "Could not move session");
+    if (identityRef.current !== identity) return;
+
+    const updated = acceptSessionRow((response.data as { session?: unknown } | undefined)?.session);
+    if (!updated || updated.id !== session.id || updated.bridgeId !== session.bridgeId || updated.projectName !== projectName) {
+      throw new Error("Bridge returned an invalid project assignment");
+    }
+    const current = sessionsRef.current.find(row => row.id === updated.id && row.bridgeId === updated.bridgeId);
+    if (!current || current.updatedAt > updated.updatedAt) return;
+
+    observationsRef.current.set(updated.id, ++mutationRef.current);
+    updateSessions(prev => prev.map(row => row === current ? mergeSessionSnapshot(row, updated) : row));
+  }, [sendCommand, updateSessions]);
+
   const renameSession = useCallback(
     (sessionId: string, name: string) => {
       if (!userId) return;
@@ -777,6 +799,7 @@ export function useSessions(
     retrySession,
     dismissSessionBlock,
     handoffSession,
+    moveSessionToProject,
     renameSession,
     setSessionParent,
     removeSession,
