@@ -1,5 +1,7 @@
 "use client";
 
+import { BridgeBadge } from "./BridgeBadge";
+import { useBridgeIdentities } from "@/hooks/useBridgeIdentities";
 import { BridgesDialog } from "./BridgesDialog";
 import { validResources, type HostResources } from "@/lib/host-resources";
 import { useState, useCallback, useMemo, useEffect, useRef, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
@@ -324,6 +326,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
     for (const state of securityRuntime?.snapshot() ?? []) if (!known.has(state.bridgeId)) known.set(state.bridgeId, { bridgeId: state.bridgeId, label: state.bridgeId, security: state });
     return [...known.values()];
   }, [bridges, securityRuntime, securityGeneration]);
+  const bridgeIdentities = useBridgeIdentities(accountId ?? userId, securityBridges, rawSessions);
   const currentComputerIds = useMemo(() => deriveCurrentComputerIds({ localMode, connectionStatus,
     localBridgeId: client?.sessionSnapshotBridgeId, sessions: rawSessions, transport, bridges: securityBridges }),
   [localMode, connectionStatus, client, rawSessions, transport, securityBridges, localityGeneration]);
@@ -1328,10 +1331,11 @@ PY`;
           </div>
 
           {!isDesktop && mobileTab === "sessions" && selectedSession && <section aria-label="Selected session header" className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-[var(--border-subtle)] px-3 py-1">
-            <span className="min-w-0 flex-1 truncate text-xs">{selectedSession.name || selectedSession.prompt?.slice(0, 48) || "Selected session"}</span>{sessionHeaderActions}
+            <span className="min-w-0 flex-1 truncate text-xs">{selectedSession.name || selectedSession.prompt?.slice(0, 48) || "Selected session"}</span><BridgeBadge full bridge={bridgeIdentities.get(selectedSession.bridgeId)} />{sessionHeaderActions}
           </section>}
           <div className="flex-1 overflow-y-auto">
             <SessionList
+              bridgeIdentities={bridgeIdentities}
               projectBridges={projectBridges}
               projectComputers={securityBridges.filter(b => b.security.status !== "revoked").map(b => ({ id: b.bridgeId, label: b.label || b.bridgeId }))}
               onProjectBridgesChange={(project, ids) => setPlacements(previous => {
@@ -1395,6 +1399,7 @@ PY`;
             sessionId={selectedSessionId}
             bridgeId={selectedSession?.bridgeId ?? null}
             isRunning={selectedSession?.status === "running"}
+            bridgeIdentity={selectedSession ? bridgeIdentities.get(selectedSession.bridgeId) : undefined}
             headerActions={sessionHeaderActions}
             sessionName={selectedSession?.name ?? selectedSession?.prompt?.slice(0, 48) ?? null}
             pullRequestUrl={selectedSession?.pullRequestUrl}
@@ -1414,7 +1419,7 @@ PY`;
       </div>
 
       {showBridges && <BridgesDialog computers={securityBridges.filter(b => b.security.status !== "revoked").map(b => ({
-        id: b.bridgeId, label: b.label || b.bridgeId, connection: b.security.status,
+        id: b.bridgeId, number: bridgeIdentities.get(b.bridgeId)?.number, label: bridgeIdentities.get(b.bridgeId)?.name || b.label || b.bridgeId, connection: b.security.status,
         online: connectionStatus === "connected" && activeBridgeIds.has(b.bridgeId),
         ready: connectionStatus === "connected" && readyBridges.some(bridge => bridge.bridgeId === b.bridgeId),
       }))} resources={resourcesByBridge} selected={preferredBridge} close={() => setShowBridges(false)}

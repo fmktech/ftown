@@ -1,5 +1,6 @@
 "use client";
 
+import { BridgeBadge, type BridgeIdentity } from "./BridgeBadge";
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, type ReactElement } from "react";
 import { createPortal } from "react-dom";
 import { Session } from "@/types";
@@ -21,6 +22,7 @@ export function SessionAccountBadge({ account }: { account?: string }) {
 }
 
 interface SessionListProps {
+  bridgeIdentities?: ReadonlyMap<string, BridgeIdentity>;
   bridges?: import("@/hooks/useBridges").BridgeInfo[];
   sessions: Session[];
   selectedSessionId: string | null;
@@ -366,7 +368,7 @@ function SessionContextMenu({
 }
 
 export function SessionList({
-  sessions, onHiddenProjectsChange, onAddSession, projectBridges, projectComputers = [], onProjectBridgesChange, projectStorageKey = "ftown:projects",
+  sessions, bridgeIdentities, onHiddenProjectsChange, onAddSession, projectBridges, projectComputers = [], onProjectBridgesChange, projectStorageKey = "ftown:projects",
   selectedSessionId,
   onSelectSession,
   onReviewPullRequest,
@@ -922,6 +924,7 @@ export function SessionList({
               {displayName}
             </span>
           )}
+          <BridgeBadge bridge={bridgeIdentities?.get(session.bridgeId)} />
           <SessionAccountBadge account={session.account} />
           </div>
           <div style={{ gridColumn: 3, display: "flex", minWidth: 0, alignItems: "center" }}>
