@@ -1141,6 +1141,9 @@ export function SessionList({
   const computers = new Map(sessions.map(session => [session.bridgeId, session.bridgeId]));
   for (const id of bridgeSecurityStates?.keys() ?? []) computers.set(id, id);
   for (const bridge of bridges) computers.set(bridge.bridgeId, bridge.hostname || bridge.bridgeId);
+  for (const [id, status] of bridgeSecurityStates ?? []) {
+    if (status === "revoked") computers.delete(id);
+  }
   function toggleProject(project: string) {
     setHiddenProjects(previous => {
       const next = new Set(previous);
