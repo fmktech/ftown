@@ -341,11 +341,8 @@ export class SessionController {
     let projectName: string | undefined;
     if (input.projectName !== undefined) {
       projectName = typeof input.projectName === 'string' ? input.projectName.trim() : '';
-      if (!projectName || projectName.length > 256 || input.parent) {
+      if ((input.projectName !== null && !projectName) || projectName.length > 256 || (input.parent && input.parent.value !== null)) {
         return { ok: false, code: 'invalid', message: 'Invalid project move' };
-      }
-      if (session.parentSessionId || (session.projectName && session.projectName !== projectName)) {
-        return { ok: false, code: 'conflict', message: 'Only unassigned root sessions can be moved to a project' };
       }
     }
 
@@ -401,6 +398,7 @@ export class SessionController {
     // implementations return shared references rather than detached snapshots.
     if (input.name !== undefined) session.name = input.name;
     if (projectName) session.projectName = projectName;
+    else if (input.projectName === null) delete session.projectName;
     if (input.parent) {
       if (parentProject) session.projectName = parentProject;
       session.parentSessionId = parentSessionId;

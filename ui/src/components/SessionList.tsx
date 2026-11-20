@@ -1,5 +1,6 @@
 "use client";
 
+import { ProjectSettingsDialog } from "./ProjectSettingsDialog";
 import { BridgeBadge, type BridgeIdentity } from "./BridgeBadge";
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, type ReactElement } from "react";
 import { createPortal } from "react-dom";
@@ -28,7 +29,7 @@ interface SessionListProps {
   selectedSessionId: string | null;
   onSelectSession: (sessionId: string) => void;
   onReviewPullRequest?: (sessionId: string) => void;
-  onMoveSessionToProject?: (session: Session, project: string) => Promise<void>;
+  onMoveSessionToProject?: (session: Session, project: string, detach?: boolean) => Promise<void>;
   onRenameSession?: (sessionId: string, name: string) => void;
   onStopSession?: (sessionId: string) => void;
   onRemoveSession?: (sessionId: string, onlyIfFinished?: boolean) => void;
@@ -307,7 +308,7 @@ function ProjectMenu({ anchor, onClose, onSettings, onHide, moveUp, moveDown }: 
       const next = { ArrowDown: index + 1, ArrowUp: index - 1, Home: 0, End: items.length - 1 }[event.key];
       if (next !== undefined) { event.preventDefault(); items[(next + items.length) % items.length].focus(); }
     }}>
-    {onSettings && <ContextMenuButton largeOnMobile label="Bridge settings" onClick={() => act(onSettings)} />}
+    {onSettings && <ContextMenuButton largeOnMobile label="Project settings" onClick={() => act(onSettings)} />}
     <ContextMenuButton largeOnMobile label="Move up" disabled={!moveUp} onClick={() => act(moveUp)} />
     <ContextMenuButton largeOnMobile label="Move down" disabled={!moveDown} onClick={() => act(moveDown)} />
     <ContextMenuButton largeOnMobile label="Hide project" onClick={() => act(onHide)} />
@@ -1134,17 +1135,58 @@ export function SessionList({
     projects.set(project, roots);
   }
   for (const project of savedProjects) if (!projects.has(project)) projects.set(project, []);
+  function treeMembers(node: SessionTreeNode): Session[] {
+    return [...node.children.flatMap(treeMembers), node.session];
+  }
+  const locations = new Map<string, { project: string; node: SessionTreeNode }>();
+  function indexTree(node: SessionTreeNode, project: string) {
+    locations.set(node.session.id, { project, node });
+    for (const child of node.children) indexTree(child, project);
+  }
+  for (const [project, roots] of projects) for (const root of roots) indexTree(root, project);
+
   function canMoveToProject(session: Session, project: string): boolean {
-    return Boolean(onMoveSessionToProject && !session.parentSessionId && !session.projectName
-      && project && projects.get(project)?.length === 0 && !hiddenProjects.has(project)
-      && (projectBridges?.get(project)?.includes(session.bridgeId) ?? true));
+    const source = locations.get(session.id);
+    const allowed = projectBridges?.get(project);
+    return Boolean(source && onMoveSessionToProject && project && project !== source.project
+      && !hiddenProjects.has(project) && (!allowed || treeMembers(source.node).every(member => allowed.includes(member.bridgeId))));
+  }
+
+  async function transferTree(root: SessionTreeNode, destination: string, detach = false) {
+    if (!onMoveSessionToProject) throw new Error("Session moves are unavailable.");
+    for (const member of treeMembers(root)) {
+      if (detach && member === root.session) await onMoveSessionToProject(member, destination, true);
+      else if ((member.projectName || "") !== destination) await onMoveSessionToProject(member, destination);
+    }
   }
 
   function moveToProject(session: Session, project: string) {
-    if (!onMoveSessionToProject || !canMoveToProject(session, project)) return;
+    const source = locations.get(session.id);
+    if (!source || !canMoveToProject(session, project)) return;
+    if (source.project) setSavedProjects(previous => new Set(previous).add(source.project));
     setMoveError(null);
-    void onMoveSessionToProject(session, project)
+    void transferTree(source.node, project, Boolean(session.parentSessionId))
       .catch(error => setMoveError(error instanceof Error ? error.message : "Could not move session"));
+  }
+
+  const pendingRename = useRef<{ from: string; to: string } | null>(null);
+  async function changeProject(from: string, to: string | null) {
+    if (to !== null && (!to || (projects.has(to) && !(pendingRename.current?.from === from && pendingRename.current.to === to)))) {
+      throw new Error("Choose an unused project name.");
+    }
+    pendingRename.current = to ? { from, to } : null;
+    for (const root of projects.get(from) ?? []) await transferTree(root, to ?? "");
+    function replace(previous: Set<string>) {
+      return new Set([...previous].flatMap(name => name !== from ? [name] : to ? [to] : []));
+    }
+    setSavedProjects(previous => replace(new Set(previous).add(from)));
+    setProjectOrder(replace(new Set(orderedProjects)));
+    setHiddenProjects(replace);
+    setCollapsedProjects(replace);
+    const policy = projectBridges?.get(from);
+    if (to && policy) onProjectBridgesChange?.(to, policy);
+    onProjectBridgesChange?.(from, undefined);
+    pendingRename.current = null;
   }
 
   const orderedProjects = [...new Set([...projectOrder, ...projects.keys()])];
@@ -1165,6 +1207,10 @@ export function SessionList({
   }
   return (
     <div className="flex flex-col">
+      {editingProject && <ProjectSettingsDialog key={editingProject} project={editingProject}
+        computers={projectComputers} allowed={projectBridges?.get(editingProject)}
+        changeBridges={ids => onProjectBridgesChange?.(editingProject, ids)}
+        changeName={to => changeProject(editingProject, to)} close={() => setEditingProject(null)} />}
       {moveError && <p role="alert" className="px-2 py-1 text-xs text-[var(--status-error)]">{moveError}</p>}
       {visibleProjects.map((project, index) => {
         const roots = projects.get(project)!;
@@ -1217,17 +1263,6 @@ export function SessionList({
                 moveDown={index + 1 < visibleProjects.length ? () => reorderProject(project, visibleProjects[index + 1]) : undefined} />}
             </div>
           </div>}
-          {!collapsed && editingProject === project && onProjectBridgesChange && <fieldset className="mx-2 space-y-1 rounded border border-[var(--border-muted)] p-2 text-xs">
-            <legend>Allowed bridges</legend>
-            <label className="flex items-center gap-2"><input type="checkbox" checked={!projectBridges?.has(project)}
-              onChange={e => onProjectBridgesChange(project, e.target.checked ? undefined : projectComputers.map(b => b.id))} />All bridges, including future bridges</label>
-            {projectComputers.map(bridge => <label key={bridge.id} className="flex items-center gap-2 break-all">
-              <input type="checkbox" checked={projectBridges?.get(project)?.includes(bridge.id) ?? true} onChange={e => {
-                const ids = new Set(projectBridges?.get(project) ?? projectComputers.map(b => b.id));
-                if (e.target.checked) ids.add(bridge.id); else ids.delete(bridge.id);
-                onProjectBridgesChange(project, [...ids]);
-              }} />{bridge.label}</label>)}
-          </fieldset>}
           {(collapsed || !collapsedProjects.has(project)) && flattenSessionTree(roots, collapsedSessions).map(row => renderSessionRow(row.session, {
             depth: row.depth, hasChildren: row.hasChildren, descendantCount: row.descendantCount,
             isCollapsed: collapsedSessions.has(row.session.id), onToggleCollapse: () => toggleSessionCollapsed(row.session.id),

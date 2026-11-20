@@ -702,6 +702,8 @@ ftown instructions show bridge --bridge studio
 
 ### Project workspaces and placement
 
-Use **Create project** at the bottom of the dashboard sidebar to keep an empty project, then **+** beside its name to launch a session. The gear beside a project lets you choose which bridges the dashboard offers for new sessions. **All bridges** includes newly paired computers. If every allowed bridge is offline, creation waits until you choose an available bridge or change the project settings. The browser remembers empty projects and placement preferences per account.
+Use **Create project** at the bottom of the dashboard sidebar to keep an empty project, then **+** beside its name to launch a session. Open **… → Project settings** to rename or delete a project and choose which bridges the dashboard offers for new sessions. **All bridges** includes newly paired computers. If every allowed bridge is offline, creation waits until you choose an available bridge or change the project settings. The browser remembers empty projects and placement preferences per account.
 
 When the working directory is blank, the destination bridge creates and reuses a directory under `~/projects`. Set `FTOWN_PROJECT_DIR` in the bridge process environment to use another root, such as `/data/projects`. Simple names like `demo` map directly to `~/projects/demo`. Labels that require normalization get a readable slug and a short hash so distinct labels can use separate directories. An explicit working directory or Git worktree takes precedence.
+
+Move a session to another project from its actions menu or by dropping it on the destination project header. Moving a parent moves its subtree. Moving a child separately makes it a root in the destination. Deleting a project returns its sessions to **No project**. These operations preserve working directories and files.

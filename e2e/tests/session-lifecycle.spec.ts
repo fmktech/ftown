@@ -196,6 +196,23 @@ test.describe("session lifecycle", () => {
       }).toBe(project);
       await page.reload();
       await expect(target.getByRole("button", { name: new RegExp(name) })).toBeVisible();
+      await target.getByRole("button", { name: `More actions for ${project}` }).click();
+      await page.getByRole("menuitem", { name: "Project settings" }).click();
+      const settings = page.getByRole("dialog", { name: "Project settings" });
+      const renamed = project + " renamed";
+      await settings.getByLabel("Project name").fill(renamed);
+      await settings.getByRole("button", { name: "Rename project" }).click();
+      await expect(settings).toBeHidden();
+      const renamedProject = page.getByRole("region", { name: renamed, exact: true });
+      await expect(renamedProject.getByRole("button", { name: new RegExp(name) })).toBeVisible();
+      await renamedProject.getByRole("button", { name: `More actions for ${renamed}` }).click();
+      await page.getByRole("menuitem", { name: "Project settings" }).click();
+      await settings.getByRole("button", { name: "Delete project" }).click();
+      await settings.getByRole("button", { name: "Confirm delete" }).click();
+      await expect(settings).toBeHidden();
+      await page.reload();
+      await expect(source).toBeVisible();
+      await expect(renamedProject).toHaveCount(0);
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

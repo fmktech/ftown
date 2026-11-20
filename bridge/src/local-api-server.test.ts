@@ -967,11 +967,15 @@ describe('LocalApiServer explicit session attention and PR metadata', () => {
     const reloaded = new SessionStore(join(f.store.sessionDir(f.sample.id), '../..'));
     assert.equal((await reloaded.loadSession(f.sample.id))?.projectName, 'Launch');
 
-    for (const projectName of ['Another project', ' ', null, 'X'.repeat(257)]) {
+    for (const projectName of [' ', 12, 'X'.repeat(257)]) {
       assert.equal((await api(f.port, f.token, 'PATCH', path, { projectName })).status, 400);
     }
     assert.equal((await reloaded.loadSession(f.sample.id))?.projectName, 'Launch');
     assert.equal(f.published.length, 1);
+    assert.equal((await api(f.port, f.token, 'PATCH', path, { projectName: 'Another project' })).status, 200);
+    assert.equal((await reloaded.loadSession(f.sample.id))?.projectName, 'Another project');
+    assert.equal((await api(f.port, f.token, 'PATCH', path, { projectName: null })).status, 200);
+    assert.equal((await reloaded.loadSession(f.sample.id))?.projectName, undefined);
   });
 
   it('attaches, replaces, reloads and clears PR metadata through the existing PATCH path', async (t) => {
