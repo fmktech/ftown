@@ -234,7 +234,7 @@ test.describe("session lifecycle", () => {
 
       await parentBRow.getByRole("button", { name: "Expand children" }).click();
       await expect(childRow).toBeVisible();
-      const projectHeader = page.getByRole("region", { name: "E2E", exact: true }).getByText("E2E", { exact: true });
+      const projectHeader = page.getByRole("region", { name: "E2E", exact: true }).getByRole("button", { name: "E2E", exact: true });
       await childRow.dragTo(projectHeader);
       await expect.poll(() => parentOf(child), { timeout: 20_000 }).toBeNull();
     } finally {

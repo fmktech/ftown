@@ -1,5 +1,6 @@
 "use client";
 
+import { BridgesDialog } from "./BridgesDialog";
 import { validResources, type HostResources } from "@/lib/host-resources";
 import { useState, useCallback, useMemo, useEffect, useRef, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
 import type { MessageClient } from "@/lib/message-client";
@@ -140,6 +141,8 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
     const link = parseAttentionDeepLink(window.location.search);
     return link.attentionId ? { attentionId: link.attentionId, sessionHint: link.sessionId } : null;
   });
+  const [showBridges, setShowBridges] = useState(false);
+  const [preferredBridge, setPreferredBridge] = usePersistentState<string | null>("ftown:preferredBridge", null);
   const [showNewSession, setShowNewSession] = useState(false);
   const [sessionDefaults, setSessionDefaults] = useState<SessionDefaults | undefined>(undefined);
   const [showToken, setShowToken] = useState(false);
@@ -282,11 +285,12 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   useEffect(() => securityRuntime?.onChange(() => setSecurityGeneration(value => value + 1)), [securityRuntime]);
   const readyBridges = useMemo(() => bridges.filter(bridge => securityRuntime?.state(bridge.bridgeId).status === "ready"), [bridges, securityRuntime, securityGeneration]);
   const [resourcesByBridge, setResourcesByBridge] = useState(new Map<string, HostResources>());
+  const preferredDefaults = useMemo(() => preferredBridge && readyBridges.some(b => b.bridgeId === preferredBridge) ? { bridgeId: preferredBridge } : undefined, [preferredBridge, readyBridges]);
   const statsCommand = useRef(rpc.sendCommand);
   statsCommand.current = rpc.sendCommand;
   const statsTargets = JSON.stringify(readyBridges.map(bridge => bridge.bridgeId));
   useEffect(() => {
-    if (!showNewSession) return;
+    if (!showNewSession && !showBridges) return;
     setResourcesByBridge(new Map());
     let active = true;
     const targets: string[] = JSON.parse(statsTargets);
@@ -307,10 +311,10 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
     refresh();
     const timer = window.setInterval(refresh, 15_000);
     return () => { active = false; window.clearInterval(timer); };
-  }, [showNewSession, statsTargets, client, userId]);
+  }, [showNewSession, showBridges, statsTargets, client, userId]);
   const updateIds = connectionStatus === "connected" ? readyBridges.map(bridge => bridge.bridgeId) : [];
   const updates = useBridgeUpdates(rpc.sendCommand, updateIds);
-  const updateViews = new Map(bridges.map(bridge => [bridge.bridgeId, updates.get(bridge.bridgeId)]));
+
   const hasBridges = readyBridges.length > 0;
   const securityBridges = useMemo(() => {
     const known = new Map(bridges.map(bridge => [bridge.bridgeId, { bridgeId: bridge.bridgeId, label: bridge.hostname,
@@ -954,8 +958,8 @@ PY`;
 
         <div className="ml-auto flex min-w-0 items-center gap-1.5 md:gap-2">
           <div role="group" aria-label="Connection overview" className="flex shrink-0 items-center gap-1.5 text-[var(--text-muted)]">
-            <HeaderTooltip label={`Computers: ${bridges.length} connected`} focusable className="flex items-center">
-              <span role="img" aria-label={`${bridges.length} bridges; ${readyBridges.length} encrypted connections ready`} className="flex items-center gap-1 text-[11px]"><NavigationIcon kind="bridge" /><span>{bridges.length}</span></span>
+            <HeaderTooltip label={`Computers: ${bridges.length} connected`} className="flex items-center">
+              <button type="button" className="btn-ghost min-h-11 min-w-11" aria-label="Computers" aria-haspopup="dialog" onClick={() => setShowBridges(true)}><span role="img" aria-label={`${bridges.length} bridges; ${readyBridges.length} encrypted connections ready`} className="flex items-center gap-1 text-[11px]"><NavigationIcon kind="bridge" /><span>{bridges.length}</span></span></button>
             </HeaderTooltip>
             <HeaderTooltip label={selectedTransportMode === "local" ? "Local: this computer" : localMode && connectionStatus === "connected" ? "Local: controller connected" : "Local: not in use"} focusable className={`${selectedTransportMode === "local" || localMode ? "flex" : "hidden md:flex"} items-center`}>
               <span role="img" aria-label={selectedTransportMode === "local" ? "Selected terminal: Local" : localMode && connectionStatus === "connected" ? "Local controller connected" : "No selected Local terminal"} style={{ color: selectedTransportMode === "local" || localMode && connectionStatus === "connected" ? "var(--status-running)" : "var(--text-faint)" }}><NavigationIcon kind="local" /></span>
@@ -1328,7 +1332,6 @@ PY`;
             <SessionList
               onHiddenProjectsChange={setHiddenProjects}
               sessions={sessions}
-              bridges={bridges}
               selectedSessionId={selectedSessionId}
               onSelectSession={handleSelectSession}
               onReviewPullRequest={handleReviewPullRequest}
@@ -1340,12 +1343,6 @@ PY`;
               onReorderSessions={handleReorderSessions}
               sessionActivity={sessionActivity}
               collapsed={isDesktop && sidebarCollapsed}
-              onCreateSession={handleCreateSessionOnBridge}
-              onOpenSecurity={openSecurity}
-              bridgeSecurityStates={bridgeSecurityStates}
-              bridgeUpdates={updateViews}
-              onOpenUpdates={setUpdateBridgeId}
-              onOpenModelRouting={setModelRoutingBridgeId}
               onHandoff={handleHandoff}
               onDismissBlock={dismissSessionBlock}
             />
@@ -1402,6 +1399,19 @@ PY`;
 
       </div>
 
+      {showBridges && <BridgesDialog computers={securityBridges.filter(b => b.security.status !== "revoked").map(b => ({
+        id: b.bridgeId, label: b.label || b.bridgeId, connection: b.security.status,
+        online: connectionStatus === "connected" && activeBridgeIds.has(b.bridgeId),
+        ready: connectionStatus === "connected" && readyBridges.some(bridge => bridge.bridgeId === b.bridgeId),
+      }))} resources={resourcesByBridge} selected={preferredBridge} close={() => setShowBridges(false)}
+        onSelect={id => {
+          setPreferredBridge(id);
+          setShowBridges(false);
+          if (selectedSession?.bridgeId !== id) handleSelectSession(sessions.find(session => session.bridgeId === id)?.id ?? null);
+        }}
+        create={id => { setShowBridges(false); handleCreateSessionOnBridge(id); }}
+        updates={setUpdateBridgeId} security={id => { setShowBridges(false); openSecurity(id); }}
+        routing={setModelRoutingBridgeId} />}
       <SecurityPanel open={showSecurity} onClose={() => setShowSecurity(false)} bridges={securityBridges}
         currentEndpointId={securityRuntime?.identity.endpoint.id ?? null} currentComputerIds={currentComputerIds} execute={executeSecurity}
         accountId={localMode ? null : accountId}
@@ -1417,7 +1427,7 @@ PY`;
         bridges={readyBridges}
         resourcesByBridge={resourcesByBridge}
         sessions={sessions}
-        defaults={sessionDefaults}
+        defaults={sessionDefaults ?? preferredDefaults}
         sendCommand={rpc.sendCommand}
       />
       {/* Portals to document.body, but React events still bubble through this tree: keep it a direct child of the root, which has no handlers. */}

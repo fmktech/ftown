@@ -13,12 +13,13 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
     ]);
     await waitForBridgeOnline(page);
     const bridgeId = readBridgePointer().bridgeId;
+    await page.getByRole("button", { name: "Computers", exact: true }).click();
     const row = page.locator(`[data-bridge-row="${bridgeId}"]`);
     await expect(row).toBeVisible();
-    const actions = row.getByRole("button", { name: /^Actions for / });
+    const actions = row.getByRole("button", { name: "Updates…" });
     const bounds = await actions.boundingBox();
     expect(bounds && bounds.width >= 44 && bounds.height >= 44).toBeTruthy();
-    await actions.click(); await page.getByRole("menuitem", { name: "Updates…" }).click();
+    await actions.click();
     const dialog = page.getByRole("dialog", { name: "Bridge updates" });
     await expect(dialog).toBeVisible();
     const installedRow = dialog.locator("dl > div").filter({ has: page.getByText("Installed", { exact: true }) });

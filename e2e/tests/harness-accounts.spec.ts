@@ -39,14 +39,16 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
       await expect.poll(() => tryReadBridgePointer(bridge!.home)?.bridgeId, { timeout: 30_000 }).toBe(bridgeId);
       await page.goto("/dashboard");
       if (viewport.name === "mobile") await page.getByRole("tab", { name: "Workspace", exact: true }).click();
+      await page.getByRole("button", { name: "Computers", exact: true }).click();
       await expect(page.locator(`[data-bridge-row="${bridgeId}"]`).first()).toBeVisible({ timeout: 30_000 });
+      await page.locator(`[data-bridge-row="${bridgeId}"]`).getByRole("button", { name: "Use computer" }).click();
       const env = { PATH: `${fakeBin}${delimiter}${process.env.PATH ?? "/usr/bin:/bin"}`, ACCOUNT_TEST_RECEIPT: receipt };
       await page.evaluate(vars => localStorage.setItem("ftown:envVars", JSON.stringify(vars)), env);
       await page.getByRole("button", { name: "Create a new session", exact: true }).click();
       const modal = page.getByRole("dialog", { name: "New Session", exact: true });
       await modal.getByLabel("Project", { exact: true }).fill("E2E");
       await modal.getByLabel("Shell Type", { exact: true }).selectOption("codex");
-      await modal.locator("#ns-bridge").selectOption(bridgeId!);
+      await expect(modal.locator("#ns-bridge")).toHaveValue(bridgeId!);
       const picker = modal.getByLabel("Account", { exact: true });
       await expect(picker).toBeEnabled();
       await expect(picker.locator("option")).toHaveText(["Default account", "Coding subscription (coding)"]);

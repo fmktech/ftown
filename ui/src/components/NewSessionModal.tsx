@@ -1,5 +1,6 @@
 "use client";
 
+import { formatResources } from "@/lib/host-resources";
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { ShellType, type AccountHarness, type HarnessAccountSummary, type Session } from "@/types";
 import { BridgeInfo } from "@/hooks/useBridges";
@@ -343,14 +344,6 @@ function ProviderTokenHint({ provider, envVar, flavor }: { provider: string; env
       </div>
     </div>
   );
-}
-
-function formatResources(sample?: import("@/lib/host-resources").HostResources): string {
-  if (!sample) return "";
-  const gib = (bytes: number) => (bytes / 2 ** 30).toFixed(1);
-  return ` · CPU ${sample.cpuPercent ?? "—"}${sample.cpuPercent === null ? "" : "%"} · RAM ${gib(sample.freeRamBytes)}/${gib(sample.totalRamBytes)} GiB free` +
-    (sample.freeDiskBytes === null ? "" : ` · disk ${gib(sample.freeDiskBytes)} GiB free`) +
-    ` · ${new Date(sample.sampledAt).toLocaleTimeString()}`;
 }
 
 export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, resourcesByBridge, defaults, sendCommand, sessions = EMPTY_SESSIONS }: NewSessionModalProps) {
@@ -996,7 +989,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, resourcesB
               >
                 {bridges.map((b) => (
                   <option key={b.bridgeId} value={b.bridgeId}>
-                    {b.bridgeId} ({b.hostname}){formatResources(resourcesByBridge?.get(b.bridgeId))}
+                    {b.bridgeId} ({b.hostname}){resourcesByBridge?.has(b.bridgeId) && " · " + formatResources(resourcesByBridge.get(b.bridgeId))}
                   </option>
                 ))}
               </select>

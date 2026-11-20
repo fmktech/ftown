@@ -67,7 +67,9 @@ test("an unpaired computer prints a private link + code; typing the code and one
 
     // The computer comes online for the account's browsers.
     await page.goto("/dashboard");
+    await page.getByRole("button", { name: "Computers", exact: true }).click();
     await expect(page.locator(`[data-bridge-row="${bridgeId}"]`).first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole("button", { name: "Close bridges" }).click();
   } catch (error) {
     if (bridge) await info.attach("pairing-bridge.log", { body: bridge.output(), contentType: "text/plain" });
     throw error;

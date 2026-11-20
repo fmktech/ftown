@@ -150,15 +150,21 @@ test("capture real isolated workspace, phone and access panel", async ({ browser
     await desktop.goto("/dashboard");
     await expect.poll(() => bridge!.bridgeIdFile(), { timeout: 60_000 }).not.toBeNull();
     const bridgeId = bridge.bridgeIdFile()!;
+    await desktop.getByRole("button", { name: "Computers", exact: true }).click();
     await expect(desktop.locator(`[data-bridge-row="${bridgeId}"]`)).toContainText("demo-workstation");
+    await desktop.getByRole("button", { name: "Close bridges" }).click();
 
     const phoneContext = await browser.newContext({ baseURL: origin, viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, hasTouch: true, isMobile: true });
     contexts.push(phoneContext);
     const phone = await phoneContext.newPage();
     await login(phone);
+    await phone.getByRole("button", { name: "Computers", exact: true }).click();
     await expect(phone.locator(`[data-bridge-row="${bridgeId}"]`)).toBeVisible({ timeout: 60_000 });
+    await phone.getByRole("button", { name: "Close bridges" }).click();
     await desktop.goto("/dashboard");
+    await desktop.getByRole("button", { name: "Computers", exact: true }).click();
     await expect(desktop.locator(`[data-bridge-row="${bridgeId}"]`)).toBeVisible({ timeout: 45_000 });
+    await desktop.getByRole("button", { name: "Close bridges" }).click();
 
     await prepareDemo();
     demoOwned = true;

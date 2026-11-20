@@ -24,7 +24,7 @@ function renderList(sessions: Session[]) {
   return render(
     <SessionList
       sessions={sessions}
-      bridges={[{ bridgeId: "bridge", clientId: "client", hostname: "workstation", connectedAt: stamp }]}
+
       selectedSessionId={null}
       onSelectSession={vi.fn()}
     />,

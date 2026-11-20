@@ -107,7 +107,9 @@ test("removing a computer in Security: the bridge re-execs as a new identity wit
 
     // (d) The browser no longer lists it as a computer of the account.
     await page.getByRole("button", { name: "Close security", exact: true }).click();
+    await page.getByRole("button", { name: "Computers", exact: true }).click();
     await expect(page.locator(`[data-bridge-row="${bridgeId}"]`)).toHaveCount(0, { timeout: 60_000 });
+    await page.getByRole("button", { name: "Close bridges" }).click();
   } catch (error) {
     if (bridge) await info.attach("removed-bridge.log", { body: bridge.output(), contentType: "text/plain" });
     throw error;
