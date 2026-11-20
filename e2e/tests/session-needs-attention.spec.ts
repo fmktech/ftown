@@ -21,7 +21,7 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
       const closeInbox = async () => inbox.getByRole("button", { name: "Back to workspace", exact: true }).click();
       try {
         for (const name of [firstName, secondName, idleName]) {
-          const response = await bridgeApiFetch("POST", "/api/sessions", { body: { projectName: "E2E", shellType: "shell", name } }); expect(response.status, JSON.stringify(response.body)).toBe(201);
+          const response = await bridgeApiFetch("POST", "/api/sessions", { body: { projectName: name === secondName ? secondName : "E2E", shellType: "shell", name } }); expect(response.status, JSON.stringify(response.body)).toBe(201);
           const id = (response.body as { session: { id: string } }).session.id; expect(id).toBeTruthy(); ids.push(id);
         }
         const [first, second, idle] = ids;
@@ -43,11 +43,11 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
         await page.goto("about:blank"); await postHook(first, "UserPromptSubmit"); await page.goto("/dashboard"); await waitForBridgeOnline(page); await workspace();
         // C1: a prompt never auto-resolves explicit items, so both stay waiting.
         await expect(page.getByRole("button", { name: "Inbox, 2 waiting" })).toBeVisible();
-        await originalRow(page, secondName).getByRole("button", { name: "Session actions", exact: true }).click();
-        await page.getByRole("menu", { name: "Session actions" }).getByRole("menuitem", { name: "Hide", exact: true }).click();
+        await page.getByRole("button", { name: `Hide project ${secondName}`, exact: true }).click();
+        await expect(originalRow(page, secondName)).toHaveCount(0);
         await expect(page.getByRole("button", { name: "Inbox, 1 waiting" })).toBeVisible();
-        await page.getByRole("button", { name: /Hidden \(1\)/ }).click(); await page.locator("#dashboard-sidebar").getByRole("button", { name: new RegExp(secondName) }).click({ button: "right" });
-        await page.getByRole("menu", { name: "Session actions" }).getByRole("menuitem", { name: "Unhide", exact: true }).click();
+        await page.getByText("Hidden projects", { exact: true }).click();
+        await page.getByRole("button", { name: `Show ${secondName}`, exact: true }).click();
         await expect(page.getByRole("button", { name: "Inbox, 2 waiting" })).toBeVisible(); await postHook(second, "UserPromptSubmit");
         await expect(page.getByRole("button", { name: "Inbox, 2 waiting" })).toBeVisible(); await page.reload(); await waitForBridgeOnline(page); await workspace();
         await expect(originalRow(page, firstName)).toBeVisible(); await expect(originalRow(page, secondName)).toBeVisible(); await expect(page.getByRole("button", { name: "Inbox, 2 waiting" })).toBeVisible();
