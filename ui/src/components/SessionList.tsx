@@ -32,6 +32,11 @@ interface SessionListProps {
   onCloneSession?: (session: Session) => void;
   onSetSessionParent?: (sessionId: string, parentSessionId: string | null) => void;
   onReorderSessions?: (orderedIds: string[]) => void;
+  projectBridges?: ReadonlyMap<string, string[]>;
+  projectComputers?: Array<{ id: string; label: string }>;
+  onProjectBridgesChange?: (project: string, bridges: string[] | undefined) => void;
+  projectStorageKey?: string;
+  onAddSession?: (project: string) => void;
   onHiddenProjectsChange?: (projects: Set<string>) => void;
   sessionActivity?: Map<string, SessionActivity>;
   collapsed?: boolean;
@@ -361,7 +366,7 @@ function SessionContextMenu({
 }
 
 export function SessionList({
-  sessions, onHiddenProjectsChange,
+  sessions, onHiddenProjectsChange, onAddSession, projectBridges, projectComputers = [], onProjectBridgesChange, projectStorageKey = "ftown:projects",
   selectedSessionId,
   onSelectSession,
   onReviewPullRequest,
@@ -382,6 +387,9 @@ export function SessionList({
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [dragOverKey, setDragOverKey] = useState<string | null>(null);
   const [dragOverZone, setDragOverZone] = useState<SessionDropZone | null>(null);
+  const [savedProjects, setSavedProjects] = usePersistentState<Set<string>>(projectStorageKey, EMPTY_ID_SET, stringSetCodec);
+  const [editingProject, setEditingProject] = useState<string | null>(null);
+  const [newProject, setNewProject] = useState<string | null>(null);
   const [hiddenProjects, setHiddenProjects] = usePersistentState<Set<string>>("ftown:hiddenProjects", EMPTY_ID_SET, stringSetCodec);
   useEffect(() => { onHiddenProjectsChange?.(hiddenProjects); }, [hiddenProjects, onHiddenProjectsChange]);
   const [collapsedProjects, setCollapsedProjects] = usePersistentState<Set<string>>("ftown:collapsedProjects", EMPTY_ID_SET, stringSetCodec);
@@ -1076,6 +1084,7 @@ export function SessionList({
     roots.push(root);
     projects.set(project, roots);
   }
+  for (const project of savedProjects) if (!projects.has(project)) projects.set(project, []);
   function toggleProject(project: string) {
     setHiddenProjects(previous => {
       const next = new Set(previous);
@@ -1105,8 +1114,24 @@ export function SessionList({
                 if (next.has(project)) next.delete(project); else next.add(project);
                 return next;
               })}><span aria-hidden="true">{collapsedProjects.has(project) ? "▸ " : "▾ "}</span>{project || "No project"}</button>
-            <button type="button" className="btn-ghost text-xs" aria-label={`Hide project ${project || "No project"}`} onClick={() => toggleProject(project)}>Hide</button>
+            <div className="flex shrink-0 items-center gap-1">
+              {project && <button type="button" className="btn-ghost px-2" disabled={!onAddSession}
+                aria-label={`Add session to ${project}`} onClick={() => onAddSession?.(project)}>+</button>}
+              {project && onProjectBridgesChange && <button type="button" className="btn-ghost px-1" aria-label={`Bridge settings for ${project}`}
+                aria-expanded={editingProject === project} onClick={() => setEditingProject(editingProject === project ? null : project)}>⚙</button>}
+            <button type="button" className="btn-ghost text-xs" aria-label={`Hide project ${project || "No project"}`} onClick={() => toggleProject(project)}>Hide</button></div>
           </div>}
+          {!collapsed && editingProject === project && onProjectBridgesChange && <fieldset className="mx-2 space-y-1 rounded border border-[var(--border-muted)] p-2 text-xs">
+            <legend>Allowed bridges</legend>
+            <label className="flex items-center gap-2"><input type="checkbox" checked={!projectBridges?.has(project)}
+              onChange={e => onProjectBridgesChange(project, e.target.checked ? undefined : projectComputers.map(b => b.id))} />All bridges, including future bridges</label>
+            {projectComputers.map(bridge => <label key={bridge.id} className="flex items-center gap-2 break-all">
+              <input type="checkbox" checked={projectBridges?.get(project)?.includes(bridge.id) ?? true} onChange={e => {
+                const ids = new Set(projectBridges?.get(project) ?? projectComputers.map(b => b.id));
+                if (e.target.checked) ids.add(bridge.id); else ids.delete(bridge.id);
+                onProjectBridgesChange(project, [...ids]);
+              }} />{bridge.label}</label>)}
+          </fieldset>}
           {(collapsed || !collapsedProjects.has(project)) && flattenSessionTree(roots, collapsedSessions).map(row => renderSessionRow(row.session, {
             depth: row.depth, hasChildren: row.hasChildren, descendantCount: row.descendantCount,
             isCollapsed: collapsedSessions.has(row.session.id), onToggleCollapse: () => toggleSessionCollapsed(row.session.id),
@@ -1118,7 +1143,22 @@ export function SessionList({
         {Array.from(projects.keys()).filter(project => hiddenProjects.has(project)).map(project =>
           <button type="button" className="btn-ghost block text-xs" key={project} onClick={() => toggleProject(project)}>Show {project || "No project"}</button>)}
       </details>}
-      {!sessions.length && !collapsed && <p className="p-4 text-xs text-[var(--text-muted)]">No sessions yet</p>}
+      {!projects.size && !collapsed && <p className="p-4 text-xs text-[var(--text-muted)]">No sessions yet</p>}
+      {!collapsed && (newProject === null
+        ? <button type="button" className="btn-ghost m-2 text-left text-sm" onClick={() => setNewProject("")}>+ Create project</button>
+        : <form className="flex flex-wrap items-center gap-1 p-2" onSubmit={event => {
+          event.preventDefault();
+          const name = newProject.trim();
+          if (!name) return;
+          setSavedProjects(previous => new Set(previous).add(name));
+          if (hiddenProjects.has(name)) toggleProject(name);
+          setNewProject(null);
+        }}>
+          <input autoFocus aria-label="Project name" maxLength={256} value={newProject} className="min-w-0 flex-1"
+            onChange={event => setNewProject(event.target.value)} onKeyDown={event => { if (event.key === "Escape") setNewProject(null); }} />
+          <button disabled={!newProject.trim()} type="submit">Create</button>
+          <button type="button" onClick={() => setNewProject(null)}>Cancel</button>
+        </form>)}
       {contextMenu?.kind === "session" && onStopSession && onRemoveSession && (
         <SessionContextMenu
           menu={contextMenu}

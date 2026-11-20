@@ -70,3 +70,23 @@ it("remembers a collapsed project while keeping its header available", () => {
   expect(screen.getByText("Worker")).toBeTruthy();
   localStorage.clear();
 });
+
+it("keeps an empty project across reloads and offers placement and session creation", () => {
+  localStorage.clear();
+  const add = vi.fn();
+  const change = vi.fn();
+  const props = { sessions: [], selectedSessionId: null, onSelectSession: vi.fn(), onAddSession: add,
+    projectComputers: [{ id: "desk", label: "Desk" }, { id: "studio", label: "Studio" }], onProjectBridgesChange: change };
+  const first = render(<SessionList {...props} />);
+  fireEvent.click(screen.getByRole("button", { name: /Create project/ }));
+  fireEvent.change(screen.getByLabelText("Project name"), { target: { value: "Launch" } });
+  fireEvent.click(screen.getByRole("button", { name: "Create" }));
+  first.unmount();
+  render(<SessionList {...props} />);
+  fireEvent.click(screen.getByLabelText("Add session to Launch"));
+  expect(add).toHaveBeenCalledWith("Launch");
+  fireEvent.click(screen.getByLabelText("Bridge settings for Launch"));
+  fireEvent.click(screen.getByLabelText("Studio"));
+  expect(change).toHaveBeenCalledWith("Launch", ["desk"]);
+  localStorage.clear();
+});
