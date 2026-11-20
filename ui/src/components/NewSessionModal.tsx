@@ -28,6 +28,7 @@ interface NewSessionModalProps {
   onClose: () => void;
   onSubmit: (prompt: string, options: CreateSessionOptions) => void | Promise<void>;
   bridges: BridgeInfo[];
+  projectBridges?: ReadonlyMap<string, readonly string[]>;
   defaults?: SessionDefaults;
   sendCommand: (command: Command, options?: { retryBridgeStarting?: boolean }) => Promise<CommandResponse>;
   sessions?: Session[];
@@ -346,7 +347,7 @@ function ProviderTokenHint({ provider, envVar, flavor }: { provider: string; env
   );
 }
 
-export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, resourcesByBridge, defaults, sendCommand, sessions = EMPTY_SESSIONS }: NewSessionModalProps) {
+export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, projectBridges, resourcesByBridge, defaults, sendCommand, sessions = EMPTY_SESSIONS }: NewSessionModalProps) {
   const [name, setName] = useState("");
   const [workingDir, setWorkingDir] = useState("");
   const [topShell, setTopShell] = useState<TopShell>("claude");
@@ -391,13 +392,15 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, resourcesB
     }
   }, [isOpen]);
 
-  const effectiveBridgeId = bridgeId || (bridges.length > 0 ? bridges[0].bridgeId : "");
-  const selectedBridge = bridges.find((b) => b.bridgeId === effectiveBridgeId);
-  const hostname = selectedBridge?.hostname ?? "";
   const parents = sessions.filter(session => !session.lastKnownOnly && bridges.some(bridge => bridge.bridgeId === session.bridgeId));
   const parent = parents.find(session => session.id === parentSessionId);
   const resolvedParent = parent?.parentSessionId ? sessions.find(session => session.id === parent.parentSessionId) : parent;
   const inheritedProject = parent ? resolvedParent?.projectName || parent.projectName || "Unassigned" : undefined;
+  const allowed = projectBridges?.get(inheritedProject || projectName.trim());
+  const eligible = allowed ? bridges.filter(bridge => allowed.includes(bridge.bridgeId)) : bridges;
+  const selectedBridge = eligible.find(b => b.bridgeId === bridgeId) ?? eligible[0];
+  const effectiveBridgeId = selectedBridge?.bridgeId ?? "";
+  const hostname = selectedBridge?.hostname ?? "";
   const localRoot = resolvedParent?.bridgeId === effectiveBridgeId ? resolvedParent : undefined;
   const directPolicy = parent?.bridgeId === effectiveBridgeId ? parent.allowedAccounts : undefined;
   const resolvedPolicy = localRoot?.allowedAccounts;
@@ -538,8 +541,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, resourcesB
     pendingRestoredBridgeIdRef.current = desiredBridgeId && !restoredBridgeId
       ? desiredBridgeId
       : null;
-    const restoredWorkingDir = defaults?.workingDir
-      ?? (typeof parsed.workingDir === "string" ? parsed.workingDir : "");
+    const restoredWorkingDir = defaults?.workingDir ?? "";
 
     setName(defaults?.name ?? "");
     setWorkingDir(restoredWorkingDir);
@@ -588,6 +590,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, resourcesB
     setSubmitError(null);
     setMissingWorkingDir(null);
     if (!(inheritedProject || projectName.trim())) { setSubmitError("Enter a project name."); return; }
+    if (!effectiveBridgeId) { setSubmitError("No eligible bridge is connected."); return; }
     if (accountBlocked) {
       setSubmitError(accountsLoading ? "Wait for accounts to finish loading." : "This parent does not allow an account for the selected shell.");
       return;
@@ -968,13 +971,13 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, resourcesB
 
           <div>
             <label htmlFor="ns-bridge" className="block text-sm text-[var(--text-muted)] mb-1">Bridge</label>
-            {bridges.length === 0 ? (
+            {eligible.length === 0 ? (
               <div
                 role="alert"
                 className="px-3 py-2 rounded-[var(--radius-sm)] border border-[var(--status-pending)] bg-[rgba(255,170,0,0.08)] text-xs text-[var(--status-pending)] flex items-start gap-2"
               >
                 <span aria-hidden>⚠</span>
-                <span>No bridges connected — start ftown-bridge on a machine first.</span>
+                <span>{allowed ? "No allowed bridges are connected for this project." : "No bridges connected — start ftown-bridge on a machine first."}</span>
               </div>
             ) : (
               <select
@@ -987,7 +990,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, resourcesB
                 }}
                 className={INPUT_CLASS + " text-sm"}
               >
-                {bridges.map((b) => (
+                {eligible.map((b) => (
                   <option key={b.bridgeId} value={b.bridgeId}>
                     {b.bridgeId} ({b.hostname}){resourcesByBridge?.has(b.bridgeId) && " · " + formatResources(resourcesByBridge.get(b.bridgeId))}
                   </option>
@@ -1085,7 +1088,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, resourcesB
               }}
               onFocus={() => setShowSuggestions(true)}
               onBlur={() => setTimeout(() => setShowSuggestions(false), 150)}
-              placeholder="/path/to/project (optional)"
+              placeholder="Use the project directory on this bridge"
               className={INPUT_CLASS + " text-sm"}
               onKeyDown={handleKeyDown}
             />
@@ -1230,7 +1233,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, resourcesB
             <button
               type="button"
               onClick={() => void handleSubmit()}
-              disabled={accountBlocked}
+              disabled={accountBlocked || !effectiveBridgeId}
               className="btn-accent"
             >
               Create Session

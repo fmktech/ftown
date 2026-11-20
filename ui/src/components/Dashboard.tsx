@@ -143,6 +143,8 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   });
   const [showBridges, setShowBridges] = useState(false);
   const [preferredBridge, setPreferredBridge] = usePersistentState<string | null>("ftown:preferredBridge", null);
+  const [placements, setPlacements] = usePersistentState<Array<[string, string[]]>>(`ftown:projectBridges:${accountId ?? userId}`, []);
+  const projectBridges = useMemo(() => new Map(placements), [placements]);
   const [showNewSession, setShowNewSession] = useState(false);
   const [sessionDefaults, setSessionDefaults] = useState<SessionDefaults | undefined>(undefined);
   const [showToken, setShowToken] = useState(false);
@@ -1330,6 +1332,18 @@ PY`;
           </section>}
           <div className="flex-1 overflow-y-auto">
             <SessionList
+              projectBridges={projectBridges}
+              projectComputers={securityBridges.filter(b => b.security.status !== "revoked").map(b => ({ id: b.bridgeId, label: b.label || b.bridgeId }))}
+              onProjectBridgesChange={(project, ids) => setPlacements(previous => {
+                const next = new Map(previous);
+                if (ids === undefined) next.delete(project); else next.set(project, ids);
+                return Array.from(next);
+              })}
+              projectStorageKey={`ftown:projects:${accountId ?? userId}`}
+              onAddSession={hasBridges ? projectName => {
+                setSessionDefaults({ ...preferredDefaults, projectName });
+                setShowNewSession(true);
+              } : undefined}
               onHiddenProjectsChange={setHiddenProjects}
               sessions={sessions}
               selectedSessionId={selectedSessionId}
@@ -1425,6 +1439,7 @@ PY`;
         onClose={() => { setShowNewSession(false); setSessionDefaults(undefined); }}
         onSubmit={handleCreateSession}
         bridges={readyBridges}
+        projectBridges={projectBridges}
         resourcesByBridge={resourcesByBridge}
         sessions={sessions}
         defaults={sessionDefaults ?? preferredDefaults}

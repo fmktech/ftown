@@ -1,8 +1,10 @@
 import { resolveSessionParent, type RemoteParentLookup } from './session-parent.js';
 import { assertSessionCanLaunch } from './retired-automation.js';
 import { v4 as uuidv4 } from 'uuid';
-import { existsSync, mkdirSync, statSync } from 'node:fs';
-import { basename, resolve } from 'node:path';
+import { existsSync, lstatSync, mkdirSync, statSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { homedir } from 'node:os';
+import { basename, isAbsolute, join, resolve } from 'node:path';
 
 import { buildPiCommand, buildSessionCommand } from './agent-commands.js';
 import { ensureAntigravityWorkdirTrust } from './antigravity-trust.js';
@@ -203,6 +205,22 @@ export class WorkingDirMissingError extends Error {
     this.name = 'WorkingDirMissingError';
     this.workingDir = workingDir;
   }
+}
+
+export function projectWorkspace(project: string): string {
+  const configured = process.env.FTOWN_PROJECT_DIR?.trim() || '~/projects';
+  const root = configured === '~' ? homedir() : configured.startsWith('~/') ? join(homedir(), configured.slice(2)) : configured;
+  if (!isAbsolute(root)) throw new Error('FTOWN_PROJECT_DIR must be absolute or start with ~/');
+  const slug = project.normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'project';
+  // Reserve the dot separator for disambiguation. Distinct labels may produce the same slug.
+  const safe = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(slug) ? 'project-' + slug : slug;
+  const name = safe === project ? safe : safe + '.' + createHash('sha256').update(project).digest('hex').slice(0, 12);
+  mkdirSync(root, { recursive: true });
+  const dir = join(root, name);
+  try { mkdirSync(dir); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+  if (!lstatSync(dir).isDirectory()) throw new Error('Project workspace must be a directory inside FTOWN_PROJECT_DIR');
+  return dir;
 }
 
 export function prepareWorkingDir(
@@ -630,6 +648,8 @@ async function createFtownSessionImpl(
           (await deps.store.listSessions()).map((session) => session.name),
         )
       : generatedBaseName);
+
+  if (!workingDir && !input.worktree) workingDir = projectWorkspace(projectName);
 
   let worktree: SessionWorktree | undefined;
   let worktrees: Pick<WorktreeApi, 'create' | 'remove'> | undefined;

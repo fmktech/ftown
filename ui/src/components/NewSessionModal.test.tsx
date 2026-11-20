@@ -30,8 +30,8 @@ function renderModal() {
       isOpen
       onClose={vi.fn()}
       onSubmit={onSubmit}
-      defaults={{ projectName: "Test project" }}
-      bridges={[]}
+      defaults={{ projectName: "Test project", shellType: "shell" }}
+      bridges={bridges}
       sendCommand={vi.fn(async () => ({ requestId: "test", success: true }))}
     />,
   );
@@ -334,4 +334,19 @@ it("shows CPU, RAM and disk space beside the reporting computer", () => {
     resourcesByBridge={new Map([["b", { sampledAt: 1, cpuPercent: 62, freeRamBytes: 4 * 2 ** 30, totalRamBytes: 16 * 2 ** 30, freeDiskBytes: 21 * 2 ** 30 }]])}
     sendCommand={vi.fn(async () => ({ requestId: "accounts", success: true, data: { accounts } }))} />);
   expect(screen.getByRole("option", { name: /second.*CPU 62%.*RAM 4.0\/16.0 GiB free.*disk 21.0 GiB free/ })).toBeTruthy();
+});
+
+it("restricts typed project names to eligible bridges and blocks an empty allowlist", () => {
+  const submit = vi.fn();
+  render(<NewSessionModal isOpen onClose={vi.fn()} onSubmit={submit} bridges={bridges}
+    defaults={{ shellType: "shell", bridgeId: "a" }} sendCommand={vi.fn(async () => ({ success: true, requestId: "accounts" }))}
+    projectBridges={new Map([["Build", ["b"]], ["Closed", []]])} />);
+  const project = screen.getByLabelText("Project");
+  fireEvent.change(project, { target: { value: "Closed" } });
+  expect((screen.getByRole("button", { name: "Create Session" }) as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.change(project, { target: { value: "Build" } });
+  const picker = document.querySelector<HTMLSelectElement>("#ns-bridge")!;
+  expect(Array.from(picker.options, o => o.value)).toEqual(["b"]);
+  fireEvent.click(screen.getByRole("button", { name: "Create Session" }));
+  expect(submit).toHaveBeenCalledWith("", expect.objectContaining({ projectName: "Build", bridgeId: "b", workingDir: undefined }));
 });

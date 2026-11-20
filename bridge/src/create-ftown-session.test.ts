@@ -20,6 +20,7 @@ import {
   InvalidEffortError,
   InvalidShellTypeError,
   nextAvailableGeneratedName,
+  projectWorkspace,
   parseCreateSessionBody,
   PlanItemError,
   prepareWorkingDir,
@@ -1989,4 +1990,23 @@ it('creates under a legacy root and resolves a local alias to a root on another 
   assert.deepEqual([sibling.parentSessionId, sibling.parentBridgeId, sibling.projectName, sibling.shellType], ['root', 'remote', 'Shared', 'shell']);
   assert.equal(sibling.account, undefined);
   assert.equal(sibling.allowedAccounts, undefined);
+});
+
+it('uses a stable project directory on the destination bridge without interpreting labels as paths', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'ftown-project-root-'));
+  const previous = process.env.FTOWN_PROJECT_DIR;
+  process.env.FTOWN_PROJECT_DIR = root;
+  try {
+    const harness = fakeDeps();
+    const created = await createFtownSession(harness.deps, { projectName: 'demo', shellType: 'shell' });
+    assert.equal(created.workingDir, join(root, 'demo'));
+    assert.equal(harness.runs[0].workingDir, created.workingDir);
+    const escaped = projectWorkspace('../demo');
+    assert.match(escaped.slice(root.length + 1), /^demo\.[0-9a-f]{12}$/);
+    assert.equal(projectWorkspace('../demo'), escaped);
+    assert.notEqual(projectWorkspace('Demo'), escaped);
+  } finally {
+    if (previous === undefined) delete process.env.FTOWN_PROJECT_DIR; else process.env.FTOWN_PROJECT_DIR = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
 });
