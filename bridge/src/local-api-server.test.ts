@@ -336,7 +336,7 @@ describe('LocalApiServer session harness inheritance', () => {
         token,
         'POST',
         '/api/sessions',
-        { prompt: 'Use my harness', parentSessionId: true },
+        { projectName: 'Test project', prompt: 'Use my harness', parentSessionId: true },
         { 'X-Ftown-Session-Id': caller.id },
       );
       assert.strictEqual(inherited.status, 201);
@@ -348,7 +348,7 @@ describe('LocalApiServer session harness inheritance', () => {
         token,
         'POST',
         '/api/sessions',
-        { shellType: 'claude', prompt: 'Use Claude', parentSessionId: true },
+        { projectName: 'Test project', shellType: 'claude', prompt: 'Use Claude', parentSessionId: true },
         { 'X-Ftown-Session-Id': caller.id },
       );
       assert.strictEqual(explicit.status, 201);
@@ -384,7 +384,7 @@ describe('LocalApiServer account selection', () => {
       server.setDependencies(store, runner, centrifugo, 'user-1');
       server.setSessionFactory({ store, runner, centrifugo, userId: 'user-1', bridgeId: 'bridge-1', hookPort: 4321, hookToken: 'hook-token', notifyScriptPath: '/tmp/notify.sh', wireTerminalInput: () => {} });
       const port = await server.start();
-      const create = (body: Record<string, unknown>) => api(port, token, 'POST', '/api/sessions', { workingDir: home, prompt: 'account policy', ...body });
+      const create = (body: Record<string, unknown>) => api(port, token, 'POST', '/api/sessions', { projectName: 'Test project', workingDir: home, prompt: 'account policy', ...body });
       const inherited = await create({ parentSessionId: 'parent', allowedAccounts: ['personal', 'other'] });
       assert.equal(inherited.status, 201);
       const child = inherited.data.session as Session;
@@ -2247,6 +2247,7 @@ describe('LocalApiServer worktree create', () => {
     });
 
     const invalid = await api(port, token, 'POST', '/api/sessions', {
+      projectName: 'Test project',
       shellType: 'claude',
       prompt: 'build it',
       worktree: { branch: 1 },
@@ -2256,6 +2257,7 @@ describe('LocalApiServer worktree create', () => {
     assert.equal((await store.listSessions()).length, 0);
 
     const failed = await api(port, token, 'POST', '/api/sessions', {
+      projectName: 'Test project',
       shellType: 'claude',
       prompt: 'build it',
       worktree: true,
@@ -2321,6 +2323,7 @@ describe('LocalApiServer worktree create', () => {
     });
 
     const started = await api(port, token, 'POST', '/api/sessions', {
+      projectName: 'Test project',
       shellType: 'claude',
       prompt: 'work',
       parentSessionId: 'parent-1',
@@ -2330,6 +2333,7 @@ describe('LocalApiServer worktree create', () => {
     assert.match(String(started.data.error), /not todo/);
 
     const missing = await api(port, token, 'POST', '/api/sessions', {
+      projectName: 'Test project',
       shellType: 'claude',
       prompt: 'work',
       parentSessionId: 'parent-1',
@@ -2339,6 +2343,7 @@ describe('LocalApiServer worktree create', () => {
     assert.match(String(missing.data.error), /does not exist/);
 
     const noParent = await api(port, token, 'POST', '/api/sessions', {
+      projectName: 'Test project',
       shellType: 'claude',
       prompt: 'work',
       planItem: 'p1',
@@ -2383,6 +2388,7 @@ describe('LocalApiServer shellType alias and validation', () => {
     });
 
     const res = await api(port, token, 'POST', '/api/sessions', {
+      projectName: 'Test project',
       shellType: 'agy',
       model: 'gemini-4-hydrogen-medium',
       prompt: 'hello world',
@@ -2427,6 +2433,7 @@ describe('LocalApiServer shellType alias and validation', () => {
     });
 
     const res = await api(port, token, 'POST', '/api/sessions', {
+      projectName: 'Test project',
       shellType: 'bogus-harness',
       prompt: 'hello world',
     });

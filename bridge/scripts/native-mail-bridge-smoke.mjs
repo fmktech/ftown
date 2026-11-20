@@ -52,7 +52,7 @@ async function api(method, path, body, expected = 200) {
   assert.equal(response.status, expected, JSON.stringify(response.body)); return response.body;
 }
 async function create(shellType, native = {}) {
-  const data = await api('POST', '/api/sessions', { shellType, command: '/bin/cat', name: `native-${shellType}`, workingDir: work, ...native }, 201);
+  const data = await api('POST', '/api/sessions', { projectName: 'smoke', shellType, command: '/bin/cat', name: `native-${shellType}`, workingDir: work, ...native }, 201);
   owned.add(data.session.id); return data.session;
 }
 async function stop() {

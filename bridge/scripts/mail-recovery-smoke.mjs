@@ -65,7 +65,7 @@ async function api(method, path, body, expected = 200) {
   const data = await response.json(); assert.equal(response.status, expected, JSON.stringify(data)); return data;
 }
 async function create(shellType, native = {}) {
-  const data = await api('POST', '/api/sessions', { shellType, command: 'codex', name: `native-${shellType}`, workingDir: work, ...native }, 201);
+  const data = await api('POST', '/api/sessions', { projectName: 'smoke', shellType, command: 'codex', name: `native-${shellType}`, workingDir: work, ...native }, 201);
   owned.add(data.session.id); return data.session;
 }
 async function stop() {

@@ -1,3 +1,4 @@
+import { resolveSessionParent } from './session-parent.js';
 import { randomUUID } from 'node:crypto';
 
 import { AUTOMATION_REMOVED_CODE, AUTOMATION_REMOVED_MESSAGE, isRetiredAutomationSession } from './retired-automation.js';
@@ -52,7 +53,7 @@ export type SessionControllerResult<T> = ({ ok: true } & T) | SessionControllerE
  * clear). `value` is unknown so adapters can hand over unvalidated wire input. */
 export interface SessionUpdateInput {
   name?: string;
-  parent?: { value: unknown };
+  parent?: { value: unknown; bridgeId?: string };
   pullRequestUrl?: string | null;
 }
 
@@ -342,6 +343,8 @@ export class SessionController {
       try { pullRequestUrl = normalizePullRequestUrl(input.pullRequestUrl); }
       catch { return { ok: false, code: 'invalid', message: 'Invalid pullRequestUrl' }; }
     }
+    let parentBridgeId: string | undefined;
+    let parentProject: string | undefined;
     let parentSessionId: string | undefined;
     if (input.parent) {
       const raw = input.parent.value;
@@ -352,18 +355,14 @@ export class SessionController {
       } else if (raw === session.id) {
         return { ok: false, code: 'invalid', message: 'Session cannot be its own parent' };
       } else {
-        const proposed = await this.deps.store.loadSession(raw);
-        if (!proposed) {
-          return { ok: false, code: 'invalid', message: 'Parent session not found' };
+        try {
+          const { root } = await resolveSessionParent(this.deps.store, session.bridgeId, raw, input.parent.bridgeId, this.deps.sessionFactory?.loadRemoteParent);
+          parentProject = root.projectName || 'Unassigned';
+          parentBridgeId = root.bridgeId;
+          parentSessionId = root.id;
+        } catch (error) {
+          return { ok: false, code: 'invalid', message: error instanceof Error ? error.message : 'Parent session unavailable' };
         }
-        if (proposed.bridgeId !== session.bridgeId) {
-          return {
-            ok: false,
-            code: 'invalid',
-            message: 'Parent session belongs to another bridge',
-          };
-        }
-        parentSessionId = proposed.parentSessionId ?? proposed.id;
         if (parentSessionId === session.id) {
           return {
             ok: false,
@@ -372,7 +371,12 @@ export class SessionController {
           };
         }
         const sessions = await this.deps.store.listSessions();
-        if (sessions.some((candidate) => candidate.parentSessionId === session.id)) {
+        let hasChildren = sessions.some(candidate => candidate.parentSessionId === session.id);
+        if (!hasChildren && this.deps.sessionFactory?.hasRemoteChildren) {
+          try { hasChildren = await this.deps.sessionFactory.hasRemoteChildren(session.id); }
+          catch { return { ok: false, code: 'conflict', message: 'Reconnect peer bridges to verify this session has no children' }; }
+        }
+        if (hasChildren) {
           return {
             ok: false,
             code: 'invalid',
@@ -385,7 +389,11 @@ export class SessionController {
     // Validate the entire update before touching the loaded object: some store
     // implementations return shared references rather than detached snapshots.
     if (input.name !== undefined) session.name = input.name;
-    if (input.parent) session.parentSessionId = parentSessionId;
+    if (input.parent) {
+      if (parentProject) session.projectName = parentProject;
+      session.parentSessionId = parentSessionId;
+      session.parentBridgeId = parentBridgeId;
+    }
     if (input.pullRequestUrl === null) { delete session.pullRequestUrl; delete session.pullRequestLinkId; }
     else if (pullRequestUrl !== undefined) {
       if (session.pullRequestUrl?.toLowerCase() !== pullRequestUrl.toLowerCase() || !session.pullRequestLinkId) session.pullRequestLinkId = randomUUID();

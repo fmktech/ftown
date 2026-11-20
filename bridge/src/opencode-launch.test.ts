@@ -165,6 +165,7 @@ describe('opencode child launch', { concurrency: 1 }, () => {
         notifyScriptPath: '',
         wireTerminalInput: () => {},
       }, {
+        projectName: 'Test project',
         shellType: 'opencode',
         model: MODEL,
         prompt: PROMPT,
@@ -217,6 +218,7 @@ describe('opencode child launch', { concurrency: 1 }, () => {
         notifyScriptPath: '',
         wireTerminalInput: () => {},
       }, {
+        projectName: 'Test project',
         shellType: 'opencode',
         model: MODEL,
         prompt: PROMPT,

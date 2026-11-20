@@ -44,7 +44,7 @@ test("removing a computer in Security: the bridge re-execs as a new identity wit
 
     // A session on this computer survives the identity reset (tmux keeps it).
     await expect.poll(async () => (await bridgeApiFetch("GET", "/api/sessions", { bridgeHome: bridge!.home })).status, { timeout: 30_000 }).toBe(200);
-    const created = await bridgeApiFetch("POST", "/api/sessions", { bridgeHome: bridge.home, body: { shellType: "shell", name: `REMOVAL_SURVIVOR_${Date.now()}` } });
+    const created = await bridgeApiFetch("POST", "/api/sessions", { bridgeHome: bridge.home, body: { projectName: "E2E", shellType: "shell", name: `REMOVAL_SURVIVOR_${Date.now()}` } });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
     const sessionId = (created.body as { session: { id: string } }).session.id;
     await expect.poll(() => bridge!.hasTmuxSession(sessionId), { timeout: 30_000 }).toBe(true);

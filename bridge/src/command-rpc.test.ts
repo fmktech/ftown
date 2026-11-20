@@ -646,7 +646,7 @@ test('create_session enforces account inheritance and policy through the real co
     const responses: CommandResponse[] = [];
     const handler = createCommandHandler({ bridgeId: 'owner', sessionController: controller, publishCommandResponse: async response => { responses.push(response); } });
     const send = async (requestId: string, payload: Record<string, unknown>) => {
-      await handler({ type: 'create_session', requestId, payload: { workingDir: home, ...payload } } as unknown as Command);
+      await handler({ type: 'create_session', requestId, payload: { projectName: "Test project", workingDir: home, ...payload } } as unknown as Command);
       return responses.at(-1)!;
     };
     const inherited = await send('inherited', { parentSessionId: 'parent', allowedAccounts: ['personal', 'other'] });

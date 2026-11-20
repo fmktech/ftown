@@ -105,6 +105,7 @@ test("two isolated browser installations signed in with the same passkey retain 
         const bridgeId = readBridgePointer(home).bridgeId; const before = await sessionIdsFor(accountId); const name = `E2EDISTINCT${who}${home ? "B" : "A"}${Date.now()}`;
         await client.getByRole("button", { name: "Create a new session", exact: true }).click();
         await expect(client.getByText("New Session", { exact: true })).toBeVisible();
+        await client.getByLabel("Project", { exact: true }).fill("E2E");
         await client.locator("#ns-shell-type").selectOption("shell");
         await client.locator("#ns-bridge").selectOption(bridgeId);
         await client.locator('input[placeholder="Optional name for this session"]').fill(name);

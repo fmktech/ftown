@@ -47,14 +47,14 @@ describe('account-aware session creation', () => {
         { id: 'codex-lab', harness: 'codex', configDir: join(home, 'codex-lab') },
       ] }, home);
       const { deps, runs, saved } = fakeDeps();
-      const launched = await createFtownSession(deps, { shellType: 'claude', account: 'personal', workingDir: work });
+      const launched = await createFtownSession(deps, { projectName: 'Test project', shellType: 'claude', account: 'personal', workingDir: work });
       assert.deepEqual(runs[0].env, { CLAUDE_CONFIG_DIR: join(home, 'claude-personal') });
       assert.equal(launched.command.includes(join(home, 'claude-personal')), false);
       assert.equal(launched.account, 'personal');
 
       const parent = { ...fakeSession('parent'), shellType: 'claude' as const, account: 'personal', allowedAccounts: ['personal', 'other'] };
       const childHarness = fakeDeps([parent]);
-      const child = await createFtownSession(childHarness.deps, { parentSessionId: 'parent', workingDir: work, allowedAccounts: ['personal'] });
+      const child = await createFtownSession(childHarness.deps, { projectName: 'Test project', parentSessionId: 'parent', workingDir: work, allowedAccounts: ['personal'] });
       assert.equal(child.account, 'personal');
       assert.deepEqual(child.allowedAccounts, ['personal']);
       assert.deepEqual(childHarness.runs[0].env, { CLAUDE_CONFIG_DIR: join(home, 'claude-personal') });
@@ -62,29 +62,29 @@ describe('account-aware session creation', () => {
       // Account comes from the resolved parent; both policies restrict children.
       const alias = { ...fakeSession('alias'), parentSessionId: 'parent', shellType: 'claude' as const, account: 'other', allowedAccounts: ['personal', 'other'] };
       const aliased = fakeDeps([{ ...parent, allowedAccounts: ['personal'] }, alias]);
-      const sibling = await createFtownSession(aliased.deps, { parentSessionId: 'alias', workingDir: work });
+      const sibling = await createFtownSession(aliased.deps, { projectName: 'Test project', parentSessionId: 'alias', workingDir: work });
       assert.equal(sibling.parentSessionId, 'parent');
       assert.equal(sibling.account, 'personal');
       assert.deepEqual(sibling.allowedAccounts, ['personal']);
       const codexParent = { ...fakeSession('codex-parent'), shellType: 'codex' as const, account: 'codex-lab' };
       const claudeAlias = { ...fakeSession('claude-alias'), parentSessionId: 'codex-parent', shellType: 'claude' as const };
       const codexAliasHarness = fakeDeps([codexParent, claudeAlias]);
-      const codexChild = await createFtownSession(codexAliasHarness.deps, { parentSessionId: 'claude-alias', workingDir: work });
+      const codexChild = await createFtownSession(codexAliasHarness.deps, { projectName: 'Test project', parentSessionId: 'claude-alias', workingDir: work });
       assert.equal(codexChild.shellType, 'codex');
       assert.equal(codexChild.account, 'codex-lab');
       assert.deepEqual(codexAliasHarness.runs[0].env, { CODEX_HOME: join(home, 'codex-lab') });
       const restricted = fakeDeps([{ ...parent, allowedAccounts: ['personal'] }, alias]);
-      await assert.rejects(createFtownSession(restricted.deps, { parentSessionId: 'alias', account: 'other', workingDir: work }),
+      await assert.rejects(createFtownSession(restricted.deps, { projectName: 'Test project', parentSessionId: 'alias', account: 'other', workingDir: work }),
         (error: unknown) => error instanceof AccountSelectionError && error.code === 'account_not_allowed');
       const grandchild = fakeDeps([{ ...parent, allowedAccounts: ['personal', 'default'] }, { ...alias, allowedAccounts: ['personal'] }]);
-      await assert.rejects(createFtownSession(grandchild.deps, { parentSessionId: 'alias', account: 'default', workingDir: work }),
+      await assert.rejects(createFtownSession(grandchild.deps, { projectName: 'Test project', parentSessionId: 'alias', account: 'default', workingDir: work }),
         (error: unknown) => error instanceof AccountSelectionError && error.code === 'account_not_allowed');
 
       const rejected = fakeDeps([{ ...parent, allowedAccounts: ['personal'] }]);
-      await assert.rejects(createFtownSession(rejected.deps, { parentSessionId: 'parent', account: 'other', workingDir: work }),
+      await assert.rejects(createFtownSession(rejected.deps, { projectName: 'Test project', parentSessionId: 'parent', account: 'other', workingDir: work }),
         (error: unknown) => error instanceof AccountSelectionError && error.code === 'account_not_allowed');
       const mismatch = fakeDeps();
-      await assert.rejects(createFtownSession(mismatch.deps, { shellType: 'codex', account: 'personal', workingDir: work }),
+      await assert.rejects(createFtownSession(mismatch.deps, { projectName: 'Test project', shellType: 'codex', account: 'personal', workingDir: work }),
         (error: unknown) => error instanceof AccountSelectionError && error.code === 'account_harness_mismatch');
       assert.equal(saved.length, 1);
     } finally {
@@ -315,7 +315,7 @@ describe('createFtownSession — working directory and generated name preflight'
 
     try {
       await assert.rejects(
-        () => createFtownSession(harness.deps, { shellType: 'codex', workingDir: missing }),
+        () => createFtownSession(harness.deps, { projectName: 'Test project', shellType: 'codex', workingDir: missing }),
         (err: unknown) => {
           assert.ok(err instanceof WorkingDirMissingError);
           assert.strictEqual(err.workingDir, resolve(missing));
@@ -346,6 +346,7 @@ describe('createFtownSession — working directory and generated name preflight'
 
     try {
       const session = await createFtownSession(harness.deps, {
+        projectName: 'Test project',
         shellType: 'shell',
         workingDir: workdir,
       });
@@ -369,12 +370,12 @@ describe('createFtownSession — historical automation metadata is not a creatio
     process.env[process.platform === 'win32' ? 'USERPROFILE' : 'HOME'] = home;
     try {
       const tagged = fakeDeps();
-      const withLoop = await createFtownSession(tagged.deps, { shellType: 'shell', loopId: 'loop-42' } as never);
+      const withLoop = await createFtownSession(tagged.deps, { projectName: 'Test project', shellType: 'shell', loopId: 'loop-42' } as never);
       assert.strictEqual(withLoop.loopId, undefined);
       assert.strictEqual(tagged.saved[0].loopId, undefined);
 
       const plain = fakeDeps();
-      const withoutLoop = await createFtownSession(plain.deps, { shellType: 'shell' });
+      const withoutLoop = await createFtownSession(plain.deps, { projectName: 'Test project', shellType: 'shell' });
       assert.strictEqual(withoutLoop.loopId, undefined);
     } finally {
       restoreHome(realHome);
@@ -504,6 +505,7 @@ describe('createFtownSession — provider runtime env', () => {
 
     try {
       const session = await createFtownSession(harness.deps, {
+        projectName: 'Test project',
         shellType: 'zai',
         prompt: 'do provider work',
       });
@@ -531,6 +533,7 @@ describe('createFtownSession — provider runtime env', () => {
 
     try {
       const session = await createFtownSession(harness.deps, {
+        projectName: 'Test project',
         shellType: 'zai',
         env: {
           ANTHROPIC_BASE_URL: 'https://custom.example/anthropic',
@@ -859,6 +862,7 @@ describe('createFtownSession — Pi launch', () => {
   it('passes the task and model on the Pi command line without typed-input races', async () => {
     const harness = fakeDeps();
     const session = await createFtownSession(harness.deps, {
+      projectName: 'Test project',
       shellType: 'pi',
       model: 'openai/gpt-5',
       prompt: "inspect today's changes",
@@ -878,11 +882,11 @@ describe('createFtownSession — Pi launch', () => {
 
   it('createFtownSession — grok and antigravity records store their native session ids', async () => {
     const harness = fakeDeps();
-    const grok = await createFtownSession(harness.deps, { shellType: 'grok', grokSessionId: 'grok-abc' });
+    const grok = await createFtownSession(harness.deps, { projectName: 'Test project', shellType: 'grok', grokSessionId: 'grok-abc' });
     assert.strictEqual(grok.grokSessionId, 'grok-abc');
     assert.strictEqual(harness.saved.at(-1)?.grokSessionId, 'grok-abc');
     assert.strictEqual(harness.runs.at(-1)?.command, "grok --always-approve -r 'grok-abc'");
-    const agy = await createFtownSession(harness.deps, { shellType: 'antigravity', antigravitySessionId: 'conv-abc' });
+    const agy = await createFtownSession(harness.deps, { projectName: 'Test project', shellType: 'antigravity', antigravitySessionId: 'conv-abc' });
     assert.strictEqual(agy.antigravitySessionId, 'conv-abc');
     assert.strictEqual(harness.saved.at(-1)?.antigravitySessionId, 'conv-abc');
     assert.strictEqual(harness.runs.at(-1)?.command, "agy --dangerously-skip-permissions --conversation 'conv-abc'");
@@ -891,6 +895,7 @@ describe('createFtownSession — Pi launch', () => {
   it('createFtownSession — opencode launch passes the prompt as a --prompt CLI arg', async () => {
     const harness = fakeDeps();
     const session = await createFtownSession(harness.deps, {
+      projectName: 'Test project',
       shellType: 'opencode',
       model: 'opencode-go/kimi-k3.1-pro',
       prompt: "inspect today's changes",
@@ -916,6 +921,7 @@ describe('createFtownSession — Pi launch', () => {
   it('createFtownSession — opencode without a model keeps the frozen command and env', async () => {
     const harness = fakeDeps();
     const session = await createFtownSession(harness.deps, {
+      projectName: 'Test project',
       shellType: 'opencode',
       prompt: 'hello',
     });
@@ -982,7 +988,7 @@ describe('relaunchFtownSession — retained terminal geometry', () => {
     try {
       await relaunchFtownSession(h.deps, session, 'retry');
       assert.deepEqual({ cols: h.runs[0].cols, rows: h.runs[0].rows }, { cols: 94, rows: 31 });
-      await createFtownSession(h.deps, { command: 'cmd', shellType: 'shell' });
+      await createFtownSession(h.deps, { projectName: 'Test project', command: 'cmd', shellType: 'shell' });
       assert.equal(Object.hasOwn(h.runs[1], 'cols'), false);
       assert.equal(Object.hasOwn(h.runs[1], 'rows'), false);
     } finally { manager.destroy(session.id); }
@@ -998,6 +1004,7 @@ describe('relaunchFtownSession — entry-point parity with createFtownSession', 
 
     try {
       const session = await createFtownSession(harness.deps, {
+        projectName: 'Test project',
         shellType: 'claude',
         claudeSessionId: 'sess-abc',
       });
@@ -1165,7 +1172,7 @@ describe('child task delivery', () => {
   it('keeps the requested task after the short briefing and supports suppression', async () => {
     for (const suppressBriefing of [false, true]) {
       const harness = fakeDeps([fakeSession('parent')]);
-      await createFtownSession(harness.deps, { name: 'worker', shellType: 'claude', parentSessionId: 'parent', prompt: 'bounded task', suppressBriefing });
+      await createFtownSession(harness.deps, { projectName: 'Test project', name: 'worker', shellType: 'claude', parentSessionId: 'parent', prompt: 'bounded task', suppressBriefing });
       const command = harness.runs[0].command;
       assert.match(command, /bounded task/);
       assert.doesNotMatch(command, /self-remov|very last command|keep the session open/);
@@ -1184,14 +1191,14 @@ describe('legacy orchestrator compatibility', () => {
   it('ignores role requests while preserving task, parent and explicitly supplied env', async () => {
     for (const legacy of [false, true]) {
       const harness = fakeDeps([fakeSession('parent')]);
-      await createFtownSession(harness.deps, { name: 'ordinary', shellType: 'claude', parentSessionId: 'parent', prompt: 'ordinary task', orchestrator: legacy });
+      await createFtownSession(harness.deps, { projectName: 'Test project', name: 'ordinary', shellType: 'claude', parentSessionId: 'parent', prompt: 'ordinary task', orchestrator: legacy });
       assert.equal(harness.saved[0].env, undefined);
       assert.equal(harness.saved[0].parentSessionId, 'parent');
       assert.match(harness.runs[0].command, /ordinary task/);
       assert.doesNotMatch(harness.runs[0].command, /ORCHESTRATOR|references\/orchestrator/);
     }
     const harness = fakeDeps();
-    await createFtownSession(harness.deps, { shellType: 'claude', prompt: 'keep my env', env: { FTOWN_ORCHESTRATOR: 'custom', USER_SETTING: 'keep' }, orchestrator: true });
+    await createFtownSession(harness.deps, { projectName: 'Test project', shellType: 'claude', prompt: 'keep my env', env: { FTOWN_ORCHESTRATOR: 'custom', USER_SETTING: 'keep' }, orchestrator: true });
     assert.deepEqual(harness.saved[0].env, { FTOWN_ORCHESTRATOR: 'custom', USER_SETTING: 'keep' });
     assert.equal(parseCreateSessionBody({ orchestrator: true, prompt: 'task' }).orchestrator, undefined);
   });
@@ -1216,7 +1223,7 @@ describe('commandless standard launch boundary', () => {
       ] as const;
       for (const { shellType, base } of cases) {
         const h = fakeDeps();
-        const session = await createFtownSession(h.deps, { shellType, model: 'provider/model', prompt,
+        const session = await createFtownSession(h.deps, { projectName: 'Test project', shellType, model: 'provider/model', prompt,
           workingDir: home, env: { CUSTOM_SETTING: 'kept verbatim' } });
         assert.equal(session.command, base, `${shellType}: persisted command excludes the task`);
         assert.equal(session.prompt, prompt);
@@ -1233,7 +1240,7 @@ describe('commandless standard launch boundary', () => {
 
   it('passes the antigravity task via -i and never replays it in the persisted command', async () => {
     const h = fakeDeps();
-    const session = await createFtownSession(h.deps, { shellType: 'antigravity', model: 'provider/model',
+    const session = await createFtownSession(h.deps, { projectName: 'Test project', shellType: 'antigravity', model: 'provider/model',
       prompt: "inspect today's changes" });
     const base = "agy --dangerously-skip-permissions --model 'provider/model'";
     assert.equal(session.command, base);
@@ -1245,7 +1252,7 @@ describe('commandless standard launch boundary', () => {
   it('retains typed task delivery for shell and kimi-code without putting it into the command', async () => {
     for (const shellType of ['shell', 'kimi-code'] as const) {
       const h = fakeDeps();
-      const session = await createFtownSession(h.deps, { shellType, prompt: 'one task' });
+      const session = await createFtownSession(h.deps, { projectName: 'Test project', shellType, prompt: 'one task' });
       assert.equal(h.runs[0].command, session.command);
       assert.equal(h.runs[0].command.includes('one task'), false);
       assert.equal(h.runs[0].initialInput, 'one task');
@@ -1256,7 +1263,7 @@ describe('commandless standard launch boundary', () => {
 
   it('delivers a new resume-create task once but never replays it on resurrection', async () => {
     const h = fakeDeps();
-    const session = await createFtownSession(h.deps, { shellType: 'claude', claudeSessionId: 'native-id',
+    const session = await createFtownSession(h.deps, { projectName: 'Test project', shellType: 'claude', claudeSessionId: 'native-id',
       model: 'chosen-model', prompt: 'new follow-up task' });
     assert.match(h.runs[0].command, /--model 'chosen-model' --resume 'native-id'$/);
     assert.equal(h.runs[0].command.includes('new follow-up task'), false);
@@ -1272,7 +1279,7 @@ describe('commandless standard launch boundary', () => {
   it('preserves old-browser/custom commands and raw input byte-for-byte', async () => {
     const h = fakeDeps();
     const command = "my-wrapper --custom 'chosen model'";
-    const session = await createFtownSession(h.deps, { shellType: 'claude', command, prompt: 'metadata only',
+    const session = await createFtownSession(h.deps, { projectName: 'Test project', shellType: 'claude', command, prompt: 'metadata only',
       initialInput: 'raw input\r', initialInputDelay: 37, env: { WRAPPER_SETTING: 'preserved' } });
     assert.equal(session.command, command);
     assert.equal(h.runs[0].command, command);
@@ -1296,7 +1303,7 @@ describe('update launch admission', () => {
     deps.centrifugo.publishSessionUpdate = async () => { publishStarted(); await gate; };
     const launch = relaunchFtownSession(deps, fakeSession('existing'), 'retry');
     await started; admission.freeze();
-    await assert.rejects(createFtownSession(deps, { command: 'safe', shellType: 'shell' }), /update in progress/i);
+    await assert.rejects(createFtownSession(deps, { projectName: 'Test project', command: 'safe', shellType: 'shell' }), /update in progress/i);
     let drained = false; const drain = admission.drain(1000).then(() => { drained = true; });
     await Promise.resolve(); assert.equal(drained, false);
     resume(); await launch; await drain;
@@ -1373,6 +1380,7 @@ describe('createFtownSession — bridge-owned worktree creation', () => {
 
       // 1. Explicit workingDir + generated suffixed name + branch/base options
       const s1 = await createFtownSession(harness.deps, {
+        projectName: 'Test project',
         shellType: 'cursor',
         workingDir: explicitDir,
         worktree: { branch: 'feat/custom', base: 'develop' },
@@ -1398,6 +1406,7 @@ describe('createFtownSession — bridge-owned worktree creation', () => {
 
       // 2. Inherited parent workingDir + explicit session name + worktree: true
       const s2 = await createFtownSession(harness.deps, {
+        projectName: 'Test project',
         shellType: 'shell',
         parentSessionId: 'parent-1',
         name: 'child-worker',
@@ -1414,6 +1423,7 @@ describe('createFtownSession — bridge-owned worktree creation', () => {
 
       // 3. Fallback to process.cwd() when neither workingDir nor parent workingDir is present
       const s3 = await createFtownSession(harness.deps, {
+        projectName: 'Test project',
         shellType: 'shell',
         name: 'cwd-worker',
         worktree: true,
@@ -1440,6 +1450,7 @@ describe('createFtownSession — bridge-owned worktree creation', () => {
     await assert.rejects(
       () =>
         createFtownSession(harness.deps, {
+          projectName: 'Test project',
           shellType: 'shell',
           name: 'fails-wt',
           worktree: true,
@@ -1479,7 +1490,7 @@ describe('createFtownSession — bridge-owned worktree creation', () => {
       throw new Error('disk full');
     };
     await assert.rejects(
-      () => createFtownSession(h1.deps, { shellType: 'shell', name: 'save-fail', worktree: true }),
+      () => createFtownSession(h1.deps, { projectName: 'Test project', shellType: 'shell', name: 'save-fail', worktree: true }),
       /disk full/,
     );
     assert.strictEqual(removed.length, 1);
@@ -1500,7 +1511,7 @@ describe('createFtownSession — bridge-owned worktree creation', () => {
     };
     try {
       await assert.rejects(
-        () => createFtownSession(h2.deps, { shellType: 'shell', name: 'spawn-fail', worktree: true }),
+        () => createFtownSession(h2.deps, { projectName: 'Test project', shellType: 'shell', name: 'spawn-fail', worktree: true }),
         /spawn failed/,
       );
     } finally {
@@ -1564,6 +1575,7 @@ describe('createFtownSession — plan-item binding', () => {
     const recorder: PlanRecorder = { calls: [] };
     harness.deps.planStore = planStore({ items: [planItem('p1', 'todo')], seq: 1 }, recorder);
     const session = await createFtownSession(harness.deps, {
+      projectName: 'Test project',
       shellType: 'claude', prompt: 'do p1', parentSessionId: 'parent', planItem: 'p1',
     });
     assert.equal(harness.runs.length, 1, 'session launched');
@@ -1577,6 +1589,7 @@ describe('createFtownSession — plan-item binding', () => {
     harness.deps.planStore = planStore({ items: [planItem('p1', 'todo')], seq: 1 }, recorder);
     await assert.rejects(
       createFtownSession(harness.deps, {
+        projectName: 'Test project',
         shellType: 'claude', prompt: 'task', parentSessionId: 'parent', planItem: 'p9',
       }),
       (err: unknown) => err instanceof PlanItemError && /p9 does not exist/.test(err.message),
@@ -1592,6 +1605,7 @@ describe('createFtownSession — plan-item binding', () => {
     harness.deps.planStore = planStore({ items: [planItem('p1', 'started')], seq: 1 }, recorder);
     await assert.rejects(
       createFtownSession(harness.deps, {
+        projectName: 'Test project',
         shellType: 'claude', prompt: 'task', parentSessionId: 'parent', planItem: 'p1',
       }),
       (err: unknown) => err instanceof PlanItemError && /p1 is started, not todo/.test(err.message),
@@ -1605,7 +1619,7 @@ describe('createFtownSession — plan-item binding', () => {
     const recorder: PlanRecorder = { calls: [] };
     harness.deps.planStore = planStore({ items: [planItem('p1', 'todo')], seq: 1 }, recorder);
     await assert.rejects(
-      createFtownSession(harness.deps, { shellType: 'claude', prompt: 'task', planItem: 'p1' }),
+      createFtownSession(harness.deps, { projectName: 'Test project', shellType: 'claude', prompt: 'task', planItem: 'p1' }),
       (err: unknown) => err instanceof PlanItemError && /requires a parent/.test(err.message),
     );
     assert.equal(harness.saved.length, 0);
@@ -1624,6 +1638,7 @@ describe('createFtownSession — plan-item binding', () => {
         new Error('plan save race'),
       );
       const session = await createFtownSession(harness.deps, {
+        projectName: 'Test project',
         shellType: 'claude', prompt: 'task', parentSessionId: 'parent', planItem: 'p1',
       });
       assert.equal(harness.saved.length, 1, 'session stays');
@@ -1640,6 +1655,7 @@ describe('createFtownSession — plan-item binding', () => {
     harness.deps.planStore = planStore(null);
     await assert.rejects(
       createFtownSession(harness.deps, {
+        projectName: 'Test project',
         shellType: 'claude', prompt: 'task', parentSessionId: 'parent', planItem: 'p1',
       }),
       (err: unknown) => err instanceof PlanItemError && /p1 does not exist/.test(err.message),
@@ -1672,6 +1688,7 @@ describe('createFtownSession — plan-item binding', () => {
       harness.deps.planStore = planStore(case_.plan);
       await assert.rejects(
         createFtownSession(harness.deps, {
+          projectName: 'Test project',
           shellType: 'claude', prompt: 'task', worktree: true,
           parentSessionId: 'parent', planItem: case_.planItem,
         }),
@@ -1717,6 +1734,7 @@ describe('requireGreenPr plumbing and briefing', () => {
   it('createFtownSession persists requireGreenPr and includes it in child briefing', async () => {
     const harness = fakeDeps([fakeSession('parent')]);
     const created = await createFtownSession(harness.deps, {
+      projectName: 'Test project',
       name: 'pr-worker',
       shellType: 'claude',
       parentSessionId: 'parent',
@@ -1766,6 +1784,7 @@ describe('createFtownSession — shellType alias, rejection, and canonical stora
   it('resolves alias agy to canonical antigravity, stores it, and launches agy CLI', async () => {
     const harness = fakeDeps();
     const session = await createFtownSession(harness.deps, {
+      projectName: 'Test project',
       shellType: 'agy' as any,
       model: 'gemini-4-hydrogen-medium',
       prompt: 'hello world',
@@ -1785,6 +1804,7 @@ describe('createFtownSession — shellType alias, rejection, and canonical stora
     const harness = fakeDeps();
     await assert.rejects(
       () => createFtownSession(harness.deps, {
+        projectName: 'Test project',
         shellType: 'bogus' as any,
         prompt: 'hello world',
       }),
@@ -1885,9 +1905,9 @@ describe('reasoning effort', () => {
 
       const shellParent = { ...fakeSession('shell-parent'), shellType: 'shell' as const };
       await assert.rejects(createFtownSession(fakeDeps([shellParent]).deps, { parentSessionId: 'shell-parent', workingDir: work, effort: 'high' }), /shell sessions take no effort level/);
-      await assert.rejects(createFtownSession(fakeDeps().deps, { shellType: 'opencode', workingDir: work, effort: 'high' }), /#<level> suffix/);
+      await assert.rejects(createFtownSession(fakeDeps().deps, { projectName: 'Test project', shellType: 'opencode', workingDir: work, effort: 'high' }), /#<level> suffix/);
       // No harness named and no parent: a claude session.
-      const plain = await createFtownSession(fakeDeps().deps, { workingDir: work, effort: 'max' });
+      const plain = await createFtownSession(fakeDeps().deps, { projectName: 'Test project', workingDir: work, effort: 'max' });
       assert.match(plain.command, /^claude .*--effort 'max'/);
       assert.equal(plain.effort, 'max');
     } finally { rmSync(work, { recursive: true, force: true }); }
@@ -1943,4 +1963,30 @@ describe('reviewed approvals by default', () => {
     assert.deepEqual(deriveRelaunchCommand({ shellType: 'codex', workingDir: undefined, model: undefined, codexSessionId: 'thread-9', command: 'codex --model x' }),
       { command: 'codex --model x', isCustom: true });
   });
+});
+
+it('requires a nonblank project on roots and inherits a remote parent project', async () => {
+  const { deps } = fakeDeps();
+  await assert.rejects(createFtownSession(deps, { shellType: 'shell', projectName: '  ' }), /Project name/);
+  deps.loadRemoteParent = async () => ({ ...fakeSession('parent'), bridgeId: 'remote', projectName: 'Shared' });
+  const child = await createFtownSession(deps, { shellType: 'shell', parentSessionId: 'parent', parentBridgeId: 'remote' });
+  assert.equal(child.projectName, 'Shared');
+  assert.equal(child.parentSessionId, 'parent');
+  assert.equal(child.parentBridgeId, 'remote');
+});
+
+it('creates under a legacy root and resolves a local alias to a root on another machine', async () => {
+  const legacy = fakeDeps([fakeSession('legacy')]);
+  const child = await createFtownSession(legacy.deps, { parentSessionId: 'legacy', shellType: 'shell' });
+  assert.equal(child.projectName, 'Unassigned');
+
+  const harness = fakeDeps([{ ...fakeSession('alias'), parentSessionId: 'root', parentBridgeId: 'remote' }]);
+  harness.deps.loadRemoteParent = async (bridgeId, id) => {
+    assert.deepEqual([bridgeId, id], ['remote', 'root']);
+    return { ...fakeSession(id), bridgeId, projectName: 'Shared', shellType: 'shell', account: 'remote-only', allowedAccounts: [] };
+  };
+  const sibling = await createFtownSession(harness.deps, { parentSessionId: 'alias' });
+  assert.deepEqual([sibling.parentSessionId, sibling.parentBridgeId, sibling.projectName, sibling.shellType], ['root', 'remote', 'Shared', 'shell']);
+  assert.equal(sibling.account, undefined);
+  assert.equal(sibling.allowedAccounts, undefined);
 });

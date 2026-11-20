@@ -98,7 +98,7 @@ describe("resolveSessionDrop", () => {
     ).toBeNull();
   });
 
-  it("rejects self-drops and cross-bridge moves", () => {
+  it("rejects self-drops and accepts cross-bridge parents", () => {
     const dragged = { id: "session-a", bridgeId: "bridge-1" };
 
     expect(
@@ -116,7 +116,7 @@ describe("resolveSessionDrop", () => {
         bridgeId: "bridge-2",
         zone: "inside",
       }),
-    ).toBeNull();
+    ).toEqual({ type: "set-parent", sessionId: "session-a", parentSessionId: "session-b" });
   });
 
   it("does not highlight a child row as a parent when the server would normalize it", () => {

@@ -15,11 +15,14 @@ export interface SessionDefaults {
   bridgeId?: string;
   shellType?: ShellType;
   account?: string;
+  projectName?: string;
+  parentBridgeId?: string;
   parentSessionId?: string;
   allowedAccounts?: string[];
 }
 
 interface NewSessionModalProps {
+  resourcesByBridge?: ReadonlyMap<string, import("@/lib/host-resources").HostResources>;
   isOpen: boolean;
   onClose: () => void;
   onSubmit: (prompt: string, options: CreateSessionOptions) => void | Promise<void>;
@@ -342,13 +345,22 @@ function ProviderTokenHint({ provider, envVar, flavor }: { provider: string; env
   );
 }
 
-export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, sendCommand, sessions = EMPTY_SESSIONS }: NewSessionModalProps) {
+function formatResources(sample?: import("@/lib/host-resources").HostResources): string {
+  if (!sample) return "";
+  const gib = (bytes: number) => (bytes / 2 ** 30).toFixed(1);
+  return ` · CPU ${sample.cpuPercent ?? "—"}${sample.cpuPercent === null ? "" : "%"} · RAM ${gib(sample.freeRamBytes)}/${gib(sample.totalRamBytes)} GiB free` +
+    (sample.freeDiskBytes === null ? "" : ` · disk ${gib(sample.freeDiskBytes)} GiB free`) +
+    ` · ${new Date(sample.sampledAt).toLocaleTimeString()}`;
+}
+
+export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, resourcesByBridge, defaults, sendCommand, sessions = EMPTY_SESSIONS }: NewSessionModalProps) {
   const [name, setName] = useState("");
   const [workingDir, setWorkingDir] = useState("");
   const [topShell, setTopShell] = useState<TopShell>("claude");
   const [claudeFlavor, setClaudeFlavor] = useState<ClaudeFlavor>("standard");
   const shellType: ShellType = resolveShellType(topShell, claudeFlavor);
   const [bridgeId, setBridgeId] = useState("");
+  const [projectName, setProjectName] = useState("");
   const [parentSessionId, setParentSessionId] = useState("");
   const [account, setAccount] = useState("default");
   const [accountChosen, setAccountChosen] = useState(false);
@@ -389,11 +401,13 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
   const effectiveBridgeId = bridgeId || (bridges.length > 0 ? bridges[0].bridgeId : "");
   const selectedBridge = bridges.find((b) => b.bridgeId === effectiveBridgeId);
   const hostname = selectedBridge?.hostname ?? "";
-  const parents = sessions.filter(session => session.bridgeId === effectiveBridgeId);
+  const parents = sessions.filter(session => !session.lastKnownOnly && bridges.some(bridge => bridge.bridgeId === session.bridgeId));
   const parent = parents.find(session => session.id === parentSessionId);
-  const resolvedParent = parent?.parentSessionId ? parents.find(session => session.id === parent.parentSessionId) : parent;
-  const directPolicy = parent?.allowedAccounts;
-  const resolvedPolicy = resolvedParent?.allowedAccounts;
+  const resolvedParent = parent?.parentSessionId ? sessions.find(session => session.id === parent.parentSessionId) : parent;
+  const inheritedProject = parent ? resolvedParent?.projectName || parent.projectName || "Unassigned" : undefined;
+  const localRoot = resolvedParent?.bridgeId === effectiveBridgeId ? resolvedParent : undefined;
+  const directPolicy = parent?.bridgeId === effectiveBridgeId ? parent.allowedAccounts : undefined;
+  const resolvedPolicy = localRoot?.allowedAccounts;
   const parentPolicy = directPolicy && resolvedPolicy
     ? directPolicy.filter(id => resolvedPolicy.includes(id)) : directPolicy ?? resolvedPolicy;
   const accountHarness: AccountHarness | null = shellType === "claude" || shellType === "codex" ? shellType : null;
@@ -406,7 +420,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
       .map(candidate => ({ id: candidate.id, label: candidate.isDefault ? "Default account" : candidate.label ? `${candidate.label} (${candidate.id})` : candidate.id }))
     : [{ id: "default", label: "Default account" }]
   ).filter(candidate => parentPolicy === undefined || parentPolicy.includes(candidate.id));
-  const preferredAccount = parent ? resolvedParent?.account ?? "default" : defaults?.account ?? "default";
+  const preferredAccount = parent ? localRoot?.account ?? "default" : defaults?.account ?? "default";
   const missingPreferredAccount = accountHarness !== null && preferredAccount !== "default"
     && !accountsLoading && !registeredAccounts.some(candidate => candidate.id === preferredAccount);
   const needsReplacement = missingPreferredAccount && !accountChosen;
@@ -416,7 +430,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
     { id: "default", label: "Default account" },
     ...registeredAccounts.filter(candidate => !candidate.isDefault).sort((a, b) => a.id.localeCompare(b.id)).map(candidate => ({ id: candidate.id, label: `${candidate.label ?? candidate.id} (${candidate.harness})` })),
   ].filter(candidate => parentPolicy === undefined || parentPolicy.includes(candidate.id));
-  const incompatibleInheritance = Boolean(parent && !accountHarness && resolvedParent?.account !== undefined);
+  const incompatibleInheritance = Boolean(parent && !accountHarness && localRoot?.account !== undefined);
   const parentDisallowsDefault = Boolean(parent && !accountHarness && parentPolicy !== undefined && !parentPolicy.includes("default"));
   const policyUnavailable = allowedAccounts !== undefined && (currentAccounts?.status !== "ready"
     || allowedAccounts.some(id => !policyChoices.some(choice => choice.id === id)));
@@ -539,6 +553,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
     setTopShell(top);
     setClaudeFlavor(flavor);
     setBridgeId(restoredBridgeId);
+    setProjectName(defaults?.projectName ?? "");
     setParentSessionId(defaults?.parentSessionId ?? "");
     setAccount(defaults?.account ?? "default");
     setAllowedAccounts(defaults?.allowedAccounts);
@@ -579,6 +594,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
   const handleSubmit = useCallback(async (createMissingWorkingDir = false) => {
     setSubmitError(null);
     setMissingWorkingDir(null);
+    if (!(inheritedProject || projectName.trim())) { setSubmitError("Enter a project name."); return; }
     if (accountBlocked) {
       setSubmitError(accountsLoading ? "Wait for accounts to finish loading." : "This parent does not allow an account for the selected shell.");
       return;
@@ -616,13 +632,14 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
 
     try {
       await onSubmit("", {
+        projectName: inheritedProject || projectName.trim(),
         name: name.trim() || undefined,
         model: shellType === "grok" ? grokModel : shellType === "muse" ? museModel.trim() || undefined : shellType === "antigravity" ? antigravityModel.trim() || undefined : shellType === "pi" ? piModel.trim() || undefined : shellType === "kimi-code" ? kimiCodeModel : shellType === "opencode" ? opencodeModel.trim() || undefined : undefined,
         workingDir: workingDir.trim() || undefined,
         bridgeId: effectiveBridgeId || undefined,
         shellType,
         ...(accountHarness ? { account: selectedAccount } : {}),
-        ...(parent ? { parentSessionId: parent.id } : {}),
+        ...(parent ? { parentSessionId: parent.id, parentBridgeId: parent.bridgeId } : {}),
         ...(allowedAccounts !== undefined ? { allowedAccounts } : {}),
         claudeSessionId: selectedClaudeSessionId ?? undefined,
         cursorSessionId: selectedCursorSessionId ?? undefined,
@@ -688,7 +705,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
     setSelectedCursorSessionId(null);
     setSelectedCursorSummary(null);
     onClose();
-  }, [shellType, topShell, claudeFlavor, name, workingDir, effectiveBridgeId, hostname, selectedClaudeSessionId, selectedCursorSessionId, fireworksModels, zaiModels, grokModel, museModel, antigravityModel, piModel, kimiCodeModel, opencodeModel, autoCompactWindow, onSubmit, onClose, accountBlocked, accountsLoading, accountHarness, selectedAccount, allowedAccounts, parent, policyChoices]);
+  }, [shellType, topShell, claudeFlavor, name, projectName, inheritedProject, workingDir, effectiveBridgeId, hostname, selectedClaudeSessionId, selectedCursorSessionId, fireworksModels, zaiModels, grokModel, museModel, antigravityModel, piModel, kimiCodeModel, opencodeModel, autoCompactWindow, onSubmit, onClose, accountBlocked, accountsLoading, accountHarness, selectedAccount, allowedAccounts, parent, policyChoices]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -974,24 +991,28 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, defaults, 
                   bridgeEditedRef.current = true;
                   pendingRestoredBridgeIdRef.current = null;
                   setBridgeId(e.target.value);
-                  setParentSessionId("");
                 }}
                 className={INPUT_CLASS + " text-sm"}
               >
                 {bridges.map((b) => (
                   <option key={b.bridgeId} value={b.bridgeId}>
-                    {b.bridgeId} ({b.hostname})
+                    {b.bridgeId} ({b.hostname}){formatResources(resourcesByBridge?.get(b.bridgeId))}
                   </option>
                 ))}
               </select>
             )}
           </div>
 
+          <div>
+            <label htmlFor="ns-project" className="block text-sm text-[var(--text-muted)] mb-1">Project</label>
+            <input id="ns-project" className={INPUT_CLASS} maxLength={256} required value={inheritedProject || projectName}
+              disabled={Boolean(inheritedProject)} onChange={event => setProjectName(event.target.value)} />
+          </div>
           {parents.length > 0 && <div>
             <label htmlFor="ns-parent" className="block text-sm text-[var(--text-muted)] mb-1">Parent Session <span className="text-xs text-[var(--text-faint)]">(optional)</span></label>
             <select id="ns-parent" className={INPUT_CLASS + " text-sm"} value={parent?.id ?? ""} onChange={event => setParentSessionId(event.target.value)}>
               <option value="">No parent</option>
-              {parents.map(candidate => <option key={candidate.id} value={candidate.id}>{candidate.name || candidate.id}</option>)}
+              {parents.map(candidate => <option key={candidate.id} value={candidate.id}>{candidate.name || candidate.id} ({candidate.bridgeId})</option>)}
             </select>
           </div>}
 

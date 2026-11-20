@@ -92,6 +92,7 @@ async function startup(pointerFails = false, restart: 'none' | 'success' | 'fail
     const security = { revalidate: async () => {}, endpoint: { id: 'inert' } };
     const updates = {}; const updateEffects = {};
     const sessionController = {};
+    const hostResources = async () => ({});
     const store = { listSessions: async () => { startupSteps.push('list'); return [
       { id: 'active', status: 'running', shellType: 'codex' }, { id: 'shell', status: 'running', shellType: 'shell' }, { id: 'stopped', status: 'completed', shellType: 'codex' }]; } };
     const attentionStore = { restoreIdleNotifications: async (ids: string[]) => {

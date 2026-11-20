@@ -1,8 +1,10 @@
 import { INSTRUCTIONS_LOCAL, INSTRUCTIONS_SYNC, INSTRUCTIONS_WIRE } from './instructions-protocol.js';
 import { mergeGlobal, readRevision } from './instructions.js';
+import { peerResources, type HostResources } from './host-resources.js';
 import { TransferJournal } from './folder-transfer-journal.js';
 import { FolderTransfers, transferError } from './folder-transfer.js';
 import { TRANSFER_LOCAL, TRANSFER_WIRE } from './folder-transfer-protocol.js';
+import { ParentLookupError, sessionRequestPrincipal } from './session-parent.js';
 import type { BrowserAccess } from './browser-access.js';
 import { createServer } from 'node:http';
 import { EventEmitter } from 'node:events';
@@ -241,10 +243,14 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
 
   private peerControl: PeerControl | null = null;
   /** Cross-bridge control: forwards the local CLI's requests to other bridges of this account. */
+  private hostResources?: () => Promise<HostResources>;
+  private rememberedPeerSessions?: () => Promise<unknown[]>;
   private peerLinks: PeerLinks | null = null;
   private transfers: FolderTransfers | null = null;
 
-  setPeerControl(peers: PeerControl, links?: PeerLinks, transferStateDir?: string): void {
+  setPeerControl(peers: PeerControl, links?: PeerLinks, transferStateDir?: string, remembered?: () => Promise<unknown[]>, hostResources?: () => Promise<HostResources>): void {
+    this.hostResources = hostResources;
+    this.rememberedPeerSessions = remembered;
     this.peerControl = peers;
     this.peerLinks = links ?? null;
     this.transfers = new FolderTransfers(peers, transferStateDir ? new TransferJournal(transferStateDir) : undefined);
@@ -326,8 +332,21 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     if (!this.peerControl || !this.security) return { status: 503, body: { error: 'Cross-bridge control is starting', code: 'peers_starting' } };
     await this.security.revalidate(message.principal);
     try {
+      if (url.pathname === '/api/peers/sessions' && method === 'GET') {
+        return { status: 200, body: applicationJson({ sessions: await this.rememberedPeerSessions?.() ?? [] }) };
+      }
       if (url.pathname === '/api/peers' && method === 'GET') {
-        const peers = await this.peerControl.list(url.searchParams.get('probe') === '1');
+        const control = this.peerControl;
+        const peers = await control.list(url.searchParams.get('probe') === '1');
+        if (url.searchParams.get('resources') === '1') {
+          const [resources, reports] = await Promise.all([
+            this.hostResources?.() ?? null,
+            Promise.all(peers.map(async peer => ({ ...peer, resources: await peerResources(control, peer.bridgeId) }))),
+          ]);
+          await this.security.revalidate(message.principal);
+          const approved = new Set((await control.list()).map(peer => peer.endpointId));
+          return { status: 200, body: applicationJson({ bridgeId: this.security.bridgeId, resources, peers: reports.filter(peer => approved.has(peer.endpointId)) }) };
+        }
         return { status: 200, body: applicationJson({ bridgeId: this.security.bridgeId, peers }) };
       }
       if (url.pathname === '/api/peers/http' && method === 'POST') {
@@ -391,6 +410,10 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   }
 
   async dispatchSecure(message: VerifiedApplication, clientGone?: AbortSignal): Promise<ApplicationJson> {
+    return sessionRequestPrincipal.run(message.principal, () => this.dispatchAuthorized(message, clientGone));
+  }
+
+  private async dispatchAuthorized(message: VerifiedApplication, clientGone?: AbortSignal): Promise<ApplicationJson> {
     if (!this.security) throw new Error('Security is starting');
     const route = message.application.route;
     if (route.kind === 'command') {
@@ -400,6 +423,11 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     if (route.kind !== 'http') throw new Error('Invalid application route');
     const routePath = route.path.split('?')[0];
     if (routePath === INSTRUCTIONS_LOCAL || routePath === INSTRUCTIONS_WIRE || routePath === INSTRUCTIONS_SYNC) return this.dispatchInstructions(message, routePath);
+    if (routePath === '/api/host-resources' && route.method === 'GET') {
+      await this.security.revalidate(message.principal);
+      if (!this.hostResources) return { status: 503, body: { error: 'Host resources unavailable' } };
+      return { status: 200, body: applicationJson({ bridgeId: this.security.bridgeId, resources: await this.hostResources() }) };
+    }
     if (routePath === TRANSFER_LOCAL || routePath === TRANSFER_WIRE) return this.dispatchTransfer(message, routePath);
     if (routePath === '/api/peers' || routePath.startsWith('/api/peers/')) return this.dispatchPeers(message, route.method, route.path);
     if ((route.method === 'PUT' || route.method === 'DELETE') && /^\/api\/sessions\/[A-Za-z0-9_-]{1,200}\/preview$/.test(route.path.split('?')[0])
@@ -1226,7 +1254,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
           return;
         }
         const message = err instanceof Error ? err.message : String(err);
-        const status = message === 'Parent session not found' ? 400 : 500;
+        const status = (err instanceof ParentLookupError || ['Parent session not found', 'Project name is required', 'Project name exceeds 256 characters'].includes(message)) ? 400 : 500;
         jsonResponse(res, status, { error: message });
       }
       return;
@@ -1898,9 +1926,9 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         return;
       }
 
-      const parentSessionId = tombstone.parentSessionId
-        ? (await this.store.loadSession(tombstone.parentSessionId)) ? tombstone.parentSessionId : undefined
-        : undefined;
+      let parentSessionId = tombstone.parentSessionId;
+      const remoteParent = tombstone.parentBridgeId && tombstone.parentBridgeId !== tombstone.bridgeId;
+      if (parentSessionId && !remoteParent && !await this.store.loadSession(parentSessionId)) parentSessionId = undefined;
 
       // Custom-command tombstones (command override at create time) must rerun
       // their command verbatim — the builder would silently swap in a stock
@@ -1912,6 +1940,8 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       try {
         const session = await createFtownSession(this.sessionDeps, {
           command: isCustomCommand ? tombstone.command : undefined,
+          parentBridgeId: tombstone.parentBridgeId,
+          projectName: tombstone.projectName || "Unassigned",
           name: tombstone.name,
           workingDir: tombstone.workingDir,
           env: tombstone.env,
@@ -1972,7 +2002,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
 
       const result = await controller.update(sessionId, {
         ...(name === undefined ? {} : { name }),
-        ...(hasParentField ? { parent: { value: body.parentSessionId } } : {}),
+        ...(hasParentField ? { parent: { value: body.parentSessionId, bridgeId: typeof body.parentBridgeId === "string" ? body.parentBridgeId : undefined } } : {}),
         ...(hasPullRequestField ? { pullRequestUrl: body.pullRequestUrl as string | null } : {}),
       });
       if (!result.ok) {

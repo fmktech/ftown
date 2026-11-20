@@ -60,7 +60,7 @@ async function api(method, path, body, expected = 200) {
   const data = response.body; assert.equal(response.status, expected, JSON.stringify(data)); return data;
 }
 async function create(input) {
-  const { session } = await api('POST', '/api/sessions', { name:'structured-fixture', workingDir:work, ...input }, 201);
+  const { session } = await api('POST', '/api/sessions', { projectName: 'smoke', name:'structured-fixture', workingDir:work, ...input }, 201);
   owned.add(session.id);
   const launch = await until(() => receipts(session.id).find(value => value.type === 'launch'), 'fake CLI launch');
   return { session, launch };
@@ -93,7 +93,7 @@ try {
   await until(() => output.includes('[Bridge] Ready and listening for commands'), 'bridge readiness');
   const status = await exec(installed, ['harness','--json','status'], { env, cwd:work, timeout:30_000 });
   assert.equal(JSON.parse(status.stdout).bridge, 'up');
-  const accountCreate = await exec(installed, ['sessions','create','--shell','claude','--account','personal','--workdir',work,'--prompt','account environment smoke','--json'], { env, cwd:work, timeout:30_000 });
+  const accountCreate = await exec(installed, ['sessions','create','--project','smoke','--shell','claude','--account','personal','--workdir',work,'--prompt','account environment smoke','--json'], { env, cwd:work, timeout:30_000 });
   const selected = JSON.parse(accountCreate.stdout).session;
   owned.add(selected.id);
   const selectedLaunch = await until(() => receipts(selected.id).find(value => value.type === 'launch'), 'account CLI launch');
@@ -102,7 +102,7 @@ try {
   assert.equal(selected.command.includes(accountConfig), false, 'account path is never embedded in command text');
   assert.equal(selectedLaunch.codexHome, undefined);
   await remove(selected.id);
-  const codexCreate = await exec(installed, ['sessions','create','--shell','codex','--account','codex-lab','--workdir',work,'--prompt','account environment smoke','--json'], { env, cwd:work, timeout:30_000 });
+  const codexCreate = await exec(installed, ['sessions','create','--project','smoke','--shell','codex','--account','codex-lab','--workdir',work,'--prompt','account environment smoke','--json'], { env, cwd:work, timeout:30_000 });
   const codexSelected = JSON.parse(codexCreate.stdout).session;
   owned.add(codexSelected.id);
   const codexLaunch = await until(() => receipts(codexSelected.id).find(value => value.type === 'launch'), 'codex account CLI launch');
