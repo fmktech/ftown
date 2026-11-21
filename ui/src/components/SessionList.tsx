@@ -382,12 +382,18 @@ function SessionContextMenu({
       {menu.session.block && onDismissBlock && (
         <ContextMenuButton largeOnMobile label="Dismiss badge" onClick={() => { void onDismissBlock(menu.session).catch(console.error); onClose(); }} />
       )}
-      {moveProjects.map(project => (
-        <ContextMenuButton key={project} largeOnMobile label={`Move to ${project}`} onClick={() => {
-          onMoveToProject(project);
-          onClose();
-        }} />
-      ))}
+      {moveProjects.length > 0 && (
+        <select
+          aria-label="Move to project"
+          defaultValue=""
+          className="min-h-11 max-w-[220px] cursor-pointer text-sm md:min-h-0 md:text-[11px]"
+          style={{ ...menuButtonStyle, fontSize: undefined }}
+          onChange={event => { onMoveToProject(event.currentTarget.value); onClose(); }}
+        >
+          <option value="" disabled>Move to project…</option>
+          {moveProjects.map(project => <option key={project} value={project}>{project}</option>)}
+        </select>
+      )}
       <ContextMenuButton largeOnMobile label="Rename" onClick={() => { onRename(menu.session); onClose(); }} />
       <ContextMenuButton largeOnMobile label="Clone" onClick={() => { onClone(menu.session); onClose(); }} />
       {isRunning && (
@@ -1298,8 +1304,8 @@ export function SessionList({
         }}>
           <input autoFocus aria-label="Project name" maxLength={256} value={newProject} className="min-w-0 flex-1"
             onChange={event => setNewProject(event.target.value)} onKeyDown={event => { if (event.key === "Escape") setNewProject(null); }} />
-          <button disabled={!newProject.trim()} type="submit">Create</button>
-          <button type="button" onClick={() => setNewProject(null)}>Cancel</button>
+          <button className="btn-accent" disabled={!newProject.trim()} type="submit">Create</button>
+          <button type="button" className="btn-ghost" onClick={() => setNewProject(null)}>Cancel</button>
         </form>)}
       {contextMenu?.kind === "session" && onStopSession && onRemoveSession && (
         <SessionContextMenu

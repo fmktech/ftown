@@ -76,5 +76,10 @@ export function BridgesDialog({ computers, resources, create, updates, security,
         </div>
       </section>;
     })}</div>
+    <details className="mx-4 mb-4">
+      <summary className="btn-ghost w-fit">Agent instructions</summary>
+      <p className="mt-2 text-sm">Edit <code>~/.ftown/global.md</code> in a text editor on any bridge. Paired bridges sync it automatically. The newest edit wins.</p>
+      <p className="mt-2 text-sm">For instructions specific to one computer, edit <code>~/.ftown/bridge.md</code> on that bridge.</p>
+    </details>
   </dialog>;
 }

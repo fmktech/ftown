@@ -107,9 +107,10 @@ it("offers an empty project in session actions when the project allows the ownin
   const section = within(screen.getByRole("region", { name: "No project" }));
   fireEvent.keyDown(section.getByLabelText("Session actions"), { key: "Enter" });
   const menu = within(screen.getByRole("menu", { name: "Session actions" }));
-  expect(menu.queryByRole("menuitem", { name: "Move to Restricted" })).toBeNull();
-  expect(menu.getByRole("menuitem", { name: "Move to Occupied" })).toBeTruthy();
-  fireEvent.click(menu.getByRole("menuitem", { name: "Move to Launch" }));
+  const picker = menu.getByRole("combobox", { name: "Move to project" });
+  expect(within(picker).queryByRole("option", { name: "Restricted" })).toBeNull();
+  expect(within(picker).getByRole("option", { name: "Occupied" })).toBeTruthy();
+  fireEvent.change(picker, { target: { value: "Launch" } });
   expect(onMoveSessionToProject).toHaveBeenCalledWith(session, "Launch");
   localStorage.clear();
 });
@@ -125,6 +126,6 @@ it("moves an assigned child into an occupied project as a new root", () => {
   if (expand) fireEvent.click(expand);
   const row = source.getByText("Child", { exact: true }).closest("button")!;
   fireEvent.keyDown(within(row).getByLabelText("Session actions"), { key: "Enter" });
-  fireEvent.click(screen.getByRole("menuitem", { name: "Move to Target" }));
+  fireEvent.change(screen.getByRole("combobox", { name: "Move to project" }), { target: { value: "Target" } });
   expect(move).toHaveBeenCalledWith(child, "Target", true);
 });
