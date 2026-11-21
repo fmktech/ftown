@@ -41,13 +41,13 @@ function readCache(key: string, project: Project): CachedBoard | null {
   } catch { return null; }
 }
 
-export function ProjectBoardDialog(props: Props) {
+export function ProjectBoardPanel(props: Props) {
   const storageKey = JSON.stringify([props.cacheKey, "project-board", props.project.bridgeId, props.project.id]);
   return <ProjectBoard key={storageKey} {...props} storageKey={storageKey} />;
 }
 
 function ProjectBoard({ project, online, send, sessions, attentionIds, bridgeNames, onLaunch, onOpenSession, storageKey, close }: Props & { storageKey: string }) {
-  const dialog = useRef<HTMLDialogElement>(null);
+  const panel = useRef<HTMLElement>(null);
   const [cached, setCached] = useState(() => readCache(storageKey, project));
   const [fresh, setFresh] = useState(false);
   const [error, setError] = useState("");
@@ -93,10 +93,10 @@ function ProjectBoard({ project, online, send, sessions, attentionIds, bridgeNam
   }, [projectId, bridgeId, send]);
   const mounted = useRef(false);
   useEffect(() => {
-    const element = dialog.current;
+    panel.current?.focus();
     mounted.current = true;
-    element?.showModal();
-    return () => { mounted.current = false; element?.close(); };
+
+    return () => { mounted.current = false; };
   }, []);
   useEffect(() => {
     setFresh(false);
@@ -167,13 +167,14 @@ function ProjectBoard({ project, online, send, sessions, attentionIds, bridgeNam
   for (const ticket of board?.tickets ?? []) {
     for (const id of ticket.sessionIds) ticketBySession.set(id, ticket.title);
   }
-  return <dialog ref={dialog} aria-labelledby="project-board-title" className="computers-dialog p-4 md:p-6" style={{ width: "min(82rem, 96vw)" }}
-    onCancel={event => { event.preventDefault(); close(); }}>
-    <header className="mb-4 flex items-start justify-between gap-4">
+  return <section ref={panel} tabIndex={-1} aria-labelledby="project-board-title"
+    className="flex min-h-0 min-w-0 flex-1 flex-col bg-[var(--bg-base)] text-[var(--text-primary)] outline-none">
+    <header className="flex shrink-0 items-center justify-between gap-4 border-b border-[var(--border-muted)] px-4 py-3 md:px-6">
       <div><h2 id="project-board-title" className="text-lg font-semibold">{project.name} board</h2>
         <p className="text-xs text-[var(--text-muted)]">Hosted on {bridgeNames?.get(bridgeId) ?? bridgeId}</p></div>
-      <button className="btn-ghost" onClick={close} aria-label="Close board">×</button>
+      <button className="btn-ghost" onClick={close} aria-label="Back to workspace">Back</button>
     </header>
+    <div className="min-h-0 flex-1 overflow-auto p-4 md:p-6">
     {!online && <p role="status">{board ? "Home bridge offline · last saved board" : "Home bridge offline · no cached board"}</p>}
     {online && !fresh && !error && <p role="status">Loading board…</p>}
     {error && online && <p role="alert">{error} <button className="btn-ghost" onClick={() => setRefresh(n => n + 1)}>Refresh</button></p>}
@@ -231,5 +232,6 @@ function ProjectBoard({ project, online, send, sessions, attentionIds, bridgeNam
         })}
       </div>
     </>}
-  </dialog>;
+    </div>
+  </section>;
 }

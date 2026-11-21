@@ -3,7 +3,7 @@
 import { BridgeBadge } from "./BridgeBadge";
 import { useBridgeIdentities } from "@/hooks/useBridgeIdentities";
 import { InstructionsDialog } from "./InstructionsDialog";
-import { ProjectBoardDialog } from "./ProjectBoardDialog";
+import { ProjectBoardPanel } from "./ProjectBoardPanel";
 import { useProjectDirectory, type HomeProject } from "@/hooks/useProjectDirectory";
 import { BridgesDialog } from "./BridgesDialog";
 import { validResources, type HostResources } from "@/lib/host-resources";
@@ -137,6 +137,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const startCommand = buildBridgeStartCommand({ apiUrl: typeof window !== "undefined" ? window.location.origin : "" });
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [usageViewSessionId, setUsageViewSessionId] = useState<string | null>(null);
+  const [openBoard, setOpenBoard] = useState<HomeProject | null>(null);
   const [inboxOpen, setInboxOpen] = useState(false);
   /** Child attention item opened in the Overview coordinator panel; mirrored to `?attention=` URL state. */
   const [openAttentionId, setOpenAttentionId] = useState<string | null>(null);
@@ -288,7 +289,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const rpc = useBridgeRpc(client, userId);
   const { bridgeExec } = rpc;
   const { sessions: rawSessions, createSession, stopSession, retrySession, handoffSession, dismissSessionBlock, moveSessionToProject, renameSession, setSessionParent, removeSession } = useSessions(client, userId, rpc,
-    !inboxOpen && selectedSessionId === usageViewSessionId && (isDesktop || mobileTab !== "sessions") ? usageViewSessionId : null);
+    !openBoard && !inboxOpen && selectedSessionId === usageViewSessionId && (isDesktop || mobileTab !== "sessions") ? usageViewSessionId : null);
   const { bridges, prepareLocalAccess } = useBridges(client, userId, transport);
   const securityRuntime = client?.securityRuntime;
   useEffect(() => securityRuntime?.onChange(() => setSecurityGeneration(value => value + 1)), [securityRuntime]);
@@ -322,7 +323,6 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   }, [showNewSession, showBridges, statsTargets, client, userId]);
   const updateIds = connectionStatus === "connected" ? readyBridges.map(bridge => bridge.bridgeId) : [];
   const projectDirectory = useProjectDirectory(accountId ?? userId, updateIds, rpc.sendCommand);
-  const [openBoard, setOpenBoard] = useState<HomeProject | null>(null);
   const updates = useBridgeUpdates(rpc.sendCommand, updateIds);
 
   const hasBridges = readyBridges.length > 0;
@@ -597,6 +597,7 @@ PY`;
   const handleCopySheetClose = useCallback(() => setCopySheetText(null), []);
 
   const handleSelectSession = useCallback((id: string | null) => {
+    setOpenBoard(null);
     setSelectedSessionId(id);
     setOpenAttentionId(null);
     setSessionActivation(count => count + 1);
@@ -726,6 +727,7 @@ PY`;
     if (!pendingAttention) return;
     const target = attentionLinkTarget({ attentionId: pendingAttention.attentionId, sessionHint: pendingAttention.sessionHint, entries: inbox, sessions });
     if (!target) return;
+    setOpenBoard(null);
     setSelectedSessionId(target.selectSessionId);
     setSessionActivation(count => count + 1);
     setAttentionHidden(null);
@@ -1214,7 +1216,7 @@ PY`;
       )}
 
       {/* ── Mobile Tab Bar ── */}
-      <div
+      {!openBoard && <div
         className="flex md:hidden shrink-0" role="tablist" aria-label="Workspace navigation" onKeyDown={event => {
           if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
           const tabs = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
@@ -1251,15 +1253,15 @@ PY`;
         </button>
         {sidePaneOpen && <button className={`mobile-tab ${mobileTab === "preview" ? "mobile-tab-active" : ""}`} role="tab" tabIndex={mobileTab === "preview" ? 0 : -1} aria-selected={mobileTab === "preview"} aria-controls="session-preview-panel" onClick={() => handleMobileTabSwitch("preview")}>{attentionShown ? "Waiting" : "Preview"}</button>}
         {reviewOpen && <button className={`mobile-tab ${mobileTab === "review" ? "mobile-tab-active" : ""}`} role="tab" tabIndex={mobileTab === "review" ? 0 : -1} aria-selected={mobileTab === "review"} aria-controls="session-review-panel" onClick={() => handleMobileTabSwitch("review")}>PR review</button>}
-      </div>
+      </div>}
 
       {/* ── Main Layout ── */}
       <div className="flex-1 flex min-h-0">
         {/* Sidebar */}
         <aside
           id="dashboard-sidebar"
-          aria-hidden={!isDesktop && inboxOpen}
-          className={`dashboard-sidebar shrink-0 flex-col ${mobileTab === "sessions" && !inboxOpen ? "flex" : "hidden"} md:flex`}
+          aria-hidden={!isDesktop && (inboxOpen || !!openBoard)}
+          className={`dashboard-sidebar shrink-0 flex-col ${mobileTab === "sessions" && !inboxOpen && !openBoard ? "flex" : "hidden"} md:flex`}
           style={{
             "--dashboard-sidebar-width": `${sidebarCollapsed ? 60 : sidebarWidth}px`,
             borderRight: "1px solid var(--border-subtle)",
@@ -1269,7 +1271,7 @@ PY`;
             transition: sidebarResizeRef.current ? "none" : "width 0.2s ease",
           } as CSSProperties}
         >
-          <SessionInboxTrigger count={waitingCount} collapsed={isDesktop && sidebarCollapsed} open={inboxOpen} onOpen={() => setInboxOpen(true)} buttonRef={inboxTriggerRef} />
+          <SessionInboxTrigger count={waitingCount} collapsed={isDesktop && sidebarCollapsed} open={inboxOpen} onOpen={() => { setOpenBoard(null); setInboxOpen(true); }} buttonRef={inboxTriggerRef} />
           <div
             className="shrink-0 hidden md:flex items-center"
             style={{
@@ -1355,10 +1357,13 @@ PY`;
           </section>}
           <div className="flex-1 overflow-y-auto">
             <SessionList
-              boards={{ projects: projectDirectory.projects,
+              boards={{ projects: projectDirectory.projects, activeProjectId: openBoard?.id,
                 homes: updateIds.map(id => ({ id, label: bridgeIdentities.get(id)?.name || id })),
-                create: projectDirectory.create, open: setOpenBoard,
-                change: (project, name) => projectDirectory.mutate(project, name === null ? "delete_project" : "rename_project", name ?? undefined),
+                create: projectDirectory.create, open: project => { setInboxOpen(false); setOpenBoard(project); },
+                change: async (project, name) => {
+                  await projectDirectory.mutate(project, name === null ? "delete_project" : "rename_project", name ?? undefined);
+                  setOpenBoard(current => current?.id === project.id ? (name ? { ...current, name } : null) : current);
+                },
               }}
               bridgeIdentities={bridgeIdentities}
               projectBridges={projectBridges}
@@ -1375,7 +1380,7 @@ PY`;
               } : undefined}
               onHiddenProjectsChange={setHiddenProjects}
               sessions={sessions}
-              selectedSessionId={selectedSessionId}
+              selectedSessionId={openBoard ? null : selectedSessionId}
               onSelectSession={handleSelectSession}
               onReviewPullRequest={handleReviewPullRequest}
               onRenameSession={renameSession}
@@ -1414,11 +1419,27 @@ PY`;
         </aside>
 
         {/* Terminal area */}
-        <main aria-hidden={!isDesktop && mobileTab === "sessions" && !inboxOpen} className={`flex-1 flex-col min-h-0 min-w-0 ${mobileTab !== "sessions" || inboxOpen ? "flex" : "hidden"} md:flex`}>
+        <main aria-hidden={!isDesktop && mobileTab === "sessions" && !inboxOpen && !openBoard} className={`flex-1 flex-col min-h-0 min-w-0 ${mobileTab !== "sessions" || inboxOpen || openBoard ? "flex" : "hidden"} md:flex`}>
+          {openBoard && <ProjectBoardPanel key={openBoard.id} project={openBoard} online={updateIds.includes(openBoard.bridgeId)}
+            bridgeNames={new Map([...bridgeIdentities].map(([id, info]) => [id, info.name]))}
+            onOpenSession={handleSelectSession}
+            onLaunch={ticketId => {
+              setLaunchTicket({ project: openBoard, ticketId });
+              setSessionDefaults({ projectName: openBoard.name });
+              setShowNewSession(true);
+            }}
+            send={rpc.sendCommand} sessions={sessions} attentionIds={new Set(openAttentionBySession.keys())}
+            cacheKey={`ftown:board:${accountId ?? userId}:${openBoard.bridgeId}:${openBoard.id}`} close={() => {
+              const trigger = document.querySelector<HTMLButtonElement>('#dashboard-sidebar button[aria-pressed="true"][data-project-board]');
+              setOpenBoard(null);
+              if (!isDesktop) setMobileTab("sessions");
+              requestAnimationFrame(() => trigger?.focus());
+              scheduleTerminalRenderAdjustment();
+            }} />}
           <SessionInboxPage entries={inbox} open={inboxOpen} onClose={() => { restoreInboxFocusRef.current = true; setInboxOpen(false); scheduleTerminalRenderAdjustment(); }}
             onOpenSession={id => { focusOpenedSessionRef.current = true; handleSelectSession(id); scheduleTerminalRenderAdjustment(); }} onDismiss={entry => clearSessionAttention(entry.session.id, entry.notice)} onReply={replyToInbox} onAnswer={answerInbox} />
-          <div ref={workspaceFocusRef} role="region" aria-label={`Session workspace: ${selectedSession?.name || selectedSession?.prompt?.slice(0, 48) || "Session"}`} tabIndex={-1} className="relative min-h-0 min-w-0 flex-1 flex-col focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--accent)]" style={{ display: inboxOpen ? "none" : "flex" }} aria-hidden={inboxOpen}>
-          <SessionWorkspace visible={!inboxOpen && (isDesktop || mobileTab !== "sessions")} onUsageVisibilityChange={setUsageViewSessionId} session={selectedSession} sessions={sessions} activity={selectedSessionId ? sessionActivity.get(selectedSessionId) : undefined} activityBySession={sessionActivity} openAttentionBySession={openAttentionBySession} idleSince={idleSince} client={client} userId={userId} readable={connectionStatus === "connected" && !!selectedSession && activeBridgeIds.has(selectedSession.bridgeId) && bridgeSecurityStates.get(selectedSession.bridgeId) === "ready"} securityGeneration={securityGeneration} sendCommand={rpc.sendCommand} open={previewOpen} onClose={() => setPreviewOpen(false)} isDesktop={isDesktop} mobileTab={mobileTab} onMobileTab={handleMobileTabFallback} sessionActivation={sessionActivation} onRefit={refitPreviewTerminal} reviewOpen={reviewOpen} reviewActivation={reviewChoice.activation} onCloseReview={closeReview} onHandoff={handleHandoff} attentionEntries={inbox} openAttentionId={openAttentionId} onOpenAttentionChange={handleOpenAttentionChange} onDismissAttention={dismissChildAttention} onReplyAttention={replyChildAttention} onAnswerAttention={answerChildAttention} onOpenSessionById={handleSelectSession} attention={selectedWaitingEntry ? { entry: selectedWaitingEntry, shown: attentionShown, onShow: showAttention, onHide: hideAttention, onDismiss: entry => clearSessionAttention(entry.session.id, entry.notice), onReply: replyToInbox, onAnswer: answerInbox } : undefined}>
+          <div ref={workspaceFocusRef} role="region" aria-label={`Session workspace: ${selectedSession?.name || selectedSession?.prompt?.slice(0, 48) || "Session"}`} tabIndex={-1} className="relative min-h-0 min-w-0 flex-1 flex-col focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--accent)]" style={{ display: inboxOpen || openBoard ? "none" : "flex" }} aria-hidden={inboxOpen || !!openBoard}>
+          <SessionWorkspace visible={!openBoard && !inboxOpen && (isDesktop || mobileTab !== "sessions")} onUsageVisibilityChange={setUsageViewSessionId} session={selectedSession} sessions={sessions} activity={selectedSessionId ? sessionActivity.get(selectedSessionId) : undefined} activityBySession={sessionActivity} openAttentionBySession={openAttentionBySession} idleSince={idleSince} client={client} userId={userId} readable={connectionStatus === "connected" && !!selectedSession && activeBridgeIds.has(selectedSession.bridgeId) && bridgeSecurityStates.get(selectedSession.bridgeId) === "ready"} securityGeneration={securityGeneration} sendCommand={rpc.sendCommand} open={previewOpen} onClose={() => setPreviewOpen(false)} isDesktop={isDesktop} mobileTab={mobileTab} onMobileTab={handleMobileTabFallback} sessionActivation={sessionActivation} onRefit={refitPreviewTerminal} reviewOpen={reviewOpen} reviewActivation={reviewChoice.activation} onCloseReview={closeReview} onHandoff={handleHandoff} attentionEntries={inbox} openAttentionId={openAttentionId} onOpenAttentionChange={handleOpenAttentionChange} onDismissAttention={dismissChildAttention} onReplyAttention={replyChildAttention} onAnswerAttention={answerChildAttention} onOpenSessionById={handleSelectSession} attention={selectedWaitingEntry ? { entry: selectedWaitingEntry, shown: attentionShown, onShow: showAttention, onHide: hideAttention, onDismiss: entry => clearSessionAttention(entry.session.id, entry.notice), onReply: replyToInbox, onAnswer: answerInbox } : undefined}>
           <Terminal
             ref={terminalRef}
             transport={transport}
@@ -1456,17 +1477,6 @@ PY`;
         currentEndpointId={securityRuntime?.identity.endpoint.id ?? null} currentComputerIds={currentComputerIds} execute={executeSecurity}
         accountId={localMode ? null : accountId}
         initialBridgeId={securityBridgeId} />
-      {openBoard && <ProjectBoardDialog key={openBoard.id} project={openBoard} online={updateIds.includes(openBoard.bridgeId)}
-        bridgeNames={new Map([...bridgeIdentities].map(([id, info]) => [id, info.name]))}
-        onOpenSession={id => { setOpenBoard(null); handleSelectSession(id); }}
-        onLaunch={ticketId => {
-          setLaunchTicket({ project: openBoard, ticketId });
-          setSessionDefaults({ projectName: openBoard.name });
-          setOpenBoard(null);
-          setShowNewSession(true);
-        }}
-        send={rpc.sendCommand} sessions={sessions} attentionIds={new Set(openAttentionBySession.keys())}
-        cacheKey={`ftown:board:${accountId ?? userId}:${openBoard.bridgeId}:${openBoard.id}`} close={() => setOpenBoard(null)} />}
       {instructionBridge && <InstructionsDialog bridgeId={instructionBridge} name={bridgeIdentities.get(instructionBridge)?.name || instructionBridge}
         send={rpc.sendCommand} close={() => setInstructionBridge(null)} />}
       {updateBridgeId && <BridgeUpdatesDialog open name={bridges.find(bridge => bridge.bridgeId === updateBridgeId)?.hostname ?? updateBridgeId}
