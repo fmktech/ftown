@@ -1,6 +1,8 @@
+import { PROJECT_DIRECTORY, type ProjectDirectoryEntry } from './project-directory-protocol.js';
 import { INSTRUCTIONS_LOCAL, INSTRUCTIONS_SYNC, INSTRUCTIONS_WIRE } from './instructions-protocol.js';
 import { mergeGlobal, readRevision } from './instructions.js';
 import { peerResources, type HostResources } from './host-resources.js';
+import { sessionBlocksTicket } from './project-board-store.js';
 import { TransferJournal } from './folder-transfer-journal.js';
 import { FolderTransfers, transferError } from './folder-transfer.js';
 import { TRANSFER_LOCAL, TRANSFER_WIRE } from './folder-transfer-protocol.js';
@@ -241,6 +243,12 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   private localEventBytes = 0;
   private readonly localEventWaiters = new Set<() => void>();
 
+  private localProjects?: () => readonly ProjectDirectoryEntry[];
+
+  setLocalProjects(list: () => readonly ProjectDirectoryEntry[]): void {
+    this.localProjects = list;
+  }
+
   private peerControl: PeerControl | null = null;
   /** Cross-bridge control: forwards the local CLI's requests to other bridges of this account. */
   private hostResources?: () => Promise<HostResources>;
@@ -422,6 +430,15 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     }
     if (route.kind !== 'http') throw new Error('Invalid application route');
     const routePath = route.path.split('?')[0];
+    if (routePath === PROJECT_DIRECTORY) {
+      const { endpoint } = message.principal;
+      if (endpoint.kind !== 'bridge' || !this.security.peerBridges().some(peer => peer.endpoint.id === endpoint.id))
+        return { status: 403, body: { error: 'permission_denied' } };
+      await this.security.revalidate(message.principal);
+      if (!this.localProjects) return { status: 503, body: { error: 'Project directory unavailable' } };
+      const projects = this.localProjects().map(({ id, bridgeId, name }) => ({ id, bridgeId, name }));
+      return { status: 200, body: applicationJson({ projects }) };
+    }
     if (routePath === INSTRUCTIONS_LOCAL || routePath === INSTRUCTIONS_WIRE || routePath === INSTRUCTIONS_SYNC) return this.dispatchInstructions(message, routePath);
     if (routePath === '/api/host-resources' && route.method === 'GET') {
       await this.security.revalidate(message.principal);
@@ -1177,7 +1194,15 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     // GET /api/sessions
     if (path === '/api/sessions' && req.method === 'GET') {
       const sessions = await (this.getSessionController()?.list() ?? this.store.listSessions());
-      jsonResponse(res, 200, { sessions: sessions.map(toWireSession) });
+      if (url.searchParams.get('boardAttention') === '1' && this.attention) {
+        const rows = [];
+        for (const session of sessions) {
+          let boardBlocked: boolean | undefined;
+          try { boardBlocked = await sessionBlocksTicket(session, this.attention); } catch { /* Leave last known blocker intact. */ }
+          rows.push({ ...toWireSession(session), boardBlocked });
+        }
+        jsonResponse(res, 200, { sessions: rows });
+      } else jsonResponse(res, 200, { sessions: sessions.map(toWireSession) });
       return;
     }
 

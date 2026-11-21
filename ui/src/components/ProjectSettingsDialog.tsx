@@ -46,7 +46,7 @@ export function ProjectSettingsDialog({ project, computers, allowed, changeBridg
           changeBridges([...ids]);
         }} />{b.label}</label>)}
       </fieldset>
-      {confirm ? <div><p>Delete “{project}” and move its sessions to No project? Their working directories and files will be preserved.</p>
+      {confirm ? <div><p>Delete “{project}” and move its sessions to No project? Deleting a hosted project also deletes its board and tickets. Session working directories and files are preserved.</p>
         <div className="flex gap-3"><button className="btn-danger" onClick={() => void submit(null)}>Confirm delete</button><button className="btn-ghost" onClick={() => setConfirm(false)}>Cancel</button></div></div>
         : <button className="btn-danger" onClick={() => setConfirm(true)}>Delete project</button>}
     </fieldset>

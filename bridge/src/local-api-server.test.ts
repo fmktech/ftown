@@ -651,6 +651,17 @@ async function sessionToolsFixture(t: { after: (fn: () => void) => void }, withA
 }
 
 describe('LocalApiServer explicit session attention and PR metadata', () => {
+  it('publishes the current attention state in peer board summaries without waiting for a dashboard', async t => {
+    const f = await sessionToolsFixture(t);
+    const blocked = async () => (await api(f.port, f.token, 'GET', '/api/sessions?boardAttention=1')).data.sessions[0].boardBlocked;
+    assert.equal(await blocked(), false);
+    const notice = await f.attention.record(f.sample.id, 'Notification', { notification_type: 'agent_needs_input', message: 'Which branch?' });
+    assert.ok(notice);
+    assert.equal(await blocked(), true);
+    await f.attention.resolveExplicitThrough(f.sample.id, notice.id);
+    assert.equal(await blocked(), false);
+  });
+
   it('routes encrypted preview chat requests through the shared controller', async t => {
     const f = await sessionToolsFixture(t); await f.store.saveSession({ ...f.sample, shellType: 'codex' });
     let count = 0;

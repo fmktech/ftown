@@ -1,5 +1,6 @@
 "use client";
 
+import type { HomeProject } from "@/hooks/useProjectDirectory";
 import { ProjectSettingsDialog } from "./ProjectSettingsDialog";
 import { BridgeBadge, type BridgeIdentity } from "./BridgeBadge";
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, type ReactElement } from "react";
@@ -22,7 +23,16 @@ export function SessionAccountBadge({ account }: { account?: string }) {
     className="inline-flex max-w-28 shrink-0 items-center truncate rounded border border-[var(--border-muted)] bg-[var(--bg-base)] px-1.5 py-px font-mono text-[10px] leading-4 text-[var(--text-muted)]">{account}</span>;
 }
 
+interface ProjectBoardControls {
+  projects: HomeProject[];
+  homes: Array<{ id: string; label: string }>;
+  open: (project: HomeProject) => void;
+  create: (name: string, home: string) => Promise<HomeProject>;
+  change: (project: HomeProject, name: string | null) => Promise<void>;
+}
+
 interface SessionListProps {
+  boards?: ProjectBoardControls;
   bridgeIdentities?: ReadonlyMap<string, BridgeIdentity>;
   bridges?: import("@/hooks/useBridges").BridgeInfo[];
   sessions: Session[];
@@ -416,7 +426,7 @@ function SessionContextMenu({
 }
 
 export function SessionList({
-  sessions, bridgeIdentities, onHiddenProjectsChange, onAddSession, projectBridges, projectComputers = [], onProjectBridgesChange, projectStorageKey = "ftown:projects",
+  boards, sessions, bridgeIdentities, onHiddenProjectsChange, onAddSession, projectBridges, projectComputers = [], onProjectBridgesChange, projectStorageKey = "ftown:projects",
   selectedSessionId,
   onSelectSession,
   onReviewPullRequest,
@@ -445,6 +455,14 @@ export function SessionList({
   const [editingProject, setEditingProject] = useState<string | null>(null);
   const [moveError, setMoveError] = useState<string | null>(null);
   const [newProject, setNewProject] = useState<string | null>(null);
+  const [chosenHome, setChosenHome] = useState("");
+  const [creatingBoard, setCreatingBoard] = useState(false);
+  const home = boards?.homes.some(item => item.id === chosenHome) ? chosenHome : boards?.homes[0]?.id ?? "";
+  const [adopting, setAdopting] = useState<string | null>(null);
+  const creationForm = useRef<HTMLFormElement>(null);
+  useEffect(() => {
+    if (adopting) creationForm.current?.scrollIntoView?.({ block: "nearest" });
+  }, [adopting]);
   const [hiddenProjects, setHiddenProjects] = usePersistentState<Set<string>>("ftown:hiddenProjects", EMPTY_ID_SET, stringSetCodec);
   useEffect(() => { onHiddenProjectsChange?.(hiddenProjects); }, [hiddenProjects, onHiddenProjectsChange]);
   const [collapsedProjects, setCollapsedProjects] = usePersistentState<Set<string>>("ftown:collapsedProjects", EMPTY_ID_SET, stringSetCodec);
@@ -1141,6 +1159,7 @@ export function SessionList({
     roots.push(root);
     projects.set(project, roots);
   }
+  for (const board of boards?.projects ?? []) if (!projects.has(board.name)) projects.set(board.name, []);
   for (const project of savedProjects) if (!projects.has(project)) projects.set(project, []);
   function treeMembers(node: SessionTreeNode): Session[] {
     return [...node.children.flatMap(treeMembers), node.session];
@@ -1170,7 +1189,7 @@ export function SessionList({
   function moveToProject(session: Session, project: string) {
     const source = locations.get(session.id);
     if (!source || !canMoveToProject(session, project)) return;
-    if (source.project) setSavedProjects(previous => new Set(previous).add(source.project));
+    if (source.project && !boards?.projects.some(board => board.name === source.project)) setSavedProjects(previous => new Set(previous).add(source.project));
     setMoveError(null);
     void transferTree(source.node, project, Boolean(session.parentSessionId))
       .catch(error => setMoveError(error instanceof Error ? error.message : "Could not move session"));
@@ -1181,12 +1200,16 @@ export function SessionList({
     if (to !== null && (!to || (projects.has(to) && !(pendingRename.current?.from === from && pendingRename.current.to === to)))) {
       throw new Error("Choose an unused project name.");
     }
+    const hosted = boards?.projects.filter(project => project.name === from) ?? [];
+    if (hosted.length > 1) throw new Error("Multiple home bridges have a board with this name.");
+    if (hosted[0] && !boards?.homes.some(home => home.id === hosted[0].bridgeId)) throw new Error("The project home bridge is offline.");
     pendingRename.current = to ? { from, to } : null;
     for (const root of projects.get(from) ?? []) await transferTree(root, to ?? "");
+    if (hosted[0]) await boards!.change(hosted[0], to);
     function replace(previous: Set<string>) {
       return new Set([...previous].flatMap(name => name !== from ? [name] : to ? [to] : []));
     }
-    setSavedProjects(previous => replace(new Set(previous).add(from)));
+    setSavedProjects(previous => hosted.length ? new Set([...previous].filter(n => n !== from)) : replace(new Set(previous).add(from)));
     setProjectOrder(replace(new Set(orderedProjects)));
     setHiddenProjects(replace);
     setCollapsedProjects(replace);
@@ -1223,6 +1246,7 @@ export function SessionList({
       {moveError && <p role="alert" className="px-2 py-1 text-xs text-[var(--status-error)]">{moveError}</p>}
       {visibleProjects.map((project, index) => {
         const roots = projects.get(project)!;
+        const hosted = boards?.projects.filter(board => board.name === project) ?? [];
         return (
         <section key={project} aria-label={project || "No project"}>
           {!collapsed && <div className={`flex items-center justify-between px-2 py-1 ${dragOverKey === `project:${project}` ? "outline outline-[var(--accent)] -outline-offset-1" : ""}`}
@@ -1268,6 +1292,11 @@ export function SessionList({
                 return next;
               })}><span aria-hidden="true">{collapsedProjects.has(project) ? "▸ " : "▾ "}</span>{project || "No project"}</button>
             <div className="flex shrink-0 items-center gap-1">
+              {project && boards && (hosted.length ? hosted.map(board =>
+                <button key={board.bridgeId + board.id} type="button" className="btn-ghost" aria-label={`Open board for ${project} on ${bridgeIdentities?.get(board.bridgeId)?.name || board.bridgeId}`}
+                  onClick={() => boards.open(board)}>Board{hosted.length > 1 ? " · " + (bridgeIdentities?.get(board.bridgeId)?.name || board.bridgeId) : ""}</button>
+              ) : <button className="btn-ghost" type="button" aria-label={`Set up board for ${project}`}
+                onClick={() => { setAdopting(project); setNewProject(project); setMoveError(null); }}>Board</button>)}
               {project && <button type="button" className="btn-ghost px-2" disabled={!onAddSession}
                 aria-label={`Add session to ${project}`} onClick={() => onAddSession?.(project)}>+</button>}
               <button type="button" className="btn-ghost px-2" aria-haspopup="menu" aria-expanded={projectMenu?.project === project}
@@ -1293,19 +1322,35 @@ export function SessionList({
       </details>}
       {!projects.size && !collapsed && <p className="p-4 text-xs text-[var(--text-muted)]">No sessions yet</p>}
       {!collapsed && (newProject === null
-        ? <button type="button" className="btn-ghost m-2 text-left text-sm" onClick={() => setNewProject("")}>+ Create project</button>
-        : <form className="flex flex-wrap items-center gap-1 p-2" onSubmit={event => {
+        ? <button type="button" className="btn-ghost m-2 text-left text-sm" onClick={() => { setAdopting(null); setNewProject(""); setMoveError(null); }}>+ Create project</button>
+        : <form ref={creationForm} className="flex flex-wrap items-center gap-1 p-2" onSubmit={async event => {
           event.preventDefault();
           const name = newProject.trim();
-          if (!name) return;
-          setSavedProjects(previous => new Set(previous).add(name));
-          if (hiddenProjects.has(name)) toggleProject(name);
-          setNewProject(null);
+          if (!name || creatingBoard) return;
+          setMoveError(null);
+          setCreatingBoard(true);
+          try {
+            if (boards) {
+              if (!home) throw Error("Connect a home bridge first.");
+              if (boards.projects.some(project => project.name === name)) throw Error("This project already has a board.");
+              const project = await boards.create(name, home);
+              setSavedProjects(previous => new Set([...previous].filter(p => p !== name)));
+              if (adopting) boards.open(project);
+            } else setSavedProjects(previous => new Set(previous).add(name));
+            if (hiddenProjects.has(name)) toggleProject(name);
+            setNewProject(null);
+            setAdopting(null);
+          } catch (error) { setMoveError(error instanceof Error ? error.message : "Could not create project"); }
+          finally { setCreatingBoard(false); }
         }}>
-          <input autoFocus aria-label="Project name" maxLength={256} value={newProject} className="min-w-0 flex-1"
-            onChange={event => setNewProject(event.target.value)} onKeyDown={event => { if (event.key === "Escape") setNewProject(null); }} />
-          <button className="btn-accent" disabled={!newProject.trim()} type="submit">Create</button>
-          <button type="button" className="btn-ghost" onClick={() => setNewProject(null)}>Cancel</button>
+          <input autoFocus aria-label="Project name" maxLength={256} value={newProject} className="min-w-0 flex-1" disabled={!!adopting || creatingBoard}
+            onChange={event => setNewProject(event.target.value)} onKeyDown={event => { if (event.key === "Escape") { setNewProject(null); setAdopting(null); } }} />
+          {boards && <label className="w-full text-xs">Home bridge <select aria-label="Home bridge" value={home} disabled={creatingBoard} onChange={event => setChosenHome(event.target.value)}>
+            {!boards.homes.length && <option value="">No connected bridge</option>}
+            {boards.homes.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}
+          </select></label>}
+          <button className="btn-accent" disabled={!newProject.trim() || creatingBoard || (!!boards && !home)} type="submit">{creatingBoard ? "Creating…" : "Create"}</button>
+          <button type="button" className="btn-ghost" disabled={creatingBoard} onClick={() => { setNewProject(null); setAdopting(null); }}>Cancel</button>
         </form>)}
       {contextMenu?.kind === "session" && onStopSession && onRemoveSession && (
         <SessionContextMenu

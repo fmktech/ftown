@@ -1,6 +1,8 @@
 import { readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { z } from 'zod';
+import { PROJECT_DIRECTORY, projectDirectoryEntry } from './project-directory-protocol.js';
+import type { ApplicationJson } from './security/protocol.js';
 import type { PeerControl } from './peer-control.js';
 
 // Store only the fields needed to draw the project tree.
@@ -8,7 +10,7 @@ const row = z.object({
   id: z.string(), bridgeId: z.string(), name: z.string(), projectName: z.string().optional(),
   parentBridgeId: z.string().optional(), parentSessionId: z.string().optional(),
   status: z.enum(['pending', 'running', 'completed', 'error', 'disconnected']),
-  createdAt: z.string(), updatedAt: z.string(),
+  createdAt: z.string(), updatedAt: z.string(), boardBlocked: z.boolean().optional(),
 });
 const snapshot = z.object({ sessions: z.array(row) });
 export function parsePeerSessions(body: unknown, owner: string) {
@@ -16,16 +18,32 @@ export function parsePeerSessions(body: unknown, owner: string) {
   if (rows.some(session => session.bridgeId !== owner)) throw new Error('Invalid session owner');
   return rows;
 }
-const entries = z.record(z.string(), z.array(row));
+export function startPeerSessionCache(peers: Pick<PeerControl, 'list' | 'http'>, path: string) {
+  return startPeerCache(peers, path, 'sessions', row, id => peers.http(id, 'GET', '/api/sessions?boardAttention=1'), parsePeerSessions);
+}
 
-export async function startPeerSessionCache(peers: Pick<PeerControl, "list" | "http">, path: string) {
-  if (/^peer-sessions-[A-Za-z0-9_-]{43}\.json$/.test(basename(path))) {
+export function startPeerProjectDirectory(peers: Pick<PeerControl, 'list' | 'directHttp' | 'connectDirect'>, path: string) {
+  return startPeerCache(peers, path, 'projects', projectDirectoryEntry, async id => {
+    if (!await peers.connectDirect(id)) throw new Error('Peer is offline');
+    return peers.directHttp(id, PROJECT_DIRECTORY, {});
+  }, (body, owner) => {
+    const { projects } = z.object({ projects: z.array(projectDirectoryEntry) }).parse(body);
+    if (projects.some(project => project.bridgeId !== owner)) throw new Error('Invalid project owner');
+    return projects;
+  });
+}
+
+async function startPeerCache<T>(peers: Pick<PeerControl, 'list'>, path: string, kind: 'sessions' | 'projects',
+  rowSchema: z.ZodType<T>, fetch: (owner: string) => Promise<{ status: number; body: ApplicationJson }>,
+  parse: (body: unknown, owner: string) => T[]) {
+  const endpointFilename = new RegExp('^peer-' + kind + '-[A-Za-z0-9_-]{43}\\.json$');
+  if (endpointFilename.test(basename(path))) {
     for (const name of await readdir(dirname(path))) {
-      if (name !== basename(path) && /^peer-sessions-[A-Za-z0-9_-]{43}\.json$/.test(name)) await unlink(join(dirname(path), name));
+      if (name !== basename(path) && endpointFilename.test(name)) await unlink(join(dirname(path), name));
     }
   }
-  let saved: z.infer<typeof entries> = {};
-  try { saved = entries.parse(JSON.parse(await readFile(path, 'utf8'))); } catch {}
+  let saved: Record<string, T[]> = {};
+  try { saved = z.record(z.string(), z.array(rowSchema)).parse(JSON.parse(await readFile(path, 'utf8'))); } catch {}
   let active: Promise<void> | undefined;
   async function refresh() {
     const approved = await peers.list();
@@ -35,10 +53,10 @@ export async function startPeerSessionCache(peers: Pick<PeerControl, "list" | "h
     }
     await Promise.all(approved.map(async peer => {
       try {
-        const result = await peers.http(peer.bridgeId, 'GET', '/api/sessions');
+        const result = await fetch(peer.bridgeId);
         if (result.status === 401 || result.status === 403) { delete next[peer.endpointId]; return; }
         if (result.status !== 200) return;
-        try { next[peer.endpointId] = parsePeerSessions(result.body, peer.bridgeId); }
+        try { next[peer.endpointId] = parse(result.body, peer.bridgeId); }
         catch { delete next[peer.endpointId]; }
       } catch { /* Keep the last complete snapshot until the peer responds. */ }
     }));
@@ -48,7 +66,7 @@ export async function startPeerSessionCache(peers: Pick<PeerControl, "list" | "h
     saved = next;
   }
   const tick = () => {
-    active ??= refresh().catch(() => console.error('Could not persist peer session summaries')).finally(() => { active = undefined; });
+    active ??= refresh().catch(() => console.error('Could not persist peer ' + kind)).finally(() => { active = undefined; });
     return active;
   };
   tick();

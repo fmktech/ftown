@@ -1,3 +1,5 @@
+import { startPeerProjectDirectory } from './peer-session-cache.js';
+import { PROJECT_DIRECTORY } from './project-directory-protocol.js';
 import assert from 'node:assert/strict';
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -285,6 +287,32 @@ async function linked(t: TestContext, w: World, deskChain: Chain = w.both, api?:
   const settle = async () => { await peers.linked('Desk').catch(() => false); };
   return { peers, transport, studioLinks, deskLinks, connections, studio, desk, settle };
 }
+
+test('an empty project is discoverable across a direct link and remembered after a disconnected restart', async t => {
+  const w = await world();
+  const remote = new LocalApiServer();
+  const { peers, desk, studioLinks, transport } = await linked(t, w, w.both, remote);
+  remote.setSecurity(desk, { protocolVersion: 1, ownerId: w.root.accountId, bridgeId: desk.bridgeId,
+    endpoint: desk.endpoint, relayUserId: w.root.accountId }, async () => null);
+  const project = { id: crypto.randomUUID(), name: 'Codebench', bridgeId: desk.bridgeId };
+  remote.setLocalProjects(() => [{ ...project, tickets: ['private'] }]);
+  const dir = await mkdtemp(join(tmpdir(), 'ftown-peer-projects-'));
+  const path = join(dir, 'cache.json');
+  let cache = await startPeerProjectDirectory(peers, path);
+  try {
+    await cache.refresh();
+    assert.deepEqual(await cache.list(), [project]);
+    await cache.stop();
+    studioLinks.closeAll();
+    transport.online = false;
+    cache = await startPeerProjectDirectory(peers, path);
+    await cache.refresh();
+    assert.deepEqual(await cache.list(), [project]);
+  } finally {
+    await cache.stop();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 
 test('a local instruction request reads the paired bridge file over the direct link', async t => {
   const home = await mkdtemp(join(tmpdir(), 'ftown-peer-guidance-'));
@@ -578,7 +606,7 @@ test('two paired bridges copy a multi-MiB snapshot over native WebRTC and never 
   assert.equal(toTarget.sent, 2, 'a second transfer reused the direct link');
 });
 
-test('the encrypted relay cannot admit folder transfer or instruction requests', async t => {
+test('the encrypted relay cannot admit direct-only requests', async t => {
   const w = await world();
   const sender = await bridge(t, w, w.studio, w.both);
   const recipient = await bridge(t, w, w.desk, w.both);
@@ -586,7 +614,7 @@ test('the encrypted relay cannot admit folder transfer or instruction requests',
   const channel = CHANNEL(w);
   const route = { transport: 'cloud' as const, channel, bridgeId: recipient.bridgeId, pairId: null };
   const id = crypto.randomUUID();
-  for (const path of [TRANSFER_WIRE, TRANSFER_LOCAL, INSTRUCTIONS_LOCAL, INSTRUCTIONS_SYNC, INSTRUCTIONS_WIRE]) {
+  for (const path of [TRANSFER_WIRE, TRANSFER_LOCAL, INSTRUCTIONS_LOCAL, INSTRUCTIONS_SYNC, INSTRUCTIONS_WIRE, PROJECT_DIRECTORY]) {
     const packet = await sender.sealToPeer(peer, 'application',
       { type: 'application', route: { kind: 'http', method: 'POST', path, requestId: id }, data: {}, mcp: null },
       channel, id, recipient.receiverEpoch, TRANSFER_REQUEST_TTL_MS);

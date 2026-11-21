@@ -213,6 +213,12 @@ test.describe("session lifecycle", () => {
       }).toBe(project);
       await page.reload();
       await expect(target.getByRole("button", { name: new RegExp(name) })).toBeVisible();
+      await target.getByRole("button", { name: /^Open board for / }).click();
+      const board = page.getByRole("dialog", { name: project + " board" });
+      await board.getByLabel("Ticket title").fill("Verify the handoff");
+      await board.getByRole("button", { name: "Add ticket" }).click();
+      await expect(board.getByRole("region", { name: "Backlog" }).getByText("Verify the handoff")).toBeVisible();
+      await board.getByRole("button", { name: "Close board" }).click();
       await target.getByRole("button", { name: `More actions for ${project}` }).click();
       await page.getByRole("menuitem", { name: "Project settings" }).click();
       const settings = page.getByRole("dialog", { name: "Project settings" });
@@ -222,6 +228,10 @@ test.describe("session lifecycle", () => {
       await expect(settings).toBeHidden();
       const renamedProject = page.getByRole("region", { name: renamed, exact: true });
       await expect(renamedProject.getByRole("button", { name: new RegExp(name) })).toBeVisible();
+      await renamedProject.getByRole("button", { name: /^Open board for / }).click();
+      const renamedBoard = page.getByRole("dialog", { name: renamed + " board" });
+      await expect(renamedBoard.getByText("Verify the handoff")).toBeVisible();
+      await renamedBoard.getByRole("button", { name: "Close board" }).click();
       await renamedProject.getByRole("button", { name: `More actions for ${renamed}` }).click();
       await page.getByRole("menuitem", { name: "Project settings" }).click();
       await settings.getByRole("button", { name: "Delete project" }).click();
