@@ -5,7 +5,7 @@ import type { UpdateView } from "@/hooks/useBridgeUpdates";
 
 const manual = (value: string | undefined): string => value && /^npx ftown@(?:latest|(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)) setup(?: --repair)?$/.test(value) ? value : "npx ftown@latest setup";
 const reason: Record<string, string> = {
-  busy: "Stop running sessions before updating.",
+  busy: "Waiting for sessions to be safe to restart. Direct sessions must finish first.",
   permission_denied: "This device does not have control permission for this computer.",
   not_enabled: "Updates are disabled on this computer or this bridge uses an older default. Start with ftown start; older bridges may require ftown start --allow-updates.",
   unsupported_launch: "Automatic updates aren’t available for this installation. Use your service manager or manual setup.",
@@ -74,7 +74,7 @@ export function BridgeUpdatesDialog({ open, name, view, onClose, onCheck, onUpda
         </div>
       </details>
       {confirming && <div className="mt-4 rounded-lg border border-[var(--border-muted)] bg-[var(--bg-elevated)] p-3" role="group" aria-label="Confirm bridge update">
-        <p>All sessions must be stopped before updating. The bridge will briefly disconnect.</p>
+        <p>Running tmux sessions stay active while the bridge briefly disconnects.</p>
         <div className="mt-3 flex flex-wrap gap-2"><button type="button" className={`${button} bg-[var(--accent)] text-[var(--bg-void)] hover:bg-[var(--accent-bright)]`} disabled={!eligible} onClick={() => { if (!eligible) return; setConfirming(false); onUpdate(); }}>Confirm update and restart</button><button type="button" className={`${button} border border-[var(--border-muted)] hover:bg-[var(--bg-hover)]`} onClick={() => setConfirming(false)}>Cancel</button></div>
       </div>}
       <footer className="mt-4 flex flex-wrap items-center gap-2 border-t border-[var(--border-muted)] pt-4">

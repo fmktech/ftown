@@ -11,9 +11,9 @@ it("opens updates for the chosen computer and shows its load", () => {
   const updates = vi.fn();
   render(<BridgesDialog computers={[{ id: "bridge-a", label: "Workstation", number: 2, ready: true, online: true }]}
     resources={new Map([["bridge-a", { sampledAt: 1, cpuPercent: 42, freeRamBytes: 1, totalRamBytes: 2, freeDiskBytes: 3 }]])}
-    create={vi.fn()} updates={updates} security={vi.fn()} routing={vi.fn()} close={vi.fn()} />);
+    instructions={vi.fn()} create={vi.fn()} updates={updates} security={vi.fn()} routing={vi.fn()} close={vi.fn()} />);
   expect(screen.getByText("B")).toBeTruthy();
-  expect(screen.getByRole("toolbar", { name: "Actions for Workstation" }).querySelectorAll("button")).toHaveLength(4);
+  expect(screen.getByRole("toolbar", { name: "Actions for Workstation" }).querySelectorAll("button")).toHaveLength(5);
   expect(screen.getByText("42%")).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "Updates…" }));
   expect(updates).toHaveBeenCalledWith("bridge-a");

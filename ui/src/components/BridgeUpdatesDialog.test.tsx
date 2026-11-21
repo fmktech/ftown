@@ -34,7 +34,7 @@ it("shows loading and availability honestly, including initial and failed checks
 });
 
 it.each([
-  ["busy", /Stop running sessions/], ["permission_denied", /does not have control permission/],
+  ["busy", /Waiting for sessions/], ["permission_denied", /does not have control permission/],
   ["not_enabled", /Updates are disabled/], ["unsupported_launch", /Automatic updates aren’t available/],
   ["in_progress", /Another update is already in progress/], ["release_unavailable", /latest release could not be checked/],
   ["node_incompatible", /Upgrade Node on this computer/],
@@ -77,7 +77,7 @@ it("does not show a previous operation while a different update is pending", () 
 it("requires confirmation, cancels, and guards a change to ineligible before update", () => {
   const update = vi.fn(); const { rerender } = render(<BridgeUpdatesDialog {...props} onUpdate={update} />);
   fireEvent.click(screen.getByRole("button", { name: "Update and restart" }));
-  expect(screen.getByText(/All sessions must be stopped/)).toBeTruthy(); expect(update).not.toHaveBeenCalled();
+  expect(screen.getByText(/Running tmux sessions stay active/)).toBeTruthy(); expect(update).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", { name: "Cancel" })); expect(screen.queryByRole("group", { name: "Confirm bridge update" })).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "Update and restart" }));
   rerender(<BridgeUpdatesDialog {...props} onUpdate={update} view={{ ...view, status: { ...view.status!, canUpdate: false, blockedReason: "busy" } }} />);

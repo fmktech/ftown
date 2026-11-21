@@ -57,7 +57,7 @@ import { SessionResurrection, shouldResurrectStoredSession } from './session-res
 import { createTerminalOutput } from './terminal-output.js';
 import { SessionFailureMonitor } from './session-block.js';
 import { handoffSession, waitForSessionHealthy, type HandoffRequest } from './session-handoff.js';
-import { hasTmuxSession, killTmuxSession } from './tmux.js';
+import { hasTmuxSession, listFtownTmuxSessions, killTmuxSession } from './tmux.js';
 import { collectSessionUsage } from './usage-collector.js';
 import { AgentSessionIdPersister } from './session-ids.js';
 import { HookUsagePersister } from './hook-usage.js';
@@ -1080,8 +1080,13 @@ program
         apiUrl: opts.apiUrl, bridgeId, ownerId: auth.ownerId, endpointId: security.endpoint.id },
       support: () => !opts.allowUpdates ? 'not_enabled' : process.platform === 'win32' || !!opts.solo ||
         !canonicalLaunch || realpathSync(dataDir) !== realpathSync(defaultDataDir) ? 'unsupported_launch' : null,
-      busy: async () => !resurrectionComplete || runner.hasLiveGenerations() || !pump.isIdle() || watchReattachInFlight.size > 0 ||
-        (await store.listSessions()).some(session => session.status === 'running' || session.status === 'pending'),
+      busy: async () => {
+        if (!resurrectionComplete || watchReattachInFlight.size) return true;
+        const live = (await store.listSessions()).filter(session => session.status === 'running' || session.status === 'pending');
+        const tmuxIds = new Set(live.length ? listFtownTmuxSessions() : []);
+        return live.some(session => !tmuxIds.has(session.id) || session.runtime === 'direct') ||
+          !runner.canDetachForUpdate(new Set(live.map(session => session.id)));
+      },
       authorize: async (principal, permission) => { await security.policy.revalidate(principal, permission); },
       resolve: resolveStableRelease,
       prepare: (release, operationId, signal) => prepareRelease(release, { operationId, stagingRoot, signal }),
@@ -1280,11 +1285,17 @@ program
       })();
     }, 2000);
 
+    const autoUpdateTimer = setInterval(() => {
+      if (ready) void updates.checkAutomaticUpdate().catch(error => console.error('[Bridge] Automatic update check failed:', error));
+    }, 30 * 60_000);
+    autoUpdateTimer.unref();
+
     // Leaves tmux sessions running and the process alive; a revoked restart re-executes this same PID
     // afterwards, so the local port, pointer, relay connection and timers must all be released here.
     let shutdownRun: Promise<void> | undefined;
     function shutdown(): Promise<void> {
       shutdownRun ??= (async () => {
+        clearInterval(autoUpdateTimer);
         console.log('\n[Bridge] Shutting down...');
         try {
           await peerCache.stop();

@@ -268,6 +268,18 @@ describe('ProcessRunner session generation ownership', () => {
       } finally { globalThis.setTimeout = original; }
     });
 
+    it(`${runtime}: only settled, persisted tmux sessions allow an update`, async () => {
+      const current = controlledPty(1);
+      const runner = new ProcessRunner({ spawn: () => current.process, createTmuxSession: async () => {} });
+      runner.getPreferredRuntime = () => runtime;
+      runner.run('session', 'test');
+      const saved = new Set(['session']);
+      assert.equal(runner.canDetachForUpdate(saved), false);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(runner.canDetachForUpdate(new Set()), false);
+      assert.equal(runner.canDetachForUpdate(saved), runtime === 'tmux');
+    });
+
     it(`${runtime}: ignores late exit and data without consuming a new generation stop`, async () => {
       const old = controlledPty(1), replacement = controlledPty(2);
       const processes = [old.process, replacement.process];

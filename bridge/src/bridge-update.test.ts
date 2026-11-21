@@ -183,3 +183,21 @@ test('manual setup recommends a newer release or the installed version without c
     assert.equal(status.blockedReason, scenario.blockedReason, scenario.label);
   }
 });
+
+test('automatic checks defer while busy and share a single handoff when eligible', async () => {
+  const f = fixture(), coordinator = new BridgeUpdateCoordinator(f.deps);
+  f.setBusy(true);
+  await coordinator.checkAutomaticUpdate();
+  assert.deepEqual(f.effects, []);
+  f.setBusy(false);
+  await Promise.all([coordinator.checkAutomaticUpdate(), coordinator.checkAutomaticUpdate()]);
+  assert.equal(f.effects.filter(effect => effect === 'shutdown').length, 1);
+});
+
+test('disabled automatic updates do not contact the registry', async () => {
+  const f = fixture();
+  f.deps.support = () => 'not_enabled';
+  f.deps.resolve = async () => assert.fail('unexpected registry request');
+  await new BridgeUpdateCoordinator(f.deps).checkAutomaticUpdate();
+  assert.deepEqual(f.effects, []);
+});

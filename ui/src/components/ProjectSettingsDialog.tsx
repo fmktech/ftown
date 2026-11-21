@@ -36,7 +36,7 @@ export function ProjectSettingsDialog({ project, computers, allowed, changeBridg
     <fieldset disabled={busy} className="space-y-4">
       <form className="flex flex-wrap items-end gap-2" onSubmit={e => { e.preventDefault(); void submit(name.trim()); }}>
         <label className="flex min-w-0 flex-1 flex-col gap-1">Project name<input maxLength={256} value={name} onChange={e => setName(e.target.value)} /></label>
-        <button disabled={!name.trim() || name.trim() === project}>Rename project</button>
+        <button className="btn-accent" disabled={!name.trim() || name.trim() === project}>Rename project</button>
       </form>
       <fieldset className="space-y-1"><legend className="font-semibold">Allowed bridges</legend>
         <label className="flex gap-2"><input type="checkbox" checked={!allowed} onChange={e => changeBridges(e.target.checked ? undefined : computers.map(b => b.id))} />All bridges, including future bridges</label>
@@ -47,8 +47,8 @@ export function ProjectSettingsDialog({ project, computers, allowed, changeBridg
         }} />{b.label}</label>)}
       </fieldset>
       {confirm ? <div><p>Delete “{project}” and move its sessions to No project? Their working directories and files will be preserved.</p>
-        <div className="flex gap-3"><button onClick={() => void submit(null)}>Confirm delete</button><button onClick={() => setConfirm(false)}>Cancel</button></div></div>
-        : <button className="text-[var(--status-error)]" onClick={() => setConfirm(true)}>Delete project</button>}
+        <div className="flex gap-3"><button className="btn-danger" onClick={() => void submit(null)}>Confirm delete</button><button className="btn-ghost" onClick={() => setConfirm(false)}>Cancel</button></div></div>
+        : <button className="btn-danger" onClick={() => setConfirm(true)}>Delete project</button>}
     </fieldset>
     {busy && <p role="status">Updating project…</p>}
     {error && <p role="alert">{error}</p>}

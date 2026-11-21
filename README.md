@@ -642,9 +642,9 @@ The dashboard can check an approved bridge for a stable update. Assisted updates
 are enabled by default for an unsupervised single bridge on POSIX, started from
 its installed CLI with `ftown start` and the default FTown home and data directory.
 Use `ftown start --no-allow-updates` to disable them; older bridges may need
-`ftown start --allow-updates`. Updates still require explicit confirmation and
-never install in the background. Stop all running or pending sessions first; the
-update briefly disconnects the bridge. Windows, Solo, development builds, custom
+`ftown start --allow-updates`. Supported bridges check for a stable release every 30 minutes and update automatically.
+You can also start an update from Computers. Running tmux sessions stay active while
+the bridge restarts and reattaches. Updates wait for direct sessions to finish. Windows, Solo, development builds, custom
 instances and service-managed bridges use their normal manager or manual setup
 instructions. If the latest release requires a newer Node version, upgrade Node
 on that computer before updating the bridge.
@@ -689,7 +689,7 @@ saved and `ftown setup` can retry.
 
 ### Shared agent instructions
 
-Run `ftown setup` on each bridge. Setup adds two file references to the user-level Codex `AGENTS.md` and Claude `CLAUDE.md`, including registered accounts. Existing instructions stay in place. Edit `~/.ftown/global.md` for guidance that applies everywhere and `~/.ftown/bridge.md` for machine-specific details. New agent sessions can read both files offline.
+Run `ftown setup` on each bridge. Setup adds two file references to the user-level Codex `AGENTS.md` and Claude `CLAUDE.md`, including registered accounts. Existing instructions stay in place. In **Computers**, choose **Edit agent instructions** on an online bridge to edit and save either Markdown file. You can also edit `~/.ftown/global.md` for guidance that applies everywhere and `~/.ftown/bridge.md` for machine-specific details. New agent sessions can read both files offline.
 
 Each bridge keeps its own files. Paired bridges automatically sync `global.md` over a direct link, checking every 30 seconds. Edits made offline participate when the bridges reconnect. The latest edit wins on both machines. Sync preserves the last-edit timestamp across hops and breaks ties by comparing file contents. Accurate bridge clocks matter. Each file can hold up to 64 KiB of Markdown.
 

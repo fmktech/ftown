@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { VerifiedPrincipal } from './security/protocol.js';
 import type { BridgeUpdateAccepted, BridgeUpdateBlock, BridgeUpdateErrorCode, BridgeUpdateOperation, BridgeUpdateStatus } from './update-protocol.js';
 import type { PreparedHandoff, PreparedRelease, RestartDescriptor, StableRelease, UpdateReceipt, UpdateReservation } from './update-runtime-contract.js';
@@ -71,16 +72,19 @@ export class BridgeUpdateCoordinator {
     }).catch(() => { this.latest = null; this.checkedAt = this.now(); return null; }).finally(() => { this.fetchPending = null; });
     return this.fetchPending;
   }
-  private active(): boolean { return this.operation !== null && ['staging', 'prepared', 'restarting'].includes(this.operation.phase); }
-  async snapshot(principal: VerifiedPrincipal, refresh = false): Promise<BridgeUpdateStatus> {
-    await this.deps.authorize(principal, 'read');
-    await this.initialize();
+  private async refreshOutcome(): Promise<void> {
     // The helper writes the terminal outcome after the replacement starts.
     // Read it again so a long-lived coordinator observes that durable result.
     const receipt = await this.deps.readReceipt();
     if (receipt?.bridgeId === this.deps.bridgeId && this.operation?.id === receipt.operation.id &&
       this.operation.targetVersion === receipt.operation.targetVersion &&
       ['succeeded', 'failed'].includes(receipt.operation.phase)) this.operation = receipt.operation;
+  }
+  private active(): boolean { return this.operation !== null && ['staging', 'prepared', 'restarting'].includes(this.operation.phase); }
+  async snapshot(principal: VerifiedPrincipal, refresh = false): Promise<BridgeUpdateStatus> {
+    await this.deps.authorize(principal, 'read');
+    await this.initialize();
+    await this.refreshOutcome();
     const [latest, busy] = await Promise.all([this.latestRelease(refresh), this.deps.busy()]);
     let control = true;
     try { await this.deps.authorize(principal, 'control'); } catch { control = false; }
@@ -111,7 +115,7 @@ export class BridgeUpdateCoordinator {
       const release = await this.latestRelease(true);
       if (!release) throw failure('release_unavailable', 'Stable release is unavailable');
       if (!supportsNode(release.nodeEngine, this.deps.nodeVersion ?? process.versions.node)) throw failure('node_incompatible', 'This release requires a different Node version');
-      if (await this.deps.busy()) throw failure('bridge_busy', 'Stop running sessions before updating');
+      if (await this.deps.busy()) throw failure('bridge_busy', 'Waiting for sessions to be safe to restart');
       if (release.version !== targetVersion || compareVersions(targetVersion, this.deps.currentVersion) <= 0)
         throw failure('update_target_changed', 'The selected release is no longer available');
       await this.deps.authorize(principal, 'control');
@@ -120,7 +124,7 @@ export class BridgeUpdateCoordinator {
     })();
     try {
       const accepted = await this.acceptance;
-      const ticket = new UpdateResponseTicket(() => { void this.run(principal, operation); }, () => { void this.fail(operation, 'Update request was not delivered'); });
+      const ticket = new UpdateResponseTicket(() => { void this.run(() => this.deps.authorize(principal, 'control'), operation); }, () => { void this.fail(operation, 'Update request was not delivered'); });
       return { accepted, ticket };
     } catch (error) {
       if (this.operation === operation) this.operation = null;
@@ -136,31 +140,55 @@ export class BridgeUpdateCoordinator {
     await this.persist();
   }
   private async fail(operation: BridgeUpdateOperation, message: string): Promise<void> { await this.transition(operation, 'failed', message).catch(() => undefined); }
-  private async run(principal: VerifiedPrincipal, operation: BridgeUpdateOperation): Promise<void> {
+  async checkAutomaticUpdate(): Promise<void> {
+    const unavailable = () => this.deps.support() !== null || this.active() || this.deps.admission.isFrozen;
+    if (this.deps.support()) return;
+    await this.initialize();
+    await this.refreshOutcome();
+    if (unavailable()) return;
+    const release = await this.latestRelease(true);
+    if (!release || compareVersions(release.version, this.deps.currentVersion) <= 0 ||
+        !supportsNode(release.nodeEngine, this.deps.nodeVersion ?? process.versions.node) ||
+        await this.deps.busy() || unavailable()) return;
+    const now = new Date(this.now()).toISOString();
+    const operation: BridgeUpdateOperation = { id: randomUUID(), targetVersion: release.version, phase: 'staging',
+      startedAt: now, updatedAt: now, error: null };
+    this.operation = operation;
+    try {
+      await this.persist();
+      await this.run(async () => {
+        if (this.deps.support()) throw new Error('Automatic updates unavailable');
+      }, operation);
+    } catch (error) {
+      await this.fail(operation, 'Automatic update could not be started');
+      throw error;
+    }
+  }
+  private async run(authorize: () => Promise<void>, operation: BridgeUpdateOperation): Promise<void> {
     let reservation: UpdateReservation | undefined;
     let prepared: PreparedRelease | undefined;
     let handoff: PreparedHandoff | undefined;
     let committed = false;
     let safeToReopen = true;
     try {
-      await this.deps.authorize(principal, 'control');
+      await authorize();
       reservation = await this.deps.reserve(operation.id);
       const release = await this.deps.resolve(AbortSignal.timeout(15_000));
       if (!release || release.version !== operation.targetVersion || compareVersions(release.version, this.deps.currentVersion) <= 0) throw new Error('Release changed');
       prepared = await this.deps.prepare(release, operation.id, AbortSignal.timeout(300_000));
       this.deps.admission.freeze();
       await this.deps.admission.drain(15_000);
-      await this.deps.authorize(principal, 'control');
+      await authorize();
       if (this.deps.support() || await this.deps.busy()) throw new Error('Bridge is unavailable');
       handoff = await this.deps.prepareHandoff(prepared, this.deps.restart, AbortSignal.timeout(15_000));
       await this.transition(operation, 'prepared');
-      await this.deps.authorize(principal, 'control');
+      await authorize();
       if (this.deps.support() || await this.deps.busy()) throw new Error('Bridge is unavailable');
       await this.transition(operation, 'restarting');
-      await this.deps.authorize(principal, 'control');
+      await authorize();
       await handoff.commit();
       // The helper is armed but remains cancellable while this process is alive.
-      await this.deps.authorize(principal, 'control');
+      await authorize();
       committed = true;
       await this.deps.shutdown();
     } catch (error) {
