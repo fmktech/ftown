@@ -38,6 +38,7 @@ describe("HarnessIcon", () => {
     ["fireworks", "Fireworks"],
     ["grok", "Grok"],
     ["pi", "Pi"],
+    ["omp", "Oh My Pi"],
     ["kimi-code", "Kimi Code"],
     ["muse", "Muse"],
     ["antigravity", "Antigravity"],

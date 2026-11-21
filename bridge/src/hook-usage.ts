@@ -38,7 +38,7 @@ export class HookUsagePersister {
     const raw = hookEvent.data.usage;
     if (!raw || typeof raw !== 'object') return undefined;
     const session = await this.deps.store.loadSession(hookEvent.sessionId);
-    if (!session || session.shellType !== 'pi') return undefined;
+    if (!session || (session.shellType !== 'pi' && session.shellType !== 'omp')) return undefined;
 
     const record = raw as Record<string, unknown>;
     const perModel = Array.isArray(record.perModel)
@@ -61,7 +61,7 @@ export class HookUsagePersister {
       totalTokens: inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
       models,
       ...(perModel.length > 0 ? { perModel } : {}),
-      harness: 'pi',
+      harness: session.shellType,
       collectedAt: this.now().toISOString(),
     };
     session.usage = usage;

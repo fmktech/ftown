@@ -175,7 +175,7 @@ function sessionProgram(): Command {
     .option('--account <id>', 'Harness account to launch with')
     .option('--allowed-accounts <ids>', 'Account ids children may use (comma-separated)')
     .option('--model <name>', 'Model override')
-    .option('--effort <level>', 'Reasoning effort (claude, codex, grok, muse, antigravity); keeps the flags ftown launches with')
+    .option('--effort <level>', 'Reasoning effort (claude, codex, grok, muse, antigravity, omp); keeps the flags ftown launches with')
     .option('--orchestrator', 'Compatibility flag (no additional prompt or environment changes)')
     .action((_opts, cmd: Command) => run('create', [], cmd));
   for (const name of ['get', 'running', 'revive'] as const) {

@@ -1,0 +1,5 @@
+# ftown supplies an explicit resume target when reviving a session.
+autoResume: false
+# Managed sessions should accept their first prompt immediately.
+startup:
+  setupWizard: false

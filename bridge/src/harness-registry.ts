@@ -56,6 +56,7 @@ export interface HarnessSpec {
   /** Resume field that suppresses the prompt-as-CLI-arg path when present. */
   resumeField?:
     | 'claudeSessionId'
+    | 'piSessionId'
     | 'cursorSessionId'
     | 'codexSessionId'
     | 'opencodeSessionId'
@@ -473,6 +474,22 @@ export const HARNESSES = {
     promptAsCliArg: true,
 
   },
+  omp: {
+    buildCommand: (input) => {
+      const parts = ['omp', '--config', '"$HOME/.ftown/pi/omp.yml"', '--extension', '"$HOME/.ftown/pi/omp.js"'];
+      if (input.piSessionId?.trim()) {
+        parts.push('--resume', shellQuote(input.piSessionId.trim()));
+      } else {
+        if (input.model?.trim()) parts.push('--model', shellQuote(input.model.trim()));
+        if (input.effort?.trim()) parts.push('--thinking', shellQuote(input.effort.trim()));
+        if (input.initialPrompt?.trim()) parts.push('--', shellQuote(input.initialPrompt));
+      }
+      return parts.join(' ');
+    },
+    hooked: true,
+    promptAsCliArg: true,
+    resumeField: 'piSessionId',
+  },
   opencode: {
     // Workdir comes from the runner cwd — opencode takes a project dir
     // positionally, so it must stay empty and inherit process cwd.
@@ -539,7 +556,7 @@ export const ACCEPTED_SHELL_TYPES: readonly string[] = Object.freeze([
  * Harnesses whose launch command takes a reasoning effort from `ftown sessions create --effort`. opencode is absent: it takes
  * effort as a `#<level>` suffix on the model. Claude-rebadged provider flavors share the claude builder, so they take it too.
  */
-const EFFORT_BASES = new Set(['claude', 'codex', 'grok', 'muse', 'antigravity']);
+const EFFORT_BASES = new Set(['claude', 'codex', 'grok', 'muse', 'antigravity', 'omp']);
 const EFFORT_LEVEL = /^[a-z]{1,16}$/;
 
 export class InvalidEffortError extends Error {
@@ -636,6 +653,7 @@ export function harnessAcceptsPromptAsCliArg(
   input: Pick<
     BuildCommandInput,
     | 'claudeSessionId'
+    | 'piSessionId'
     | 'cursorSessionId'
     | 'codexSessionId'
     | 'opencodeSessionId'

@@ -121,7 +121,12 @@ describe('ftown Pi extension', () => {
     assert.equal(requestCount, 0);
   });
 
-  it('forwards native lifecycle metadata and turns pending mail into a follow-up', async () => {
+  for (const [harness, completionEvent] of [['pi', 'agent_settled'], ['omp', 'agent_end']]) {
+    it(`forwards ${harness} lifecycle metadata and turns pending mail into a follow-up`, () =>
+      verifyLifecycle(harness, completionEvent));
+  }
+
+  async function verifyLifecycle(harness: string, completionEvent: string) {
     const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>();
     const followUps: string[] = [];
     const requests: Array<{ url: string; init?: RequestInit }> = [];
@@ -149,6 +154,7 @@ describe('ftown Pi extension', () => {
     };
 
     registerFtownPiExtension(pi, {
+      harness,
       env: {
         FTOWN_SESSION_ID: 'ftown-session',
         FTOWN_HOOK_PORT: '4321',
@@ -174,7 +180,7 @@ describe('ftown Pi extension', () => {
         }],
       },
     };
-    await handlers.get('agent_settled')?.({}, ctx);
+    await handlers.get(completionEvent)?.({}, ctx);
 
     assert.equal(requests.length, 2);
     assert.equal(requests[0].url, 'http://127.0.0.1:4321/hook');
@@ -199,7 +205,7 @@ describe('ftown Pi extension', () => {
           cacheReadTokens: 3,
           cacheWriteTokens: 1,
         }],
-        harness: 'pi',
+        harness,
       },
     });
     assert.equal(requests[0].init?.headers instanceof Headers, true);
@@ -211,82 +217,88 @@ describe('ftown Pi extension', () => {
     assert.deepEqual(followUps, [
       '[ftown mail]\n[task from Planner (parent-id)] Review the API\nHandle this message and reply with the `ftown_mail` tool where appropriate.',
     ]);
-  });
+  }
 
-  it('long-polls for mail and wakes an idle Pi session with a native follow-up', async () => {
-    const handlers = new Map<string, (event: any, ctx: any) => Promise<unknown>>();
-    const followUps: Array<{ message: string; options: unknown }> = [];
-    const inboxRequests: Array<{ url: string; signal?: AbortSignal }> = [];
-    let inboxRequestCount = 0;
-    const pi = {
-      on(event: string, handler: (event: any, ctx: any) => Promise<unknown>) {
-        handlers.set(event, handler);
-      },
-      sendUserMessage(message: string, options: unknown) {
-        followUps.push({ message, options });
-      },
-      registerTool() {},
-      registerCommand() {},
-    };
-    const fetchImpl = async (url: string, init?: RequestInit): Promise<any> => {
-      if (url.includes('/inbox?')) {
-        inboxRequests.push({ url, signal: init?.signal ?? undefined });
-        inboxRequestCount += 1;
-        if (inboxRequestCount === 1) {
-          return {
-            ok: true,
-            json: async () => ({
-              messages: [{ from: 'planner-id', fromName: 'Planner', type: 'task', body: 'Wake up' }],
-            }),
-          };
+  for (const harness of ['pi', 'omp']) {
+    it(`long-polls for mail and wakes an idle ${harness} session`, async () => {
+      const handlers = new Map<string, (event: any, ctx: any) => Promise<unknown>>();
+      const followUps: Array<{ message: string; options: unknown }> = [];
+      const inboxRequests: Array<{ url: string; signal?: AbortSignal }> = [];
+      let inboxRequestCount = 0;
+      const pi = {
+        on(event: string, handler: (event: any, ctx: any) => Promise<unknown>) {
+          handlers.set(event, handler);
+        },
+        sendUserMessage(message: string, options: unknown) {
+          followUps.push({ message, options });
+          // OMP resolves this call only after the idle-triggered turn ends.
+          if (harness === 'omp') return new Promise<void>(() => {});
+        },
+        registerTool() {},
+        registerCommand() {},
+      };
+      const fetchImpl = async (url: string, init?: RequestInit): Promise<any> => {
+        if (url.includes('/inbox?')) {
+          inboxRequests.push({ url, signal: init?.signal ?? undefined });
+          inboxRequestCount += 1;
+          if (inboxRequestCount === 1) {
+            return {
+              ok: true,
+              json: async () => ({
+                messages: [{ from: 'planner-id', fromName: 'Planner', type: 'task', body: 'Wake up' }],
+              }),
+            };
+          }
+          return await new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+          });
         }
-        return await new Promise((_resolve, reject) => {
-          init?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
-        });
-      }
-      return { ok: true, json: async () => ({ ok: true }) };
-    };
-    registerFtownPiExtension(pi, {
-      env: { FTOWN_SESSION_ID: 'ftown-session', FTOWN_HOOK_PORT: '4321' },
-      fetch: fetchImpl,
-      readBridgePointer: async () => null,
+        return { ok: true, json: async () => ({ ok: true }) };
+      };
+      registerFtownPiExtension(pi, {
+        harness,
+        env: { FTOWN_SESSION_ID: 'ftown-session', FTOWN_HOOK_PORT: '4321' },
+        fetch: fetchImpl,
+        readBridgePointer: async () => null,
+      });
+      const ctx = {
+        isIdle: () => true,
+        sessionManager: {
+          getSessionId: () => 'pi-session-uuid',
+          getSessionFile: () => '/tmp/pi-session.jsonl',
+          getCwd: () => '/tmp/project',
+        },
+      };
+
+      await handlers.get('session_start')?.({ reason: 'startup' }, ctx);
+      await waitFor(() => followUps.length === 1, 'mail did not wake the idle Pi session');
+
+      assert.equal(
+        inboxRequests[0]?.url,
+        'http://127.0.0.1:4321/api/sessions/ftown-session/inbox?wait=30',
+      );
+      assert.deepEqual(followUps, [{
+        message: '[ftown mail]\n[task from Planner (planner-id)] Wake up\nHandle this message and reply with the `ftown_mail` tool where appropriate.',
+        options: harness === 'omp' ? undefined : { deliverAs: 'followUp' },
+      }]);
+
+      await handlers.get('session_start')?.({ reason: 'resume' }, ctx);
+      await handlers.get(harness === 'omp' ? 'agent_end' : 'agent_settled')?.({}, ctx);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(
+        inboxRequests.length,
+        2,
+        'repeated starts and agent settlement must reuse the active listener',
+      );
+
+      await handlers.get('session_shutdown')?.({ reason: 'quit' }, ctx);
+      assert.equal(inboxRequests[1]?.signal?.aborted, true, 'shutdown must abort the active listener');
+      await handlers.get('session_start')?.({ reason: 'resume-after-shutdown' }, ctx);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(inboxRequests.length, 2, 'shutdown must permanently close the listener');
+      assert.equal(followUps.length, 1, 'mail must be injected exactly once');
     });
-    const ctx = {
-      sessionManager: {
-        getSessionId: () => 'pi-session-uuid',
-        getSessionFile: () => '/tmp/pi-session.jsonl',
-        getCwd: () => '/tmp/project',
-      },
-    };
-
-    await handlers.get('session_start')?.({ reason: 'startup' }, ctx);
-    await waitFor(() => followUps.length === 1, 'mail did not wake the idle Pi session');
-
-    assert.equal(
-      inboxRequests[0]?.url,
-      'http://127.0.0.1:4321/api/sessions/ftown-session/inbox?wait=30',
-    );
-    assert.deepEqual(followUps, [{
-      message: '[ftown mail]\n[task from Planner (planner-id)] Wake up\nHandle this message and reply with the `ftown_mail` tool where appropriate.',
-      options: { deliverAs: 'followUp' },
-    }]);
-
-    await handlers.get('session_start')?.({ reason: 'resume' }, ctx);
-    await handlers.get('agent_settled')?.({}, ctx);
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    assert.equal(
-      inboxRequests.length,
-      2,
-      'repeated starts and agent settlement must reuse the active listener',
-    );
-
-    await handlers.get('session_shutdown')?.({ reason: 'quit' }, ctx);
-    assert.equal(inboxRequests[1]?.signal?.aborted, true, 'shutdown must abort the active listener');
-    await handlers.get('session_start')?.({ reason: 'resume-after-shutdown' }, ctx);
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    assert.equal(inboxRequests.length, 2, 'shutdown must permanently close the listener');
-    assert.equal(followUps.length, 1, 'mail must be injected exactly once');
-  });
+  }
 
   it('backs off repeated listener failures and stops retrying on shutdown', async () => {
     const handlers = new Map<string, (event: any, ctx: any) => Promise<unknown>>();
@@ -333,7 +345,12 @@ describe('ftown Pi extension', () => {
     assert.equal(delays.length, 4);
   });
 
-  it('maps Pi session, prompt, and tool events onto ftown hook events', async () => {
+  for (const [harness, expectedToolName] of [['pi', 'ask'], ['omp', 'ask_user']]) {
+    it(`maps ${harness} session, prompt, and tool events onto ftown hook events`, () =>
+      verifyHookEvents(harness, expectedToolName));
+  }
+
+  async function verifyHookEvents(harness: string, expectedToolName: string) {
     const handlers = new Map<string, (event: any, ctx: any) => Promise<unknown>>();
     const hookPayloads: Array<Record<string, unknown>> = [];
     const pi = {
@@ -349,6 +366,7 @@ describe('ftown Pi extension', () => {
       return { ok: true, json: async () => ({ messages: [] }) };
     };
     registerFtownPiExtension(pi, {
+      harness,
       env: { FTOWN_SESSION_ID: 'ftown-session', FTOWN_HOOK_PORT: '4321' },
       fetch: fetchImpl,
       readBridgePointer: async () => null,
@@ -364,11 +382,11 @@ describe('ftown Pi extension', () => {
     await handlers.get('session_start')?.({ reason: 'startup' }, ctx);
     await handlers.get('before_agent_start')?.({ prompt: 'Ship it' }, ctx);
     await handlers.get('tool_execution_start')?.(
-      { toolCallId: 'call-1', toolName: 'bash', args: { command: 'npm test' } },
+      { toolCallId: 'call-1', toolName: 'ask', args: { html: '<form><input name=branch></form>' } },
       ctx,
     );
     await handlers.get('tool_execution_end')?.(
-      { toolCallId: 'call-1', toolName: 'bash', isError: false },
+      { toolCallId: 'call-1', toolName: 'ask', isError: false },
       ctx,
     );
     await handlers.get('session_shutdown')?.({ reason: 'quit' }, ctx);
@@ -385,11 +403,14 @@ describe('ftown Pi extension', () => {
       session_file: '/tmp/pi-session.jsonl',
       cwd: '/tmp/project',
       tool_call_id: 'call-1',
-      tool_name: 'bash',
-      tool_input: { command: 'npm test' },
+      tool_use_id: 'call-1',
+      tool_name: expectedToolName,
+      tool_input: { html: '<form><input name=branch></form>' },
     });
+    assert.equal(hookPayloads[3].tool_name, expectedToolName);
+    assert.equal(hookPayloads[3].tool_use_id, 'call-1');
     assert.equal(hookPayloads[3].is_error, false);
-  });
+  }
 
   it('registers model-callable ftown tools and sends mail through the local API', async () => {
     const tools = new Map<string, any>();
@@ -690,10 +711,10 @@ describe('ftown Pi extension', () => {
     assert.equal(result.details.session.id, 'child-id');
 
     await createTool.execute('override-call', {
-      shell: 'claude', prompt: 'Use Claude explicitly',
+      shell: 'omp', effort: 'high', prompt: 'Use OMP explicitly',
     });
     assert.deepEqual(JSON.parse(String(requests[1].init?.body)), {
-      shellType: 'claude', prompt: 'Use Claude explicitly',
+      shellType: 'omp', effort: 'high', prompt: 'Use OMP explicitly',
     });
     const overrideHeaders = requests[1].init?.headers as Headers;
     assert.equal(overrideHeaders.get('x-ftown-session-id'), 'parent-id');

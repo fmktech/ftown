@@ -569,7 +569,7 @@ export function useSessions(
   const usageTarget = sessions.find(session => session.id === usageViewSessionId);
   // Usage replies only change `usage`: they must never schedule another read.
   const usageUpdateKey = usageTarget ? JSON.stringify([usageTarget.id, usageTarget.bridgeId, usageTarget.status, usageTarget.updatedAt,
-    usageTarget.shellType, usageTarget.workingDir, usageTarget.codexSessionId, usageTarget.claudeSessionId, usageTarget.museSessionId]) : "";
+    usageTarget.shellType, usageTarget.workingDir, usageTarget.codexSessionId, usageTarget.claudeSessionId, usageTarget.museSessionId, usageTarget.piSessionFile]) : "";
   useEffect(() => {
     if (!userId || usageViewSessionId === null) return;
     if (usageTarget?.status !== "running") return;

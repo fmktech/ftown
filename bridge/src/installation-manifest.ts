@@ -16,9 +16,9 @@ export const CLI_LAUNCHERS = [
 export const RUNTIME_INVENTORY_FILE = 'installation.json';
 export const REQUIRED_RUNTIME_FILES: readonly string[] = ['package.json', ...CLI_RUNTIME_MODULES.map((name) => `dist/${name}.js`)];
 export const REQUIRED_SETUP_ASSETS: readonly string[] = [
-  ...CLI_LAUNCHERS.map(({ path }) => path), 'notify.sh', 'pi/ftown.js', 'harness-agent.md', 'skills/ftown/SKILL.md',
+  ...CLI_LAUNCHERS.map(({ path }) => path), 'notify.sh', 'pi/ftown.js', 'pi/omp.js', 'pi/omp.yml', 'harness-agent.md', 'skills/ftown/SKILL.md',
   ...REQUIRED_RUNTIME_FILES.map((path) => `cli/${path}`), `cli/${RUNTIME_INVENTORY_FILE}`,
-  'cli/hooks/notify.sh', 'cli/pi-extension/ftown.js', 'cli/opencode-plugin/ftown.js',
+  'cli/hooks/notify.sh', 'cli/pi-extension/ftown.js', 'cli/pi-extension/omp.js', 'cli/pi-extension/omp.yml', 'cli/opencode-plugin/ftown.js',
   'claude-plugin/.claude-plugin/plugin.json', 'claude-plugin/hooks/hooks.json', 'claude-plugin/hooks/register.js',
   'cli/claude-mod/.claude-plugin/plugin.json', 'cli/claude-mod/hooks/hooks.json', 'cli/claude-mod/hooks/register.js',
   'cli/muse-plugin/.muse-plugin/plugin.json', 'cli/skills/ftown/SKILL.md',

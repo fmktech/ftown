@@ -1,21 +1,22 @@
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { installPiExtension } from './pi-extension-installer.js';
+import { installPiExtensions } from './pi-extension-installer.js';
 
-describe('installPiExtension', () => {
-  it('installs the bundled extension at the canonical per-user path', () => {
+describe('installPiExtensions', () => {
+  it('installs the Pi and OMP launch assets together at their per-user paths', () => {
     const home = mkdtempSync(join(tmpdir(), 'ftown-pi-extension-'));
-    const bundled = join(home, 'bundled.js');
-    writeFileSync(bundled, 'export default function () {}\n');
+    const bundled = fileURLToPath(new URL('../pi-extension/', import.meta.url));
+    installPiExtensions(bundled, home);
 
-    const installed = installPiExtension(bundled, home);
-
-    assert.equal(installed, join(home, '.ftown', 'pi', 'ftown.js'));
-    assert.equal(readFileSync(installed, 'utf8'), 'export default function () {}\n');
-    assert.equal(statSync(installed).mode & 0o777, 0o600);
+    for (const filename of ['ftown.js', 'omp.js', 'omp.yml']) {
+      const installed = join(home, '.ftown', 'pi', filename);
+      assert.equal(readFileSync(installed, 'utf8'), readFileSync(join(bundled, filename), 'utf8'));
+      assert.equal(statSync(installed).mode & 0o777, 0o600);
+    }
   });
 });

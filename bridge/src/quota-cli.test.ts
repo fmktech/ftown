@@ -314,7 +314,7 @@ describe('parseQuotaArgs', () => {
     const parsed = parseQuotaArgs(['claude', 'gemini']);
     assert.deepEqual(parsed, {
       ok: false,
-      error: 'unknown provider: gemini (expected claude, codex, grok, muse, agy, opencode)',
+      error: 'unknown provider: gemini (expected claude, codex, grok, muse, agy, opencode, omp)',
     });
   });
 
@@ -355,15 +355,15 @@ describe('runQuota table mode', () => {
       routingFor(rows[2], 'exhausted'),
       routingFor(rows[3], 'unknown'),
       routingFor(rows[4]),
-      routingFor(rows[5]),
+      ...rows.slice(5).map(row => routingFor(row)),
     ];
     const { deps } = fakeDeps({ advise });
     const result = await runQuota([], deps);
 
     assert.equal(
       result.stdout,
-      'TABLE(claude,codex,grok,muse,agy,opencode)\n\n'
-      + 'Route first: codex (low) > claude > grok (exhausted) > muse (unknown) > agy > opencode',
+      'TABLE(claude,codex,grok,muse,agy,opencode,omp)\n\n'
+      + 'Route first: codex (low) > claude > grok (exhausted) > muse (unknown) > agy > opencode > omp',
     );
   });
 
@@ -1362,7 +1362,7 @@ describe('runQuotaCli', () => {
     const { code, out, err } = await captureOutput(() => runQuotaCli(['bogus']));
     assert.equal(code, 2);
     assert.equal(out, '');
-    assert.equal(err, `unknown provider: bogus (expected claude, codex, grok, muse, agy, opencode)\n${QUOTA_HELP_TEXT}\n`);
+    assert.equal(err, `unknown provider: bogus (expected claude, codex, grok, muse, agy, opencode, omp)\n${QUOTA_HELP_TEXT}\n`);
   });
 });
 
@@ -1424,8 +1424,8 @@ describe('runQuota hung fetchers and advice failures', () => {
     assert.equal(result.stderr, 'ftown-quota: routing advice failed: bad advice');
     assert.equal(
       result.stdout,
-      'TABLE(claude,codex,grok,muse,agy,opencode)\n\n'
-      + 'Route first: claude (unknown) > codex (unknown) > grok (unknown) > muse (unknown) > agy (unknown) > opencode (unknown)',
+      'TABLE(claude,codex,grok,muse,agy,opencode,omp)\n\n'
+      + 'Route first: claude (unknown) > codex (unknown) > grok (unknown) > muse (unknown) > agy (unknown) > opencode (unknown) > omp (unknown)',
     );
   });
 });

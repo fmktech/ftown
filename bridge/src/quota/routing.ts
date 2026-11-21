@@ -312,6 +312,22 @@ export function advisePickRouting(
   const quotaRow = quota.find((entry) => entry.provider === pick.provider && (entry.account ?? 'default') === (pick.account ?? 'default'));
   const route = routing.find((entry) => entry.provider === pick.provider && (entry.account ?? 'default') === (pick.account ?? 'default'));
 
+  if (pick.provider === 'omp') {
+    const [provider, ...rest] = pick.model.toLowerCase().split('/');
+    const model = rest.join('/');
+    const pools = (quotaRow?.scopedLimits ?? []).filter(limit => limit.scope.toLowerCase().split('/')[0] === provider);
+    // Codex "chat" and named meters such as "spark" are independent. Other
+    // providers may also report a shared umbrella limit that applies to all models.
+    const named = pools.filter(limit => {
+      const meter = limit.scope.toLowerCase().split('/')[1];
+      return meter && meter !== 'chat' && model.includes(meter);
+    });
+    const windows = pools.filter(limit => !limit.scope.includes('/') || named.includes(limit)
+      || (!named.length && limit.scope.endsWith('/chat')))
+      .map(limit => ({ ...limit, note: limit.scope, windowMinutes: null }));
+    return adviseWindows(windows, resolvePickNow(now, quotaRow?.observedAt), quotaRow?.message);
+  }
+
   if (pick.provider === 'agy' && quotaRow !== undefined && quotaRow.status === 'ok') {
     const poolWindows = agyWindowsForModel(quotaRow, pick.model);
     if (poolWindows.length > 0) {

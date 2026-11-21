@@ -47,7 +47,7 @@ ftown sessions remove <session-id>
 ftown sessions archive
 
 # Recreate a removed session from its tombstone (resumes the agent
-# conversation when a claude/cursor/codex/Pi/grok/antigravity session id was recorded; Kimi Code
+# conversation when a claude/cursor/codex/Pi/OMP/grok/antigravity session id was recorded; Kimi Code
 # continues by working directory; the revived session gets a NEW id)
 ftown sessions revive <session-id>
 
@@ -402,9 +402,8 @@ with the exact version setup command in their readiness hint.
 
 `tell` posts to the target session's **inbox**. Mail is delivered into the
 recipient's context automatically (as `[ftown mail]` context), so there is no
-keystroke injection by default. Claude and codex use turn-boundary hooks. Pi's
-bundled extension keeps a cancellable long-poll open and starts a native
-follow-up turn when mail arrives, including while Pi is idle. opencode's
+keystroke injection by default. Claude and codex use turn-boundary hooks. The bundled extension for Pi and OMP keeps a cancellable long-poll open and starts a native
+follow-up turn when mail arrives, even when the session is idle. opencode's
 installed plugin delivers pending mail as a new prompt when a turn goes idle.
 Muse's installed `ftown` plugin reports the native session id on SessionStart
 and pumps pending mail as context on Stop.
@@ -450,12 +449,12 @@ Fan-out targets are messaged sequentially, one JSON result line per target.
 
 | Flag | Description |
 |------|-------------|
-| `--shell` | Explicit harness override: `claude`, `cursor`, `codex`, `grok`, `muse`, `antigravity`, `pi`, `kimi-code`, `opencode`, `shell`, or Claude Code provider flavors `zai`, `kimi`, `deepseek`, `fireworks`. When omitted inside a session, inherits that session's harness; outside a session, defaults to `claude`. |
-| `--prompt` | Initial task — passed as a CLI launch argument to `claude`/Claude provider flavors/`cursor`/`codex`/`grok`/`muse`/`antigravity`/`pi` (typed after boot for other shells) |
+| `--shell` | Explicit harness override: `claude`, `cursor`, `codex`, `grok`, `muse`, `antigravity`, `pi`, `omp`, `kimi-code`, `opencode`, `shell`, or Claude Code provider flavors `zai`, `kimi`, `deepseek`, `fireworks`. When omitted inside a session, inherits that session's harness; outside a session, defaults to `claude`. |
+| `--prompt` | Initial task — passed as a CLI launch argument to `claude`/Claude provider flavors/`cursor`/`codex`/`grok`/`muse`/`antigravity`/`pi`/`omp` (typed after boot for other shells) |
 | `--workdir` | Working directory |
 | `--project <name>` | Required for a new root. Children inherit their root’s project. |
 | `--name` | Dashboard label |
-| `--effort <level>` | Reasoning effort for claude, codex, grok, muse and antigravity (opencode: `--model provider/model#<level>`) |
+| `--effort <level>` | Reasoning effort for claude, codex, grok, muse, antigravity and omp (opencode: `--model provider/model#<level>`) |
 | `--command` | Full command override, run exactly as written: skips the `--shell` builder and the flags it adds for unattended runs (a codex launched this way asks for approvals). Not for setting a model or effort. |
 | `--parent` | Attach to the root of the calling session (`$FTOWN_SESSION_ID`), including when creating on another bridge. |
 | `--parent-id` | Explicit parent session UUID |

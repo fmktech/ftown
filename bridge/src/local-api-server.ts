@@ -148,6 +148,7 @@ export function archivedSessionWasResumed(
     Session,
     | 'shellType'
     | 'claudeSessionId'
+    | 'piSessionId'
     | 'cursorSessionId'
     | 'codexSessionId'
     | 'opencodeSessionId'
@@ -1933,7 +1934,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
           ((tombstone.claudeSessionId && s.claudeSessionId === tombstone.claudeSessionId) ||
             (tombstone.cursorSessionId && s.cursorSessionId === tombstone.cursorSessionId) ||
             (tombstone.codexSessionId && s.codexSessionId === tombstone.codexSessionId) ||
-            (tombstone.piSessionId && s.piSessionId === tombstone.piSessionId) ||
+            (tombstone.piSessionId && s.shellType === tombstone.shellType && s.piSessionId === tombstone.piSessionId) ||
             (tombstone.opencodeSessionId &&
               s.opencodeSessionId === tombstone.opencodeSessionId) ||
             (tombstone.museSessionId &&
@@ -1972,6 +1973,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
           env: tombstone.env,
           shellType: tombstone.shellType,
           model: tombstone.model,
+          effort: tombstone.effort,
           account: tombstone.account,
           allowedAccounts: tombstone.allowedAccounts,
           claudeSessionId: tombstone.claudeSessionId,
