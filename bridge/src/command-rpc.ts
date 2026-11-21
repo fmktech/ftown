@@ -1,5 +1,6 @@
 import { readRevision, saveInstructions } from './instructions.js';
 import { exec } from 'node:child_process';
+import { ProjectBoardChanged, projectBoardPage, type HomeProject, type ProjectBoardStore } from './project-board-store.js';
 import type { VerifiedApplication } from './security/protocol.js';
 import type { BridgeSecurityService } from './security/bridge/security.js';
 import { BridgeSecurityError } from './security/bridge/errors.js';
@@ -82,6 +83,9 @@ interface ExecError {
 export interface CommandRpcDeps {
   bridgeId: string;
   security?: BridgeSecurityService;
+  projectBoards?: ProjectBoardStore;
+  rememberedProjects?: () => Promise<HomeProject[]>;
+  projectBlockers?: (sessionIds: Set<string>) => Promise<Map<string, boolean>>;
   hostResources?: ReturnType<typeof import('./host-resources.js').hostResourceSampler>;
   sessionController: SessionController;
   pullRequestStatuses?: PullRequestStatusService;
@@ -329,6 +333,30 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
             : await sessionController.getPreviewChunk(payload.sessionId, payload.previewId, payload.fileId, 'revision' in payload && typeof payload.revision === 'string' ? payload.revision : '', 'offset' in payload && typeof payload.offset === 'number' ? payload.offset : -1);
           response = result.ok ? { requestId: command.requestId, success: true, data: result.preview }
             : { requestId: command.requestId, success: false, error: result.message, data: { code: result.code } };
+          break;
+        }
+        case 'list_projects':
+        case 'get_project_board':
+        case 'mutate_project_board': {
+          if (!verified || !deps.security || !deps.projectBoards || payloadBridgeId !== bridgeId) throw new BridgeSecurityError('approval_required');
+          const writing = command.type === 'mutate_project_board';
+          await deps.security.policy.revalidate(verified.principal, writing ? 'control' : 'read');
+          const payload = command.payload as Record<string, unknown>;
+          if (command.type === 'list_projects') {
+            const remembered = await deps.rememberedProjects?.() ?? [];
+            await deps.security.policy.revalidate(verified.principal, 'read');
+            response = { requestId: command.requestId, success: true, data: { projects: [...deps.projectBoards.list(), ...remembered] } };
+            break;
+          }
+          if (typeof payload.projectId !== 'string') throw new Error('Missing project ID');
+          let board = writing ? deps.projectBoards.mutate(payload) : deps.projectBoards.read(payload.projectId);
+          const linked = new Set(board.tickets.flatMap(ticket => ticket.sessionIds));
+          if (linked.size && payload.cursor === undefined && deps.projectBlockers) {
+            const known = await deps.projectBlockers(linked);
+            await deps.security.policy.revalidate(verified.principal, 'read');
+            board = deps.projectBoards.recordBlockers(payload.projectId, known);
+          }
+          response = { requestId: command.requestId, success: true, data: { ...projectBoardPage(board, payload.cursor) } };
           break;
         }
         case 'get_instructions':
@@ -820,7 +848,9 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
       }
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
-      response = err instanceof SessionBoardRequestError
+      response = err instanceof ProjectBoardChanged
+        ? { requestId: command.requestId, success: false, error: err.message, data: { code: 'project_board_changed' } }
+        : err instanceof SessionBoardRequestError
         ? { requestId: command.requestId, success: false, error: errorMessage, data: { code: err.code } }
         : err instanceof AttentionError
         ? { requestId: command.requestId, success: false, error: errorMessage, data: { code: err.code } }

@@ -3,6 +3,8 @@
 import { BridgeBadge } from "./BridgeBadge";
 import { useBridgeIdentities } from "@/hooks/useBridgeIdentities";
 import { InstructionsDialog } from "./InstructionsDialog";
+import { ProjectBoardDialog } from "./ProjectBoardDialog";
+import { useProjectDirectory, type HomeProject } from "@/hooks/useProjectDirectory";
 import { BridgesDialog } from "./BridgesDialog";
 import { validResources, type HostResources } from "@/lib/host-resources";
 import { useState, useCallback, useMemo, useEffect, useRef, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
@@ -148,6 +150,8 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [placements, setPlacements] = usePersistentState<Array<[string, string[]]>>(`ftown:projectBridges:${accountId ?? userId}`, []);
   const projectBridges = useMemo(() => new Map(placements), [placements]);
   const [showNewSession, setShowNewSession] = useState(false);
+  const [launchTicket, setLaunchTicket] = useState<{ project: HomeProject; ticketId: string } | null>(null);
+  const [boardLinkError, setBoardLinkError] = useState("");
   const [sessionDefaults, setSessionDefaults] = useState<SessionDefaults | undefined>(undefined);
   const [showToken, setShowToken] = useState(false);
   const [copiedCommand, setCopiedCommand] = useState<"setup" | "start" | null>(null);
@@ -317,6 +321,8 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
     return () => { active = false; window.clearInterval(timer); };
   }, [showNewSession, showBridges, statsTargets, client, userId]);
   const updateIds = connectionStatus === "connected" ? readyBridges.map(bridge => bridge.bridgeId) : [];
+  const projectDirectory = useProjectDirectory(accountId ?? userId, updateIds, rpc.sendCommand);
+  const [openBoard, setOpenBoard] = useState<HomeProject | null>(null);
   const updates = useBridgeUpdates(rpc.sendCommand, updateIds);
 
   const hasBridges = readyBridges.length > 0;
@@ -692,11 +698,23 @@ PY`;
 
   const handleCreateSession = useCallback(
     async (prompt: string, options: CreateSessionOptions): Promise<void> => {
+      if (launchTicket && options.projectName !== launchTicket.project.name) throw Error("Choose the ticket’s project to launch this worker.");
       const created = await createSession(prompt, options);
+      if (launchTicket) {
+        try {
+          const result = await rpc.sendCommand({ type: "mutate_project_board", requestId: crypto.randomUUID(), payload: {
+            action: "update_ticket", bridgeId: launchTicket.project.bridgeId, projectId: launchTicket.project.id,
+            ticketId: launchTicket.ticketId, addSessionId: created.id,
+          } });
+          if (!result.success) throw Error(result.error);
+        } catch {
+          setBoardLinkError("Worker created. Its ticket link could not be confirmed. Open the project board to check the linked sessions.");
+        }
+      }
       handleSelectSession(created.id);
       scheduleTerminalRenderAdjustment();
     },
-    [createSession, handleSelectSession, scheduleTerminalRenderAdjustment]
+    [createSession, handleSelectSession, scheduleTerminalRenderAdjustment, launchTicket, rpc.sendCommand]
   );
 
   const handleOpenAttentionChange = useCallback((id: string | null) => {
@@ -872,6 +890,8 @@ PY`;
       className="h-dvh flex flex-col"
       style={{ background: "var(--bg-void)" }}
     >
+      {boardLinkError && <div role="alert" className="flex justify-between p-2 text-sm">{boardLinkError}
+        <button className="btn-ghost" onClick={() => setBoardLinkError("")}>Dismiss</button></div>}
       {/* ── Top Chrome ── */}
       <header
         className="shrink-0 flex items-center justify-between px-4"
@@ -1335,6 +1355,11 @@ PY`;
           </section>}
           <div className="flex-1 overflow-y-auto">
             <SessionList
+              boards={{ projects: projectDirectory.projects,
+                homes: updateIds.map(id => ({ id, label: bridgeIdentities.get(id)?.name || id })),
+                create: projectDirectory.create, open: setOpenBoard,
+                change: (project, name) => projectDirectory.mutate(project, name === null ? "delete_project" : "rename_project", name ?? undefined),
+              }}
               bridgeIdentities={bridgeIdentities}
               projectBridges={projectBridges}
               projectComputers={securityBridges.filter(b => b.security.status !== "revoked").map(b => ({ id: b.bridgeId, label: b.label || b.bridgeId }))}
@@ -1431,6 +1456,17 @@ PY`;
         currentEndpointId={securityRuntime?.identity.endpoint.id ?? null} currentComputerIds={currentComputerIds} execute={executeSecurity}
         accountId={localMode ? null : accountId}
         initialBridgeId={securityBridgeId} />
+      {openBoard && <ProjectBoardDialog key={openBoard.id} project={openBoard} online={updateIds.includes(openBoard.bridgeId)}
+        bridgeNames={new Map([...bridgeIdentities].map(([id, info]) => [id, info.name]))}
+        onOpenSession={id => { setOpenBoard(null); handleSelectSession(id); }}
+        onLaunch={ticketId => {
+          setLaunchTicket({ project: openBoard, ticketId });
+          setSessionDefaults({ projectName: openBoard.name });
+          setOpenBoard(null);
+          setShowNewSession(true);
+        }}
+        send={rpc.sendCommand} sessions={sessions} attentionIds={new Set(openAttentionBySession.keys())}
+        cacheKey={`ftown:board:${accountId ?? userId}:${openBoard.bridgeId}:${openBoard.id}`} close={() => setOpenBoard(null)} />}
       {instructionBridge && <InstructionsDialog bridgeId={instructionBridge} name={bridgeIdentities.get(instructionBridge)?.name || instructionBridge}
         send={rpc.sendCommand} close={() => setInstructionBridge(null)} />}
       {updateBridgeId && <BridgeUpdatesDialog open name={bridges.find(bridge => bridge.bridgeId === updateBridgeId)?.hostname ?? updateBridgeId}
@@ -1439,9 +1475,10 @@ PY`;
         send={rpc.sendCommand} onClose={() => setModelRoutingBridgeId(null)} />}
       <NewSessionModal
         isOpen={showNewSession}
-        onClose={() => { setShowNewSession(false); setSessionDefaults(undefined); }}
+        onClose={() => { setShowNewSession(false); setSessionDefaults(undefined); setLaunchTicket(null); }}
         onSubmit={handleCreateSession}
         bridges={readyBridges}
+        hostedProjects={projectDirectory.projects.map(p => p.name)} createProjectBoard={projectDirectory.ensureForSession}
         projectBridges={projectBridges}
         resourcesByBridge={resourcesByBridge}
         sessions={sessions}

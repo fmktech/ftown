@@ -23,6 +23,8 @@ export interface SessionDefaults {
 }
 
 interface NewSessionModalProps {
+  hostedProjects?: readonly string[];
+  createProjectBoard?: (name: string, bridgeId: string) => Promise<unknown>;
   resourcesByBridge?: ReadonlyMap<string, import("@/lib/host-resources").HostResources>;
   isOpen: boolean;
   onClose: () => void;
@@ -347,13 +349,14 @@ function ProviderTokenHint({ provider, envVar, flavor }: { provider: string; env
   );
 }
 
-export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, projectBridges, resourcesByBridge, defaults, sendCommand, sessions = EMPTY_SESSIONS }: NewSessionModalProps) {
+export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, hostedProjects, createProjectBoard, projectBridges, resourcesByBridge, defaults, sendCommand, sessions = EMPTY_SESSIONS }: NewSessionModalProps) {
   const [name, setName] = useState("");
   const [workingDir, setWorkingDir] = useState("");
   const [topShell, setTopShell] = useState<TopShell>("claude");
   const [claudeFlavor, setClaudeFlavor] = useState<ClaudeFlavor>("standard");
   const shellType: ShellType = resolveShellType(topShell, claudeFlavor);
   const [bridgeId, setBridgeId] = useState("");
+  const [boardHome, setBoardHome] = useState("");
   const [projectName, setProjectName] = useState("");
   const [parentSessionId, setParentSessionId] = useState("");
   const [account, setAccount] = useState("default");
@@ -396,6 +399,8 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, projectBri
   const parent = parents.find(session => session.id === parentSessionId);
   const resolvedParent = parent?.parentSessionId ? sessions.find(session => session.id === parent.parentSessionId) : parent;
   const inheritedProject = parent ? resolvedParent?.projectName || parent.projectName || "Unassigned" : undefined;
+  const newBoard = !!createProjectBoard && !!projectName.trim() && !inheritedProject &&
+    !hostedProjects?.includes(projectName.trim()) && !sessions.some(session => session.projectName === projectName.trim());
   const allowed = projectBridges?.get(inheritedProject || projectName.trim());
   const eligible = allowed ? bridges.filter(bridge => allowed.includes(bridge.bridgeId)) : bridges;
   const selectedBridge = eligible.find(b => b.bridgeId === bridgeId) ?? eligible[0];
@@ -548,6 +553,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, projectBri
     setTopShell(top);
     setClaudeFlavor(flavor);
     setBridgeId(restoredBridgeId);
+    setBoardHome("");
     setProjectName(defaults?.projectName ?? "");
     setParentSessionId(defaults?.parentSessionId ?? "");
     setAccount(defaults?.account ?? "default");
@@ -627,6 +633,11 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, projectBri
     }
 
     try {
+      if (newBoard && createProjectBoard) {
+        const home = boardHome || effectiveBridgeId;
+        if (!home) throw Error("Choose a home bridge for the project.");
+        await createProjectBoard(projectName.trim(), home);
+      }
       await onSubmit("", {
         projectName: inheritedProject || projectName.trim(),
         name: name.trim() || undefined,
@@ -701,7 +712,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, projectBri
     setSelectedCursorSessionId(null);
     setSelectedCursorSummary(null);
     onClose();
-  }, [shellType, topShell, claudeFlavor, name, projectName, inheritedProject, workingDir, effectiveBridgeId, hostname, selectedClaudeSessionId, selectedCursorSessionId, fireworksModels, zaiModels, grokModel, museModel, antigravityModel, piModel, kimiCodeModel, opencodeModel, autoCompactWindow, onSubmit, onClose, accountBlocked, accountsLoading, accountHarness, selectedAccount, allowedAccounts, parent, policyChoices]);
+  }, [newBoard, boardHome, createProjectBoard, shellType, topShell, claudeFlavor, name, projectName, inheritedProject, workingDir, effectiveBridgeId, hostname, selectedClaudeSessionId, selectedCursorSessionId, fireworksModels, zaiModels, grokModel, museModel, antigravityModel, piModel, kimiCodeModel, opencodeModel, autoCompactWindow, onSubmit, onClose, accountBlocked, accountsLoading, accountHarness, selectedAccount, allowedAccounts, parent, policyChoices]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -1002,7 +1013,13 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, projectBri
           <div>
             <label htmlFor="ns-project" className="block text-sm text-[var(--text-muted)] mb-1">Project</label>
             <input id="ns-project" className={INPUT_CLASS} maxLength={256} required value={inheritedProject || projectName}
-              disabled={Boolean(inheritedProject)} onChange={event => setProjectName(event.target.value)} />
+              list="hosted-projects" disabled={Boolean(inheritedProject)} onChange={event => setProjectName(event.target.value)} />
+            <datalist id="hosted-projects">{[...new Set(hostedProjects)].map(name => <option key={name} value={name} />)}</datalist>
+            {newBoard && <label className="mt-2 block text-sm">Home bridge for new project
+              <select className={INPUT_CLASS} value={boardHome || effectiveBridgeId || ""} onChange={e => setBoardHome(e.target.value)}>
+                {bridges.map(b => <option key={b.bridgeId} value={b.bridgeId}>{b.hostname || b.bridgeId}</option>)}
+              </select>
+            </label>}
           </div>
           {parents.length > 0 && <div>
             <label htmlFor="ns-parent" className="block text-sm text-[var(--text-muted)] mb-1">Parent Session <span className="text-xs text-[var(--text-faint)]">(optional)</span></label>

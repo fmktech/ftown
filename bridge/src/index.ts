@@ -17,6 +17,7 @@ import { PublishRouter } from './direct-transport/publish-router.js';
 import { LoopbackPeerServer } from './direct-transport/loopback-server.js';
 import { toWireSession } from './session-wire.js';
 import { ProcessRunner } from './claude-runner.js';
+import { ProjectBoardStore, sessionBlocksTicket } from './project-board-store.js';
 import { SessionStore } from './session-store.js';
 import { MailStore } from './mail-store.js';
 import { AttentionStore } from './attention-store.js';
@@ -24,7 +25,7 @@ import type { AttentionItem } from './attention-events.js';
 import { PreviewChatStore } from './preview-chat.js';
 import { BridgePushNotifier } from './push-notifier.js';
 import { LocalApiServer } from './local-api-server.js';
-import { parsePeerSessions, startPeerSessionCache } from './peer-session-cache.js';
+import { parsePeerSessions, startPeerSessionCache, startPeerProjectDirectory } from './peer-session-cache.js';
 import { hostResourceSampler } from './host-resources.js';
 import { parseRemoteParent, sessionRequestPrincipal } from './session-parent.js';
 import { PeerControl } from './peer-control.js';
@@ -1198,7 +1199,10 @@ program
       routing: modelRouting,
     }, sessionId, request);
     localApiServer.setHandoff(runHandoff);
+    const projectBoards = new ProjectBoardStore(dataDir, bridgeId);
     const peerCache = await startPeerSessionCache(peerControl, join(dataDir, "peer-sessions-" + security.endpoint.id + ".json"));
+    const projectDirectory = await startPeerProjectDirectory(peerControl, join(dataDir, "peer-projects-" + security.endpoint.id + ".json"));
+    localApiServer.setLocalProjects(() => projectBoards.list());
     const hostResources = hostResourceSampler(dataDir);
     const dispatchCommand = async (message: VerifiedApplication): Promise<ApplicationJson> => {
       if (!ready) return { type: 'command_response', response: { requestId: message.envelope.messageId, success: false, error: 'bridge_offline' } };
@@ -1211,7 +1215,22 @@ program
         return { type: 'command_response', response: { requestId: route.requestId, success: true } };
       }
       let result: CommandResponse | undefined;
-      await createCommandHandler({ bridgeId, hostResources, security, sessionController, attentionStore, updates, updateEffects, pullRequestStatuses,
+      await createCommandHandler({ bridgeId, hostResources, projectBoards, rememberedProjects: projectDirectory.list,
+        projectBlockers: async ids => {
+          const known = new Map<string, boolean>();
+          const remote = new Map((await peerCache.list()).map(row => [row.id, row]));
+          for (const id of ids) {
+            try {
+              const local = await store.loadSession(id);
+              if (local) known.set(id, await sessionBlocksTicket(local, attentionStore));
+              else {
+                const blocked = remote.get(id)?.boardBlocked;
+                if (blocked !== undefined) known.set(id, blocked);
+              }
+            } catch { /* A worker removed mid-read can be reconciled on the next refresh. */ }
+          }
+          return known;
+        }, security, sessionController, attentionStore, updates, updateEffects, pullRequestStatuses,
         directAddress: () => addressed?.address() ?? null, pullRequestReview,
         modelRouting: () => modelRouting,
         // Commands may arrive during bootstrap; only board reads resolve this late-bound source.
@@ -1298,7 +1317,7 @@ program
         clearInterval(autoUpdateTimer);
         console.log('\n[Bridge] Shutting down...');
         try {
-          await peerCache.stop();
+          await Promise.all([peerCache.stop(), projectDirectory.stop()]);
           await pullRequestEvents.stop();
           attentionStore.stopNotifications();
           stopPushSessionObserver();
