@@ -14,4 +14,4 @@ chaos/qemu/init text eol=lf
 bridge/claude-mod/hooks/register.js text eol=lf
 bridge/claude-mod/hooks/hooks.json text eol=lf
 bridge/opencode-plugin/ftown.js text eol=lf
-bridge/pi-extension/ftown.js text eol=lf
+bridge/pi-extension/*.js text eol=lf
