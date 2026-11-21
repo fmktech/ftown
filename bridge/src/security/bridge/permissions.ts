@@ -6,10 +6,10 @@ import { SESSION_BOARD_CHUNK_BYTES } from '../../session-board-protocol.js';
 
 export interface OperationPermission { permission: EndpointPermission; mutating: boolean; operation: string; sessionId: string | null }
 const session = /^[A-Za-z0-9_-]+$/;
-const readCommands = new Set(['get_direct_address', 'get_pull_request_statuses', 'session_preview_status', 'session_preview_chunk', 'get_bridge_update', 'list_sessions', 'get_host_resources', 'get_history', 'get_session_usage', 'get_sessions_usage', 'get_session_attention', 'get_attention_summary',
+const readCommands = new Set(['get_instructions', 'get_direct_address', 'get_pull_request_statuses', 'session_preview_status', 'session_preview_chunk', 'get_bridge_update', 'list_sessions', 'get_host_resources', 'get_history', 'get_session_usage', 'get_sessions_usage', 'get_session_attention', 'get_attention_summary',
   'ledger_head', 'ledger_chain',
   'get_model_routing', 'get_accounts', 'get_session_board', 'list_native_sessions']);
-const controlCommands = new Set(['update_bridge', 'create_session', 'stop_session', 'dismiss_session_block', 'retry_session', 'handoff_session', 'send_message', 'rename_session', 'remove_session',
+const controlCommands = new Set(['set_instructions', 'update_bridge', 'create_session', 'stop_session', 'dismiss_session_block', 'retry_session', 'handoff_session', 'send_message', 'rename_session', 'remove_session',
   'bridge_exec', 'clear_terminal', 'update_session_parent', 'move_session_to_project', 'resolve_session_attention', 'answer_session_attention',
   'set_model_routing']);
 const adminCommands = new Set(['security_devices', 'security_invite', 'security_revoke']);

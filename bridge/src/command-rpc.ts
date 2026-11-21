@@ -1,3 +1,4 @@
+import { readRevision, saveInstructions } from './instructions.js';
 import { exec } from 'node:child_process';
 import type { VerifiedApplication } from './security/protocol.js';
 import type { BridgeSecurityService } from './security/bridge/security.js';
@@ -328,6 +329,18 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
             : await sessionController.getPreviewChunk(payload.sessionId, payload.previewId, payload.fileId, 'revision' in payload && typeof payload.revision === 'string' ? payload.revision : '', 'offset' in payload && typeof payload.offset === 'number' ? payload.offset : -1);
           response = result.ok ? { requestId: command.requestId, success: true, data: result.preview }
             : { requestId: command.requestId, success: false, error: result.message, data: { code: result.code } };
+          break;
+        }
+        case 'get_instructions':
+        case 'set_instructions': {
+          if (!verified || !deps.security || payloadBridgeId !== bridgeId) throw new BridgeSecurityError('approval_required');
+          const writing = command.type === 'set_instructions';
+          await deps.security.policy.revalidate(verified.principal, writing ? 'control' : 'read');
+          const { scope, text } = command.payload as Record<string, unknown>;
+          if (scope !== 'bridge' && scope !== 'global') throw new Error('Invalid instruction scope');
+          if (writing && typeof text !== 'string') throw new Error('Expected Markdown text');
+          const data = writing ? saveInstructions(scope, text as string) : readRevision(scope);
+          response = { requestId: command.requestId, success: true, data };
           break;
         }
         case 'get_direct_address': {

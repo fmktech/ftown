@@ -36,16 +36,26 @@ export function mergeGlobal(value: unknown, home = homedir()) {
   if (!remote || typeof remote.text !== 'string' || Buffer.byteLength(remote.text) > instructionLimit
     || typeof remote.version !== 'number' || !Number.isSafeInteger(remote.version) || remote.version < 0
     || !Number.isFinite(new Date(remote.version).getTime())) throw new Error('Invalid instruction revision');
-  const file = instructionPath('global', home);
   const local = readRevision('global', home);
   if (remote.version < local.version || (remote.version === local.version && remote.text <= local.text)) return local;
+  return writeRevision('global', remote.text, remote.version, home);
+}
+
+export function saveInstructions(scope: Scope, text: string, home = homedir()) {
+  if (Buffer.byteLength(text) > instructionLimit) throw new Error('Instructions exceed 64 KiB');
+  const local = readRevision(scope, home);
+  return writeRevision(scope, text, Math.max(Date.now(), local.version + 1), home);
+}
+
+function writeRevision(scope: Scope, text: string, version: number, home: string) {
+  const file = instructionPath(scope, home);
   const temp = file + '.' + randomUUID();
   try {
-    writeFileSync(temp, remote.text, { flag: 'wx', mode: 0o600 });
-    const timestamp = new Date(remote.version);
+    writeFileSync(temp, text, { flag: 'wx', mode: 0o600 });
+    const timestamp = new Date(version);
     utimesSync(temp, timestamp, timestamp);
     renameSync(temp, file);
-    return { text: remote.text, version: remote.version };
+    return { text, version };
   } finally { rmSync(temp, { force: true }); }
 }
 

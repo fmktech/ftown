@@ -2,6 +2,7 @@
 
 import { BridgeBadge } from "./BridgeBadge";
 import { useBridgeIdentities } from "@/hooks/useBridgeIdentities";
+import { InstructionsDialog } from "./InstructionsDialog";
 import { BridgesDialog } from "./BridgesDialog";
 import { validResources, type HostResources } from "@/lib/host-resources";
 import { useState, useCallback, useMemo, useEffect, useRef, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
@@ -158,6 +159,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [showNavigation, setShowNavigation] = useState(false);
   const [showSecurity, setShowSecurity] = useState(false);
+  const [instructionBridge, setInstructionBridge] = useState<string | null>(null);
   const [updateBridgeId, setUpdateBridgeId] = useState<string | null>(null);
   const [modelRoutingBridgeId, setModelRoutingBridgeId] = useState<string | null>(null);
   const [securityBridgeId, setSecurityBridgeId] = useState<string | undefined>(undefined);
@@ -1423,12 +1425,14 @@ PY`;
         ready: connectionStatus === "connected" && readyBridges.some(bridge => bridge.bridgeId === b.bridgeId),
       }))} resources={resourcesByBridge} close={() => setShowBridges(false)}
         create={id => { setShowBridges(false); handleCreateSessionOnBridge(id); }}
-        updates={setUpdateBridgeId} security={id => { setShowBridges(false); openSecurity(id); }}
+        instructions={setInstructionBridge} updates={setUpdateBridgeId} security={id => { setShowBridges(false); openSecurity(id); }}
         routing={setModelRoutingBridgeId} />}
       <SecurityPanel open={showSecurity} onClose={() => setShowSecurity(false)} bridges={securityBridges}
         currentEndpointId={securityRuntime?.identity.endpoint.id ?? null} currentComputerIds={currentComputerIds} execute={executeSecurity}
         accountId={localMode ? null : accountId}
         initialBridgeId={securityBridgeId} />
+      {instructionBridge && <InstructionsDialog bridgeId={instructionBridge} name={bridgeIdentities.get(instructionBridge)?.name || instructionBridge}
+        send={rpc.sendCommand} close={() => setInstructionBridge(null)} />}
       {updateBridgeId && <BridgeUpdatesDialog open name={bridges.find(bridge => bridge.bridgeId === updateBridgeId)?.hostname ?? updateBridgeId}
         view={updates.get(updateBridgeId)} onClose={() => setUpdateBridgeId(null)} onCheck={() => void updates.check(updateBridgeId, true)} onUpdate={() => void updates.update(updateBridgeId)} />}
       {modelRoutingBridgeId && <ModelRoutingDialog open bridgeId={modelRoutingBridgeId} name={bridges.find(bridge => bridge.bridgeId === modelRoutingBridgeId)?.hostname ?? modelRoutingBridgeId}

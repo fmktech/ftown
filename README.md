@@ -689,7 +689,7 @@ saved and `ftown setup` can retry.
 
 ### Shared agent instructions
 
-Run `ftown setup` on each bridge. Setup adds two file references to the user-level Codex `AGENTS.md` and Claude `CLAUDE.md`, including registered accounts. Existing instructions stay in place. Edit `~/.ftown/global.md` for guidance that applies everywhere and `~/.ftown/bridge.md` for machine-specific details. New agent sessions can read both files offline.
+Run `ftown setup` on each bridge. Setup adds two file references to the user-level Codex `AGENTS.md` and Claude `CLAUDE.md`, including registered accounts. Existing instructions stay in place. In **Computers**, choose **Edit agent instructions** on an online bridge to edit and save either Markdown file. You can also edit `~/.ftown/global.md` for guidance that applies everywhere and `~/.ftown/bridge.md` for machine-specific details. New agent sessions can read both files offline.
 
 Each bridge keeps its own files. Paired bridges automatically sync `global.md` over a direct link, checking every 30 seconds. Edits made offline participate when the bridges reconnect. The latest edit wins on both machines. Sync preserves the last-edit timestamp across hops and breaks ties by comparing file contents. Accurate bridge clocks matter. Each file can hold up to 64 KiB of Markdown.
 

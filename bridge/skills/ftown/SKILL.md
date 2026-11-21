@@ -16,7 +16,7 @@ description: >-
 
 # ftown
 
-Setup points Claude and Codex to `~/.ftown/global.md` and `~/.ftown/bridge.md`. Use `ftown instructions show global|bridge --bridge <peer>` to read guidance over a paired direct link. Paired bridges automatically sync global guidance, with the newest edit winning on both machines. Use `ftown instructions sync global --bridge <peer>` for an immediate exchange. Bridge guidance stays local.
+Setup points Claude and Codex to `~/.ftown/global.md` and `~/.ftown/bridge.md`. Use `ftown instructions show global|bridge --bridge <peer>` to read guidance over a paired direct link. Paired bridges automatically sync global guidance, with the newest edit winning on both machines. Use `ftown instructions sync global --bridge <peer>` for an immediate exchange. Bridge guidance stays local. In Computers, choose Edit agent instructions on the target bridge to edit either file.
 
 Use `ftown start`, `ftown sessions`, `ftown harness`, and `ftown env`. Run `ftown --help`
 for command discovery; if it is missing from PATH, use `~/.ftown/ftown`.
