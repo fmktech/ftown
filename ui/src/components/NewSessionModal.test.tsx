@@ -23,14 +23,14 @@ function setPlatform(platform: string) {
   });
 }
 
-function renderModal() {
+function renderModal(defaults: SessionDefaults = { projectName: "Test project", shellType: "shell" }) {
   const onSubmit = vi.fn(async () => undefined);
   render(
     <NewSessionModal
       isOpen
       onClose={vi.fn()}
       onSubmit={onSubmit}
-      defaults={{ projectName: "Test project", shellType: "shell" }}
+      defaults={defaults}
       bridges={bridges}
       sendCommand={vi.fn(async () => ({ requestId: "test", success: true }))}
     />,
@@ -45,7 +45,7 @@ it("creates an Oh My Pi session and restores its model the next time the form op
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Create Session" })); });
   expect(onSubmit).toHaveBeenCalledWith("", expect.objectContaining({ shellType: "omp", model: "openai/gpt-5.2" }));
   cleanup();
-  renderModal();
+  renderModal({ projectName: "Test project" });
   expect((screen.getByLabelText("Shell Type") as HTMLSelectElement).value).toBe("omp");
   expect((screen.getByLabelText("Model") as HTMLInputElement).value).toBe("openai/gpt-5.2");
 });
