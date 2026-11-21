@@ -7,9 +7,9 @@
  * This file is types only. Do not add logic and do not edit it from a task.
  */
 
-export type QuotaProviderId = 'claude' | 'codex' | 'grok' | 'muse' | 'agy' | 'opencode';
+export type QuotaProviderId = 'claude' | 'codex' | 'grok' | 'muse' | 'agy' | 'opencode' | 'omp';
 
-export const QUOTA_PROVIDER_IDS: readonly QuotaProviderId[] = ['claude', 'codex', 'grok', 'muse', 'agy', 'opencode'];
+export const QUOTA_PROVIDER_IDS: readonly QuotaProviderId[] = ['claude', 'codex', 'grok', 'muse', 'agy', 'opencode', 'omp'];
 
 /**
  * `five_hour` is the provider's short rolling block (its real length is in

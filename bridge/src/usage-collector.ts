@@ -138,13 +138,12 @@ export async function collectSessionUsage(
     if (session.codexSessionId) {
       return await collectCodexUsage(session.codexSessionId, options);
     }
-    if (session.shellType === 'pi' && session.workingDir) {
-      return await collectPiUsage(
-        session.workingDir,
-        session.createdAt,
-        options,
-        session.piSessionFile,
-      );
+    if (session.shellType === 'pi' || session.shellType === 'omp') {
+      const harness = session.shellType;
+      const sessionsDir = harness === 'omp'
+        ? join(env.PI_CODING_AGENT_DIR || join(home, '.omp', 'agent'), 'sessions')
+        : options.piSessionsDir ?? join(home, '.pi', 'agent', 'sessions');
+      return await collectPiUsage(harness, sessionsDir, session, options);
     }
     if (session.shellType === 'kimi-code' && session.workingDir) {
       return await collectKimiCodeUsage(session.workingDir, session.createdAt, options);
@@ -195,12 +194,11 @@ interface PiUsageLine {
 }
 
 async function resolvePiSessionFile(
-  baseDir: string,
+  dir: string,
   workingDir: string,
   sessionCreatedAt: string | undefined,
   deadline: number,
 ): Promise<string | null> {
-  const dir = join(baseDir, piWorkspaceDirName(workingDir));
   let files: string[];
   try {
     files = (await readdir(dir)).filter((file) => file.endsWith('.jsonl'));
@@ -236,15 +234,18 @@ async function resolvePiSessionFile(
 }
 
 async function collectPiUsage(
-  workingDir: string,
-  sessionCreatedAt: string | undefined,
+  harness: 'pi' | 'omp',
+  baseDir: string,
+  session: UsageSessionRef,
   options: UsageCollectorOptions,
-  nativeSessionFile?: string,
 ): Promise<SessionUsage | null> {
-  const baseDir = options.piSessionsDir ?? join(homedir(), '.pi', 'agent', 'sessions');
+  const { workingDir, createdAt, piSessionFile } = session;
   const deadline = Date.now() + (options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-  const candidatePath = nativeSessionFile
-    ?? await resolvePiSessionFile(baseDir, workingDir, sessionCreatedAt, deadline);
+  // OMP can hash or migrate workspace directory names. Its extension supplies
+  // the exact transcript, including when several sessions share a checkout.
+  const candidatePath = piSessionFile ?? (harness === 'pi' && workingDir
+    ? await resolvePiSessionFile(join(baseDir, piWorkspaceDirName(workingDir)), workingDir, createdAt, deadline)
+    : undefined);
   if (!candidatePath) return null;
   const filePath = await containedPiSessionFile(baseDir, candidatePath);
   if (!filePath) return null;
@@ -253,7 +254,7 @@ async function collectPiUsage(
     filePath,
     piUsageFold,
     options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-    (state) => (state.counted === 0 ? null : usageFromModels(state.byModel, 'pi')),
+    (state) => (state.counted === 0 ? null : usageFromModels(state.byModel, harness)),
   );
   return usage ?? null;
 }

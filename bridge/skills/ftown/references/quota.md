@@ -20,7 +20,7 @@ ftown quota --json --timeout 30       # per-harness limit, 1-600 s, default 15
 ftown quota --json --fresh            # bypass the cache, fetch live and refresh it
 ```
 
-Harnesses: `claude`, `codex`, `grok`, `muse`, `agy`, `opencode`. If `ftown` is
+Harnesses: `claude`, `codex`, `grok`, `muse`, `agy`, `omp`, `opencode`. If `ftown` is
 not on PATH, use `~/.ftown/ftown quota`. `--models` only affects table mode.
 
 A first run takes several seconds. It launches hidden local CLIs to read their
@@ -109,7 +109,7 @@ ftown sessions create --shell <provider> --model <id> --effort <level> --parent 
   --workdir "$PWD" --name review-auth --prompt "..."
 ```
 
-Pass the effort with `--effort` (claude, codex, grok, muse, antigravity); ftown
+Pass the effort with `--effort` (claude, codex, grok, muse, antigravity, omp); ftown
 turns it into the harness's own `effortFlag`. For opencode put it on the model
 instead: `--model provider/model#high`. Omit `--model` or `--effort` to take the
 harness default.

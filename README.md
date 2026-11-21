@@ -1,6 +1,6 @@
 # ftown
 
-A remote CLI agent orchestrator that lets you manage and stream **Claude Code, Cursor Agent, Codex, Grok, Muse Code, Antigravity, Pi, Kimi Code, opencode,** and shell sessions through a web dashboard. Terminal streaming climbs a transport ladder — local loopback, then WebRTC P2P, then Centrifugo — so output stays on your machine or network whenever possible, and automatically upgrades back to a direct connection once it can.
+A remote CLI agent orchestrator that lets you manage and stream **Claude Code, Cursor Agent, Codex, Grok, Muse Code, Antigravity, Pi, Oh My Pi (OMP), Kimi Code, opencode,** and shell sessions through a web dashboard. Terminal streaming climbs a transport ladder — local loopback, then WebRTC P2P, then Centrifugo — so output stays on your machine or network whenever possible, and automatically upgrades back to a direct connection once it can.
 
 ## Demo
 
@@ -150,12 +150,12 @@ The file travels through the existing encrypted connection and runs in an iframe
 
 ### Everything else
 
-- Nine coding-agent CLIs plus raw shells as full interactive sessions
+- Ten coding-agent CLIs plus raw shells as full interactive sessions
 - Parent/child agent trees, durable cross-session mail, and session reparenting
-- Native resume support for Claude, Cursor, Codex, and Pi; workdir-based continuation for Kimi Code
+- Native resume support for Claude, Cursor, Codex, Pi, and OMP; workdir-based continuation for Kimi Code
 - Live per-session token/model usage for harnesses with structured native session logs
-- Hook forwarding to the dashboard (Claude/Codex settings, Cursor hooks, and ftown's bundled Pi extension)
-- Native Pi tools for session discovery/control, durable ftown mail, token usage, terminal inspection, and archives
+- Hook forwarding to the dashboard (Claude/Codex settings, Cursor hooks, and ftown's bundled Pi and OMP extension)
+- Native Pi and OMP tools for session discovery/control, durable ftown mail, token usage, terminal inspection, and archives
 - Optional [Web Push notifications](docs/push-notifications.md) for agent questions and the first observed idle transition per agent on hosted deployments
 - Multiple concurrent sessions with session management
 - Multi-bridge support (connect multiple machines)
@@ -206,6 +206,14 @@ creates a one-time snapshot. Stop writes to the source while it is being read.
 - PostgreSQL database (e.g., [Neon](https://neon.tech))
 - [Centrifugo](https://centrifugal.dev) v5 server
 - On bridge machines: install and authenticate whichever agent CLIs you plan to run. For Pi: `npm install -g @mariozechner/pi-coding-agent`, then run `pi` and `/login` (or provide a supported provider API key).
+
+With Oh My Pi (`omp`) on the bridge PATH, select **Oh My Pi (omp)** in the dashboard or create a session with the CLI.
+
+```sh
+ftown sessions create --shell omp --project my-project --workdir "$PWD" --prompt "Review the current changes"
+```
+
+New tasks start a fresh OMP conversation. Reviving an archived session resumes its recorded OMP conversation when available. Use `--model` and `--effort` to override OMP’s defaults, and `ftown quota omp --json` to inspect available models and provider limits.
 
 ### Bridge platforms
 

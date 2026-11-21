@@ -260,6 +260,7 @@ const VALID_SHELL_TYPES: ShellType[] = [
   "muse",
   "antigravity",
   "pi",
+  "omp",
   "kimi-code",
   "opencode",
   "shell",
@@ -272,7 +273,7 @@ interface LastSessionDefaults {
   model?: string;
 }
 
-type TopShell = "claude" | "cursor" | "codex" | "grok" | "muse" | "antigravity" | "pi" | "kimi-code" | "opencode" | "shell";
+type TopShell = "claude" | "cursor" | "codex" | "grok" | "muse" | "antigravity" | "pi" | "omp" | "kimi-code" | "opencode" | "shell";
 type ClaudeFlavor = "standard" | "zai" | "kimi" | "deepseek" | "fireworks";
 
 function shellTypeToTop(s: ShellType | undefined): { top: TopShell; flavor: ClaudeFlavor } {
@@ -281,7 +282,7 @@ function shellTypeToTop(s: ShellType | undefined): { top: TopShell; flavor: Clau
   if (s === "grok") return { top: "grok", flavor: "standard" };
   if (s === "muse") return { top: "muse", flavor: "standard" };
   if (s === "antigravity") return { top: "antigravity", flavor: "standard" };
-  if (s === "pi") return { top: "pi", flavor: "standard" };
+  if (s === "pi" || s === "omp") return { top: s, flavor: "standard" };
   if (s === "kimi-code") return { top: "kimi-code", flavor: "standard" };
   if (s === "opencode") return { top: "opencode", flavor: "standard" };
   if (s === "shell") return { top: "shell", flavor: "standard" };
@@ -293,7 +294,7 @@ function shellTypeToTop(s: ShellType | undefined): { top: TopShell; flavor: Clau
 }
 
 function resolveShellType(top: TopShell, flavor: ClaudeFlavor): ShellType {
-  if (top === "cursor" || top === "codex" || top === "grok" || top === "muse" || top === "antigravity" || top === "pi" || top === "kimi-code" || top === "opencode" || top === "shell") return top;
+  if (top !== "claude") return top;
   if (flavor === "standard") return "claude";
   return flavor;
 }
@@ -377,6 +378,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, hostedProj
   const [museModel, setMuseModel] = useState("");
   const [antigravityModel, setAntigravityModel] = useState("");
   const [piModel, setPiModel] = useState("");
+  const [ompModel, setOmpModel] = useState("");
   const [kimiCodeModel, setKimiCodeModel] = useState<string>(KIMI_CODE_MODEL_OPTIONS[0].value);
   const [opencodeModel, setOpencodeModel] = useState("");
   const [autoCompactWindow, setAutoCompactWindow] = useState("");
@@ -564,12 +566,15 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, hostedProj
     setSelectedCursorSummary(null);
     setFireworksModels(getStoredFireworksModels());
     setZaiModels(getStoredZaiModels());
-    setGrokModel(restoredShellType === "grok" && typeof parsed.model === "string" ? parsed.model : GROK_MODEL_OPTIONS[0]);
-    setMuseModel(restoredShellType === "muse" && typeof parsed.model === "string" ? parsed.model : "");
-    setAntigravityModel(restoredShellType === "antigravity" && typeof parsed.model === "string" ? parsed.model : "");
-    setPiModel(restoredShellType === "pi" && typeof parsed.model === "string" ? parsed.model : "");
-    setKimiCodeModel(restoredShellType === "kimi-code" && typeof parsed.model === "string" ? parsed.model : KIMI_CODE_MODEL_OPTIONS[0].value);
-    setOpencodeModel(restoredShellType === "opencode" && typeof parsed.model === "string" ? parsed.model : "");
+    const savedModel = (shell: ShellType) =>
+      shell === restoredShellType && shell === parsed.shellType && typeof parsed.model === "string" ? parsed.model : undefined;
+    setGrokModel(savedModel("grok") ?? GROK_MODEL_OPTIONS[0]);
+    setMuseModel(savedModel("muse") ?? "");
+    setAntigravityModel(savedModel("antigravity") ?? "");
+    setOmpModel(savedModel("omp") ?? "");
+    setPiModel(savedModel("pi") ?? "");
+    setKimiCodeModel(savedModel("kimi-code") ?? KIMI_CODE_MODEL_OPTIONS[0].value);
+    setOpencodeModel(savedModel("opencode") ?? "");
     setAutoCompactWindow(getStoredAutoCompactWindow());
     setSubmitError(null);
     setMissingWorkingDir(null);
@@ -632,6 +637,17 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, hostedProj
       }
     }
 
+    const optionalModels: Partial<Record<ShellType, string | undefined>> = {
+      grok: grokModel,
+      muse: museModel.trim() || undefined,
+      antigravity: antigravityModel.trim() || undefined,
+      pi: piModel.trim() || undefined,
+      omp: ompModel.trim() || undefined,
+      "kimi-code": kimiCodeModel,
+      opencode: opencodeModel.trim() || undefined,
+    };
+    const model = optionalModels[shellType];
+
     try {
       if (newBoard && createProjectBoard) {
         const home = boardHome || effectiveBridgeId;
@@ -641,7 +657,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, hostedProj
       await onSubmit("", {
         projectName: inheritedProject || projectName.trim(),
         name: name.trim() || undefined,
-        model: shellType === "grok" ? grokModel : shellType === "muse" ? museModel.trim() || undefined : shellType === "antigravity" ? antigravityModel.trim() || undefined : shellType === "pi" ? piModel.trim() || undefined : shellType === "kimi-code" ? kimiCodeModel : shellType === "opencode" ? opencodeModel.trim() || undefined : undefined,
+        model,
         workingDir: workingDir.trim() || undefined,
         bridgeId: effectiveBridgeId || undefined,
         shellType,
@@ -669,28 +685,11 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, hostedProj
 
     try {
       const lastDefaults: LastSessionDefaults = {
+        model,
         bridgeId: effectiveBridgeId || undefined,
         shellType,
         workingDir: workingDir.trim() || undefined,
       };
-      if (shellType === "grok") {
-        lastDefaults.model = grokModel;
-      }
-      if (shellType === "muse") {
-        lastDefaults.model = museModel.trim() || undefined;
-      }
-      if (shellType === "antigravity") {
-        lastDefaults.model = antigravityModel.trim() || undefined;
-      }
-      if (shellType === "pi") {
-        lastDefaults.model = piModel.trim() || undefined;
-      }
-      if (shellType === "kimi-code") {
-        lastDefaults.model = kimiCodeModel;
-      }
-      if (shellType === "opencode") {
-        lastDefaults.model = opencodeModel.trim() || undefined;
-      }
       localStorage.setItem(LAST_SESSION_DEFAULTS_KEY, JSON.stringify(lastDefaults));
     } catch {
       // localStorage unavailable (private browsing, quota) — ignore
@@ -703,6 +702,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, hostedProj
     setGrokModel(GROK_MODEL_OPTIONS[0]);
     setMuseModel("");
     setPiModel("");
+    setOmpModel("");
     setKimiCodeModel(KIMI_CODE_MODEL_OPTIONS[0].value);
     setOpencodeModel("");
     setBridgeId("");
@@ -712,7 +712,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, hostedProj
     setSelectedCursorSessionId(null);
     setSelectedCursorSummary(null);
     onClose();
-  }, [newBoard, boardHome, createProjectBoard, shellType, topShell, claudeFlavor, name, projectName, inheritedProject, workingDir, effectiveBridgeId, hostname, selectedClaudeSessionId, selectedCursorSessionId, fireworksModels, zaiModels, grokModel, museModel, antigravityModel, piModel, kimiCodeModel, opencodeModel, autoCompactWindow, onSubmit, onClose, accountBlocked, accountsLoading, accountHarness, selectedAccount, allowedAccounts, parent, policyChoices]);
+  }, [newBoard, boardHome, createProjectBoard, shellType, topShell, claudeFlavor, name, projectName, inheritedProject, workingDir, effectiveBridgeId, hostname, selectedClaudeSessionId, selectedCursorSessionId, fireworksModels, zaiModels, grokModel, museModel, antigravityModel, piModel, ompModel, kimiCodeModel, opencodeModel, autoCompactWindow, onSubmit, onClose, accountBlocked, accountsLoading, accountHarness, selectedAccount, allowedAccounts, parent, policyChoices]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -778,6 +778,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, hostedProj
                 <option value="muse">Muse</option>
                 <option value="antigravity">Antigravity</option>
                 <option value="pi">Pi</option>
+                <option value="omp">Oh My Pi (omp)</option>
                 <option value="kimi-code">Kimi Code</option>
                 <option value="opencode">opencode</option>
               </optgroup>
@@ -922,16 +923,16 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, hostedProj
               </div>
             )}
 
-            {shellType === "pi" && (
+            {(shellType === "pi" || shellType === "omp") && (
               <div className="mt-3">
-                <label htmlFor="ns-pi-model" className="block text-sm text-[var(--text-muted)] mb-1">
+                <label htmlFor={`ns-${shellType}-model`} className="block text-sm text-[var(--text-muted)] mb-1">
                   Model
                 </label>
                 <input
-                  id="ns-pi-model"
+                  id={`ns-${shellType}-model`}
                   type="text"
-                  value={piModel}
-                  onChange={(e) => setPiModel(e.target.value)}
+                  value={shellType === "omp" ? ompModel : piModel}
+                  onChange={(e) => (shellType === "omp" ? setOmpModel : setPiModel)(e.target.value)}
                   placeholder="Optional, e.g. anthropic/claude-sonnet-4"
                   className={INPUT_CLASS + " text-sm"}
                 />

@@ -102,6 +102,10 @@ export const NUDGE_TEXT = formatNudgeText;
 // after that window or it is treated as a pasted newline.
 const COMPOSER_PASTE_SETTLE_MS = 600;
 
+function usesExtensionMailListener(session: Session): boolean {
+  return session.shellType === 'pi' || session.shellType === 'omp';
+}
+
 // Messages are sanitized to a single line, so a delayed plain CR submits everywhere.
 // (ESC+CR reads as Alt+Enter — insert newline — on current Claude Code.)
 function submitSuffixFor(_shellType: ShellType | undefined): string {
@@ -284,7 +288,7 @@ export class MailDeliveryService {
     const current = () => !this.stopped && dependencyEpoch === this.dependencyEpoch;
     if (!current() || !store || !mailStore || !runner || !runner.isRunning(sessionId)) return;
     const session = await store.loadSession(sessionId);
-    if (!current() || !session || session.status !== 'running' || session.shellType === 'pi'
+    if (!current() || !session || session.status !== 'running' || usesExtensionMailListener(session)
       || !runner.isRunning(sessionId)) return;
     const pending = await mailStore.listUnnudgedWaking(sessionId);
     if (!current() || !pending.length || !runner.isRunning(sessionId)) return;
@@ -579,7 +583,7 @@ export class MailDeliveryService {
       }
       pending = (await mailStore.listUnnudgedWaking(session.id)).length > 0;
     });
-    if (pending && (!hadWaiter || session.shellType === 'codex') && session.shellType !== 'pi') {
+    if (pending && (!hadWaiter || session.shellType === 'codex') && !usesExtensionMailListener(session)) {
       const legacyDelay = HOOKED_SHELL_TYPES.has(session.shellType ?? 'claude')
         ? MAIL_NUDGE_DELAY_HOOKED_MS : MAIL_NUDGE_DELAY_MS;
       if (!this.pendingNudgeFrom.has(session.id)) this.legacyReadyAt.set(session.id, this.monotonicNow() + legacyDelay);
@@ -771,7 +775,7 @@ export class MailDeliveryService {
   /** A session earns the listen window when it has a native persistent listener
    *  (Pi), a parent, children, or prior mail history. */
   async participatesInMail(session: Session): Promise<boolean> {
-    if (session.shellType === 'pi') return true;
+    if (usesExtensionMailListener(session)) return true;
     if (session.parentSessionId) return true;
     if (!this.store || !this.mailStore) return false;
     const sessions = await this.store.listSessions();
@@ -816,7 +820,7 @@ export class MailDeliveryService {
    *  AGENT_BUSY_STALE_MS. */
   private busyStaleMs(session: Session | undefined, busyEvent?: 'PreToolUse' | 'PostToolUse' | 'UserPromptSubmit'): number {
     if (!session || !session.shellType || !HOOKED_SHELL_TYPES.has(session.shellType)) return AGENT_BUSY_STALE_MS;
-    if (session.shellType === 'codex' || session.shellType === 'muse' || session.shellType === 'pi') return AGENT_BUSY_STALE_MS;
+    if (session.shellType === 'codex' || session.shellType === 'muse' || usesExtensionMailListener(session)) return AGENT_BUSY_STALE_MS;
     if (this.pluginIdentity(session, 'claude-mod') !== undefined || this.pluginIdentity(session, 'opencode') !== undefined) return AGENT_BUSY_STALE_MS;
     return busyEvent === 'PostToolUse' || busyEvent === 'UserPromptSubmit' ? HOOKED_BUSY_STALE_MS : AGENT_BUSY_STALE_MS;
   }
@@ -980,7 +984,7 @@ export class MailDeliveryService {
       await this.wakeCodex(session, store, mailStore, runner, dependencyEpoch, fromLabel);
       return;
     }
-    if (!session || session.status !== 'running' || session.shellType === 'pi' || !runner || !runner.isRunning(sessionId)) {
+    if (!session || session.status !== 'running' || usesExtensionMailListener(session) || !runner || !runner.isRunning(sessionId)) {
       this.nativeLeases.delete(sessionId);
       return;
     }

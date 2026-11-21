@@ -419,6 +419,7 @@ export function canResumeStoredSession(
     Session,
     | 'shellType'
     | 'claudeSessionId'
+    | 'piSessionId'
     | 'cursorSessionId'
     | 'codexSessionId'
     | 'opencodeSessionId'
@@ -433,6 +434,7 @@ export function canResumeStoredSession(
   } catch {
     // Keep un-normalized if invalid
   }
+  if (shellType === 'omp') return Boolean(session.piSessionId?.trim());
   if (shellType === 'cursor') return Boolean(session.cursorSessionId?.trim());
   if (shellType === 'codex') return Boolean(session.codexSessionId?.trim());
   // opencode resumes by captured session id (`--session`), recorded from the

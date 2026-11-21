@@ -560,6 +560,8 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
               claudeSessionId: payload.claudeSessionId,
               cursorSessionId: payload.cursorSessionId,
               codexSessionId: payload.codexSessionId,
+              piSessionId: payload.piSessionId,
+              piSessionFile: payload.piSessionFile,
               opencodeSessionId: payload.opencodeSessionId,
               museSessionId: payload.museSessionId,
               grokSessionId: payload.grokSessionId,

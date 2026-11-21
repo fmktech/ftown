@@ -15,7 +15,7 @@ async function defaultReadBridgePointer() {
 }
 
 
-async function secureProxy(env, pointer, path, init = {}) {
+async function secureProxy(node, env, pointer, path, init = {}) {
   const cli = pointer?.harnessCli || join(homedir(), '.ftown', 'cli', 'dist', 'ftown-cli.js');
   const args = [cli, 'security'];
   const directory = env.FTOWN_DATA_DIR || pointer?.dataDir;
@@ -24,7 +24,7 @@ async function secureProxy(env, pointer, path, init = {}) {
   const request = { method: init.method || 'GET', path, timeoutMs: 60000 };
   if (init.body !== undefined) request.body = typeof init.body === 'string' ? JSON.parse(init.body) : init.body;
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, args, { stdio: ['pipe', 'pipe', 'ignore'], signal: init.signal, env });
+    const child = spawn(node, args, { stdio: ['pipe', 'pipe', 'ignore'], signal: init.signal, env });
     const chunks = []; let bytes = 0;
     const timeout = setTimeout(() => child.kill(), 65000); timeout.unref?.();
     child.on('error', () => { clearTimeout(timeout); reject(new Error('Encrypted bridge request failed')); });
@@ -78,7 +78,7 @@ function formatMail(message) {
   return `[${message.type ?? 'message'} from ${sender}] ${message.body ?? ''}`;
 }
 
-function collectBranchUsage(ctx) {
+function collectBranchUsage(ctx, harness) {
   let entries;
   try {
     entries = ctx.sessionManager.getBranch();
@@ -120,7 +120,7 @@ function collectBranchUsage(ctx) {
     totalTokens: inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
     models: perModel.map((item) => item.model),
     perModel,
-    harness: 'pi',
+    harness,
   };
 }
 
@@ -143,6 +143,9 @@ function delayWithAbort(ms, signal) {
 
 /** Register ftown lifecycle forwarding and mail delivery on Pi's extension API. */
 export function registerFtownPiExtension(pi, options = {}) {
+  const harness = options.harness ?? 'pi';
+  // OMP is a standalone Bun executable. Its process.execPath launches OMP itself.
+  const node = harness === 'omp' ? 'node' : process.execPath;
   const env = options.env ?? process.env;
   const fetchImpl = options.fetch ?? globalThis.fetch;
   const readBridgePointer = options.readBridgePointer ?? defaultReadBridgePointer;
@@ -181,7 +184,7 @@ export function registerFtownPiExtension(pi, options = {}) {
   async function request(path, init = {}) {
     const pointer = await readBridgePointer();
     if (path.startsWith('/api/')) {
-      try { return await (options.proxy ?? ((p, i) => secureProxy(env, pointer, p, i)))(path, init); }
+      try { return await (options.proxy ?? ((p, i) => secureProxy(node, env, pointer, p, i)))(path, init); }
       catch { return null; } // Delivery may be unknown: never retry a mutation through another endpoint.
     }
     let lastResponse = null;
@@ -250,7 +253,7 @@ export function registerFtownPiExtension(pi, options = {}) {
     if (!normalized) throw new Error('A target session id or name is required');
     if (normalized === 'parent') {
       const parent = env.FTOWN_PARENT_SESSION_ID?.trim();
-      if (!parent) throw new Error('This Pi session has no ftown parent');
+      if (!parent) throw new Error('This session has no ftown parent');
       return sessions.find((session) => session.id === parent) ?? { id: parent, name: parent };
     }
     const byId = sessions.find((session) => session.id === normalized);
@@ -357,7 +360,7 @@ export function registerFtownPiExtension(pi, options = {}) {
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       try {
         requireString(params, 'question');
-        if (!ctx?.ui) throw new Error('Pi interactive UI is unavailable');
+        if (!ctx?.ui) throw new Error('Interactive UI is unavailable');
         const answer = Array.isArray(params.options) && params.options.length > 0
           ? await ctx.ui.select(params.question, params.options)
           : await ctx.ui.input(params.question);
@@ -538,20 +541,21 @@ export function registerFtownPiExtension(pi, options = {}) {
   pi.registerTool({
     name: 'ftown_session_create',
     label: 'create ftown session',
-    description: 'Create a structured ftown agent session. Omit shell to inherit the current Pi harness; set it only for an explicit override. Does not allow arbitrary commands or environment variables.',
+    description: 'Create a structured ftown agent session. Omit shell to inherit the current harness; set it only for an explicit override. Does not allow arbitrary commands or environment variables.',
     parameters: {
       type: 'object',
       properties: {
         shell: {
           type: 'string',
-          enum: ['claude', 'cursor', 'codex', 'grok', 'pi', 'kimi-code', 'opencode', 'shell', 'zai', 'kimi', 'deepseek', 'fireworks'],
-          description: 'Optional harness override. Omit to inherit the current Pi harness.',
+          enum: ['claude', 'cursor', 'codex', 'grok', 'muse', 'antigravity', 'pi', 'omp', 'kimi-code', 'opencode', 'shell', 'zai', 'kimi', 'deepseek', 'fireworks'],
+          description: 'Optional harness override. Omit to inherit the current harness.',
         },
         prompt: { type: 'string', minLength: 1 },
         workdir: { type: 'string' },
         name: { type: 'string' },
         model: { type: 'string' },
-        parent: { type: 'boolean', description: 'Make the current Pi session the parent.' },
+        effort: { type: 'string', description: 'Optional reasoning effort for a harness that supports it.' },
+        parent: { type: 'boolean', description: 'Make the current session the parent.' },
         parentId: { type: 'string', description: 'Explicit ftown parent session id.' },
         createWorkdir: { type: 'boolean' },
         orchestrator: { type: 'boolean', description: 'Deprecated compatibility input; ignored.' },
@@ -568,6 +572,7 @@ export function registerFtownPiExtension(pi, options = {}) {
             ...(params.workdir ? { workingDir: params.workdir } : {}),
             ...(params.name ? { name: params.name } : {}),
             ...(params.model ? { model: params.model } : {}),
+            ...(params.effort ? { effort: params.effort } : {}),
             ...(params.parentId
               ? { parentSessionId: params.parentId }
               : params.parent ? { parentSessionId: true } : {}),
@@ -609,7 +614,7 @@ export function registerFtownPiExtension(pi, options = {}) {
     const sessions = await listSessions();
     const session = resolveSession(sessions, params.target);
     if (params.operation === 'stop') {
-      if (typeof pi.exec !== 'function') throw new Error('Pi command execution is unavailable');
+      if (typeof pi.exec !== 'function') throw new Error('Command execution is unavailable');
       const result = await pi.exec(
         join(homedir(), '.ftown', 'ftown-sessions'),
         ['stop', session.id],
@@ -665,15 +670,23 @@ export function registerFtownPiExtension(pi, options = {}) {
     },
   });
 
+  let sessionContext;
+
   async function deliverMail(wait = 0, signal) {
     const messages = await drainMail(wait, signal);
     if (signal?.aborted || messages.length === 0) return 0;
     const formatted = messages.map(formatMail).join('\n');
-    pi.sendUserMessage(
+    const text = (
       `[ftown mail]\n${formatted}\n` +
-      'Handle this message and reply with the `ftown_mail` tool where appropriate.',
-      { deliverAs: 'followUp' },
+      'Handle this message and reply with the `ftown_mail` tool where appropriate.'
     );
+    if (harness === 'omp' && sessionContext?.isIdle()) {
+      // OMP queues explicit follow-ups even when idle. A normal message starts
+      // a turn, whose promise lasts until completion. Keep polling during it.
+      void pi.sendUserMessage(text).catch(() => console.error('[ftown] OMP could not start a mail turn'));
+    } else {
+      await pi.sendUserMessage(text, { deliverAs: 'followUp' });
+    }
     return messages.length;
   }
 
@@ -714,6 +727,7 @@ export function registerFtownPiExtension(pi, options = {}) {
   }
 
   pi.on('session_start', async (event, ctx) => {
+    sessionContext = ctx;
     await postHook('SessionStart', ctx, { reason: event.reason });
     startMailWake();
   });
@@ -722,24 +736,29 @@ export function registerFtownPiExtension(pi, options = {}) {
     await postHook('UserPromptSubmit', ctx, { prompt: event.prompt });
   });
 
+  function toolIdentity(event) {
+    // OMP's interactive form tool is called "ask". Use the bridge's ask-user
+    // spelling only for this native tool so other harnesses retain their names.
+    const toolName = harness === 'omp' && event.toolName === 'ask' ? 'ask_user' : event.toolName;
+    return { tool_call_id: event.toolCallId, tool_use_id: event.toolCallId, tool_name: toolName };
+  }
+
   pi.on('tool_execution_start', async (event, ctx) => {
     await postHook('PreToolUse', ctx, {
-      tool_call_id: event.toolCallId,
-      tool_name: event.toolName,
+      ...toolIdentity(event),
       tool_input: event.args,
     });
   });
 
   pi.on('tool_execution_end', async (event, ctx) => {
     await postHook('PostToolUse', ctx, {
-      tool_call_id: event.toolCallId,
-      tool_name: event.toolName,
+      ...toolIdentity(event),
       is_error: event.isError,
     });
   });
 
-  pi.on('agent_settled', async (_event, ctx) => {
-    const usage = collectBranchUsage(ctx);
+  pi.on(harness === 'omp' ? 'agent_end' : 'agent_settled', async (_event, ctx) => {
+    const usage = collectBranchUsage(ctx, harness);
     await postHook('Stop', ctx, usage ? { usage } : {});
     if (!mailWakeTask) await deliverMail();
   });

@@ -5,7 +5,7 @@ export const PREVIEW_CHAT_PAGE_TURNS = 25;
 export const PREVIEW_CHAT_MAX_TURNS = 1000;
 export const PREVIEW_CHAT_STORE_BYTES = 4 * 1024 * 1024;
 export const PREVIEW_CHAT_POLL_MS = 1500;
-export const PREVIEW_CHAT_AGENT_SHELLS = ['claude', 'cursor', 'codex', 'zai', 'kimi', 'opencode', 'deepseek', 'fireworks', 'grok', 'pi', 'kimi-code', 'muse'] as const;
+export const PREVIEW_CHAT_AGENT_SHELLS = ['claude', 'cursor', 'codex', 'zai', 'kimi', 'opencode', 'deepseek', 'fireworks', 'grok', 'pi', 'omp', 'kimi-code', 'muse'] as const;
 
 interface PreviewChatTurnBase {
   id: string;

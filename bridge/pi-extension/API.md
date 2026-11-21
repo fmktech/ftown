@@ -1,6 +1,6 @@
-# Pi extension API
+# Pi and OMP extension API
 
-The bundled Pi extension exposes ftown's authenticated local bridge API as a small set of model-callable tools. It uses camel-case JSON, opaque string identifiers, plural resource names, and wrapped success objects. Failures are returned to Pi as a tool error with a sanitized `{ "error": string }` detail object.
+Pi and Oh My Pi (OMP) load the bundled extension, which exposes ftown's authenticated local bridge API as a small set of model-callable tools. It uses camel-case JSON, opaque string identifiers, plural resource names, and wrapped success objects. Failures are returned as a tool error with a sanitized `{ "error": string }` detail object.
 
 ## Resource model
 
@@ -24,7 +24,7 @@ All tools talk only to the local bridge selected by `FTOWN_HOOK_PORT` or `~/.fto
 | `ftown_sessions` | `usage` | `target` | Session token/model usage | No |
 | `ftown_sessions` | `screen` | `target` | Paginated terminal screen | No |
 | `ftown_sessions` | `grep` | `target`, `pattern` | Paginated terminal-log matches | No |
-| `ftown_session_create` | create | `shell`, `prompt` | Created session | Yes |
+| `ftown_session_create` | create | `prompt` | Created session | Yes |
 | `ftown_session_manage` | `stop` | `target` | Stop acknowledgement | Yes |
 | `ftown_session_manage` | `rename` | `target`, `name` | Updated session | Yes |
 | `ftown_session_manage` | `reparent` | `target`, `parent` | Updated session | Yes |
@@ -39,9 +39,9 @@ The extension also registers `/ftown-mail read [--peek]`, `/ftown-mail send <ses
 
 After `session_start`, the extension maintains one authenticated, cancellable
 30-second long-poll against the current session's inbox. Incoming messages are
-injected through Pi's native `sendUserMessage(..., { deliverAs: "followUp" })`
-API. This starts a turn immediately while Pi is idle and safely queues a
-follow-up while Pi is streaming. The listener retries bridge errors with capped
+injected through the harness’s native `sendUserMessage` API. Pi accepts
+`deliverAs: "followUp"` both when idle and when streaming. OMP starts an idle
+turn with a normal message and uses `followUp` during an active turn. The listener retries bridge errors with capped
 exponential backoff and is aborted during `session_shutdown`; it never types
 into the terminal.
 
@@ -49,13 +49,13 @@ into the terminal.
 
 The local bridge bearer token authorizes access to the current ftown user's bridge resources. Session name resolution is performed against that same authenticated bridge. The model can inspect a terminal screen or search its captured log, but it cannot inject raw terminal keystrokes, resize terminals, clear terminal history, or call hook/conversation-resolution internals through these tools.
 
-Mutation executions are deduplicated in the running extension by `(tool name, Pi tool-call ID)`, including concurrent retries. Failed attempts are not cached. This prevents a retried model tool call from duplicating mail, sessions, or management actions; it is not a durable idempotency key across Pi process restarts.
+Mutation executions are deduplicated in the running extension by `(tool name, native tool-call ID)`, including concurrent retries. Failed attempts are not cached. This prevents a retried model tool call from duplicating mail, sessions, or management actions; it is not a durable idempotency key across process restarts.
 
 ## Pagination and errors
 
 Inbox reads accept `limit` from 1 to 100. Screen and log operations accept zero-based `offset`; screen `limit` is 1 to 1,000, log `limit` is 1 to 1,000, and grep context is 0 to 10 lines. Session collection endpoints currently return the bridge's complete local collection and inherit its unpaginated behavior.
 
-Transport failures, missing/ambiguous names, unavailable parent context, validation failures, and bridge `{ "error": string }` responses become Pi tool errors. No response body, token, stack trace, or upstream URL is exposed to the model.
+Transport failures, missing/ambiguous names, unavailable parent context, validation failures, and bridge `{ "error": string }` responses become tool errors. No response body, token, stack trace, or upstream URL is exposed to the model.
 
 ## Compatibility
 

@@ -685,7 +685,7 @@ async function runQuotaLazy(argv: string[], getDeps: () => Promise<QuotaDeps>): 
 /** The real fetchers, models, routing, formatter and clock: what the bridge passes to collectQuotaReport. */
 export async function loadRealQuotaDeps(): Promise<QuotaDeps> {
   const [
-    claude, codex, grok, muse, agy, opencode,
+    claude, codex, grok, muse, agy, opencode, omp,
     claudeModels, codexModels, grokModels, museModels, agyModels, opencodeModels,
     routing, format, routingConfigModule, annotateModule,
   ] = await Promise.all([
@@ -695,6 +695,7 @@ export async function loadRealQuotaDeps(): Promise<QuotaDeps> {
     import('./quota/muse.js'),
     import('./quota/agy.js'),
     import('./quota/opencode.js'),
+    import('./quota/omp.js'),
     import('./quota/models-claude.js'),
     import('./quota/models-codex.js'),
     import('./quota/models-grok.js'),
@@ -714,6 +715,7 @@ export async function loadRealQuotaDeps(): Promise<QuotaDeps> {
       muse: muse.fetchMuseQuota,
       agy: agy.fetchAgyQuota,
       opencode: opencode.fetchOpencodeQuota,
+      omp: omp.fetchOmpQuota,
     },
     modelFetchers: {
       claude: claudeModels.fetchClaudeModels,
@@ -722,6 +724,7 @@ export async function loadRealQuotaDeps(): Promise<QuotaDeps> {
       muse: museModels.fetchMuseModels,
       agy: agyModels.fetchAgyModels,
       opencode: opencodeModels.fetchOpencodeModels,
+      omp: omp.fetchOmpModels,
     },
     advise: routing.adviseQuotaRouting,
     format: format.formatQuotaTable,

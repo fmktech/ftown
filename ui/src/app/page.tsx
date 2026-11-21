@@ -97,6 +97,7 @@ const SUPPORTED_AGENTS = [
   { name: "Cursor Agent", detail: "agent CLI" },
   { name: "Codex", detail: "OpenAI Codex CLI" },
   { name: "Grok", detail: "xAI coding agent CLI" },
+  { name: "Oh My Pi", detail: "interactive CLI" },
   { name: "Pi", detail: "Hooks, ftown tools, and native resume" },
   { name: "Kimi Code", detail: "Moonshot coding agent CLI" },
   { name: "opencode", detail: "interactive CLI" },
@@ -117,7 +118,7 @@ const STEPS = [
   {
     n: "3",
     title: "Orchestrate the swarm",
-    desc: "Spawn Claude Code, Cursor, Codex, Grok, Pi, Kimi Code, opencode, or a shell. Run them in parallel, organize agent trees, and drive them all from anywhere.",
+    desc: "Spawn Claude Code, Cursor, Codex, Grok, Pi, Oh My Pi, Kimi Code, opencode, or a shell. Run them in parallel, organize agent trees, and drive them all from anywhere.",
   },
 ] as const;
 
@@ -150,7 +151,7 @@ const FEATURES = [
   {
     icon: <AgentIcon />,
     title: "Multi-agent orchestration",
-    desc: "Run seven coding-agent CLIs plus raw shells as full interactive TUIs. Build parent/child teams, move sessions between groups, and coordinate them through durable mail.",
+    desc: "Run coding-agent CLIs and raw shells as full interactive TUIs. Build parent/child teams, move sessions between groups, and coordinate them through durable mail.",
   },
   {
     icon: <TerminalIcon />,
@@ -165,7 +166,7 @@ const FEATURES = [
   {
     icon: <RefreshIcon />,
     title: "Resume where you left off",
-    desc: "Pick up native Claude, Cursor, Codex, and Pi sessions; Kimi Code continues by workspace when a bridge restarts.",
+    desc: "Resume native Claude, Cursor, Codex, Pi, and Oh My Pi sessions after a bridge restart. Kimi Code continues by workspace.",
   },
   {
     icon: <ZapIcon />,

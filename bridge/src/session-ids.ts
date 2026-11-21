@@ -79,7 +79,7 @@ export class AgentSessionIdPersister {
     const session = await this.deps.store.loadSession(hookEvent.sessionId);
     if (!session) return;
     const isCodex = session.shellType === 'codex';
-    const isPi = session.shellType === 'pi';
+    const isPi = session.shellType === 'pi' || session.shellType === 'omp';
     const isOpencode = session.shellType === 'opencode';
     const isMuse = session.shellType === 'muse';
     const isGrok = session.shellType === 'grok';

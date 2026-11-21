@@ -21,6 +21,8 @@ describe("buildUsagePollBatches", () => {
   it("groups only running sessions with collectable usage into one request per bridge", () => {
     const batches = buildUsagePollBatches([
       session({ id: "claude-b", claudeSessionId: "native-b", workingDir: "/repo", bridgeId: "bridge-a" }),
+      session({ id: "omp", shellType: "omp", piSessionFile: "/native/session.jsonl" }),
+      session({ id: "omp-waiting", shellType: "omp", workingDir: "/repo" }),
       session({ id: "shell", shellType: "shell" }),
       session({ id: "completed", status: "completed", claudeSessionId: "native-done", workingDir: "/repo" }),
       session({ id: "claude-pending-id", shellType: "claude", workingDir: "/repo" }),
@@ -34,7 +36,7 @@ describe("buildUsagePollBatches", () => {
     ]);
 
     expect(batches).toEqual([
-      { bridgeId: "bridge-a", sessionIds: ["claude-a", "claude-b", "kimi", "muse", "muse-id"] },
+      { bridgeId: "bridge-a", sessionIds: ["claude-a", "claude-b", "kimi", "muse", "muse-id", "omp"] },
       { bridgeId: "bridge-b", sessionIds: ["codex"] },
     ]);
   });

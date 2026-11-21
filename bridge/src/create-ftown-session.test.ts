@@ -812,6 +812,8 @@ describe('deriveRelaunchCommand — single home of the relaunch heuristic', () =
 
 describe('canResumeStoredSession — which stored sessions can resume', () => {
   it('routes each harness to its own recorded agent-session id', () => {
+    assert.strictEqual(canResumeStoredSession({ shellType: 'omp', piSessionId: 'native-id' }), true);
+    assert.strictEqual(canResumeStoredSession({ shellType: 'omp' }), false);
     assert.strictEqual(canResumeStoredSession({ shellType: 'claude', claudeSessionId: 'c' }), true);
     assert.strictEqual(canResumeStoredSession({ shellType: undefined, claudeSessionId: 'c' }), true);
     assert.strictEqual(canResumeStoredSession({ shellType: 'cursor', cursorSessionId: 'u' }), true);

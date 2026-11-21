@@ -36,7 +36,7 @@ export function parseSessionBlock(value: unknown): SessionBlock | undefined {
   return block;
 }
 
-export type ShellType = 'claude' | 'cursor' | 'codex' | 'shell' | 'zai' | 'kimi' | 'opencode' | 'deepseek' | 'fireworks' | 'grok' | 'pi' | 'kimi-code' | 'muse' | 'antigravity';
+export type ShellType = 'claude' | 'cursor' | 'codex' | 'shell' | 'zai' | 'kimi' | 'opencode' | 'deepseek' | 'fireworks' | 'grok' | 'pi' | 'omp' | 'kimi-code' | 'muse' | 'antigravity';
 
 export type AccountHarness = 'claude' | 'codex';
 export interface HarnessAccount { id: string; harness: AccountHarness; label?: string; configDir: string }

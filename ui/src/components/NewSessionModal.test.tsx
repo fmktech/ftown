@@ -38,6 +38,18 @@ function renderModal() {
   return onSubmit;
 }
 
+it("creates an Oh My Pi session and restores its model the next time the form opens", async () => {
+  const onSubmit = renderModal();
+  fireEvent.change(screen.getByLabelText("Shell Type"), { target: { value: "omp" } });
+  fireEvent.change(screen.getByLabelText("Model"), { target: { value: " openai/gpt-5.2 " } });
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Create Session" })); });
+  expect(onSubmit).toHaveBeenCalledWith("", expect.objectContaining({ shellType: "omp", model: "openai/gpt-5.2" }));
+  cleanup();
+  renderModal();
+  expect((screen.getByLabelText("Shell Type") as HTMLSelectElement).value).toBe("omp");
+  expect((screen.getByLabelText("Model") as HTMLInputElement).value).toBe("openai/gpt-5.2");
+});
+
 it("submits with Ctrl+Enter and shows the Ctrl hint on Linux", () => {
   setPlatform("Linux x86_64");
   const onSubmit = renderModal();

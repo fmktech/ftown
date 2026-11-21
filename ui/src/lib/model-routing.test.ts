@@ -90,6 +90,7 @@ const fixtureReport = (): QuotaReport => ({
       harnessModel('gemini-3-flash-low', { efforts: ['low'], defaultEffort: null }),
     ]),
     modelsEntry('opencode', 'ok', []),
+    { ...modelsEntry('omp', 'ok', [harnessModel('openai/gpt-5.2', { efforts: ['low', 'high'] })]), effortFlag: '--thinking <level>' },
   ],
   routingConfig: { status: 'missing', path: '/home/u/.ftown/model-routing.json', errors: [] },
   tiers: [],
@@ -350,6 +351,7 @@ describe('option helpers', () => {
       { provider: 'muse', available: false, reason: 'not checked' },
       { provider: 'agy', available: true, reason: null },
       { provider: 'opencode', available: false, reason: 'no models reported' },
+      { provider: 'omp', available: true, reason: null },
     ]);
   });
 

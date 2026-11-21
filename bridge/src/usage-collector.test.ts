@@ -252,34 +252,36 @@ describe('collectSessionUsage — Pi extractor', () => {
     assert.equal(usage.inputTokens, 42);
   });
 
-  it('uses the native session file from the Pi extension when available', async () => {
-    const piSessionsDir = join(root, 'pi-native');
-    const nativeFile = join(piSessionsDir, 'pi-native-session.jsonl');
-    await mkdir(piSessionsDir, { recursive: true });
-    await writeFile(nativeFile, [
-      JSON.stringify({ type: 'session', version: 3, id: 'pi-native', cwd: '/actual/workdir' }),
-      JSON.stringify({
-        type: 'message', id: 'a1', message: {
-          role: 'assistant', provider: 'openai', model: 'gpt-5',
-          usage: { input: 77, output: 9, cacheRead: 3, cacheWrite: 0 },
+  for (const shellType of ['pi', 'omp'] as const) {
+    it(`reads the exact ${shellType} transcript from its session store`, async () => {
+      const sessionsDir = join(root, `.${shellType}`, 'agent', 'sessions');
+      const nativeFile = join(sessionsDir, 'pi-native-session.jsonl');
+      await mkdir(sessionsDir, { recursive: true });
+      await writeFile(nativeFile, [
+        JSON.stringify({ type: 'session', version: 3, id: 'pi-native', cwd: '/actual/workdir' }),
+        JSON.stringify({
+          type: 'message', id: 'a1', message: {
+            role: 'assistant', provider: 'openai', model: 'gpt-5',
+            usage: { input: 77, output: 9, cacheRead: 3, cacheWrite: 0 },
+          },
+        }),
+      ].join('\n') + '\n');
+
+      const usage = await collectSessionUsage(
+        {
+          shellType,
+          piSessionId: 'pi-native',
+          piSessionFile: nativeFile,
         },
-      }),
-    ].join('\n') + '\n');
+        { env: { HOME: root, PI_CODING_AGENT_DIR: undefined } },
+      );
 
-    const usage = await collectSessionUsage(
-      {
-        shellType: 'pi',
-        workingDir: '/ambiguous/shared/workdir',
-        piSessionId: 'pi-native',
-        piSessionFile: nativeFile,
-      },
-      { piSessionsDir },
-    );
-
-    assert.ok(usage);
-    assert.equal(usage.inputTokens, 77);
-    assert.equal(usage.outputTokens, 9);
-  });
+      assert.ok(usage);
+      assert.equal(usage.harness, shellType);
+      assert.equal(usage.inputTokens, 77);
+      assert.equal(usage.outputTokens, 9);
+    });
+  }
 
   it('rejects a native session file outside the Pi sessions directory', async () => {
     const piSessionsDir = join(root, 'pi-contained');

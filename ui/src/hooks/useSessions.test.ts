@@ -59,7 +59,7 @@ function setup(immediate = false, commandTimeoutMs?: number, usageView: string |
   return { ...h, ...hook, refresh, ids, setUsageView };
 }
 describe("structured session creation through the actual hook", () => {
-  const shellTypes: ShellType[] = ["claude", "cursor", "codex", "shell", "zai", "kimi", "opencode", "deepseek", "fireworks", "grok", "pi", "kimi-code", "muse", "antigravity"];
+  const shellTypes: ShellType[] = ["claude", "cursor", "codex", "shell", "zai", "kimi", "opencode", "deepseek", "fireworks", "grok", "pi", "omp", "kimi-code", "muse", "antigravity"];
 
   it("sends account selection and child restrictions through the dashboard RPC", async () => {
     const h = setup();

@@ -68,8 +68,15 @@ describe('harness registry', () => {
   it('contains the supported ShellType set', () => {
     assert.deepEqual(
       [...SHELL_TYPES].sort(),
-      ['antigravity', 'claude', 'codex', 'cursor', 'deepseek', 'fireworks', 'grok', 'kimi', 'kimi-code', 'muse', 'opencode', 'pi', 'shell', 'zai'],
+      ['antigravity', 'claude', 'codex', 'cursor', 'deepseek', 'fireworks', 'grok', 'kimi', 'kimi-code', 'muse', 'omp', 'opencode', 'pi', 'shell', 'zai'],
     );
+  });
+
+  it('launches an OMP task with its model and thinking level, and restores the captured conversation without replaying the task', () => {
+    const command = 'omp --config "$HOME/.ftown/pi/omp.yml" --extension "$HOME/.ftown/pi/omp.js"';
+    const task = { shellType: 'omp' as const, model: 'openai/model', effort: 'high', initialPrompt: 'review source' };
+    assert.equal(buildSessionCommand(task), command + " --model 'openai/model' --thinking 'high' -- 'review source'");
+    assert.equal(buildSessionCommand({ ...task, piSessionId: 'native-id' }), command + " --resume 'native-id'");
   });
 
   it('registers antigravity directly after muse', () => {
@@ -120,7 +127,7 @@ describe('harness registry', () => {
   it('derives the hooked harness set (Pi uses the bundled ftown extension, opencode/muse the bundled ftown plugins, antigravity the ftown Stop hook)', () => {
     assert.deepEqual(
       [...HOOKED_SHELL_TYPES].sort(),
-      ['antigravity', 'claude', 'codex', 'deepseek', 'fireworks', 'kimi', 'muse', 'opencode', 'pi', 'zai'],
+      ['antigravity', 'claude', 'codex', 'deepseek', 'fireworks', 'kimi', 'muse', 'omp', 'opencode', 'pi', 'zai'],
     );
     // Grok hooks only report the session id; mail stays a typed nudge.
     assert.equal(HOOKED_SHELL_TYPES.has('grok'), false);

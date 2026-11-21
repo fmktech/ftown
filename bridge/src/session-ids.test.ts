@@ -4,8 +4,8 @@ import assert from 'node:assert/strict';
 import { AgentSessionIdPersister } from './session-ids.js';
 import type { Session } from './types.js';
 
-describe('AgentSessionIdPersister — Pi', () => {
-  it('persists Pi native session identity without claiming a Claude session id', async () => {
+for (const shellType of ['pi', 'omp'] as const) {
+  it(`persists the ${shellType} native identity without claiming a Claude session id`, async () => {
     const session: Session = {
       id: 'ftown-session',
       name: 'Pi',
@@ -14,7 +14,7 @@ describe('AgentSessionIdPersister — Pi', () => {
       bridgeId: 'bridge',
       createdAt: '2026-08-08T00:00:00.000Z',
       updatedAt: '2026-08-08T00:00:00.000Z',
-      shellType: 'pi',
+      shellType,
     };
     const saved: Session[] = [];
     const persister = new AgentSessionIdPersister({
@@ -40,7 +40,7 @@ describe('AgentSessionIdPersister — Pi', () => {
     assert.equal(saved[0].piSessionFile, '/tmp/pi-session.jsonl');
     assert.equal(saved[0].claudeSessionId, undefined);
   });
-});
+}
 
 describe('AgentSessionIdPersister — opencode', () => {
   it('persists the plugin-reported opencode session id without claiming a Claude session id', async () => {

@@ -5,7 +5,7 @@ import { createPortal } from "react-dom";
 import type { BlockReason, SessionBlock, ShellType } from "@/types";
 
 const SHELLS: ShellType[] = [
-  "claude", "cursor", "codex", "grok", "muse", "antigravity", "opencode", "pi", "kimi-code", "shell",
+  "claude", "cursor", "codex", "grok", "muse", "antigravity", "opencode", "pi", "omp", "kimi-code", "shell",
   "zai", "kimi", "deepseek", "fireworks",
 ];
 

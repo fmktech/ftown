@@ -9,7 +9,7 @@ description: >-
   HTML/Markdown previews, HTML preview replies, PR links, status cards and
   ftown board/events, the manager's plan list (ftown plan), and manager brief.
   Use quota/model routing for choosing CLI/model/effort across claude, codex,
-  grok, muse, agy and opencode (`ftown quota --json`). Use for ftown sessions,
+  grok, muse, agy, omp and opencode (`ftown quota --json`). Use for ftown sessions,
   child/sibling agents, bridge mail/inbox, HTML preview, previews, worktrees,
   plan list, or orchestration.
 ---
