@@ -24,6 +24,7 @@ const change = z.discriminatedUnion('action', [
 ]);
 
 export type HomeProject = ProjectDirectoryEntry;
+type ProjectWorker = Pick<Session, 'id' | 'bridgeId' | 'parentSessionId' | 'parentBridgeId' | 'projectName'>;
 interface Ticket { id: string; title: string; stage: z.infer<typeof stage>; sessionIds: string[]; blocked: boolean }
 export interface ProjectBoard { project: HomeProject; tickets: Ticket[] }
 
@@ -97,6 +98,7 @@ export class ProjectBoardStore {
       try {
         db.exec(`
           CREATE TABLE project (name TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0);
+          CREATE TABLE unlinked_sessions (session_id TEXT PRIMARY KEY);
           CREATE TABLE tickets (id TEXT PRIMARY KEY, title TEXT NOT NULL, stage TEXT NOT NULL);
           CREATE TABLE ticket_sessions (
             session_id TEXT PRIMARY KEY, ticket_id TEXT NOT NULL REFERENCES tickets(id), blocked INTEGER NOT NULL DEFAULT 0
@@ -128,6 +130,42 @@ export class ProjectBoardStore {
     return this.withDb(projectId, true, db => this.snapshot(db, projectId));
   }
 
+  /** A newly observed child inherits its parent's ticket once. Existing and explicitly removed links win. */
+  inheritWorkers(projectId: string, sessions: ProjectWorker[]): ProjectBoard {
+    return this.withDb(projectId, false, db => {
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const board = this.snapshot(db, projectId);
+        const workers = new Map(sessions.map(session => [session.id, session]));
+        const children = new Map<string, string[]>();
+        for (const worker of sessions) {
+          if (worker.projectName !== board.project.name || !worker.parentSessionId) continue;
+          const parent = workers.get(worker.parentSessionId);
+          if (!parent || (worker.parentBridgeId && worker.parentBridgeId !== parent.bridgeId)) continue;
+          const siblings = children.get(parent.id) ?? [];
+          siblings.push(worker.id);
+          children.set(parent.id, siblings);
+        }
+        const claimed = new Set(db.prepare('SELECT session_id FROM unlinked_sessions').all().map(row => String(row.session_id)));
+        for (const ticket of board.tickets) for (const worker of ticket.sessionIds) claimed.add(worker);
+        const insert = db.prepare('INSERT INTO ticket_sessions (session_id, ticket_id) VALUES (?, ?)');
+        for (const ticket of board.tickets) {
+          // Appending also visits deeper descendants. Claimed ids terminate cycles and preserve explicit assignments.
+          for (const parent of ticket.sessionIds) {
+            for (const child of children.get(parent) ?? []) {
+              if (ticket.sessionIds.length >= 500 || claimed.has(child)) continue;
+              insert.run(child, ticket.id);
+              ticket.sessionIds.push(child);
+              claimed.add(child);
+            }
+          }
+        }
+        db.exec('COMMIT');
+        return board;
+      } catch (error) { db.exec('ROLLBACK'); throw error; }
+    });
+  }
+
   /** Keep the last owner observation for linked workers whose bridges are unreachable. */
   recordBlockers(projectId: string, observations: ReadonlyMap<string, boolean>): ProjectBoard {
     return this.withDb(projectId, false, db => {
@@ -157,7 +195,7 @@ export class ProjectBoardStore {
         const project = db.prepare('SELECT name, deleted FROM project').get()!;
         if (project.deleted && m.action !== 'delete_project') throw new Error('Project has been deleted');
         if (m.action === 'delete_project') {
-          db.exec('UPDATE project SET deleted=1; DELETE FROM ticket_sessions; DELETE FROM tickets; COMMIT');
+          db.exec('UPDATE project SET deleted=1; DELETE FROM ticket_sessions; DELETE FROM unlinked_sessions; DELETE FROM tickets; COMMIT');
           return { project: { id: m.projectId, name: String(project.name), bridgeId: this.bridgeId }, tickets: [] };
         }
         if (m.action === 'rename_project') db.prepare('UPDATE project SET name=?').run(m.name);
@@ -170,9 +208,13 @@ export class ProjectBoardStore {
           if (!db.prepare('SELECT 1 FROM tickets WHERE id=?').get(m.ticketId)) throw new Error('Ticket not found');
           if (m.title !== undefined) db.prepare('UPDATE tickets SET title=? WHERE id=?').run(m.title, m.ticketId);
           if (m.stage !== undefined) db.prepare('UPDATE tickets SET stage=? WHERE id=?').run(m.stage, m.ticketId);
-          if (m.removeSessionId) db.prepare('DELETE FROM ticket_sessions WHERE ticket_id=? AND session_id=?').run(m.ticketId, m.removeSessionId);
+          if (m.removeSessionId) {
+            const removed = db.prepare('DELETE FROM ticket_sessions WHERE ticket_id=? AND session_id=?').run(m.ticketId, m.removeSessionId);
+            if (removed.changes) db.prepare('INSERT OR IGNORE INTO unlinked_sessions VALUES (?)').run(m.removeSessionId);
+          }
           if (m.addSessionId) {
             link.run(m.addSessionId, m.ticketId);
+            db.prepare('DELETE FROM unlinked_sessions WHERE session_id=?').run(m.addSessionId);
             const count = db.prepare('SELECT count(*) AS total FROM ticket_sessions WHERE ticket_id=?').get(m.ticketId)!;
             if (Number(count.total) > 500) throw new Error('A ticket can link up to 500 sessions');
           }

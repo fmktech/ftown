@@ -1,6 +1,6 @@
 import { readRevision, saveInstructions } from './instructions.js';
 import { exec } from 'node:child_process';
-import { ProjectBoardChanged, projectBoardPage, type HomeProject, type ProjectBoardStore } from './project-board-store.js';
+import { ProjectBoardChanged, projectBoardPage, type HomeProject, type ProjectBoard, type ProjectBoardStore } from './project-board-store.js';
 import type { VerifiedApplication } from './security/protocol.js';
 import type { BridgeSecurityService } from './security/bridge/security.js';
 import { BridgeSecurityError } from './security/bridge/errors.js';
@@ -85,7 +85,7 @@ export interface CommandRpcDeps {
   security?: BridgeSecurityService;
   projectBoards?: ProjectBoardStore;
   rememberedProjects?: () => Promise<HomeProject[]>;
-  projectBlockers?: (sessionIds: Set<string>) => Promise<Map<string, boolean>>;
+  observeProject?: (projectId: string) => Promise<ProjectBoard>;
   hostResources?: ReturnType<typeof import('./host-resources.js').hostResourceSampler>;
   sessionController: SessionController;
   pullRequestStatuses?: PullRequestStatusService;
@@ -350,11 +350,9 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
           }
           if (typeof payload.projectId !== 'string') throw new Error('Missing project ID');
           let board = writing ? deps.projectBoards.mutate(payload) : deps.projectBoards.read(payload.projectId);
-          const linked = new Set(board.tickets.flatMap(ticket => ticket.sessionIds));
-          if (linked.size && payload.cursor === undefined && deps.projectBlockers) {
-            const known = await deps.projectBlockers(linked);
+          if (board.tickets.some(ticket => ticket.sessionIds.length) && payload.cursor === undefined && deps.observeProject) {
+            board = await deps.observeProject(payload.projectId);
             await deps.security.policy.revalidate(verified.principal, 'read');
-            board = deps.projectBoards.recordBlockers(payload.projectId, known);
           }
           response = { requestId: command.requestId, success: true, data: { ...projectBoardPage(board, payload.cursor) } };
           break;

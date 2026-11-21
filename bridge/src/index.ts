@@ -1216,20 +1216,22 @@ program
       }
       let result: CommandResponse | undefined;
       await createCommandHandler({ bridgeId, hostResources, projectBoards, rememberedProjects: projectDirectory.list,
-        projectBlockers: async ids => {
-          const known = new Map<string, boolean>();
-          const remote = new Map((await peerCache.list()).map(row => [row.id, row]));
-          for (const id of ids) {
-            try {
-              const local = await store.loadSession(id);
-              if (local) known.set(id, await sessionBlocksTicket(local, attentionStore));
-              else {
-                const blocked = remote.get(id)?.boardBlocked;
-                if (blocked !== undefined) known.set(id, blocked);
-              }
-            } catch { /* A worker removed mid-read can be reconciled on the next refresh. */ }
+        observeProject: async projectId => {
+          const [sessions, peers] = await Promise.all([store.listSessions(), peerCache.list()]);
+          const board = projectBoards.inheritWorkers(projectId, [...peers, ...sessions]);
+          const localSessions = new Map(sessions.map(row => [row.id, row]));
+          const peerWorkers = new Map(peers.map(row => [row.id, row]));
+          const observed = new Map<string, boolean>();
+          for (const ticket of board.tickets) {
+            for (const id of ticket.sessionIds) {
+              const local = localSessions.get(id);
+              try {
+                const blocked = local ? await sessionBlocksTicket(local, attentionStore) : peerWorkers.get(id)?.boardBlocked;
+                if (blocked !== undefined) observed.set(id, blocked);
+              } catch { /* Preserve the last observation if a worker disappears mid-read. */ }
+            }
           }
-          return known;
+          return projectBoards.recordBlockers(projectId, observed);
         }, security, sessionController, attentionStore, updates, updateEffects, pullRequestStatuses,
         directAddress: () => addressed?.address() ?? null, pullRequestReview,
         modelRouting: () => modelRouting,

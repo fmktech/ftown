@@ -37,6 +37,29 @@ test('restoring one project database independently retains its renamed board, li
   assert.equal(store.list().length, 2);
 });
 
+test('a cross-bridge descendant inherits once while explicit assignments and unlinks survive rediscovery', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'ftown-ticket-workers-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const store = new ProjectBoardStore(dir, 'A');
+  const projectId = randomUUID(), first = randomUUID(), second = randomUUID();
+  const base = { projectId, bridgeId: 'A' };
+  store.mutate({ ...base, action: 'create_project', name: 'Work' });
+  store.mutate({ ...base, action: 'create_ticket', title: 'Implementation', ticketId: first, sessionIds: ['manager'] });
+  store.mutate({ ...base, action: 'create_ticket', title: 'Review', ticketId: second, sessionIds: ['reviewer'] });
+  const manager = { projectName: 'Work', bridgeId: 'A', id: 'manager' };
+  const child = { projectName: 'Work', bridgeId: 'B', parentBridgeId: 'A', parentSessionId: 'manager', id: 'worker' };
+  const reviewer = { ...child, id: 'reviewer' };
+  const workers = [{ ...child, bridgeId: 'C', parentBridgeId: 'B', parentSessionId: 'reviewer', id: 'assistant' }, reviewer, child, manager,
+    { ...child, id: 'other-project', projectName: 'Side' }, { ...child, id: 'wrong-parent', parentBridgeId: 'C' }];
+  const initial = store.inheritWorkers(projectId, workers);
+  assert.deepEqual(initial.tickets.map(ticket => ticket.sessionIds), [['manager', 'worker'], ['reviewer', 'assistant']]);
+  store.mutate({ ...base, action: 'update_ticket', ticketId: first, removeSessionId: 'worker' });
+  const restarted = new ProjectBoardStore(dir, 'A');
+  restarted.mutate({ ...base, action: 'update_ticket', ticketId: second, addSessionId: 'manager' });
+  assert.deepEqual(restarted.inheritWorkers(projectId, workers).tickets.map(ticket => ticket.sessionIds),
+    [[], ['manager', 'reviewer', 'assistant']]);
+});
+
 test('large project responses fit the wire budget and reject mixed-revision pages', () => {
   const ticket = { id: '', title: 'Fix', stage: 'Review' as const, blocked: false,
     sessionIds: Array.from({length: 450}, () => randomUUID()) };
