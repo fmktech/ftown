@@ -1,9 +1,13 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, expect, it, vi } from "vitest";
 import type { Session } from "@/types";
 import { SessionAccountBadge, SessionList } from "./SessionList";
 
+beforeAll(() => {
+  HTMLDialogElement.prototype.showModal = function () { this.open = true; };
+  HTMLDialogElement.prototype.close = function () { this.open = false; };
+});
 afterEach(cleanup);
 
 it("only labels non-default accounts", () => {
@@ -79,15 +83,14 @@ it("keeps an empty project across reloads and offers placement and session creat
     projectComputers: [{ id: "desk", label: "Desk" }, { id: "studio", label: "Studio" }], onProjectBridgesChange: change };
   const first = render(<SessionList {...props} />);
   fireEvent.click(screen.getByRole("button", { name: /Create project/ }));
-  fireEvent.change(screen.getByLabelText("Project name"), { target: { value: "Launch" } });
-  fireEvent.click(screen.getByRole("button", { name: "Create" }));
+  const create = within(screen.getByRole("dialog", { name: "Create project" }));
+  fireEvent.change(create.getByLabelText("Project name"), { target: { value: "Launch" } });
+  fireEvent.click(create.getByRole("button", { name: "Create" }));
   first.unmount();
   render(<SessionList {...props} />);
   fireEvent.click(screen.getByLabelText("Add session to Launch"));
   expect(add).toHaveBeenCalledWith("Launch");
   fireEvent.click(screen.getByLabelText("More actions for Launch"));
-  HTMLDialogElement.prototype.showModal = function () { this.open = true; };
-  HTMLDialogElement.prototype.close = function () { this.open = false; };
   fireEvent.click(screen.getByRole("menuitem", { name: "Project settings" }));
   expect(screen.getByRole("dialog", { name: "Project settings" })).toBeTruthy();
   fireEvent.click(screen.getByLabelText("Studio"));
@@ -107,10 +110,13 @@ it("offers an empty project in session actions when the project allows the ownin
   const section = within(screen.getByRole("region", { name: "No project" }));
   fireEvent.keyDown(section.getByLabelText("Session actions"), { key: "Enter" });
   const menu = within(screen.getByRole("menu", { name: "Session actions" }));
-  const picker = menu.getByRole("combobox", { name: "Move to project" });
+  fireEvent.click(menu.getByRole("menuitem", { name: "Move to project…" }));
+  const dialog = within(screen.getByRole("dialog", { name: "Move session to project" }));
+  const picker = dialog.getByLabelText("Destination project");
   expect(within(picker).queryByRole("option", { name: "Restricted" })).toBeNull();
   expect(within(picker).getByRole("option", { name: "Occupied" })).toBeTruthy();
   fireEvent.change(picker, { target: { value: "Launch" } });
+  fireEvent.click(dialog.getByRole("button", { name: "Move" }));
   expect(onMoveSessionToProject).toHaveBeenCalledWith(session, "Launch");
   localStorage.clear();
 });
@@ -126,6 +132,9 @@ it("moves an assigned child into an occupied project as a new root", () => {
   if (expand) fireEvent.click(expand);
   const row = source.getByText("Child", { exact: true }).closest("button")!;
   fireEvent.keyDown(within(row).getByLabelText("Session actions"), { key: "Enter" });
-  fireEvent.change(screen.getByRole("combobox", { name: "Move to project" }), { target: { value: "Target" } });
+  fireEvent.click(screen.getByRole("menuitem", { name: "Move to project…" }));
+  const dialog = within(screen.getByRole("dialog", { name: "Move session to project" }));
+  fireEvent.change(dialog.getByLabelText("Destination project"), { target: { value: "Target" } });
+  fireEvent.click(dialog.getByRole("button", { name: "Move" }));
   expect(move).toHaveBeenCalledWith(child, "Target", true);
 });

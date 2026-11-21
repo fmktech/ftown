@@ -1,6 +1,7 @@
 "use client";
 
 import type { HomeProject } from "@/hooks/useProjectDirectory";
+import { SidebarFormDialog } from "./SidebarFormDialog";
 import { ProjectSettingsDialog } from "./ProjectSettingsDialog";
 import { BridgeBadge, type BridgeIdentity } from "./BridgeBadge";
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, type ReactElement } from "react";
@@ -24,6 +25,7 @@ export function SessionAccountBadge({ account }: { account?: string }) {
 }
 
 interface ProjectBoardControls {
+  activeProjectId?: string;
   projects: HomeProject[];
   homes: Array<{ id: string; label: string }>;
   open: (project: HomeProject) => void;
@@ -328,7 +330,7 @@ function ProjectMenu({ anchor, onClose, onSettings, onHide, moveUp, moveDown }: 
 function SessionContextMenu({
   menu,
   onRename,
-  moveProjects,
+  canMove,
   onMoveToProject,
   onReviewPullRequest,
   onStop,
@@ -340,8 +342,8 @@ function SessionContextMenu({
 }: {
   menu: Extract<ContextMenuState, { kind: "session" }>;
   onRename: (session: Session) => void;
-  moveProjects: string[];
-  onMoveToProject: (project: string) => void;
+  canMove: boolean;
+  onMoveToProject: () => void;
   onReviewPullRequest?: (sessionId: string) => void;
   onStop: (sessionId: string) => void;
   onRemove: (sessionId: string) => void;
@@ -392,18 +394,7 @@ function SessionContextMenu({
       {menu.session.block && onDismissBlock && (
         <ContextMenuButton largeOnMobile label="Dismiss badge" onClick={() => { void onDismissBlock(menu.session).catch(console.error); onClose(); }} />
       )}
-      {moveProjects.length > 0 && (
-        <select
-          aria-label="Move to project"
-          defaultValue=""
-          className="min-h-11 max-w-[220px] cursor-pointer text-sm md:min-h-0 md:text-[11px]"
-          style={{ ...menuButtonStyle, fontSize: undefined }}
-          onChange={event => { onMoveToProject(event.currentTarget.value); onClose(); }}
-        >
-          <option value="" disabled>Move to project…</option>
-          {moveProjects.map(project => <option key={project} value={project}>{project}</option>)}
-        </select>
-      )}
+      {canMove && <ContextMenuButton largeOnMobile label="Move to project…" onClick={() => { onMoveToProject(); onClose(); }} />}
       <ContextMenuButton largeOnMobile label="Rename" onClick={() => { onRename(menu.session); onClose(); }} />
       <ContextMenuButton largeOnMobile label="Clone" onClick={() => { onClone(menu.session); onClose(); }} />
       {isRunning && (
@@ -456,13 +447,10 @@ export function SessionList({
   const [moveError, setMoveError] = useState<string | null>(null);
   const [newProject, setNewProject] = useState<string | null>(null);
   const [chosenHome, setChosenHome] = useState("");
-  const [creatingBoard, setCreatingBoard] = useState(false);
+  const [movingSession, setMovingSession] = useState<Session | null>(null);
+  const [destination, setDestination] = useState("");
   const home = boards?.homes.some(item => item.id === chosenHome) ? chosenHome : boards?.homes[0]?.id ?? "";
   const [adopting, setAdopting] = useState<string | null>(null);
-  const creationForm = useRef<HTMLFormElement>(null);
-  useEffect(() => {
-    if (adopting) creationForm.current?.scrollIntoView?.({ block: "nearest" });
-  }, [adopting]);
   const [hiddenProjects, setHiddenProjects] = usePersistentState<Set<string>>("ftown:hiddenProjects", EMPTY_ID_SET, stringSetCodec);
   useEffect(() => { onHiddenProjectsChange?.(hiddenProjects); }, [hiddenProjects, onHiddenProjectsChange]);
   const [collapsedProjects, setCollapsedProjects] = usePersistentState<Set<string>>("ftown:collapsedProjects", EMPTY_ID_SET, stringSetCodec);
@@ -475,7 +463,6 @@ export function SessionList({
   // Inline opacity React rendered on the dragged row, restored on drag end —
   // hardcoding "1" would permanently clear the 0.55 dim on finished rows.
   const dragStartOpacity = useRef<string>("");
-  const inputRef = useRef<HTMLInputElement>(null);
   const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressFired = useRef(false);
   // Parent ids whose subtree has already had the default-collapse applied. A
@@ -552,13 +539,6 @@ export function SessionList({
   }, [sessions, setCollapsedSessions]);
 
   useEffect(() => {
-    if (editingSessionId && inputRef.current) {
-      inputRef.current.focus();
-      inputRef.current.select();
-    }
-  }, [editingSessionId]);
-
-  useEffect(() => {
     if (selectedSessionId === null) return;
     const byId = new Map(sessions.map((session) => [session.id, session]));
     const ancestors = new Set<string>();
@@ -596,13 +576,6 @@ export function SessionList({
   function startEditing(session: Session): void {
     setEditingSessionId(session.id);
     setEditValue(session.name || session.prompt?.slice(0, 36) || "Session");
-  }
-
-  function commitRename(): void {
-    if (editingSessionId && editValue.trim() && onRenameSession) {
-      onRenameSession(editingSessionId, editValue.trim());
-    }
-    setEditingSessionId(null);
   }
 
   function handleContextMenu(e: React.MouseEvent, session: Session): void {
@@ -949,32 +922,6 @@ export function SessionList({
             <span style={{ width: 10, flexShrink: 0 }} />
           ) : null}
           <HarnessIcon harness={session.shellType} size={17} />
-          {editingSessionId === session.id ? (
-            <input
-              ref={inputRef}
-              value={editValue}
-              onChange={(e) => setEditValue(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") commitRename();
-                if (e.key === "Escape") setEditingSessionId(null);
-              }}
-              onBlur={commitRename}
-              onClick={(e) => e.stopPropagation()}
-              style={{
-                fontSize: 12,
-                fontWeight: 600,
-                color: "var(--text-primary)",
-                background: "var(--bg-void)",
-                border: "1px solid var(--accent-dim)",
-                borderRadius: 3,
-                padding: "1px 4px",
-                outline: "none",
-                flex: 1,
-                minWidth: 0,
-                fontFamily: "var(--font-mono)",
-              }}
-            />
-          ) : (
             <span
               onDoubleClick={(e) => {
                 e.stopPropagation();
@@ -995,7 +942,6 @@ export function SessionList({
             >
               {displayName}
             </span>
-          )}
           <BridgeBadge bridge={bridgeIdentities?.get(session.bridgeId)} />
           <SessionAccountBadge account={session.account} />
           </div>
@@ -1186,13 +1132,12 @@ export function SessionList({
     }
   }
 
-  function moveToProject(session: Session, project: string) {
+  async function moveToProject(session: Session, project: string) {
     const source = locations.get(session.id);
-    if (!source || !canMoveToProject(session, project)) return;
+    if (!source || !canMoveToProject(session, project)) throw Error("This session cannot move to that project.");
     if (source.project && !boards?.projects.some(board => board.name === source.project)) setSavedProjects(previous => new Set(previous).add(source.project));
     setMoveError(null);
-    void transferTree(source.node, project, Boolean(session.parentSessionId))
-      .catch(error => setMoveError(error instanceof Error ? error.message : "Could not move session"));
+    await transferTree(source.node, project, Boolean(session.parentSessionId));
   }
 
   const pendingRename = useRef<{ from: string; to: string } | null>(null);
@@ -1279,7 +1224,7 @@ export function SessionList({
               if (drag?.kind === "project") reorderProject(drag.id, project);
               else if (drag?.kind === "session") {
                 const session = sessions.find(row => row.id === drag.id && row.bridgeId === drag.bridgeId);
-                if (session && canMoveToProject(session, project)) moveToProject(session, project);
+                if (session && canMoveToProject(session, project)) void moveToProject(session, project).catch(error => setMoveError(error instanceof Error ? error.message : "Could not move session"));
                 else if (roots.some(root => root.children.some(child => child.session.id === drag.id))) onSetSessionParent?.(drag.id, null);
               }
               clearDragState();
@@ -1293,7 +1238,7 @@ export function SessionList({
               })}><span aria-hidden="true">{collapsedProjects.has(project) ? "▸ " : "▾ "}</span>{project || "No project"}</button>
             <div className="flex shrink-0 items-center gap-1">
               {project && boards && (hosted.length ? hosted.map(board =>
-                <button key={board.bridgeId + board.id} type="button" className="btn-ghost" aria-label={`Open board for ${project} on ${bridgeIdentities?.get(board.bridgeId)?.name || board.bridgeId}`}
+                <button key={board.bridgeId + board.id} data-project-board="" aria-pressed={boards.activeProjectId === board.id} type="button" className="btn-ghost" aria-label={`Open board for ${project} on ${bridgeIdentities?.get(board.bridgeId)?.name || board.bridgeId}`}
                   onClick={() => boards.open(board)}>Board{hosted.length > 1 ? " · " + (bridgeIdentities?.get(board.bridgeId)?.name || board.bridgeId) : ""}</button>
               ) : <button className="btn-ghost" type="button" aria-label={`Set up board for ${project}`}
                 onClick={() => { setAdopting(project); setNewProject(project); setMoveError(null); }}>Board</button>)}
@@ -1321,43 +1266,51 @@ export function SessionList({
           <button type="button" className="btn-ghost block text-xs" key={project} onClick={() => toggleProject(project)}>Show {project || "No project"}</button>)}
       </details>}
       {!projects.size && !collapsed && <p className="p-4 text-xs text-[var(--text-muted)]">No sessions yet</p>}
-      {!collapsed && (newProject === null
-        ? <button type="button" className="btn-ghost m-2 text-left text-sm" onClick={() => { setAdopting(null); setNewProject(""); setMoveError(null); }}>+ Create project</button>
-        : <form ref={creationForm} className="flex flex-wrap items-center gap-1 p-2" onSubmit={async event => {
-          event.preventDefault();
+      {!collapsed && <button type="button" className="btn-ghost m-2 text-left text-sm" onClick={() => {
+        setAdopting(null); setNewProject(""); setMoveError(null);
+      }}>+ Create project</button>}
+      {newProject !== null && <SidebarFormDialog title={adopting ? "Set up project board" : "Create project"} action="Create"
+        disabled={!newProject.trim() || (!!boards && !home)} close={() => { setNewProject(null); setAdopting(null); }}
+        submit={async () => {
           const name = newProject.trim();
-          if (!name || creatingBoard) return;
-          setMoveError(null);
-          setCreatingBoard(true);
-          try {
-            if (boards) {
-              if (!home) throw Error("Connect a home bridge first.");
-              if (boards.projects.some(project => project.name === name)) throw Error("This project already has a board.");
-              const project = await boards.create(name, home);
-              setSavedProjects(previous => new Set([...previous].filter(p => p !== name)));
-              if (adopting) boards.open(project);
-            } else setSavedProjects(previous => new Set(previous).add(name));
-            if (hiddenProjects.has(name)) toggleProject(name);
-            setNewProject(null);
-            setAdopting(null);
-          } catch (error) { setMoveError(error instanceof Error ? error.message : "Could not create project"); }
-          finally { setCreatingBoard(false); }
+          if (boards) {
+            if (!home) throw Error("Connect a home bridge first.");
+            if (boards.projects.some(project => project.name === name)) throw Error("This project already has a board.");
+            const project = await boards.create(name, home);
+            setSavedProjects(previous => new Set([...previous].filter(p => p !== name)));
+            if (adopting) boards.open(project);
+          } else setSavedProjects(previous => new Set(previous).add(name));
+          if (hiddenProjects.has(name)) toggleProject(name);
         }}>
-          <input autoFocus aria-label="Project name" maxLength={256} value={newProject} className="min-w-0 flex-1" disabled={!!adopting || creatingBoard}
-            onChange={event => setNewProject(event.target.value)} onKeyDown={event => { if (event.key === "Escape") { setNewProject(null); setAdopting(null); } }} />
-          {boards && <label className="w-full text-xs">Home bridge <select aria-label="Home bridge" value={home} disabled={creatingBoard} onChange={event => setChosenHome(event.target.value)}>
+        <label className="block text-sm">Project name
+          <input className="mt-1 w-full rounded border border-[var(--border-muted)] p-2" maxLength={256} value={newProject}
+            disabled={!!adopting} onChange={event => setNewProject(event.target.value)} /></label>
+        {boards && <label className="block text-sm">Home bridge
+          <select className="mt-1 w-full rounded border border-[var(--border-muted)] p-2" value={home} onChange={event => setChosenHome(event.target.value)}>
             {!boards.homes.length && <option value="">No connected bridge</option>}
             {boards.homes.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}
           </select></label>}
-          <button className="btn-accent" disabled={!newProject.trim() || creatingBoard || (!!boards && !home)} type="submit">{creatingBoard ? "Creating…" : "Create"}</button>
-          <button type="button" className="btn-ghost" disabled={creatingBoard} onClick={() => { setNewProject(null); setAdopting(null); }}>Cancel</button>
-        </form>)}
+      </SidebarFormDialog>}
+      {editingSessionId && <SidebarFormDialog title="Rename session" action="Rename" disabled={!editValue.trim()}
+        close={() => setEditingSessionId(null)} submit={() => onRenameSession?.(editingSessionId, editValue.trim())}>
+        <label className="block text-sm">Session name
+          <input className="mt-1 w-full rounded border border-[var(--border-muted)] p-2" value={editValue}
+            onFocus={event => event.target.select()} onChange={event => setEditValue(event.target.value)} /></label>
+      </SidebarFormDialog>}
+      {movingSession && <SidebarFormDialog title="Move session to project" action="Move" disabled={!canMoveToProject(movingSession, destination)}
+        close={() => setMovingSession(null)} submit={() => moveToProject(movingSession, destination)}>
+        <label className="block text-sm">Destination project
+          <select className="mt-1 w-full rounded border border-[var(--border-muted)] p-2" value={destination} onChange={event => setDestination(event.target.value)}>
+            <option value="" disabled>Choose a project</option>
+            {[...projects.keys()].filter(project => canMoveToProject(movingSession, project)).map(project => <option key={project}>{project}</option>)}
+          </select></label>
+      </SidebarFormDialog>}
       {contextMenu?.kind === "session" && onStopSession && onRemoveSession && (
         <SessionContextMenu
           menu={contextMenu}
           onRename={startEditing}
-          moveProjects={Array.from(projects.keys()).filter(project => canMoveToProject(contextMenu.session, project))}
-          onMoveToProject={project => moveToProject(contextMenu.session, project)}
+          canMove={Array.from(projects.keys()).some(project => canMoveToProject(contextMenu.session, project))}
+          onMoveToProject={() => { setMovingSession(contextMenu.session); setDestination(""); }}
           onReviewPullRequest={onReviewPullRequest}
           onStop={onStopSession}
           onRemove={onRemoveSession}
