@@ -1,12 +1,10 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import { ProjectBoardDialog } from "./ProjectBoardDialog";
+import { ProjectBoardPanel } from "./ProjectBoardPanel";
 
 afterEach(() => { cleanup(); localStorage.clear(); });
 it("retains an attention-blocked ticket in the offline, read-only board after reopening it", async () => {
-  HTMLDialogElement.prototype.showModal = function () { this.open = true; };
-  HTMLDialogElement.prototype.close = function () { this.open = false; };
   const project = { id: "p", bridgeId: "home", name: "Tooling" };
   const send = vi.fn(async () => ({
     success: true, requestId: "board", data: { project, tickets: [
@@ -14,11 +12,11 @@ it("retains an attention-blocked ticket in the offline, read-only board after re
     ] },
   }));
   const props = { project, send, cacheKey: "account", sessions: [], close: vi.fn() };
-  const first = render(<ProjectBoardDialog {...props} online attentionIds={new Set(["remote-worker"])} />);
+  const first = render(<ProjectBoardPanel {...props} online attentionIds={new Set(["remote-worker"])} />);
   const firstColumn = await screen.findByRole("region", { name: "Blocked" });
   expect(within(firstColumn).getByText("Ship picker")).toBeTruthy();
   first.unmount();
-  render(<ProjectBoardDialog {...props} online={false} attentionIds={new Set()} />);
+  render(<ProjectBoardPanel {...props} online={false} attentionIds={new Set()} />);
   expect(screen.getByRole("status").textContent).toContain("offline");
   const offlineColumn = screen.getByRole("region", { name: "Blocked" });
   expect(within(offlineColumn).getByText("Ship picker")).toBeTruthy();
@@ -28,8 +26,6 @@ it("retains an attention-blocked ticket in the offline, read-only board after re
 });
 
 it("discards an interrupted snapshot and displays both pages from the new revision", async () => {
-  HTMLDialogElement.prototype.showModal = function () { this.open = true; };
-  HTMLDialogElement.prototype.close = function () { this.open = false; };
   const project = { id: "p", bridgeId: "home", name: "Tooling" };
   const ticket = (id: string) => ({ id, title: id, stage: "Backlog", sessionIds: [] });
   const pages = [
@@ -39,7 +35,7 @@ it("discards an interrupted snapshot and displays both pages from the new revisi
     { success: true, data: { project, tickets: [ticket("New second")] } },
   ];
   const send = vi.fn(async () => ({ requestId: "read", ...pages.shift()! }));
-  render(<ProjectBoardDialog project={project} online attentionIds={new Set()} send={send} cacheKey="account" sessions={[]} close={vi.fn()} />);
+  render(<ProjectBoardPanel project={project} online attentionIds={new Set()} send={send} cacheKey="account" sessions={[]} close={vi.fn()} />);
   const column = await screen.findByRole("region", { name: "Backlog" });
   expect(within(column).getByText("New first")).toBeTruthy();
   expect(within(column).getByText("New second")).toBeTruthy();
