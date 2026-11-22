@@ -1,5 +1,5 @@
 import { TICKET_NOTIFICATION_WIRE, TICKET_NOTIFICATION_INBOX } from '../../ticket-notification-protocol.js';
-import { PROJECT_DIRECTORY } from '../../project-directory-protocol.js';
+import { PROJECT_DIRECTORY, boardCommandForPath } from '../../project-directory-protocol.js';
 import { INSTRUCTIONS_LOCAL, INSTRUCTIONS_SYNC, INSTRUCTIONS_WIRE } from '../../instructions-protocol.js';
 import { TRANSFER_LOCAL, TRANSFER_WIRE } from '../../folder-transfer-protocol.js';
 import type { ApplicationJson, EndpointPermission } from '../protocol.js';
@@ -30,6 +30,8 @@ export function classifyHttp(method: string, path: string): OperationPermission 
   const url = new URL(path, 'http://bridge.invalid');
   if (url.origin !== 'http://bridge.invalid' || url.pathname.split('/').some(part => part === '.' || part === '..')
     || path.split('?')[0] !== url.pathname) return deny();
+  const boardCommand = boardCommandForPath(url.pathname);
+  if (boardCommand) return method === 'POST' && !url.search ? classifyCommand(boardCommand) : deny();
   if (url.pathname === TICKET_NOTIFICATION_WIRE) return method === 'POST' && !url.search ? result('control', 'ticket_notify') : deny();
   if (url.pathname === TICKET_NOTIFICATION_INBOX) return method === 'GET' && queryAllows(url, ['after', 'limit']) ? result('read', 'ticket_inbox') : deny();
   if (url.pathname === PROJECT_DIRECTORY) return method === 'POST' && !url.search ? result('read', 'project_directory') : deny();

@@ -109,7 +109,24 @@ The dashboard’s **Create project** selects a home bridge and creates one SQLit
 
 Click a ticket title to edit its description, assign it to yourself or a paired bridge, add comments, and create subtasks. Each subtask has its own stage, assignee and linked workers. Drag a card to a column or use its stage selector. Linked sessions show their last reported status. Running work advances a backlog ticket to **In progress**. Use **Review** and **Done** when the work is ready.
 
-Assigning a ticket to a bridge or changing its stage while assigned sends a message to that bridge. The project home retries delivery when a bridge is offline. Run `ftown tickets inbox` on the assigned bridge to read messages. Use `--json` for automation and pass the returned `nextCursor` to `--after` to read the next page.
+Assigning a ticket to a bridge or changing its stage while assigned sends a message to that bridge. The project home retries delivery when a bridge is offline. Run `ftown tickets inbox` on the assigned bridge, or `ftown tickets inbox --bridge <assigned-bridge>` from a paired bridge. Use `--json` for automation and pass the returned `nextCursor` to `--after` to read the next page.
+
+### Work a project ticket from a session
+
+Use `ftown projects list --json` to discover project IDs, names and home bridges. Select a project by name or ID. Use the ID when names overlap. To create a project on a particular bridge, use `ftown projects create "App" --bridge <home-bridge>`. Existing projects support `ftown projects rename <project> <name>` and `ftown projects delete <project>`.
+
+```bash
+ftown tickets list --project App --json
+ftown tickets create --project App --title "Verify the release" --body "Run the smoke suite." --assignee user
+ftown tickets create --project App --parent <ticket-id> --title "Test the Linux build"
+ftown tickets update <ticket-id> --project App --assignee <bridge-id> --stage "In progress" --link "$FTOWN_SESSION_ID"
+ftown tickets comment <ticket-id> --project App --text "Linux smoke tests passed."
+ftown tickets comments <ticket-id> --project App --json
+ftown tickets update <ticket-id> --project App --stage Review
+```
+
+Use `tickets show <ticket-id>` for details, `update --unlink <session-id>` to remove a worker, `update --assignee none` to clear ownership, and `tickets delete <ticket-id>` to delete a ticket. Supply `--project` on each command. Use `ftown board` for session-tree coordination and `ftown tickets` for project work.
+
 
 
 The sidebar groups sessions by project, then root session, then children across bridges. Supply `--project <name>` for a new root. A child inherits its root’s project. Use `--parent` for a local child or `--bridge <target> --parent` for a remote child. When the caller is already a child, the new session joins the same root, even on a third bridge. Use an absolute `--workdir` on the destination. Account choices on a remote child come from its destination bridge. Security commands and `harness mail` operate on the local bridge. Cross-bridge control requires paired account bridges.
