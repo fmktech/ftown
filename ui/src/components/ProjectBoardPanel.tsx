@@ -3,10 +3,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Command, CommandResponse, Session } from "@/types";
 
+import { ProjectTicketDetail, assignmentLabel, type Ticket } from "./ProjectTicketDetail";
+
 const stages = ["Backlog", "In progress", "Blocked", "Review", "Done"] as const;
-type Stage = typeof stages[number];
 type Project = { id: string; name: string; bridgeId: string };
-type Ticket = { id: string; title: string; stage: Stage; blocked?: boolean; sessionIds: string[] };
 type Board = { project: Project; tickets: Ticket[] };
 type BoardPage = Board & { nextCursor?: string };
 type CachedBoard = { board: Board; blocked: string[] };
@@ -52,6 +52,9 @@ function ProjectBoard({ project, online, send, sessions, attentionIds, bridgeNam
   const [fresh, setFresh] = useState(false);
   const [error, setError] = useState("");
   const [title, setTitle] = useState("");
+  const [detailId, setDetailId] = useState<string | null>(null);
+  const [dragTicket, setDragTicket] = useState<string | null>(null);
+  const [dropStage, setDropStage] = useState<Ticket["stage"] | null>(null);
   const newTicketId = useRef<string | null>(null);
   const [busy, setBusy] = useState(false);
   const revision = useRef(0);
@@ -162,6 +165,8 @@ function ProjectBoard({ project, online, send, sessions, attentionIds, bridgeNam
       setBusy(false);
     }
   }
+  const ticketById = new Map(board?.tickets.map(ticket => [ticket.id, ticket]));
+  const detail = detailId ? ticketById.get(detailId) : undefined;
   const sessionById = new Map(sessions.map(session => [session.id, session]));
   const ticketBySession = new Map<string, string>();
   for (const ticket of board?.tickets ?? []) {
@@ -195,10 +200,48 @@ function ProjectBoard({ project, online, send, sessions, attentionIds, bridgeNam
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
         {stages.map(stage => {
           const tickets = board.tickets.filter(ticket => (blocked.includes(ticket.id) ? "Blocked" : ticket.stage) === stage);
-          return <section aria-label={stage} key={stage} className="min-w-0 rounded-lg border border-[var(--border-muted)] bg-[var(--bg-surface)] p-2">
+          return <section aria-label={stage} key={stage}
+            onDragOver={event => {
+              if (!editable || !dragTicket) return;
+              event.preventDefault();
+              event.dataTransfer.dropEffect = "move";
+              setDropStage(stage);
+            }}
+            onDragLeave={event => {
+              if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropStage(null);
+            }}
+            onDrop={event => {
+              event.preventDefault();
+              if (editable && dragTicket && event.dataTransfer.getData("application/x-ftown-ticket") === dragTicket &&
+                  ticketById.get(dragTicket)?.stage !== stage) {
+                void change({ action: "update_ticket", ticketId: dragTicket, stage });
+              }
+              setDragTicket(null); setDropStage(null);
+            }}
+            className="min-w-0 rounded-lg border border-[var(--border-muted)] bg-[var(--bg-surface)] p-2"
+            style={dropStage === stage ? { outline: "2px solid var(--accent)" } : undefined}>
             <h3 className="mb-2 flex justify-between gap-2 text-sm font-semibold">{stage}<span className="text-[var(--text-muted)]">{tickets.length}</span></h3>
-            {tickets.map(ticket => <article key={ticket.id} className="mb-2 rounded border border-[var(--border-subtle)] bg-[var(--bg-base)] p-2 text-sm">
-              <h4 className="mb-1 break-words font-semibold">{ticket.title}</h4>
+            {tickets.map(ticket => <article key={ticket.id} draggable={editable}
+              onDragStart={event => {
+                event.dataTransfer.setData("application/x-ftown-ticket", ticket.id);
+                event.dataTransfer.effectAllowed = "move";
+                setDragTicket(ticket.id);
+              }}
+              onDragEnd={() => { setDragTicket(null); setDropStage(null); }}
+              className="mb-2 rounded border border-[var(--border-subtle)] bg-[var(--bg-base)] p-2 text-sm">
+              {ticket.parentTicketId && ticketById.has(ticket.parentTicketId) && <button className="mb-1 block truncate text-xs text-[var(--text-muted)] underline"
+                onClick={() => setDetailId(ticket.parentTicketId ?? null)} aria-label={"Open parent ticket " + ticketById.get(ticket.parentTicketId)?.title}>
+                {ticketById.get(ticket.parentTicketId)?.title}</button>}
+              <div className="mb-1 flex items-start justify-between gap-2">
+                <h4 className="min-w-0 font-semibold">
+                <button className="cursor-pointer break-words text-left underline decoration-[var(--border-muted)] underline-offset-2 hover:text-[var(--accent)]"
+                  onClick={() => setDetailId(ticket.id)}>{ticket.title}</button>
+                </h4>
+                {editable && <span role="img" aria-label={"Drag " + ticket.title} title={"Drag " + ticket.title} draggable
+                className="cursor-grab select-none rounded px-1 text-[var(--text-muted)] active:cursor-grabbing">⠿</span>}
+              </div>
+              <p className="mb-2 flex flex-wrap items-baseline gap-1 text-xs"><span className="text-[var(--text-muted)]">Assignee</span>
+                <span>{assignmentLabel(ticket.assignee, bridgeNames)}</span></p>
               {blocked.includes(ticket.id) && <p className="mb-1 text-xs text-[var(--status-pending)]">Session needs attention</p>}
               <label className="flex flex-wrap items-center gap-1 text-xs">Stage
                 <select aria-label={'Stage for ' + ticket.title} className="btn-ghost" disabled={!editable} value={ticket.stage}
@@ -215,6 +258,7 @@ function ProjectBoard({ project, online, send, sessions, attentionIds, bridgeNam
                       ? <button className="btn-ghost min-w-0 truncate" title={bridgeNames?.get(linked.bridgeId) ?? linked.bridgeId}
                           onClick={() => onOpenSession(id)}>{linked.name}</button>
                       : <span className="break-all">{linked?.name ?? id}</span>}
+                    <span className="text-[var(--text-muted)]">{ticket.sessionStatuses?.[id] ?? linked?.status ?? "Unknown status"}</span>
                     <button className="btn-ghost" aria-label={'Unlink ' + (linked?.name ?? id)} disabled={!editable}
                       onClick={() => void change({ action: "update_ticket", ticketId: ticket.id, removeSessionId: id })}>×</button>
                   </li>;
@@ -233,5 +277,7 @@ function ProjectBoard({ project, online, send, sessions, attentionIds, bridgeNam
       </div>
     </>}
     </div>
+    {detail && <ProjectTicketDetail key={detail.id} ticket={detail} tickets={board?.tickets ?? []} sessionById={sessionById} openTicket={setDetailId} openSession={onOpenSession} project={project} editable={editable} online={online}
+      bridgeNames={bridgeNames} send={send} change={change} error={error} close={() => setDetailId(null)} />}
   </section>;
 }

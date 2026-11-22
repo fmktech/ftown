@@ -107,6 +107,11 @@ Use `ftown bridges --resources --json` to choose a host. Compare the local `reso
 
 The dashboard’s **Create project** selects a home bridge and creates one SQLite database per hosted project. Use **Board** beside a legacy project to choose its home. Boards route writes to that home; workers can run on any allowed bridge. Open a ticket to link sessions or launch a worker. Outstanding attention on linked sessions displays the ticket as Blocked. Paired bridges exchange the project directory; an offline home leaves a previously viewed board readable from the client cache.
 
+Click a ticket title to edit its description, assign it to yourself or a paired bridge, add comments, and create subtasks. Each subtask has its own stage, assignee and linked workers. Drag a card to a column or use its stage selector. Linked sessions show their last reported status. Running work advances a backlog ticket to **In progress**. Use **Review** and **Done** when the work is ready.
+
+Assigning a ticket to a bridge or changing its stage while assigned sends a message to that bridge. The project home retries delivery when a bridge is offline. Run `ftown tickets inbox` on the assigned bridge to read messages. Use `--json` for automation and pass the returned `nextCursor` to `--after` to read the next page.
+
+
 The sidebar groups sessions by project, then root session, then children across bridges. Supply `--project <name>` for a new root. A child inherits its root’s project. Use `--parent` for a local child or `--bridge <target> --parent` for a remote child. When the caller is already a child, the new session joins the same root, even on a third bridge. Use an absolute `--workdir` on the destination. Account choices on a remote child come from its destination bridge. Security commands and `harness mail` operate on the local bridge. Cross-bridge control requires paired account bridges.
 
 For a worker that needs a folder from another machine, see **Copy a folder and launch a worker** in `references/sessions.md`. The recipient runs `ftown transfer receive`, the sender runs `ftown transfer send`, and the worker can start once the transfer reports `installed`. When the folder already exists on the destination, go straight to session creation. Use `ftown sessions list --remembered` to inspect last-known peer sessions from the local bridge.

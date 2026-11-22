@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { TicketNotificationInbox, deliverTicketNotifications } from './ticket-notifications.js';
 
 import { Command as Commander, CommanderError } from 'commander';
 import { v4 as uuidv4 } from 'uuid';
@@ -17,7 +18,7 @@ import { PublishRouter } from './direct-transport/publish-router.js';
 import { LoopbackPeerServer } from './direct-transport/loopback-server.js';
 import { toWireSession } from './session-wire.js';
 import { ProcessRunner } from './claude-runner.js';
-import { ProjectBoardStore, sessionBlocksTicket } from './project-board-store.js';
+import { ProjectBoardStore, sessionBlocksTicket, type ProjectBoard } from './project-board-store.js';
 import { SessionStore } from './session-store.js';
 import { MailStore } from './mail-store.js';
 import { AttentionStore } from './attention-store.js';
@@ -35,7 +36,7 @@ import { startAddressedListener, type AddressedSetup } from './direct-transport/
 import { executeSecurePacket } from './security/bridge/execute.js';
 import { BrowserAccess } from './browser-access.js';
 import { registerLocalBrowserCommands } from './local-pair-cli.js';
-import type { CommandResponse } from './types.js';
+import type { CommandResponse, Session } from './types.js';
 import { TerminalManager } from './terminal-manager.js';
 import { assertSetupReady } from './setup-state.js';
 import { canonicalNotifyPath } from './install-notify-script.js';
@@ -1203,6 +1204,74 @@ program
     const peerCache = await startPeerSessionCache(peerControl, join(dataDir, "peer-sessions-" + security.endpoint.id + ".json"));
     const projectDirectory = await startPeerProjectDirectory(peerControl, join(dataDir, "peer-projects-" + security.endpoint.id + ".json"));
     localApiServer.setLocalProjects(() => projectBoards.list());
+    const ticketInbox = new TicketNotificationInbox(join(dataDir, 'ticket-inboxes', security.endpoint.id + '.sqlite'), bridgeId);
+    localApiServer.setTicketInbox(ticketInbox);
+    const deliveries = new Map<string, Promise<void>>();
+    function deliverProject(id: string) {
+      const current = deliveries.get(id);
+      if (current) return current;
+      const next = deliverTicketNotifications(projectBoards, ticketInbox, bridgeId, peerControl, id)
+        .catch(() => console.error('[Bridge] Could not drain project notification outbox:', id))
+        .finally(() => { deliveries.delete(id); });
+      deliveries.set(id, next);
+      return next;
+    }
+
+    const readBoardWorkers = async () => {
+      const [sessions, peers] = await Promise.all([store.listSessions(), peerCache.list()]);
+      const workers = [...peers, ...sessions];
+      const localSessions = new Map(sessions.map(row => [row.id, row]));
+      const peerWorkers = new Map(peers.map(row => [row.id, row]));
+      return async (projectId: string) => {
+        const board = projectBoards.inheritWorkers(projectId, workers);
+        const observed = new Map<string, { status?: Session['status']; blocked?: boolean }>();
+        for (const ticket of board.tickets) {
+          for (const id of ticket.sessionIds) {
+            const local = localSessions.get(id), remote = peerWorkers.get(id);
+            const status = local?.status ?? remote?.status;
+            if (!status || status === 'disconnected') continue;
+            const observation = { status, blocked: remote?.boardBlocked };
+            if (local) {
+              try { observation.blocked = await sessionBlocksTicket(local, attentionStore); }
+              catch { observation.blocked = undefined; }
+            }
+            observed.set(id, observation);
+          }
+        }
+        return projectBoards.recordWorkerStates(projectId, observed);
+      };
+    };
+    const observations = new Map<string, Promise<ProjectBoard>>();
+    let loadingWorkers: ReturnType<typeof readBoardWorkers> | undefined;
+    function observeProject(projectId: string) {
+      const previous = observations.get(projectId);
+      // Read-after-write clients receive their own newly committed snapshot, even during a background pass.
+      const next = Promise.resolve(previous).catch(() => undefined).then(async () => {
+        // All projects refreshing together share the session-list read. A queued refresh starts
+        // after its predecessor and never replays an older worker snapshot over a newer one.
+        loadingWorkers ??= readBoardWorkers().finally(() => { loadingWorkers = undefined; });
+        return (await loadingWorkers)(projectId);
+      })
+        .finally(() => { if (observations.get(projectId) === next) observations.delete(projectId); });
+      observations.set(projectId, next);
+      return next;
+    }
+    let maintenance: Promise<void> | undefined;
+    async function refreshProjects() {
+      const projects = projectBoards.list();
+      if (!projects.length) return;
+      await Promise.all(projects.map(async ({ id }) => {
+        try { await observeProject(id); }
+        catch { console.error('[Bridge] Could not refresh project workers:', id); }
+        void deliverProject(id);
+      }));
+    }
+    const ticketTimer = setInterval(() => {
+      if (!ready || updateAdmission.isFrozen) return;
+      maintenance ??= refreshProjects().catch(() => console.error('[Bridge] Could not refresh project boards'))
+        .finally(() => { maintenance = undefined; });
+    }, 30_000);
+    ticketTimer.unref();
     const hostResources = hostResourceSampler(dataDir);
     const dispatchCommand = async (message: VerifiedApplication): Promise<ApplicationJson> => {
       if (!ready) return { type: 'command_response', response: { requestId: message.envelope.messageId, success: false, error: 'bridge_offline' } };
@@ -1216,23 +1285,7 @@ program
       }
       let result: CommandResponse | undefined;
       await createCommandHandler({ bridgeId, hostResources, projectBoards, rememberedProjects: projectDirectory.list,
-        observeProject: async projectId => {
-          const [sessions, peers] = await Promise.all([store.listSessions(), peerCache.list()]);
-          const board = projectBoards.inheritWorkers(projectId, [...peers, ...sessions]);
-          const localSessions = new Map(sessions.map(row => [row.id, row]));
-          const peerWorkers = new Map(peers.map(row => [row.id, row]));
-          const observed = new Map<string, boolean>();
-          for (const ticket of board.tickets) {
-            for (const id of ticket.sessionIds) {
-              const local = localSessions.get(id);
-              try {
-                const blocked = local ? await sessionBlocksTicket(local, attentionStore) : peerWorkers.get(id)?.boardBlocked;
-                if (blocked !== undefined) observed.set(id, blocked);
-              } catch { /* Preserve the last observation if a worker disappears mid-read. */ }
-            }
-          }
-          return projectBoards.recordBlockers(projectId, observed);
-        }, security, sessionController, attentionStore, updates, updateEffects, pullRequestStatuses,
+        observeProject, security, sessionController, attentionStore, updates, updateEffects, pullRequestStatuses,
         directAddress: () => addressed?.address() ?? null, pullRequestReview,
         modelRouting: () => modelRouting,
         // Commands may arrive during bootstrap; only board reads resolve this late-bound source.
@@ -1243,6 +1296,10 @@ program
         publishAttentionChanged: (sessionId) => { localApiServer.emit('event', { sessionId, eventName: 'AttentionSnapshot', data: {} }); },
         publishCommandResponse: async response => { result = response; },
       })(message.application.data as unknown as Parameters<ReturnType<typeof createCommandHandler>>[0], message);
+      if (route.command === 'mutate_project_board' || route.command === 'get_project_board') {
+        const payload = (message.application.data as { payload?: { projectId?: unknown } } | null)?.payload;
+        if (result?.success && typeof payload?.projectId === 'string') void deliverProject(payload.projectId);
+      }
       return applicationJson({ type: 'command_response', response: result ?? { requestId: route.requestId, success: false, error: 'bridge_error' } });
     };
     localApiServer.setSecurity(security, { protocolVersion: 1, ownerId: auth.ownerId, bridgeId, endpoint: security.endpoint,
@@ -1317,9 +1374,11 @@ program
     function shutdown(): Promise<void> {
       shutdownRun ??= (async () => {
         clearInterval(autoUpdateTimer);
+        clearInterval(ticketTimer);
         console.log('\n[Bridge] Shutting down...');
         try {
-          await Promise.all([peerCache.stop(), projectDirectory.stop()]);
+          await maintenance;
+          await Promise.all([...deliveries.values(), peerCache.stop(), projectDirectory.stop()]);
           await pullRequestEvents.stop();
           attentionStore.stopNotifications();
           stopPushSessionObserver();

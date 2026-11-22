@@ -1,3 +1,5 @@
+import type { TicketNotificationInbox } from './ticket-notifications.js';
+import { TICKET_NOTIFICATION_WIRE, TICKET_NOTIFICATION_INBOX } from './ticket-notification-protocol.js';
 import { PROJECT_DIRECTORY, type ProjectDirectoryEntry } from './project-directory-protocol.js';
 import { INSTRUCTIONS_LOCAL, INSTRUCTIONS_SYNC, INSTRUCTIONS_WIRE } from './instructions-protocol.js';
 import { mergeGlobal, readRevision } from './instructions.js';
@@ -244,6 +246,9 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   private localEventBytes = 0;
   private readonly localEventWaiters = new Set<() => void>();
 
+  private ticketInbox?: TicketNotificationInbox;
+  setTicketInbox(inbox: TicketNotificationInbox): void { this.ticketInbox = inbox; }
+
   private localProjects?: () => readonly ProjectDirectoryEntry[];
 
   setLocalProjects(list: () => readonly ProjectDirectoryEntry[]): void {
@@ -431,6 +436,28 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     }
     if (route.kind !== 'http') throw new Error('Invalid application route');
     const routePath = route.path.split('?')[0];
+    if (routePath === TICKET_NOTIFICATION_INBOX || routePath === TICKET_NOTIFICATION_WIRE) {
+      await this.security.revalidate(message.principal);
+      if (!this.ticketInbox) return { status: 503, body: { error: 'Ticket inbox unavailable' } };
+      const endpoint = message.principal.endpoint;
+      if (routePath === TICKET_NOTIFICATION_INBOX) {
+        if (endpoint.kind !== 'local-cli') return { status: 403, body: { error: 'permission_denied' } };
+        const query = new URL(route.path, 'http://localhost').searchParams;
+        const after = query.get('after') ?? '0', limit = query.get('limit') ?? '50';
+        if (!/^\d+$/.test(after) || !Number.isSafeInteger(Number(after)) ||
+            !/^\d+$/.test(limit) || Number(limit) < 1 || Number(limit) > 100)
+          return { status: 400, body: { error: 'Invalid notification cursor or limit' } };
+        return { status: 200, body: applicationJson(this.ticketInbox.list(Number(after), Number(limit))) };
+      }
+      const home = this.security.peerBridges().find(peer => peer.endpoint.id === endpoint.id);
+      if (endpoint.kind !== 'bridge' || !home) return { status: 403, body: { error: 'permission_denied' } };
+      const body = (message.application.data as { body?: unknown } | null)?.body;
+      try {
+        return { status: 200, body: { id: this.ticketInbox.receive(home.bridgeId, body) } };
+      } catch {
+        return { status: 400, body: { error: 'Could not store ticket notification' } };
+      }
+    }
     if (routePath === PROJECT_DIRECTORY) {
       const { endpoint } = message.principal;
       if (endpoint.kind !== 'bridge' || !this.security.peerBridges().some(peer => peer.endpoint.id === endpoint.id))

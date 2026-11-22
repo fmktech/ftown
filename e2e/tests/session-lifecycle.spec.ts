@@ -218,6 +218,27 @@ test.describe("session lifecycle", () => {
       await board.getByLabel("Ticket title").fill("Verify the handoff");
       await board.getByRole("button", { name: "Add ticket" }).click();
       await expect(board.getByRole("region", { name: "Backlog" }).getByText("Verify the handoff")).toBeVisible();
+      const card = board.getByRole("article").filter({ has: page.getByRole("button", { name: "Verify the handoff", exact: true }) });
+      await card.getByRole("button", { name: "Verify the handoff" }).click();
+      const detail = page.getByRole("dialog", { name: "Verify the handoff" });
+      await detail.getByLabel("Description").fill("Confirm the build on the assigned bridge.");
+      await detail.getByLabel("Assignee").selectOption("bridge/" + readBridgePointer().bridgeId);
+      await detail.getByRole("button", { name: "Save changes" }).click();
+      await detail.getByLabel("New comment").fill("Ready for verification.");
+      await detail.getByRole("button", { name: "Add comment" }).click();
+      await expect(detail.getByText("Ready for verification.", { exact: true })).toBeVisible();
+      await detail.getByLabel("Subtask title").fill("Check the build");
+      await detail.getByRole("button", { name: "Add subtask" }).click();
+      await expect(detail.getByRole("button", { name: "Check the build" })).toBeVisible();
+      await detail.getByRole("button", { name: "Close ticket" }).click();
+      const review = board.getByRole("region", { name: "Review", exact: true });
+      await card.getByTitle("Drag Verify the handoff").dragTo(review);
+      await expect(review.getByRole("button", { name: "Verify the handoff" })).toBeVisible();
+      await expect.poll(async () => {
+        const { body } = await bridgeApiFetch("GET", "/api/tickets/inbox?limit=100");
+        return (body as { notifications: { projectName: string; reason: string; stage: string }[] }).notifications
+          .filter(event => event.projectName === project).map(event => [event.reason, event.stage]);
+      }).toEqual([["assignment", "Backlog"], ["stage", "Review"]]);
       await target.getByRole("button", { name: new RegExp(name) }).click();
       await expect(board).toBeHidden();
       await target.getByRole("button", { name: `More actions for ${project}` }).click();
@@ -231,7 +252,7 @@ test.describe("session lifecycle", () => {
       await expect(renamedProject.getByRole("button", { name: new RegExp(name) })).toBeVisible();
       await renamedProject.getByRole("button", { name: /^Open board for / }).click();
       const renamedBoard = page.getByRole("main").getByRole("region", { name: renamed + " board" });
-      await expect(renamedBoard.getByText("Verify the handoff")).toBeVisible();
+      await expect(renamedBoard.getByRole("button", { name: "Verify the handoff", exact: true })).toBeVisible();
       await renamedBoard.getByRole("button", { name: "Back to workspace" }).click();
       await renamedProject.getByRole("button", { name: `More actions for ${renamed}` }).click();
       await page.getByRole("menuitem", { name: "Project settings" }).click();

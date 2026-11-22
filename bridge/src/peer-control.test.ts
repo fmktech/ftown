@@ -1,3 +1,6 @@
+import { ProjectBoardStore } from './project-board-store.js';
+import { TicketNotificationInbox, deliverTicketNotifications } from './ticket-notifications.js';
+import { TICKET_NOTIFICATION_INBOX, TICKET_NOTIFICATION_WIRE } from './ticket-notification-protocol.js';
 import { startPeerProjectDirectory } from './peer-session-cache.js';
 import { PROJECT_DIRECTORY } from './project-directory-protocol.js';
 import assert from 'node:assert/strict';
@@ -287,6 +290,54 @@ async function linked(t: TestContext, w: World, deskChain: Chain = w.both, api?:
   const settle = async () => { await peers.linked('Desk').catch(() => false); };
   return { peers, transport, studioLinks, deskLinks, connections, studio, desk, settle };
 }
+
+test('offline ticket assignments arrive once after restart and later stages follow the assignee', async t => {
+  const w = await world();
+  const remote = new LocalApiServer();
+  const { peers, desk, studio, transport } = await linked(t, w, w.both, remote);
+  remote.setSecurity(desk, { protocolVersion: 1, ownerId: w.root.accountId, bridgeId: desk.bridgeId,
+    endpoint: desk.endpoint, relayUserId: w.root.accountId }, async () => null);
+  const dir = await mkdtemp(join(tmpdir(), 'ftown-ticket-delivery-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const localInbox = new TicketNotificationInbox(join(dir, 'local.sqlite'), studio.bridgeId);
+  const remotePath = join(dir, 'remote.sqlite');
+  remote.setTicketInbox(new TicketNotificationInbox(remotePath, desk.bridgeId));
+  const projectId = crypto.randomUUID(), ticketId = crypto.randomUUID();
+  const base = { projectId, bridgeId: studio.bridgeId };
+  let boards = new ProjectBoardStore(dir, studio.bridgeId);
+  boards.mutate({ ...base, action: 'create_project', name: 'Demo' });
+  boards.mutate({ ...base, action: 'create_ticket', ticketId, title: 'Inspect', assignee: { kind: 'bridge', bridgeId: desk.bridgeId } });
+  transport.online = false;
+  await deliverTicketNotifications(boards, localInbox, studio.bridgeId, new PeerControl(studio, transport), projectId);
+  boards = new ProjectBoardStore(dir, studio.bridgeId);
+  const [{ seq, ...notice }] = boards.pendingNotifications(projectId);
+  assert.equal(notice.reason, 'assignment');
+  transport.online = true;
+  assert.equal(await peers.connectDirect(desk.bridgeId), true);
+  // The recipient commits, but the sender restarts before recording that acknowledgement.
+  assert.equal((await peers.directHttp(desk.bridgeId, TICKET_NOTIFICATION_WIRE, notice)).status, 200);
+  const remoteInbox = new TicketNotificationInbox(remotePath, desk.bridgeId);
+  remote.setTicketInbox(remoteInbox);
+  boards.mutate({ ...base, action: 'update_ticket', ticketId, stage: 'Review' });
+  await deliverTicketNotifications(boards, localInbox, studio.bridgeId, peers, projectId);
+  assert.deepEqual(boards.pendingNotifications(projectId), []);
+  const cli = await generateEndpoint(w.root.accountId, 'local-cli');
+  await desk.policy.provisionLocalEndpoint(cli.endpoint);
+  const principal = await desk.policy.principal(cli.endpoint.id);
+  const read = async (after: number, limit: number) => {
+    const result = await remote.dispatchSecure({ principal,
+      application: { route: { kind: 'http', method: 'GET', path: TICKET_NOTIFICATION_INBOX + '?after=' + after + '&limit=' + limit } },
+    } as VerifiedApplication) as { status: number; body: ReturnType<TicketNotificationInbox['list']> };
+    assert.equal(result.status, 200);
+    return result.body;
+  };
+  const page = await read(0, 1);
+  assert.deepEqual(page.notifications.map(n => [n.reason, n.homeBridgeId, n.ticketId]), [['assignment', studio.bridgeId, ticketId]]);
+  assert.deepEqual((await read(page.nextCursor, 100)).notifications.map(n => [n.reason, n.stage]), [['stage', 'Review']]);
+  boards.mutate({ ...base, action: 'update_ticket', ticketId, assignee: { kind: 'bridge', bridgeId: studio.bridgeId } });
+  await deliverTicketNotifications(boards, localInbox, studio.bridgeId, peers, projectId);
+  assert.deepEqual(localInbox.list(0, 10).notifications.map(n => [n.reason, n.bridgeId]), [['assignment', studio.bridgeId]]);
+});
 
 test('an empty project is discoverable across a direct link and remembered after a disconnected restart', async t => {
   const w = await world();
@@ -614,7 +665,7 @@ test('the encrypted relay cannot admit direct-only requests', async t => {
   const channel = CHANNEL(w);
   const route = { transport: 'cloud' as const, channel, bridgeId: recipient.bridgeId, pairId: null };
   const id = crypto.randomUUID();
-  for (const path of [TRANSFER_WIRE, TRANSFER_LOCAL, INSTRUCTIONS_LOCAL, INSTRUCTIONS_SYNC, INSTRUCTIONS_WIRE, PROJECT_DIRECTORY]) {
+  for (const path of [TRANSFER_WIRE, TRANSFER_LOCAL, INSTRUCTIONS_LOCAL, INSTRUCTIONS_SYNC, INSTRUCTIONS_WIRE, PROJECT_DIRECTORY, TICKET_NOTIFICATION_WIRE]) {
     const packet = await sender.sealToPeer(peer, 'application',
       { type: 'application', route: { kind: 'http', method: 'POST', path, requestId: id }, data: {}, mcp: null },
       channel, id, recipient.receiverEpoch, TRANSFER_REQUEST_TTL_MS);
