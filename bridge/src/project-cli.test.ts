@@ -1,0 +1,68 @@
+import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import test from 'node:test';
+import { runFtown } from './ftown-cli.js';
+import { ProjectBoardStore, projectBoardPage } from './project-board-store.js';
+import { secureFixture } from './security/bridge/fixtures.test.js';
+
+test('a session can address its remote project by name, read every page and disambiguate projects by ID', async t => {
+  const work = mkdtempSync(join(tmpdir(), 'ftown-project-cli-'));
+  t.after(() => rmSync(work, { recursive: true, force: true }));
+  const remote = new ProjectBoardStore(join(work, 'remote'), 'remote');
+  const projectId = randomUUID();
+  const target = { bridgeId: 'remote', projectId };
+  remote.mutate({ ...target, action: 'create_project', name: 'Product' });
+  const ids = Array.from({ length: 13 }, () => randomUUID());
+  for (const ticketId of ids) remote.mutate({ ...target, action: 'create_ticket', ticketId, title: 'A task', body: 'a'.repeat(30_000) });
+  const ticketId = ids.at(-1)!;
+  for (let n = 0; n < 12; n++) remote.mutate({ ...target, action: 'add_ticket_comment', ticketId, commentId: randomUUID(), text: 'Comment ' + n }, 'Worker');
+  let duplicate = false;
+  const home = join(work, '.ftown');
+  mkdirSync(home);
+  const secure = await secureFixture(home, async (url, init) => {
+    const route = new URL(String(url)).pathname;
+    if (route === '/api/project-board/list_projects') {
+      const projects = remote.list();
+      if (duplicate) projects.push({ id: randomUUID(), bridgeId: 'bridge', name: 'Product' });
+      return Response.json({ homeBridgeId: 'bridge', projects });
+    }
+    const forwarded = JSON.parse(String(init?.body));
+    if (route !== '/api/peers/http' || forwarded.bridge !== 'remote') return Response.json({ error: 'Wrong home bridge' }, { status: 404 });
+    const payload = forwarded.body;
+    if (forwarded.path === '/api/project-board/get_ticket_comments') {
+      return Response.json(remote.comments(payload.projectId, payload.ticketId, payload.after));
+    }
+    if (forwarded.path === '/api/project-board/get_project_board') return Response.json(projectBoardPage(remote.read(payload.projectId), payload.cursor));
+    if (forwarded.path === '/api/project-board/mutate_project_board') return Response.json(projectBoardPage(remote.mutate({ ...payload, bridgeId: 'remote' })));
+    return Response.json({ error: 'Unknown command' }, { status: 404 });
+  });
+  t.after(() => secure.security.close());
+  writeFileSync(join(home, 'bridge.json'), JSON.stringify(secure.pointer));
+  const previous = { fetch: globalThis.fetch, dir: process.env.FTOWN_DATA_DIR, bridge: process.env.FTOWN_BRIDGE };
+  process.env.FTOWN_DATA_DIR = home;
+  delete process.env.FTOWN_BRIDGE;
+  globalThis.fetch = secure.fetch;
+  t.after(() => {
+    globalThis.fetch = previous.fetch;
+    if (previous.dir === undefined) delete process.env.FTOWN_DATA_DIR; else process.env.FTOWN_DATA_DIR = previous.dir;
+    if (previous.bridge === undefined) delete process.env.FTOWN_BRIDGE; else process.env.FTOWN_BRIDGE = previous.bridge;
+  });
+  const messages: string[] = [];
+  t.mock.method(console, 'log', (message: string) => messages.push(message));
+  t.mock.method(console, 'error', (message: string) => messages.push(message));
+  const tickets = (...args: string[]) => runFtown(['tickets', '--json', ...args]);
+  assert.equal(await tickets('list', '--project', 'Product'), 0, messages.at(-1));
+  assert.deepEqual(JSON.parse(messages.pop()!).tickets.map((ticket: { id: string }) => ticket.id), ids);
+  assert.equal(await tickets('update', ticketId, '--project', 'Product', '--stage', 'Review', '--link', 'worker'), 0);
+  assert.equal(JSON.parse(messages.pop()!).ticket.stage, 'Review');
+  assert.deepEqual(remote.read(projectId).tickets.at(-1)?.sessionIds, ['worker']);
+  duplicate = true;
+  assert.equal(await tickets('comments', ticketId, '--project', 'Product'), 1);
+  assert.match(messages.pop()!, /Ambiguous project/);
+  assert.equal(await tickets('comments', ticketId, '--project', projectId), 0);
+  assert.deepEqual(JSON.parse(messages.pop()!).comments.map((comment: { text: string }) => comment.text),
+    Array.from({ length: 12 }, (_, i) => 'Comment ' + (11 - i)));
+});

@@ -716,7 +716,10 @@ Open **Board** beside a project to create tickets, change their stage, and link 
 
 Click a ticket title to edit its description, assign it to yourself or a paired bridge, add comments, and create subtasks. Each subtask has its own stage, assignee and linked workers. Drag a card to a column or use its stage selector. Linked sessions show their last reported status. Running work advances a backlog ticket to **In progress**. Use **Review** and **Done** when the work is ready.
 
-Assigning a ticket to a bridge or changing its stage while assigned sends a message to that bridge. The project home retries delivery when a bridge is offline. Run `ftown tickets inbox` on the assigned bridge to read messages. Use `--json` for automation and pass the returned `nextCursor` to `--after` to read the next page.
+Assigning a ticket to a bridge or changing its stage while assigned sends a message to that bridge. The project home retries delivery when a bridge is offline. Run `ftown tickets inbox` on the assigned bridge, or `ftown tickets inbox --bridge <assigned-bridge>` from a paired bridge. Use `--json` for automation and pass the returned `nextCursor` to `--after` to read the next page.
+
+Sessions can operate the same board with `ftown projects` and `ftown tickets`. For example, run `ftown tickets list --project App --json` to find a ticket, then `ftown tickets update <ticket-id> --project App --stage Review` to move it. The CLI resolves the project’s home bridge from the shared directory. See the [ftown skill](bridge/skills/ftown/SKILL.md) for creation, assignment, comments and subtasks.
+
 
 
 When the working directory is blank, the destination bridge creates and reuses a directory under `~/projects`. Set `FTOWN_PROJECT_DIR` in the bridge process environment to use another root, such as `/data/projects`. Simple names like `demo` map directly to `~/projects/demo`. Labels that require normalization get a readable slug and a short hash so distinct labels can use separate directories. An explicit working directory or Git worktree takes precedence.

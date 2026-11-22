@@ -339,6 +339,33 @@ test('offline ticket assignments arrive once after restart and later stages foll
   assert.deepEqual(localInbox.list(0, 10).notifications.map(n => [n.reason, n.bridgeId]), [['assignment', studio.bridgeId]]);
 });
 
+test('sessions on a paired bridge operate the project home board and read its ticket inbox', async t => {
+  const w = await world();
+  const remote = new LocalApiServer();
+  const { peers, desk, studio } = await linked(t, w, w.both, remote);
+  remote.setSecurity(desk, { protocolVersion: 1, ownerId: w.root.accountId, bridgeId: desk.bridgeId,
+    endpoint: desk.endpoint, relayUserId: w.root.accountId }, async () => null);
+  const dir = await mkdtemp(join(tmpdir(), 'ftown-board-cli-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const projectBoards = new ProjectBoardStore(dir, desk.bridgeId);
+  const inbox = new TicketNotificationInbox(join(dir, 'inbox.sqlite'), desk.bridgeId);
+  remote.setTicketInbox(inbox);
+  remote.setBoardCommands({ bridgeId: desk.bridgeId, security: desk, projectBoards, ready: () => true, deliverProject: async () => {} });
+  const projectId = crypto.randomUUID(), ticketId = crypto.randomUUID();
+  const post = (action: string, body: ApplicationJson) => peers.http(desk.bridgeId, 'POST', '/api/project-board/' + action, body);
+  const write = (body: Record<string, ApplicationJson>) => post('mutate_project_board', { projectId, ...body });
+  assert.equal((await write({ action: 'create_project', name: 'Workflow' })).status, 200);
+  assert.deepEqual((await post('list_projects', {})).body, { homeBridgeId: desk.bridgeId, projects: [{ id: projectId, name: 'Workflow', bridgeId: desk.bridgeId }] });
+  assert.equal((await write({ action: 'create_ticket', ticketId, title: 'Review proposal' })).status, 200);
+  assert.equal((await write({ action: 'add_ticket_comment', ticketId, text: 'Ready', commentId: crypto.randomUUID() })).status, 200);
+  const page = (await post('get_ticket_comments', { projectId, ticketId })).body as { comments: { text: string; author: string }[] };
+  assert.equal(page.comments[0].text, 'Ready');
+  assert.equal(page.comments[0].author, desk.peerBridges().find(peer => peer.bridgeId === studio.bridgeId)?.label);
+  assert.deepEqual((await post('get_project_board', { projectId })).body, JSON.parse(JSON.stringify(projectBoards.read(projectId))));
+  assert.equal((await write({ action: 'delete_project', bridgeId: studio.bridgeId })).status, 400);
+  assert.deepEqual(await peers.http(desk.bridgeId, 'GET', TICKET_NOTIFICATION_INBOX), { status: 200, body: { notifications: [], nextCursor: 0 } });
+});
+
 test('an empty project is discoverable across a direct link and remembered after a disconnected restart', async t => {
   const w = await world();
   const remote = new LocalApiServer();

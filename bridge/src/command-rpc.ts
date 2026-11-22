@@ -1,8 +1,8 @@
 import { readRevision, saveInstructions } from './instructions.js';
 import { exec } from 'node:child_process';
-import { ProjectBoardChanged, projectBoardPage, type HomeProject, type ProjectBoard, type ProjectBoardStore } from './project-board-store.js';
+import { runProjectBoardCommand, type BoardCommandDeps } from './project-board-commands.js';
+import { ProjectBoardChanged } from './project-board-store.js';
 import type { VerifiedApplication } from './security/protocol.js';
-import type { BridgeSecurityService } from './security/bridge/security.js';
 import { BridgeSecurityError } from './security/bridge/errors.js';
 import { ledgerChainPage, ledgerHeadAnswer, parseLedgerChainQuery, parseLedgerHeadQuery, type HeldLedger } from './security/bridge/ledger-rpc.js';
 import { appendFileSync, mkdirSync } from 'node:fs';
@@ -80,12 +80,7 @@ interface ExecError {
   code: number;
 }
 
-export interface CommandRpcDeps {
-  bridgeId: string;
-  security?: BridgeSecurityService;
-  projectBoards?: ProjectBoardStore;
-  rememberedProjects?: () => Promise<HomeProject[]>;
-  observeProject?: (projectId: string) => Promise<ProjectBoard>;
+export interface CommandRpcDeps extends BoardCommandDeps {
   hostResources?: ReturnType<typeof import('./host-resources.js').hostResourceSampler>;
   sessionController: SessionController;
   pullRequestStatuses?: PullRequestStatusService;
@@ -339,35 +334,8 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
         case 'get_project_board':
         case 'get_ticket_comments':
         case 'mutate_project_board': {
-          if (!verified || !deps.security || !deps.projectBoards || payloadBridgeId !== bridgeId) throw new BridgeSecurityError('approval_required');
-          const writing = command.type === 'mutate_project_board';
-          await deps.security.policy.revalidate(verified.principal, writing ? 'control' : 'read');
-          const payload = command.payload as Record<string, unknown>;
-          if (command.type === 'list_projects') {
-            const remembered = await deps.rememberedProjects?.() ?? [];
-            await deps.security.policy.revalidate(verified.principal, 'read');
-            response = { requestId: command.requestId, success: true, data: { projects: [...deps.projectBoards.list(), ...remembered] } };
-            break;
-          }
-          if (typeof payload.projectId !== 'string') throw new Error('Missing project ID');
-          if (command.type === 'get_ticket_comments') {
-            if (typeof payload.ticketId !== 'string' || (payload.after !== undefined && !Number.isSafeInteger(payload.after))) throw new Error('Invalid comment request');
-            response = { requestId: command.requestId, success: true, data: { ...deps.projectBoards.comments(payload.projectId, payload.ticketId, payload.after as number | undefined) } };
-            break;
-          }
-          const assignee = payload.assignee as { kind?: string; bridgeId?: string } | null | undefined;
-          if (writing && assignee?.kind === 'bridge' && assignee.bridgeId !== bridgeId &&
-              !deps.security.peerBridges().some(peer => peer.bridgeId === assignee.bridgeId)) throw new Error('Choose a paired bridge');
-          const endpoint = verified.principal.endpoint;
-          const author = endpoint.kind === 'bridge'
-            ? deps.security.peerBridges().find(peer => peer.endpoint.id === endpoint.id)?.label || endpoint.id
-            : 'User';
-          let board = writing ? deps.projectBoards.mutate(payload, author) : deps.projectBoards.read(payload.projectId);
-          if (board.tickets.some(ticket => ticket.sessionIds.length) && payload.cursor === undefined && deps.observeProject) {
-            board = await deps.observeProject(payload.projectId);
-            await deps.security.policy.revalidate(verified.principal, 'read');
-          }
-          response = { requestId: command.requestId, success: true, data: { ...projectBoardPage(board, payload.cursor) } };
+          const data = await runProjectBoardCommand(deps, command.type, command.payload as Record<string, unknown>, verified?.principal);
+          response = { requestId: command.requestId, success: true, data };
           break;
         }
         case 'get_instructions':

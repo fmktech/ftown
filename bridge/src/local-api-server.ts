@@ -1,6 +1,9 @@
+import { runProjectBoardCommand, type BoardCommandDeps } from './project-board-commands.js';
+import { ProjectBoardChanged } from './project-board-store.js';
+import { BridgeSecurityError } from './security/bridge/errors.js';
 import type { TicketNotificationInbox } from './ticket-notifications.js';
 import { TICKET_NOTIFICATION_WIRE, TICKET_NOTIFICATION_INBOX } from './ticket-notification-protocol.js';
-import { PROJECT_DIRECTORY, type ProjectDirectoryEntry } from './project-directory-protocol.js';
+import { boardCommandForPath, PROJECT_DIRECTORY, type ProjectDirectoryEntry } from './project-directory-protocol.js';
 import { INSTRUCTIONS_LOCAL, INSTRUCTIONS_SYNC, INSTRUCTIONS_WIRE } from './instructions-protocol.js';
 import { mergeGlobal, readRevision } from './instructions.js';
 import { peerResources, type HostResources } from './host-resources.js';
@@ -249,6 +252,9 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   private ticketInbox?: TicketNotificationInbox;
   setTicketInbox(inbox: TicketNotificationInbox): void { this.ticketInbox = inbox; }
 
+  private boardCommands?: BoardCommandDeps & { ready(): boolean; deliverProject(id: string): Promise<void> };
+  setBoardCommands(commands: NonNullable<LocalApiServer['boardCommands']>): void { this.boardCommands = commands; }
+
   private localProjects?: () => readonly ProjectDirectoryEntry[];
 
   setLocalProjects(list: () => readonly ProjectDirectoryEntry[]): void {
@@ -436,12 +442,31 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     }
     if (route.kind !== 'http') throw new Error('Invalid application route');
     const routePath = route.path.split('?')[0];
+    const boardCommand = boardCommandForPath(route.path);
+    if (route.method === 'POST' && boardCommand) {
+      const endpoint = message.principal.endpoint;
+      if (endpoint.kind !== 'local-cli' && endpoint.kind !== 'bridge') return { status: 403, body: { error: 'permission_denied' } };
+      if (!this.boardCommands?.ready()) return { status: 503, body: { error: 'Project boards unavailable' } };
+      const body = (message.application.data as { body?: ApplicationJson } | null)?.body ?? {};
+      if (typeof body !== 'object' || Array.isArray(body) || 'bridgeId' in body) return { status: 400, body: { error: 'Invalid project board payload' } };
+      try {
+        const data = await runProjectBoardCommand(this.boardCommands, boardCommand, { ...body, bridgeId: this.security.bridgeId }, message.principal);
+        if ((boardCommand === 'mutate_project_board' || boardCommand === 'get_project_board') && typeof body.projectId === 'string') {
+          void this.boardCommands.deliverProject(body.projectId);
+        }
+        return { status: 200, body: applicationJson(data) };
+      } catch (error) {
+        if (error instanceof BridgeSecurityError) throw error;
+        if (error instanceof ProjectBoardChanged) return { status: 409, body: { error: error.message, code: 'project_board_changed' } };
+        return { status: 400, body: { error: error instanceof Error ? error.message : 'Invalid project board request' } };
+      }
+    }
     if (routePath === TICKET_NOTIFICATION_INBOX || routePath === TICKET_NOTIFICATION_WIRE) {
       await this.security.revalidate(message.principal);
       if (!this.ticketInbox) return { status: 503, body: { error: 'Ticket inbox unavailable' } };
       const endpoint = message.principal.endpoint;
       if (routePath === TICKET_NOTIFICATION_INBOX) {
-        if (endpoint.kind !== 'local-cli') return { status: 403, body: { error: 'permission_denied' } };
+        if (endpoint.kind !== 'local-cli' && endpoint.kind !== 'bridge') return { status: 403, body: { error: 'permission_denied' } };
         const query = new URL(route.path, 'http://localhost').searchParams;
         const after = query.get('after') ?? '0', limit = query.get('limit') ?? '50';
         if (!/^\d+$/.test(after) || !Number.isSafeInteger(Number(after)) ||

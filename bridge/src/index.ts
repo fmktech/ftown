@@ -1204,6 +1204,8 @@ program
     const peerCache = await startPeerSessionCache(peerControl, join(dataDir, "peer-sessions-" + security.endpoint.id + ".json"));
     const projectDirectory = await startPeerProjectDirectory(peerControl, join(dataDir, "peer-projects-" + security.endpoint.id + ".json"));
     localApiServer.setLocalProjects(() => projectBoards.list());
+    localApiServer.setBoardCommands({ bridgeId, security, projectBoards, rememberedProjects: projectDirectory.list, observeProject,
+      ready: () => ready && !updateAdmission.isFrozen, deliverProject });
     const ticketInbox = new TicketNotificationInbox(join(dataDir, 'ticket-inboxes', security.endpoint.id + '.sqlite'), bridgeId);
     localApiServer.setTicketInbox(ticketInbox);
     const deliveries = new Map<string, Promise<void>>();
