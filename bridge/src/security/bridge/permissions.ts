@@ -1,3 +1,4 @@
+import { TICKET_NOTIFICATION_WIRE, TICKET_NOTIFICATION_INBOX } from '../../ticket-notification-protocol.js';
 import { PROJECT_DIRECTORY } from '../../project-directory-protocol.js';
 import { INSTRUCTIONS_LOCAL, INSTRUCTIONS_SYNC, INSTRUCTIONS_WIRE } from '../../instructions-protocol.js';
 import { TRANSFER_LOCAL, TRANSFER_WIRE } from '../../folder-transfer-protocol.js';
@@ -7,7 +8,7 @@ import { SESSION_BOARD_CHUNK_BYTES } from '../../session-board-protocol.js';
 
 export interface OperationPermission { permission: EndpointPermission; mutating: boolean; operation: string; sessionId: string | null }
 const session = /^[A-Za-z0-9_-]+$/;
-const readCommands = new Set(['list_projects', 'get_project_board', 'get_instructions', 'get_direct_address', 'get_pull_request_statuses', 'session_preview_status', 'session_preview_chunk', 'get_bridge_update', 'list_sessions', 'get_host_resources', 'get_history', 'get_session_usage', 'get_sessions_usage', 'get_session_attention', 'get_attention_summary',
+const readCommands = new Set(['list_projects', 'get_project_board', 'get_ticket_comments', 'get_instructions', 'get_direct_address', 'get_pull_request_statuses', 'session_preview_status', 'session_preview_chunk', 'get_bridge_update', 'list_sessions', 'get_host_resources', 'get_history', 'get_session_usage', 'get_sessions_usage', 'get_session_attention', 'get_attention_summary',
   'ledger_head', 'ledger_chain',
   'get_model_routing', 'get_accounts', 'get_session_board', 'list_native_sessions']);
 const controlCommands = new Set(['mutate_project_board', 'set_instructions', 'update_bridge', 'create_session', 'stop_session', 'dismiss_session_block', 'retry_session', 'handoff_session', 'send_message', 'rename_session', 'remove_session',
@@ -29,6 +30,8 @@ export function classifyHttp(method: string, path: string): OperationPermission 
   const url = new URL(path, 'http://bridge.invalid');
   if (url.origin !== 'http://bridge.invalid' || url.pathname.split('/').some(part => part === '.' || part === '..')
     || path.split('?')[0] !== url.pathname) return deny();
+  if (url.pathname === TICKET_NOTIFICATION_WIRE) return method === 'POST' && !url.search ? result('control', 'ticket_notify') : deny();
+  if (url.pathname === TICKET_NOTIFICATION_INBOX) return method === 'GET' && queryAllows(url, ['after', 'limit']) ? result('read', 'ticket_inbox') : deny();
   if (url.pathname === PROJECT_DIRECTORY) return method === 'POST' && !url.search ? result('read', 'project_directory') : deny();
   if (url.pathname === INSTRUCTIONS_SYNC) return method === 'POST' && !url.search ? result('control', 'instructions_sync') : deny();
   if (url.pathname === INSTRUCTIONS_LOCAL || url.pathname === INSTRUCTIONS_WIRE) {

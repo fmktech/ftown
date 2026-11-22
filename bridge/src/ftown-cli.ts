@@ -13,15 +13,16 @@ import { runWorktrees } from './worktrees-cli.js';
 import { runPlan } from './plan-cli.js';
 import { runAccounts } from './accounts-cli.js';
 import { executeCli, isCliEntry } from './cli-entry.js';
-import { setPeerTarget } from './cli-client.js';
+import { api, loadPointer, setPeerTarget } from './cli-client.js';
 import { runInstructions } from './instructions-cli.js';
+import { TICKET_NOTIFICATION_INBOX, type TicketNotice } from './ticket-notification-protocol.js';
 import { runTransfer } from './transfer-cli.js';
 import { PEER_GROUPS, extractBridgeOption, runBridges } from './peers-cli.js';
 export { isCliEntry } from './cli-entry.js';
 
 export function usage(): string {
   return `Usage: ftown [bridge options]
-       ftown <setup|start|sessions|harness|env|accounts|security|quota|status|board|events|attention|brief|worktrees|plan|bridges|transfer|instructions> [args...]
+       ftown <setup|start|sessions|harness|env|accounts|security|quota|status|board|events|attention|brief|worktrees|plan|bridges|transfer|instructions|tickets> [args...]
 
 With no subcommand, start the bridge. Run setup explicitly before the first start.
 Add --bridge <name|id> (or set FTOWN_BRIDGE) to run sessions, status, board, events, attention, brief,
@@ -38,6 +39,7 @@ Subcommands:
   quota      Subscription quota left, routing advice and model lists per harness (--json for agents)
   status     Own status card: show, set or clear
   board      Child-session board for this session's tree
+  tickets     Read local project ticket messages (inbox [--after <sequence>] [--json])
   events     Tree event log for this session's tree
   attention  Answer or escalate questions routed from child sessions
   brief      Manager brief for a session (show, set, note)
@@ -70,6 +72,21 @@ export async function runFtown(argv: string[], start: (argv: string[]) => Promis
     setPeerTarget(PEER_GROUPS.has(group) ? target : null);
   }
   switch (group) {
+    case 'tickets': {
+      const [action, ...options] = args;
+      const flags = options.filter(option => option !== '--json');
+      const cursor = flags.length === 0 ? '0' : flags[1];
+      if (action !== 'inbox' || (flags.length > 0 && (flags.length !== 2 || flags[0] !== '--after')) || !/^\d+$/.test(cursor) || !Number.isSafeInteger(Number(cursor))) {
+        console.error('Usage: ftown tickets inbox [--after <sequence>] [--json]');
+        return 1;
+      }
+      const page = await api<{ notifications: (TicketNotice & { sequence: number })[]; nextCursor: number }>(
+        loadPointer(), 'GET', TICKET_NOTIFICATION_INBOX + '?after=' + cursor);
+      if (options.includes('--json')) console.log(JSON.stringify(page));
+      else if (!page.notifications.length) console.log('No ticket messages.');
+      else for (const event of page.notifications) console.log(event.sequence, event.projectName, event.title, event.reason, event.stage);
+      return 0;
+    }
     case 'bridges': return runBridges(args);
     case 'sessions': return runSessions(args);
     case 'harness': return runHarness(args);

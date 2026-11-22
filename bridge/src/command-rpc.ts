@@ -337,6 +337,7 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
         }
         case 'list_projects':
         case 'get_project_board':
+        case 'get_ticket_comments':
         case 'mutate_project_board': {
           if (!verified || !deps.security || !deps.projectBoards || payloadBridgeId !== bridgeId) throw new BridgeSecurityError('approval_required');
           const writing = command.type === 'mutate_project_board';
@@ -349,7 +350,19 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
             break;
           }
           if (typeof payload.projectId !== 'string') throw new Error('Missing project ID');
-          let board = writing ? deps.projectBoards.mutate(payload) : deps.projectBoards.read(payload.projectId);
+          if (command.type === 'get_ticket_comments') {
+            if (typeof payload.ticketId !== 'string' || (payload.after !== undefined && !Number.isSafeInteger(payload.after))) throw new Error('Invalid comment request');
+            response = { requestId: command.requestId, success: true, data: { ...deps.projectBoards.comments(payload.projectId, payload.ticketId, payload.after as number | undefined) } };
+            break;
+          }
+          const assignee = payload.assignee as { kind?: string; bridgeId?: string } | null | undefined;
+          if (writing && assignee?.kind === 'bridge' && assignee.bridgeId !== bridgeId &&
+              !deps.security.peerBridges().some(peer => peer.bridgeId === assignee.bridgeId)) throw new Error('Choose a paired bridge');
+          const endpoint = verified.principal.endpoint;
+          const author = endpoint.kind === 'bridge'
+            ? deps.security.peerBridges().find(peer => peer.endpoint.id === endpoint.id)?.label || endpoint.id
+            : 'User';
+          let board = writing ? deps.projectBoards.mutate(payload, author) : deps.projectBoards.read(payload.projectId);
           if (board.tickets.some(ticket => ticket.sessionIds.length) && payload.cursor === undefined && deps.observeProject) {
             board = await deps.observeProject(payload.projectId);
             await deps.security.policy.revalidate(verified.principal, 'read');

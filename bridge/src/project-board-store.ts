@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -6,32 +6,53 @@ import { z } from 'zod';
 import type { Session } from './types.js';
 import type { ProjectDirectoryEntry } from './project-directory-protocol.js';
 import type { AttentionStore } from './attention-store.js';
+import type { TicketNotice } from './ticket-notification-protocol.js';
 
 const id = z.uuid().refine(value => value === value.toLowerCase(), 'Expected a lowercase UUID');
 const name = z.string().trim().min(1).max(256);
 const stage = z.enum(['Backlog', 'In progress', 'Blocked', 'Review', 'Done']);
 const sessionId = z.string().regex(/^[a-zA-Z0-9_-]{1,200}$/);
 const title = z.string().trim().min(1).max(512);
+const assignee = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('user') }).strict(),
+  z.object({ kind: z.literal('bridge'), bridgeId: z.string().trim().min(1).max(256) }).strict(),
+]).nullable();
+// Keep rich text, newlines and tabs; exclude control characters outside the Markdown text format.
+function markdown(bytes: number) {
+  return z.string().regex(/^[^\x00-\x08\x0b\x0c\x0e-\x1f]*$/u).refine(text => Buffer.byteLength(text) <= bytes);
+}
+const ticketFields = { body: markdown(32 * 1024).optional(), assignee: assignee.optional(), parentTicketId: id.nullable().optional() };
 const projectTarget = z.object({ bridgeId: z.string(), projectId: id });
 const change = z.discriminatedUnion('action', [
   projectTarget.extend({ action: z.literal('create_project'), name }).strict(),
   projectTarget.extend({ action: z.literal('rename_project'), name }).strict(),
   projectTarget.extend({ action: z.literal('delete_project') }).strict(),
-  projectTarget.extend({ action: z.literal('create_ticket'), ticketId: id, title, stage: stage.optional(),
+  projectTarget.extend({ ...ticketFields, action: z.literal('create_ticket'), ticketId: id, title, stage: stage.optional(),
     sessionIds: z.array(sessionId).max(500).optional() }).strict(),
-  projectTarget.extend({ action: z.literal('update_ticket'), ticketId: id, title: title.optional(), stage: stage.optional(),
+  projectTarget.extend({ ...ticketFields, action: z.literal('update_ticket'), ticketId: id, title: title.optional(), stage: stage.optional(),
     addSessionId: sessionId.optional(), removeSessionId: sessionId.optional() }).strict(),
+  projectTarget.extend({ action: z.literal('add_ticket_comment'), ticketId: id, commentId: id,
+    text: markdown(8 * 1024).refine(value => !!value.trim()) }).strict(),
+  projectTarget.extend({ action: z.literal('delete_ticket'), ticketId: id }).strict(),
 ]);
 
 export type HomeProject = ProjectDirectoryEntry;
 type ProjectWorker = Pick<Session, 'id' | 'bridgeId' | 'parentSessionId' | 'parentBridgeId' | 'projectName'>;
-interface Ticket { id: string; title: string; stage: z.infer<typeof stage>; sessionIds: string[]; blocked: boolean }
+type Stage = z.infer<typeof stage>;
+type Assignee = z.infer<typeof assignee>;
+export type TicketNotification = TicketNotice & { seq: number };
+interface Ticket {
+  id: string; title: string; body: string; stage: Stage; assignee: Assignee; parentTicketId: string | null;
+  sessionIds: string[]; sessionStatuses: Record<string, Session['status']>; blocked: boolean; commentCount: number;
+}
+type WorkerState = { blocked?: boolean; status?: Session['status'] | 'disconnected' };
+type Routing = { destination: string | null; stage: Stage };
 export interface ProjectBoard { project: HomeProject; tickets: Ticket[] }
 
 /** Keep each command answer within the encrypted transport budget; a cursor pins the contents across requests. */
 export function projectBoardPage(board: ProjectBoard, cursor?: unknown) {
   const encoded = JSON.stringify(board);
-  const pageBytes = 200_000;
+  const pageBytes = 285_000;
   if (cursor === undefined && Buffer.byteLength(encoded) <= pageBytes) return board;
   const hash = createHash('sha256').update(encoded).digest('hex');
   let offset = 0;
@@ -50,6 +71,7 @@ export function projectBoardPage(board: ProjectBoard, cursor?: unknown) {
     tickets.push(ticket);
     bytes += size;
   }
+  if (!tickets.length && offset < board.tickets.length) throw new Error('Ticket exceeds the board transport limit');
   const next = offset + tickets.length;
   return { project: board.project, tickets, ...(next < board.tickets.length ? { nextCursor: hash + ':' + next } : {}) };
 }
@@ -64,6 +86,84 @@ export async function sessionBlocksTicket(session: Session, attention: Attention
   return !!(await attention.explicitSnapshot(session.id)).attention;
 }
 
+/** Upgrade the original board in place; interruption rolls back all schema changes. */
+function migrate(db: DatabaseSync): void {
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const version = Number(db.prepare('PRAGMA user_version').get()!.user_version);
+    if (version === 0) db.exec(`
+      ALTER TABLE tickets ADD COLUMN body TEXT NOT NULL DEFAULT '';
+      ALTER TABLE tickets ADD COLUMN assignee TEXT;
+      ALTER TABLE tickets ADD COLUMN parent_id TEXT REFERENCES tickets(id) ON DELETE SET NULL;
+      ALTER TABLE ticket_sessions ADD COLUMN observed_status TEXT;
+      CREATE TABLE comments (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, ticket_id TEXT NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+        text TEXT NOT NULL, author TEXT NOT NULL, created_at TEXT NOT NULL
+      );
+      CREATE INDEX comments_by_ticket ON comments(ticket_id, seq);
+      CREATE INDEX sessions_by_ticket ON ticket_sessions(ticket_id);
+      CREATE TABLE deleted_tickets (id TEXT PRIMARY KEY);
+      CREATE TABLE notification_outbox (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, ticket_id TEXT NOT NULL, payload TEXT NOT NULL);
+      PRAGMA user_version=1;
+    `);
+    else if (version !== 1) throw new Error('Unsupported project database version');
+    db.exec('COMMIT');
+  } catch (error) { db.exec('ROLLBACK'); throw error; }
+}
+
+function assigneeValue(value: Assignee): string | null {
+  return value ? JSON.stringify(value) : null;
+}
+
+function routingBefore(db: DatabaseSync): Map<string, Routing> {
+  const rows = db.prepare(`
+    SELECT t.id, json_extract(t.assignee, '$.bridgeId') AS destination,
+      CASE WHEN EXISTS(SELECT 1 FROM ticket_sessions s WHERE s.ticket_id=t.id AND s.blocked=1) THEN 'Blocked' ELSE t.stage END AS stage
+    FROM tickets t WHERE t.assignee IS NOT NULL
+  `).all();
+  return new Map(rows.map(row => [String(row.id), { destination: row.destination === null ? null : String(row.destination), stage: row.stage as Stage }]));
+}
+
+function queueChanges(db: DatabaseSync, before: Map<string, Routing>, board: ProjectBoard): void {
+  const insert = db.prepare('INSERT INTO notification_outbox(id, ticket_id, payload) VALUES(?, ?, ?)');
+  for (const ticket of board.tickets) {
+    if (ticket.assignee?.kind !== 'bridge') continue;
+    const bridgeId = ticket.assignee.bridgeId;
+    const old = before.get(ticket.id);
+    const current = ticket.blocked ? 'Blocked' : ticket.stage;
+    const reason = old?.destination !== bridgeId ? 'assignment' : old.stage !== current ? 'stage' : undefined;
+    if (!reason) continue;
+    const event: Omit<TicketNotification, 'seq'> = { id: randomUUID(), projectId: board.project.id, projectName: board.project.name,
+      ticketId: ticket.id, title: ticket.title, bridgeId, reason, stage: current, createdAt: new Date().toISOString() };
+    insert.run(event.id, ticket.id, JSON.stringify(event));
+  }
+}
+
+function linkWorker(db: DatabaseSync, session: string, ticket: string): void {
+  const link = db.prepare(`
+    INSERT INTO ticket_sessions (session_id, ticket_id) VALUES (?, ?)
+    ON CONFLICT(session_id) DO UPDATE SET ticket_id=excluded.ticket_id WHERE ticket_id<>excluded.ticket_id
+  `).run(session, ticket);
+  if (link.changes) {
+    db.prepare(`
+      UPDATE tickets SET stage='In progress' WHERE id=? AND stage='Backlog'
+      AND EXISTS(SELECT 1 FROM ticket_sessions WHERE session_id=? AND observed_status='running')
+    `).run(ticket, session);
+  }
+}
+
+function validateParent(db: DatabaseSync, ticketId: string, parentId: string | null | undefined): void {
+  if (!parentId) return;
+  if (!db.prepare('SELECT 1 FROM tickets WHERE id=?').get(parentId)) throw new Error('Parent ticket not found in this project');
+  const cycle = db.prepare(`
+    WITH RECURSIVE chain(id, parent_id) AS (
+      SELECT id, parent_id FROM tickets WHERE id=?
+      UNION SELECT t.id, t.parent_id FROM tickets t JOIN chain c ON t.id=c.parent_id
+    ) SELECT 1 FROM chain WHERE id=? LIMIT 1
+  `).get(parentId, ticketId);
+  if (cycle) throw new Error('A ticket cannot be its own ancestor');
+}
+
 /** Every visible project directory contains one fully initialized, independently restorable database. */
 export class ProjectBoardStore {
   private readonly root: string;
@@ -75,8 +175,18 @@ export class ProjectBoardStore {
     if (!id.safeParse(projectId).success) throw new Error('Invalid project ID');
     const path = join(this.root, projectId, 'board.sqlite');
     if (!existsSync(path)) throw new Error('Project not found on this bridge');
-    const db = new DatabaseSync(path, { readOnly });
-    try { return fn(db); } finally { db.close(); }
+    let db = new DatabaseSync(path, { readOnly });
+    try {
+      const version = Number(db.prepare('PRAGMA user_version').get()!.user_version);
+      if (version !== 1) {
+        if (readOnly) {
+          db.close();
+          db = new DatabaseSync(path);
+        }
+        migrate(db);
+      }
+      return fn(db);
+    } finally { db.close(); }
   }
 
   list(): HomeProject[] {
@@ -104,6 +214,7 @@ export class ProjectBoardStore {
             session_id TEXT PRIMARY KEY, ticket_id TEXT NOT NULL REFERENCES tickets(id), blocked INTEGER NOT NULL DEFAULT 0
           );
         `);
+        migrate(db);
         db.prepare('INSERT INTO project (name) VALUES (?)').run(projectName);
       } finally { db.close(); }
       renameSync(dir, join(this.root, projectId));
@@ -114,13 +225,20 @@ export class ProjectBoardStore {
     const meta = db.prepare('SELECT name FROM project WHERE deleted = 0').get();
     if (!meta) throw new Error('Project has been deleted');
     const tickets = new Map<string, Ticket>();
-    for (const row of db.prepare('SELECT id, title, stage FROM tickets ORDER BY rowid').all()) {
-      const ticket: Ticket = { id: String(row.id), title: String(row.title), stage: stage.parse(row.stage), sessionIds: [], blocked: false };
+    for (const row of db.prepare(`
+      SELECT t.*, (SELECT count(*) FROM comments c WHERE c.ticket_id=t.id) AS comment_count FROM tickets t ORDER BY t.rowid
+    `).all()) {
+      const ticket: Ticket = { id: String(row.id), title: String(row.title), body: String(row.body), stage: stage.parse(row.stage),
+        assignee: row.assignee === null ? null : assignee.parse(JSON.parse(String(row.assignee))),
+        parentTicketId: row.parent_id === null ? null : String(row.parent_id), commentCount: Number(row.comment_count),
+        sessionIds: [], sessionStatuses: Object.create(null), blocked: false };
       tickets.set(ticket.id, ticket);
     }
-    for (const row of db.prepare('SELECT session_id, ticket_id, blocked FROM ticket_sessions ORDER BY rowid').all()) {
+    for (const row of db.prepare('SELECT session_id, ticket_id, blocked, observed_status FROM ticket_sessions ORDER BY rowid').all()) {
       const ticket = tickets.get(String(row.ticket_id))!;
-      ticket.sessionIds.push(String(row.session_id));
+      const workerId = String(row.session_id);
+      ticket.sessionIds.push(workerId);
+      if (row.observed_status !== null) ticket.sessionStatuses[workerId] = row.observed_status as Session['status'];
       if (row.blocked) ticket.blocked = true;
     }
     return { project: { id: projectId, name: String(meta.name), bridgeId: this.bridgeId }, tickets: [...tickets.values()] };
@@ -128,6 +246,30 @@ export class ProjectBoardStore {
 
   read(projectId: string): ProjectBoard {
     return this.withDb(projectId, true, db => this.snapshot(db, projectId));
+  }
+
+  comments(projectId: string, ticketId: string, after?: number) {
+    if (!id.safeParse(ticketId).success || (after !== undefined && (!Number.isSafeInteger(after) || after <= 0))) {
+      throw new Error('Invalid ticket comment cursor or ID');
+    }
+    return this.withDb(projectId, true, db => {
+      if (!db.prepare('SELECT 1 FROM tickets WHERE id=?').get(ticketId)) throw new Error('Ticket not found');
+      const rows = db.prepare(`
+        SELECT * FROM comments WHERE ticket_id=? AND seq<? ORDER BY seq DESC LIMIT 11
+      `).all(ticketId, after ?? Number.MAX_SAFE_INTEGER);
+      const page = rows.slice(0, 10);
+      return { comments: page.map(row => ({ id: String(row.id), text: String(row.text), author: String(row.author),
+        createdAt: String(row.created_at) })), ...(rows.length > page.length ? { nextAfter: Number(page[page.length - 1].seq) } : {}) };
+    });
+  }
+
+  pendingNotifications(projectId: string, after = 0, limit = 100): TicketNotification[] {
+    return this.withDb(projectId, true, db => db.prepare('SELECT seq, payload FROM notification_outbox WHERE seq>? ORDER BY seq LIMIT ?')
+      .all(after, limit).map(row => ({ ...JSON.parse(String(row.payload)), seq: Number(row.seq) })));
+  }
+
+  acknowledgeNotification(projectId: string, eventId: string): void {
+    this.withDb(projectId, false, db => { db.prepare('DELETE FROM notification_outbox WHERE id=?').run(eventId); });
   }
 
   /** A newly observed child inherits its parent's ticket once. Existing and explicitly removed links win. */
@@ -139,7 +281,7 @@ export class ProjectBoardStore {
         const workers = new Map(sessions.map(session => [session.id, session]));
         const children = new Map<string, string[]>();
         for (const worker of sessions) {
-          if (worker.projectName !== board.project.name || !worker.parentSessionId) continue;
+          if (worker.projectName !== board.project.name || !worker.parentSessionId || !sessionId.safeParse(worker.id).success) continue;
           const parent = workers.get(worker.parentSessionId);
           if (!parent || (worker.parentBridgeId && worker.parentBridgeId !== parent.bridgeId)) continue;
           const siblings = children.get(parent.id) ?? [];
@@ -167,20 +309,33 @@ export class ProjectBoardStore {
   }
 
   /** Keep the last owner observation for linked workers whose bridges are unreachable. */
-  recordBlockers(projectId: string, observations: ReadonlyMap<string, boolean>): ProjectBoard {
+  recordWorkerStates(projectId: string, observations: ReadonlyMap<string, WorkerState>): ProjectBoard {
     return this.withDb(projectId, false, db => {
       db.exec('BEGIN IMMEDIATE');
       try {
-        const set = db.prepare('UPDATE ticket_sessions SET blocked=? WHERE session_id=? AND blocked<>?');
-        for (const [session, blocked] of observations) set.run(Number(blocked), session, Number(blocked));
+        const before = routingBefore(db);
+        const observe = db.prepare(`
+          UPDATE ticket_sessions SET blocked=COALESCE(:blocked, blocked), observed_status=COALESCE(:status, observed_status)
+          WHERE session_id=:session AND ((:blocked IS NOT NULL AND blocked<>:blocked) OR (:status IS NOT NULL AND observed_status IS NOT :status))
+        `);
+        const start = db.prepare(`
+          UPDATE tickets SET stage='In progress' WHERE stage='Backlog' AND id IN
+            (SELECT ticket_id FROM ticket_sessions WHERE session_id=? AND observed_status IS NOT 'running')
+        `);
+        for (const [session, { blocked, status }] of observations) {
+          if (status === 'running') start.run(session);
+          if (status === 'disconnected') continue;
+          observe.run({ blocked: blocked === undefined ? null : Number(blocked), status: status ?? null, session });
+        }
         const board = this.snapshot(db, projectId);
+        queueChanges(db, before, board);
         db.exec('COMMIT');
         return board;
       } catch (error) { db.exec('ROLLBACK'); throw error; }
     });
   }
 
-  mutate(payload: unknown): ProjectBoard {
+  mutate(payload: unknown, author?: string): ProjectBoard {
     const parsed = change.safeParse(payload);
     if (!parsed.success) throw new Error('Invalid project change');
     const m = parsed.data;
@@ -195,17 +350,44 @@ export class ProjectBoardStore {
         const project = db.prepare('SELECT name, deleted FROM project').get()!;
         if (project.deleted && m.action !== 'delete_project') throw new Error('Project has been deleted');
         if (m.action === 'delete_project') {
-          db.exec('UPDATE project SET deleted=1; DELETE FROM ticket_sessions; DELETE FROM unlinked_sessions; DELETE FROM tickets; COMMIT');
+          db.exec('UPDATE project SET deleted=1; DELETE FROM notification_outbox; DELETE FROM comments; DELETE FROM ticket_sessions; DELETE FROM unlinked_sessions; DELETE FROM deleted_tickets; DELETE FROM tickets; COMMIT');
           return { project: { id: m.projectId, name: String(project.name), bridgeId: this.bridgeId }, tickets: [] };
         }
         if (m.action === 'rename_project') db.prepare('UPDATE project SET name=?').run(m.name);
-        const link = db.prepare('INSERT INTO ticket_sessions (session_id, ticket_id) VALUES (?, ?) ON CONFLICT(session_id) DO UPDATE SET ticket_id=excluded.ticket_id');
+        const before = routingBefore(db);
         if (m.action === 'create_ticket') {
-          const result = db.prepare('INSERT INTO tickets VALUES (?, ?, ?) ON CONFLICT(id) DO NOTHING').run(m.ticketId, m.title, m.stage ?? 'Backlog');
-          if (result.changes) for (const session of m.sessionIds ?? []) link.run(session, m.ticketId);
+          if (db.prepare('SELECT 1 FROM deleted_tickets WHERE id=?').get(m.ticketId)) throw new Error('Ticket has been deleted');
+          if (!db.prepare('SELECT 1 FROM tickets WHERE id=?').get(m.ticketId)) {
+            validateParent(db, m.ticketId, m.parentTicketId);
+            db.prepare('INSERT INTO tickets (id,title,stage,body,assignee,parent_id) VALUES (?,?,?,?,?,?)')
+              .run(m.ticketId, m.title, m.stage ?? 'Backlog', m.body ?? '', assigneeValue(m.assignee ?? null), m.parentTicketId ?? null);
+            for (const session of m.sessionIds ?? []) linkWorker(db, session, m.ticketId);
+          }
+        }
+        if (m.action === 'delete_ticket') {
+          const removed = db.prepare('DELETE FROM tickets WHERE id=? RETURNING id');
+          db.prepare('DELETE FROM ticket_sessions WHERE ticket_id=?').run(m.ticketId);
+          db.prepare('DELETE FROM notification_outbox WHERE ticket_id=?').run(m.ticketId);
+          if (removed.get(m.ticketId)) db.prepare('INSERT INTO deleted_tickets VALUES (?)').run(m.ticketId);
+        }
+        if (m.action === 'add_ticket_comment') {
+          if (!author || author.length > 256) throw new Error('A verified comment author is required');
+          if (!db.prepare('SELECT 1 FROM tickets WHERE id=?').get(m.ticketId)) throw new Error('Ticket not found');
+          const previous = db.prepare('SELECT ticket_id, text, author FROM comments WHERE id=?').get(m.commentId);
+          if (previous && (previous.ticket_id !== m.ticketId || previous.text !== m.text || previous.author !== author)) {
+            throw new Error('Comment ID is already in use');
+          }
+          if (!previous) db.prepare('INSERT INTO comments(id,ticket_id,text,author,created_at) VALUES (?,?,?,?,?)')
+            .run(m.commentId,m.ticketId,m.text,author,new Date().toISOString());
         }
         if (m.action === 'update_ticket') {
           if (!db.prepare('SELECT 1 FROM tickets WHERE id=?').get(m.ticketId)) throw new Error('Ticket not found');
+          if (m.assignee !== undefined) db.prepare('UPDATE tickets SET assignee=? WHERE id=?').run(assigneeValue(m.assignee), m.ticketId);
+          if (m.body !== undefined) db.prepare('UPDATE tickets SET body=? WHERE id=?').run(m.body, m.ticketId);
+          if (m.parentTicketId !== undefined) {
+            validateParent(db, m.ticketId, m.parentTicketId);
+            db.prepare('UPDATE tickets SET parent_id=? WHERE id=?').run(m.parentTicketId, m.ticketId);
+          }
           if (m.title !== undefined) db.prepare('UPDATE tickets SET title=? WHERE id=?').run(m.title, m.ticketId);
           if (m.stage !== undefined) db.prepare('UPDATE tickets SET stage=? WHERE id=?').run(m.stage, m.ticketId);
           if (m.removeSessionId) {
@@ -213,13 +395,14 @@ export class ProjectBoardStore {
             if (removed.changes) db.prepare('INSERT OR IGNORE INTO unlinked_sessions VALUES (?)').run(m.removeSessionId);
           }
           if (m.addSessionId) {
-            link.run(m.addSessionId, m.ticketId);
+            linkWorker(db, m.addSessionId, m.ticketId);
             db.prepare('DELETE FROM unlinked_sessions WHERE session_id=?').run(m.addSessionId);
             const count = db.prepare('SELECT count(*) AS total FROM ticket_sessions WHERE ticket_id=?').get(m.ticketId)!;
             if (Number(count.total) > 500) throw new Error('A ticket can link up to 500 sessions');
           }
         }
         const board = this.snapshot(db, m.projectId);
+        queueChanges(db, before, board);
         db.exec('COMMIT');
         return board;
       } catch (error) { db.exec('ROLLBACK'); throw error; }

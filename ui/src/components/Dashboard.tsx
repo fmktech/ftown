@@ -1421,7 +1421,7 @@ PY`;
         {/* Terminal area */}
         <main aria-hidden={!isDesktop && mobileTab === "sessions" && !inboxOpen && !openBoard} className={`flex-1 flex-col min-h-0 min-w-0 ${mobileTab !== "sessions" || inboxOpen || openBoard ? "flex" : "hidden"} md:flex`}>
           {openBoard && <ProjectBoardPanel key={openBoard.id} project={openBoard} online={updateIds.includes(openBoard.bridgeId)}
-            bridgeNames={new Map([...bridgeIdentities].map(([id, info]) => [id, info.name]))}
+            bridgeNames={new Map(securityBridges.filter(b => b.security.status !== "revoked").map(b => [b.bridgeId, bridgeIdentities.get(b.bridgeId)?.name ?? (b.label || b.bridgeId)]))}
             onOpenSession={handleSelectSession}
             onLaunch={ticketId => {
               setLaunchTicket({ project: openBoard, ticketId });
