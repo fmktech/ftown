@@ -206,7 +206,7 @@ export class SecureMessageClient implements MessageClient {
         if (becameReady) this.getSubscription(accountChannel("commands:rpc", this.userId))?.emit("subscribed", UNRECOVERED_SUBSCRIBED_CONTEXT);
         return;
       }
-      for (const pin of securityRuntime.pinnedBridges()) if (securityRuntime.state(pin.bridgeId).status === "offline") {
+      for (const pin of securityRuntime.pinnedBridges()) if (securityRuntime.state(pin.bridgeId).status === "offline" && !this.retries.has(pin.bridgeId)) {
         this.recoverBridge(pin.bridgeId, false);
       }
     });
@@ -358,7 +358,11 @@ export class SecureMessageClient implements MessageClient {
     let becameReady = false;
     for (const pin of this.securityRuntime.pinnedBridges()) {
       if (this.securityRuntime.state(pin.bridgeId).status !== "ready") this.readyBridges.delete(pin.bridgeId);
-      else if (!this.readyBridges.has(pin.bridgeId)) { this.readyBridges.add(pin.bridgeId); becameReady = true; }
+      else if (!this.readyBridges.has(pin.bridgeId)) {
+        this.resetRetry(pin.bridgeId);
+        this.readyBridges.add(pin.bridgeId);
+        becameReady = true;
+      }
     }
     return becameReady;
   }

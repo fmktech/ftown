@@ -297,30 +297,43 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const [resourcesByBridge, setResourcesByBridge] = useState(new Map<string, HostResources>());
   const statsCommand = useRef(rpc.sendCommand);
   statsCommand.current = rpc.sendCommand;
-  const statsTargets = JSON.stringify(readyBridges.map(bridge => bridge.bridgeId));
+  const statsTargets = JSON.stringify(showNewSession || showBridges ? readyBridges.map(b => b.bridgeId).sort() : []);
+  const statsPollers = useRef(new Map<string, () => void>());
   useEffect(() => {
-    if (!showNewSession && !showBridges) return;
-    setResourcesByBridge(new Map());
-    let active = true;
-    const targets: string[] = JSON.parse(statsTargets);
-    const pending = new Set<string>();
-    const refresh = () => {
-      for (const bridgeId of targets) {
-        if (pending.has(bridgeId)) continue;
-        pending.add(bridgeId);
-        void statsCommand.current({ type: "get_host_resources", requestId: crypto.randomUUID(), payload: { bridgeId } }).then(reply => {
-          const data = reply.data as { bridgeId?: unknown; hostResources?: unknown } | undefined;
-          const sample = data?.hostResources;
-          if (active && reply.success && data?.bridgeId === bridgeId && validResources(sample)) {
+    const pollers = statsPollers.current;
+    return () => {
+      for (const stop of pollers.values()) stop();
+      pollers.clear();
+    };
+  }, [client, userId]);
+  useEffect(() => {
+    const pollers = statsPollers.current;
+    const targets = new Set<string>(JSON.parse(statsTargets));
+    for (const [id, stop] of pollers) if (!targets.has(id)) { stop(); pollers.delete(id); }
+    const retained = new Set(pollers.keys());
+    setResourcesByBridge(previous => new Map([...previous].filter(([id]) => retained.has(id))));
+    for (const bridgeId of targets) {
+      if (pollers.has(bridgeId)) continue;
+      let active = true;
+      let pending = false;
+      const refresh = async () => {
+        if (pending) return;
+        pending = true;
+        try {
+          const reply = await statsCommand.current({ type: "get_host_resources", requestId: crypto.randomUUID(), payload: { bridgeId } });
+          const data = reply.data as { bridgeId?: string; hostResources?: HostResources } | undefined;
+          if (active && reply.success && data?.bridgeId === bridgeId && validResources(data.hostResources)) {
+            const sample = data.hostResources;
             setResourcesByBridge(previous => new Map(previous).set(bridgeId, sample));
           }
-        }).catch(() => {}).finally(() => pending.delete(bridgeId));
-      }
-    };
-    refresh();
-    const timer = window.setInterval(refresh, 15_000);
-    return () => { active = false; window.clearInterval(timer); };
-  }, [showNewSession, showBridges, statsTargets, client, userId]);
+        } catch { /* Retry on the next sampling interval. */ }
+        finally { pending = false; }
+      };
+      const timer = window.setInterval(refresh, 15_000);
+      pollers.set(bridgeId, () => { active = false; window.clearInterval(timer); });
+      void refresh();
+    }
+  }, [statsTargets, client, userId]);
   const updateIds = connectionStatus === "connected" ? readyBridges.map(bridge => bridge.bridgeId) : [];
   const projectDirectory = useProjectDirectory(accountId ?? userId, updateIds, rpc.sendCommand);
   const updates = useBridgeUpdates(rpc.sendCommand, updateIds);

@@ -163,14 +163,22 @@ export class LocalBrowserClient implements MessageClient {
       throw new SecurityError('permission_denied', 'Encrypted local command was rejected');
     } catch (error) {
       if (legacySummary && error instanceof LocalAccessError && error.status === 400 && error.code === 'invalid_command') return unsupportedSummary();
-      this.handleError(error); throw error;
+      // The event poll owns connection health. A single rejected, cancelled or
+      // timed-out command must not disconnect the bridge and replay dashboard reads.
+      if (this.lostAuthority(error) || error instanceof SecurityError && error.code === 'epoch_changed') {
+        this.handleError(error);
+      }
+      throw error;
     }
   }
   executeSecurity = <C extends SecurityCommand>(command: C): Promise<SecurityCommandResults[C['type']]> => this.securityRuntime!.command(command, value => this.command(value as Command));
+  private lostAuthority(error: unknown): boolean {
+    return error instanceof SecurityError && ['endpoint_revoked', 'key_changed', 'approval_required'].includes(error.code);
+  }
   private handleError(error: unknown): void {
     if (this.abort.signal.aborted) return;
     this.online = false; this.securityRuntime?.disconnected(this.boot.bridgeId); this.status(false, 'Encrypted local bridge is unavailable.');
-    if (error instanceof SecurityError && ['endpoint_revoked', 'key_changed', 'approval_required'].includes(error.code)) { this.close(); this.unauthorized(); }
+    if (this.lostAuthority(error)) { this.close(); this.unauthorized(); }
   }
   start(): void { if (!this.running) { this.running = true; void this.poll(); } }
   private async poll(): Promise<void> {

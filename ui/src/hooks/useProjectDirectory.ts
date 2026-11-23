@@ -36,39 +36,48 @@ export function useProjectDirectory(account: string | null, targets: string[], s
     });
   }, [key]);
   useEffect(() => { setDirectory({ key, rows: cached(key) }); }, [key]);
+  // Keep an in-flight read and its authority while this particular home is reachable.
+  const homes = useRef(new Map<string, { reading: boolean; answered: boolean }>());
+  const refresh = useCallback(async (id: string) => {
+    const home = homes.current.get(id);
+    if (!home || home.reading || !account || document.hidden) return;
+    home.reading = true;
+    const revision = generation.current;
+    try {
+      const result = await sendRef.current({ type: "list_projects", requestId: crypto.randomUUID(), payload: { bridgeId: id } });
+      if (homes.current.get(id) !== home || generation.current !== revision || key !== accountKey.current) return;
+      const rows = (result.data as { projects?: unknown } | undefined)?.projects;
+      if (!result.success || !Array.isArray(rows) || !rows.every(isProject)) return;
+      home.answered = true;
+      const accepted = rows.filter(row => row.bridgeId === id || !homes.current.get(row.bridgeId)?.answered);
+      update(previous => {
+        const merged = new Map(previous.filter(p => p.bridgeId !== id).map(p => [identity(p), p]));
+        for (const p of accepted) merged.set(identity(p), p);
+        return [...merged.values()];
+      });
+    } catch { /* Retain the last directory until this bridge responds. */ }
+    finally { home.reading = false; }
+  }, [account, key, update]);
+
   useEffect(() => {
-    let active = true;
-    let reading = false;
-    const ids = JSON.parse(targetKey) as string[];
-    async function refresh() {
-      if (reading || !account || !ids.length || document.hidden) return;
-      reading = true;
-      const revision = generation.current;
-      try {
-        const replies = await Promise.allSettled(ids.map(async id => {
-          const result = await sendRef.current({ type: "list_projects", requestId: crypto.randomUUID(), payload: { bridgeId: id } });
-          const rows = (result.data as { projects?: unknown } | undefined)?.projects;
-          if (!result.success || !Array.isArray(rows) || !rows.every(isProject)) throw Error("Directory unavailable");
-          return { id, rows };
-        }));
-        if (!active || generation.current !== revision) return;
-        const answers = replies.flatMap(reply => reply.status === "fulfilled" ? [reply.value] : []);
-        if (!answers.length) return;
-        const owners = new Set(answers.map(answer => answer.id));
-        update(previous => {
-          const merged = new Map(previous.filter(p => !owners.has(p.bridgeId)).map(p => [identity(p), p]));
-          for (const { id, rows } of answers) {
-            for (const p of rows) if (p.bridgeId === id || !owners.has(p.bridgeId)) merged.set(identity(p), p);
-          }
-          return [...merged.values()];
-        });
-      } finally { reading = false; }
+    const current = homes.current;
+    const refreshAll = () => current.forEach((_, id) => void refresh(id));
+    const timer = setInterval(refreshAll, 30_000);
+    document.addEventListener("visibilitychange", refreshAll);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", refreshAll);
+      current.clear();
+    };
+  }, [refresh]);
+  useEffect(() => {
+    const ids = new Set<string>(JSON.parse(targetKey));
+    for (const id of homes.current.keys()) if (!ids.has(id)) homes.current.delete(id);
+    for (const id of ids) if (!homes.current.has(id)) {
+      homes.current.set(id, { reading: false, answered: false });
+      void refresh(id);
     }
-    void refresh();
-    const timer = setInterval(refresh, 30_000);
-    document.addEventListener("visibilitychange", refresh);
-    return () => { active = false; clearInterval(timer); document.removeEventListener("visibilitychange", refresh); };
-  }, [account, key, targetKey, update]);
+  }, [targetKey, refresh]);
 
   async function mutate(project: HomeProject, action: string, name?: string) {
     const reply = await send({ type: "mutate_project_board", requestId: crypto.randomUUID(),
