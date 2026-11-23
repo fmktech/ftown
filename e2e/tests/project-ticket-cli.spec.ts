@@ -60,3 +60,50 @@ test("sessions manage a project on a paired bridge using the ticket CLI", async 
     await command(otherHome, ["projects", "delete", project.id]);
   }
 });
+
+test("sessions manage a project discussion on a paired bridge and receive thread mail", async () => {
+  const home = join(E2E_DIR, ".bridge-home-2");
+  const homeId = readBridgePointer(home).bridgeId;
+  const workerBridge = readBridgePointer().bridgeId;
+  const name = "Discussion " + randomUUID();
+  await expect(async () => {
+    await command(BRIDGE_HOME, ["projects", "list", "--bridge", homeId]);
+  }).toPass({ timeout: 45_000 });
+  const { project } = await command<{ project: { id: string } }>(home, ["projects", "create", name]);
+  const local = ["--project", project.id];
+  const remote = [...local, "--bridge", homeId];
+  let workerId: string | undefined;
+  try {
+    const worker = await bridgeApiFetch("POST", "/api/sessions", { body: { projectName: name, shellType: "shell", name: "ARM tester" } });
+    expect(worker.status).toBe(201);
+    workerId = (worker.body as { session: { id: string } }).session.id;
+    await command(BRIDGE_HOME, ["discuss", "channels", "create", "builds", ...remote], workerId);
+    const { id: thread } = await command<{ id: string }>(BRIDGE_HOME, ["discuss", "post", "builds", "--title", "ARM build", "--text", "I can verify ARM.", ...remote], workerId);
+    type Post = { seq: number; text: string; author: { name: string; sessionId?: string; bridgeId?: string } };
+    const initial = await command<{ posts: Post[] }>(home, ["discuss", "activity", "builds", ...local]);
+    expect(initial.posts).toHaveLength(1);
+    expect(initial.posts[0].author).toMatchObject({ name: "ARM tester", sessionId: workerId, bridgeId: workerBridge });
+    const mention = "Please run the smoke suite @" + workerBridge + "/" + workerId;
+    await command(home, ["discuss", "reply", thread, "--text", mention, ...local]);
+    const inbox = async () => {
+      const { body } = await bridgeApiFetch("GET", "/api/sessions/" + workerId + "/inbox?peek=1&all=1");
+      return (body as { messages: { body: string }[] }).messages.map(message => message.body).join("\n");
+    };
+    await expect.poll(inbox, { timeout: 45_000 }).toContain("Please run the smoke suite");
+    await command(BRIDGE_HOME, ["discuss", "follow", thread, ...remote], workerId);
+    await command(home, ["discuss", "reply", thread, "--text", "CI is green", ...local]);
+    await expect.poll(inbox, { timeout: 45_000 }).toContain("CI is green");
+    const later = await command<{ posts: Post[] }>(BRIDGE_HOME, ["discuss", "activity", "builds", "--after", String(initial.posts[0].seq), ...remote]);
+    expect(later.posts.map(post => post.text)).toEqual([mention, "CI is green"]);
+    await command(BRIDGE_HOME, ["discuss", "unfollow", thread, ...remote], workerId);
+    const ticketId = randomUUID();
+    await command(BRIDGE_HOME, ["discuss", "create-ticket", thread, "--id", ticketId, "--title", "Release on ARM", ...remote], workerId);
+    await command(home, ["discuss", "channels", "rename", "builds", "releases", ...local]);
+    await command(home, ["discuss", "channels", "archive", "releases", ...local]);
+    const linked = await command<{ threads: { id: string; ticketId: string }[] }>(BRIDGE_HOME, ["discuss", "for-ticket", ticketId, ...remote]);
+    expect(linked.threads).toMatchObject([{ id: thread, ticketId }]);
+  } finally {
+    if (workerId) await bridgeApiFetch("DELETE", "/api/sessions/" + workerId);
+    await command(home, ["projects", "delete", project.id]);
+  }
+});

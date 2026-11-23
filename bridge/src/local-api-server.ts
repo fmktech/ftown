@@ -451,7 +451,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       if (typeof body !== 'object' || Array.isArray(body) || 'bridgeId' in body) return { status: 400, body: { error: 'Invalid project board payload' } };
       try {
         const data = await runProjectBoardCommand(this.boardCommands, boardCommand, { ...body, bridgeId: this.security.bridgeId }, message.principal);
-        if ((boardCommand === 'mutate_project_board' || boardCommand === 'get_project_board') && typeof body.projectId === 'string') {
+        if ((boardCommand === 'mutate_project_board' || boardCommand === 'get_project_board' || boardCommand === 'mutate_project_discussion') && typeof body.projectId === 'string') {
           void this.boardCommands.deliverProject(body.projectId);
         }
         return { status: 200, body: applicationJson(data) };
@@ -2429,6 +2429,10 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     }
 
     const body = await parseBody(req);
+    if (body.discussionProject !== undefined && session.projectName !== body.discussionProject) {
+      jsonResponse(res, 409, { error: 'Recipient moved out of the project' });
+      return;
+    }
     const result = await this.mail.acceptMail(session, body);
     if (!result.ok) {
       jsonResponse(res, 400, { error: result.error });

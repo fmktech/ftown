@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { deliverDiscussionMail, discussionSession } from './project-discussion-delivery.js';
 import { TicketNotificationInbox, deliverTicketNotifications } from './ticket-notifications.js';
 
 import { Command as Commander, CommanderError } from 'commander';
@@ -1204,7 +1205,8 @@ program
     const peerCache = await startPeerSessionCache(peerControl, join(dataDir, "peer-sessions-" + security.endpoint.id + ".json"));
     const projectDirectory = await startPeerProjectDirectory(peerControl, join(dataDir, "peer-projects-" + security.endpoint.id + ".json"));
     localApiServer.setLocalProjects(() => projectBoards.list());
-    localApiServer.setBoardCommands({ bridgeId, security, projectBoards, rememberedProjects: projectDirectory.list, observeProject,
+    const findDiscussionSession = (origin: string, id: string) => discussionSession(bridgeId, sid => store.loadSession(sid), peerControl, origin, id);
+    localApiServer.setBoardCommands({ discussionSession: findDiscussionSession, bridgeId, security, projectBoards, rememberedProjects: projectDirectory.list, observeProject,
       ready: () => ready && !updateAdmission.isFrozen, deliverProject });
     const ticketInbox = new TicketNotificationInbox(join(dataDir, 'ticket-inboxes', security.endpoint.id + '.sqlite'), bridgeId);
     localApiServer.setTicketInbox(ticketInbox);
@@ -1212,7 +1214,11 @@ program
     function deliverProject(id: string) {
       const current = deliveries.get(id);
       if (current) return current;
-      const next = deliverTicketNotifications(projectBoards, ticketInbox, bridgeId, peerControl, id)
+      const next = Promise.all([
+        deliverTicketNotifications(projectBoards, ticketInbox, bridgeId, peerControl, id),
+        deliverDiscussionMail(projectBoards, id, bridgeId, peerControl, sid => store.loadSession(sid),
+          (session, body) => localApiServer.acceptSessionMail(session, body)),
+      ]).then(() => {})
         .catch(() => console.error('[Bridge] Could not drain project notification outbox:', id))
         .finally(() => { deliveries.delete(id); });
       deliveries.set(id, next);
@@ -1287,7 +1293,7 @@ program
       }
       let result: CommandResponse | undefined;
       await createCommandHandler({ bridgeId, hostResources, projectBoards, rememberedProjects: projectDirectory.list,
-        observeProject, security, sessionController, attentionStore, updates, updateEffects, pullRequestStatuses,
+        discussionSession: findDiscussionSession, observeProject, security, sessionController, attentionStore, updates, updateEffects, pullRequestStatuses,
         directAddress: () => addressed?.address() ?? null, pullRequestReview,
         modelRouting: () => modelRouting,
         // Commands may arrive during bootstrap; only board reads resolve this late-bound source.
@@ -1298,7 +1304,7 @@ program
         publishAttentionChanged: (sessionId) => { localApiServer.emit('event', { sessionId, eventName: 'AttentionSnapshot', data: {} }); },
         publishCommandResponse: async response => { result = response; },
       })(message.application.data as unknown as Parameters<ReturnType<typeof createCommandHandler>>[0], message);
-      if (route.command === 'mutate_project_board' || route.command === 'get_project_board') {
+      if (route.command === 'mutate_project_discussion' || route.command === 'mutate_project_board' || route.command === 'get_project_board') {
         const payload = (message.application.data as { payload?: { projectId?: unknown } } | null)?.payload;
         if (result?.success && typeof payload?.projectId === 'string') void deliverProject(payload.projectId);
       }

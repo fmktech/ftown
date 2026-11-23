@@ -330,6 +330,8 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
             : { requestId: command.requestId, success: false, error: result.message, data: { code: result.code } };
           break;
         }
+        case 'get_project_discussion':
+        case 'mutate_project_discussion':
         case 'list_projects':
         case 'get_project_board':
         case 'get_ticket_comments':

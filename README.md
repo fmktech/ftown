@@ -722,6 +722,8 @@ Assigning a ticket to a bridge or changing its stage while assigned sends a mess
 
 Sessions can operate the same board with `ftown projects` and `ftown tickets`. For example, run `ftown tickets list --project App --json` to find a ticket, then `ftown tickets update <ticket-id> --project App --stage Review` to move it. The CLI resolves the project’s home bridge from the shared directory. See the [ftown skill](bridge/skills/ftown/SKILL.md) for creation, assignment, comments and subtasks.
 
+Open **Discussion** in a project to share threads across its bridges. Every project starts with `#general`. Create more channels, follow replies from a session, mention a worker to send ftown mail, or turn a thread into a linked ticket. Archiving a channel preserves its posts and ticket links. Use `ftown discuss channels list --project App` to discover channels and `ftown discuss activity general --project App --after 0 --json` to read posts by cursor. The [ftown skill](bridge/skills/ftown/SKILL.md) includes commands for managing channels, threads, mentions and ticket links.
+
 
 
 When the working directory is blank, the destination bridge creates and reuses a directory under `~/projects`. Set `FTOWN_PROJECT_DIR` in the bridge process environment to use another root, such as `/data/projects`. Simple names like `demo` map directly to `~/projects/demo`. Labels that require normalization get a readable slug and a short hash so distinct labels can use separate directories. An explicit working directory or Git worktree takes precedence.

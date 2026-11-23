@@ -32,6 +32,11 @@ test('a session can address its remote project by name, read every page and disa
     const forwarded = JSON.parse(String(init?.body));
     if (route !== '/api/peers/http' || forwarded.bridge !== 'remote') return Response.json({ error: 'Wrong home bridge' }, { status: 404 });
     const payload = forwarded.body;
+    if (forwarded.path.endsWith('_project_discussion')) {
+      const { projectId, actorSessionId, ...operation } = payload;
+      return Response.json(remote.discussion(projectId, operation, { name: 'Tester', bridgeId: 'bridge', sessionId: actorSessionId },
+        forwarded.path.endsWith('/mutate_project_discussion')));
+    }
     if (forwarded.path === '/api/project-board/get_ticket_comments') {
       return Response.json(remote.comments(payload.projectId, payload.ticketId, payload.after));
     }
@@ -54,6 +59,20 @@ test('a session can address its remote project by name, read every page and disa
   t.mock.method(console, 'log', (message: string) => messages.push(message));
   t.mock.method(console, 'error', (message: string) => messages.push(message));
   const tickets = (...args: string[]) => runFtown(['tickets', '--json', ...args]);
+  const discuss = (...args: string[]) => runFtown(['discuss', ...args, '--project', 'Product', '--json']);
+  const thread = randomUUID();
+  assert.equal(await discuss('post', '#general', '--id', thread, '--title', 'Review', '--text', 'Please review.'), 0);
+  assert.equal(await discuss('post', 'general', '--id', thread, '--title', 'Review', '--text', 'Please review.'), 0);
+  assert.equal(await discuss('read', thread), 0);
+  const posts = JSON.parse(messages.pop()!).posts;
+  assert.equal(posts.length, 1);
+  assert.equal(await discuss('link', thread, ticketId), 0);
+  assert.equal(await discuss('for-ticket', ticketId), 0);
+  assert.equal(JSON.parse(messages.pop()!).threads[0].id, thread);
+  assert.equal(await discuss('activity', 'general', '--after', String(posts[0].seq)), 0);
+  assert.deepEqual(JSON.parse(messages.pop()!).posts, []);
+  assert.equal(await discuss('activity', 'general', '--after', '-1'), 1);
+
   assert.equal(await tickets('list', '--project', 'Product'), 0, messages.at(-1));
   assert.deepEqual(JSON.parse(messages.pop()!).tickets.map((ticket: { id: string }) => ticket.id), ids);
   assert.equal(await tickets('update', ticketId, '--project', 'Product', '--stage', 'Review', '--link', 'worker'), 0);

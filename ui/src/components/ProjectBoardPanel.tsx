@@ -5,6 +5,8 @@ import type { Command, CommandResponse, Session } from "@/types";
 
 import { ProjectTicketDetail, assignmentLabel, type Ticket } from "./ProjectTicketDetail";
 import { ProjectBoardSettingsDialog } from "./ProjectBoardSettingsDialog";
+import { ProjectDiscussion, TicketThreads } from "./ProjectDiscussion";
+import type { DiscussionThread } from "../../../bridge/src/project-discussion-protocol";
 import { defaultBoardColumns, type BoardColumn } from "../../../bridge/src/board-columns";
 
 type Project = { id: string; name: string; bridgeId: string };
@@ -59,6 +61,8 @@ function ProjectBoard({ project, online, send, sessions, attentionIds, bridgeNam
   const [error, setError] = useState("");
   const [title, setTitle] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [tab, setTab] = useState<"Tickets" | "Discussion">("Tickets");
+  const [thread, setThread] = useState<DiscussionThread | null>(null);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [dragTicket, setDragTicket] = useState<string | null>(null);
   const [dropStage, setDropStage] = useState<Ticket["stage"] | null>(null);
@@ -128,6 +132,7 @@ function ProjectBoard({ project, online, send, sessions, attentionIds, bridgeNam
       } finally { reading = false; }
     }
     void load();
+    if (tab === "Discussion") return () => { active = false; };
     const timer = window.setInterval(load, 15_000);
     document.addEventListener("visibilitychange", load);
     return () => {
@@ -135,7 +140,7 @@ function ProjectBoard({ project, online, send, sessions, attentionIds, bridgeNam
       clearInterval(timer);
       document.removeEventListener("visibilitychange", load);
     };
-  }, [online, send, projectId, bridgeId, receive, refresh]);
+  }, [online, send, projectId, bridgeId, receive, refresh, tab]);
   const board = cached?.board;
   const columns = board?.columns ?? defaultBoardColumns;
   const columnNames = new Map(columns.map(c => [c.id, c.label]));
@@ -190,10 +195,18 @@ function ProjectBoard({ project, online, send, sessions, attentionIds, bridgeNam
       <div><h2 id="project-board-title" className="text-lg font-semibold">{project.name} board</h2>
         <p className="text-xs text-[var(--text-muted)]">Hosted on {bridgeNames?.get(bridgeId) ?? bridgeId}</p></div>
       <div className="flex items-center gap-2">
-      {board?.boardEnabled === true && <button className="btn-ghost" disabled={!editable} onClick={() => setSettingsOpen(true)}>Board settings</button>}
+      {tab === "Tickets" && board?.boardEnabled === true && <button className="btn-ghost" disabled={!editable} onClick={() => setSettingsOpen(true)}>Board settings</button>}
       <button className="btn-ghost" onClick={close} aria-label="Back to workspace">Back</button></div>
     </header>
-    <div className="min-h-0 flex-1 overflow-auto p-4 md:p-6">
+    <nav aria-label="Project views" className="flex shrink-0 gap-1 border-b border-[var(--border-muted)] px-4 py-2 md:px-6">
+      {(["Tickets", "Discussion"] as const).map(view => <button key={view} aria-pressed={tab === view}
+        className={tab === view ? "btn-accent" : "btn-ghost"} onClick={() => setTab(view)}>{view}</button>)}
+    </nav>
+    {tab === "Discussion" ? <ProjectDiscussion project={project} sessions={sessions} bridgeNames={bridgeNames}
+      online={online} send={send} boardEnabled={board?.boardEnabled !== false} tickets={board?.tickets ?? []}
+      initialThread={thread} onThread={setThread} openTicket={id => {
+        setDetailId(id); setTab("Tickets"); setRefresh(n => n + 1);
+      }} onTicketCreated={() => setRefresh(n => n + 1)} /> : <div className="min-h-0 flex-1 overflow-auto p-4 md:p-6">
     {!online && <p role="status">{board ? "Home bridge offline · last saved board" : "Home bridge offline · no cached board"}</p>}
     {online && !fresh && !error && <p role="status">Loading board…</p>}
     {error && online && <p role="alert">{error} <button className="btn-ghost" onClick={() => setRefresh(n => n + 1)}>Refresh</button></p>}
@@ -292,11 +305,12 @@ function ProjectBoard({ project, online, send, sessions, attentionIds, bridgeNam
         })}
       </div>
     </>}
-    </div>
+    </div>}
     {settingsOpen && board?.boardEnabled === true && <ProjectBoardSettingsDialog
       columns={columns} tickets={board.tickets} projectName={project.name} editable={editable} error={error}
       change={change} close={() => setSettingsOpen(false)} />}
-    {detail && <ProjectTicketDetail columnNames={columnNames} key={detail.id} ticket={detail} tickets={board?.tickets ?? []} sessionById={sessionById} openTicket={setDetailId} openSession={onOpenSession} project={project} editable={editable} online={online}
+    {tab === "Tickets" && detail && <ProjectTicketDetail discussion={<TicketThreads project={project} ticketId={detail.id}
+      online={online} send={send} open={row => { setThread(row); setDetailId(null); setTab("Discussion"); }} />} columnNames={columnNames} key={detail.id} ticket={detail} tickets={board?.tickets ?? []} sessionById={sessionById} openTicket={setDetailId} openSession={onOpenSession} project={project} editable={editable} online={online}
       bridgeNames={bridgeNames} send={send} change={change} error={error} close={() => setDetailId(null)} />}
   </section>;
 }

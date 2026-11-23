@@ -2,7 +2,7 @@ import type { HostResources } from './host-resources.js';
 import { apiResponse, loadPointer } from './cli-client.js';
 
 /** Command groups whose requests may be forwarded to another bridge with --bridge / FTOWN_BRIDGE. */
-export const PEER_GROUPS: ReadonlySet<string> = new Set(['sessions', 'status', 'board', 'events', 'attention', 'brief', 'worktrees', 'plan', 'projects', 'boards', 'tickets']);
+export const PEER_GROUPS: ReadonlySet<string> = new Set(['sessions', 'status', 'board', 'events', 'attention', 'brief', 'worktrees', 'plan', 'projects', 'boards', 'tickets', 'discuss']);
 
 /**
  * Removes the global `--bridge <target>` / `--bridge=<target>` option from `args` (only before a `--` terminator, so text sent with
@@ -41,7 +41,7 @@ List the other bridges (computers) of this account that cross-bridge control can
   --json    Machine-readable output
 
 Then drive one with --bridge <name|id|id-prefix> on sessions, status, board, events, attention, brief, worktrees,
-plan, projects, boards and tickets commands, or set FTOWN_BRIDGE. Example: ftown sessions list --bridge my-laptop`;
+plan, projects, boards, tickets and discuss commands, or set FTOWN_BRIDGE. Example: ftown sessions list --bridge my-laptop`;
 }
 
 export async function runBridges(args: string[]): Promise<number> {

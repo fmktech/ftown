@@ -175,7 +175,7 @@ export type CommandType =
   | 'get_accounts'
   | 'preview_chat_list' | 'preview_chat_send' | 'preview_chat_reply'
   | 'session_preview_status' | 'session_preview_chunk'
-  | 'list_projects' | 'get_project_board' | 'get_ticket_comments' | 'mutate_project_board' | 'get_instructions' | 'set_instructions' | 'get_bridge_update' | 'get_direct_address' | 'update_bridge' | 'get_pull_request_statuses' | 'get_pull_request_review' | 'get_pull_request_review_chunk'
+  | 'list_projects' | 'get_project_board' | 'get_project_discussion' | 'mutate_project_discussion' | 'get_ticket_comments' | 'mutate_project_board' | 'get_instructions' | 'set_instructions' | 'get_bridge_update' | 'get_direct_address' | 'update_bridge' | 'get_pull_request_statuses' | 'get_pull_request_review' | 'get_pull_request_review_chunk'
   | 'get_model_routing' | 'set_model_routing'
   | 'get_session_attention' | 'resolve_session_attention' | 'answer_session_attention' | 'get_session_board' | 'send_message'
   | 'create_session' | 'stop_session' | 'list_sessions' | 'get_host_resources' | 'get_history'
