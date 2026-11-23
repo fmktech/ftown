@@ -5,7 +5,7 @@ import type { Command, CommandResponse, Session } from "@/types";
 
 export type TicketAssignee = { kind: "user" } | { kind: "bridge"; bridgeId: string } | null;
 export type Ticket = {
-  id: string; title: string; stage: "Backlog" | "In progress" | "Blocked" | "Review" | "Done";
+  id: string; title: string; stage: string;
   blocked?: boolean; sessionIds: string[]; body?: string; assignee?: TicketAssignee; commentCount?: number;
   parentTicketId?: string | null; sessionStatuses?: Record<string, Session["status"]>;
 };
@@ -23,6 +23,7 @@ type Props = {
   openTicket: (id: string) => void;
   openSession?: (id: string) => void;
   bridgeNames?: ReadonlyMap<string,string>;
+  columnNames: ReadonlyMap<string, string>;
   editable: boolean;
   online: boolean;
   error: string;
@@ -39,7 +40,7 @@ function readPage(data: unknown) {
   return { comments: page.comments, nextAfter: page.nextAfter };
 }
 
-export function ProjectTicketDetail({ ticket, tickets, sessionById, openTicket, openSession, project, bridgeNames, editable, online, send, change, error, close }: Props) {
+export function ProjectTicketDetail({ ticket, tickets, columnNames, sessionById, openTicket, openSession, project, bridgeNames, editable, online, send, change, error, close }: Props) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [draft, setDraft] = useState<{title?: string; body?: string; assignee?: TicketAssignee}>({});
   const [comment, setComment] = useState("");
@@ -52,6 +53,8 @@ export function ProjectTicketDetail({ ticket, tickets, sessionById, openTicket, 
   const subtaskId = useRef<string | null>(null);
   const parent = tickets.find(t => t.id === ticket.parentTicketId);
   const subtasks = tickets.filter(t => t.parentTicketId === ticket.id);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const stageLabel = (t: Ticket) => columnNames.get(t.blocked && columnNames.has("Blocked") ? "Blocked" : t.stage) ?? t.stage;
   const [loading, setLoading] = useState(false);
   const [refresh, setRefresh] = useState(0);
   const title = draft.title ?? ticket.title;
@@ -96,7 +99,7 @@ export function ProjectTicketDetail({ ticket, tickets, sessionById, openTicket, 
     onCancel={event => { event.preventDefault(); close(); }}>
     <header className="flex items-center justify-between gap-3 border-b border-[var(--border-subtle)] px-5 py-3">
       <div className="min-w-0">
-        <p className="text-xs text-[var(--text-muted)]">{project.name} / {ticket.stage}</p>
+        <p className="text-xs text-[var(--text-muted)]">{project.name} / {stageLabel(ticket)}</p>
         <h2 id="ticket-detail-heading" className="break-words text-lg font-semibold">{ticket.title}</h2>
       </div>
       <button className="btn-ghost shrink-0" aria-label="Close ticket" onClick={close}>×</button>
@@ -131,7 +134,7 @@ export function ProjectTicketDetail({ ticket, tickets, sessionById, openTicket, 
         <h3 className="text-sm font-semibold">Subtasks</h3>
         <ul>{subtasks.map(t => <li key={t.id} className="mb-1 flex items-center gap-2 text-xs">
           <button className="btn-ghost" onClick={() => openTicket(t.id)}>{t.title}</button>
-          <span>{t.blocked ? "Blocked" : t.stage}</span>
+          <span>{stageLabel(t)}</span>
         </li>)}</ul>
         <form className="flex gap-2" onSubmit={async event => {
           event.preventDefault();
@@ -180,6 +183,14 @@ export function ProjectTicketDetail({ ticket, tickets, sessionById, openTicket, 
           {!validComment && <p role="alert">Comment exceeds 8 KiB.</p>}
           <button className="btn-ghost mt-1" disabled={!editable || !validComment || !comment.trim()}>Add comment</button>
         </form>
+      </section>
+      <section className="border-t border-[var(--border-subtle)] pt-4">
+        {confirmDelete ? <div className="space-y-2">
+          <p>Delete “{ticket.title}” and its comments?{subtasks.length > 0 && " Its subtasks will become top-level tickets."}</p>
+          <div className="flex gap-2"><button className="btn-danger" disabled={!editable} onClick={async () => {
+            if (await change({ action: "delete_ticket", ticketId: ticket.id })) close();
+          }}>Confirm delete ticket</button><button className="btn-ghost" onClick={() => setConfirmDelete(false)}>Cancel</button></div>
+        </div> : <button className="btn-danger" disabled={!editable} onClick={() => setConfirmDelete(true)}>Delete ticket</button>}
       </section>
     </div>
   </dialog>;

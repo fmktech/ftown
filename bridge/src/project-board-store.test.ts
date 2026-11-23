@@ -143,7 +143,7 @@ test('bridge assignment and effective stage transitions enqueue once with the ti
 test('large project responses fit the wire budget and reject mixed-revision pages', () => {
   const ticket = { id: '', title: 'Fix', stage: 'Review' as const, blocked: false, body: '', parentTicketId: null, assignee: null, commentCount: 0, sessionStatuses: {},
     sessionIds: Array.from({length: 450}, () => randomUUID()) };
-  const board: ProjectBoard = { project: { id: randomUUID(), name: 'Infra', bridgeId: 'home' },
+  const board: ProjectBoard = { boardEnabled: true, columns: [{id: 'Review', label: 'Review'}], project: { id: randomUUID(), name: 'Infra', bridgeId: 'home' },
     tickets: Array.from({ length: 30 }, () => ({ ...ticket, id: randomUUID() })) };
   const loaded: string[] = [];
   let cursor: string | undefined;
@@ -163,7 +163,9 @@ test('maximum escaped ticket and comment text still fit a sealed command respons
   const store = new ProjectBoardStore(dir, 'home');
   const projectId = randomUUID(), ticketId = randomUUID();
   const base = { bridgeId: 'home', projectId };
-  store.mutate({ ...base, action: 'create_project', name: 'Work' });
+  const initial = store.mutate({ ...base, action: 'create_project', name: 'Work' });
+  const columns = Array.from({ length: 32 }, (_, i) => ({ id: randomUUID(), label: '驗'.repeat(62) + String(i).padStart(2, '0') }));
+  store.mutate({ ...base, action: 'configure_columns', previousColumns: initial.columns, columns });
   const sessionIds = Array.from({ length: 500 }, (_, index) => String(index).padStart(200, 'x'));
   const body = '\t'.repeat(32 * 1024);
   const create = { ...base, action: 'create_ticket', ticketId, title: '\u0001'.repeat(511) + '!', body, sessionIds,
@@ -174,6 +176,7 @@ test('maximum escaped ticket and comment text still fit a sealed command respons
   const board = store.recordWorkerStates(projectId, new Map(sessionIds.map(id => [id, { status: 'completed' as const }])));
   const first = projectBoardPage(board);
   assert.deepEqual(first.tickets.map(ticket => ticket.id), [ticketId]);
+  assert.deepEqual(first.columns, columns);
   const bytes = (response: unknown) => Buffer.byteLength(JSON.stringify({ type: 'command_response', response: {
     requestId: randomUUID(), success: true, data: response,
   } }));
@@ -197,4 +200,55 @@ test('project catalog and board reads are available to readers and board changes
   const write = classifyCommand('mutate_project_board');
   assert.equal(write.permission, 'control');
   assert.equal(write.mutating, true);
+});
+
+test('column edits migrate occupied stages atomically and preserve worker behavior under renames', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'ftown-board-columns-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const store = new ProjectBoardStore(dir, 'home');
+  const projectId = randomUUID(), ticketId = randomUUID(), customId = randomUUID();
+  const change = (action: string, payload: Record<string, unknown> = {}) => store.mutate({ bridgeId: 'home', projectId, action, ...payload });
+  const original = change('create_project', { name: 'Work' }).columns;
+  const columns = [{ id: customId, label: 'Ideas' }, ...original.map(c => c.id === 'Blocked' ? { ...c, label: 'Needs help' } : c)];
+  change('configure_columns', { previousColumns: original, columns });
+  assert.equal(change('create_ticket', { ticketId, title: 'Ship', assignee: { kind: 'bridge', bridgeId: 'home' }, sessionIds: ['worker'] }).tickets[0].stage, customId);
+  assert.throws(() => change('configure_columns', { previousColumns: original, columns: original }), /Reload/);
+  assert.throws(() => change('configure_columns', { previousColumns: columns, columns: original }), /destination/);
+  assert.deepEqual(store.read(projectId).columns, columns);
+
+  const dropCustom = columns.slice(1);
+  change('configure_columns', { previousColumns: columns, columns: dropCustom, moveTo: { [customId]: 'Backlog' } });
+  const state = (status: 'running'|'completed', blocked: boolean) => store.recordWorkerStates(projectId, new Map([['worker', { status, blocked }]]));
+  assert.equal(state('running', true).tickets[0].stage, 'In progress');
+  assert.deepEqual(store.pendingNotifications(projectId).map(e => e.stage), ['Ideas', 'Backlog', 'Needs help']);
+  const noRoles = dropCustom.filter(c => c.id !== 'Blocked' && c.id !== 'In progress');
+  change('configure_columns', { previousColumns: dropCustom, columns: noRoles, moveTo: { 'In progress': 'Backlog' } });
+  state('completed', false);
+  assert.equal(state('running', true).tickets[0].stage, 'Backlog');
+  assert.throws(() => change('update_ticket', { ticketId, stage: 'Blocked' }), /Unknown board column/);
+  assert.deepEqual(new ProjectBoardStore(dir, 'home').read(projectId).columns, noRoles);
+});
+
+test('deleting and recreating a board preserves its project and rejects replayed ticket creation', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'ftown-board-lifecycle-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const store = new ProjectBoardStore(dir, 'home');
+  const projectId = randomUUID(), ticketId = randomUUID();
+  const change = (action: string, payload: Record<string, unknown> = {}) => store.mutate({ bridgeId: 'home', projectId, action, ...payload });
+  const initial = change('create_project', { name: 'Work' });
+  const ticket = { ticketId, title: 'Ship', sessionIds: ['worker'], assignee: { kind: 'bridge', bridgeId: 'home' } };
+  change('create_ticket', ticket);
+  store.mutate({ bridgeId: 'home', projectId, action: 'add_ticket_comment', ticketId, commentId: randomUUID(), text: 'Ready' }, 'Operator');
+  change('delete_board');
+  const reader = new ProjectBoardStore(dir, 'home');
+  assert.deepEqual(reader.list(), [initial.project]);
+  assert.deepEqual(reader.read(projectId), { project: initial.project, boardEnabled: false, columns: [], tickets: [] });
+  assert.deepEqual(reader.pendingNotifications(projectId), []);
+  assert.throws(() => reader.comments(projectId, ticketId), /not found/);
+  assert.throws(() => change('create_ticket', { ...ticket, ticketId: randomUUID() }), /Board has been deleted/);
+  assert.equal(change('rename_project', { name: 'Release' }).boardEnabled, false);
+  assert.deepEqual(change('create_board').columns, initial.columns);
+  assert.throws(() => change('create_ticket', ticket), /deleted/);
+  change('create_ticket', { ...ticket, ticketId: randomUUID() });
+  assert.equal(change('create_board').tickets.length, 1);
 });

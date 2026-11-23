@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, within } from "@testing-library/react";
-import { afterEach, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { afterEach, beforeAll, expect, it, vi } from "vitest";
 import { ProjectBoardPanel } from "./ProjectBoardPanel";
 
 afterEach(() => { cleanup(); localStorage.clear(); });
@@ -40,4 +40,71 @@ it("discards an interrupted snapshot and displays both pages from the new revisi
   expect(within(column).getByText("New first")).toBeTruthy();
   expect(within(column).getByText("New second")).toBeTruthy();
   expect(screen.queryByText("Obsolete")).toBeNull();
+});
+
+
+beforeAll(() => {
+  HTMLDialogElement.prototype.showModal = function () { this.open = true; };
+  HTMLDialogElement.prototype.close = function () { this.open = false; };
+});
+
+it("requires a destination before removing an occupied column and renders the saved names and order", async () => {
+  const project = { id: "p", bridgeId: "home", name: "Tooling" };
+  const original = [{ id: "Review", label: "Review" }, { id: "Done", label: "Done" }];
+  const updated = [{ id: "Done", label: "Shipped" }];
+  const ticket = { id: "t", title: "Build", sessionIds: [] };
+  const send = vi.fn()
+    .mockResolvedValueOnce({ success: true, data: { project, boardEnabled: true, columns: original, tickets: [{ ...ticket, stage: "Review" }] } })
+    .mockResolvedValueOnce({ success: true, data: { project, boardEnabled: true, columns: updated, tickets: [{ ...ticket, stage: "Done" }] } });
+  render(<ProjectBoardPanel project={project} online attentionIds={new Set()} send={send} cacheKey="account" sessions={[]} close={vi.fn()} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Board settings" }));
+  fireEvent.click(screen.getByRole("button", { name: "Remove Review" }));
+  fireEvent.change(screen.getByLabelText("Column 1 name"), { target: { value: "Shipped" } });
+  const save = screen.getByRole("button", { name: "Save columns" }) as HTMLButtonElement;
+  expect(save.disabled).toBe(true);
+  fireEvent.change(screen.getByRole("combobox", { name: /Move tickets from Review/ }), { target: { value: "Done" } });
+  fireEvent.click(save);
+  const shipped = await screen.findByRole("region", { name: "Shipped" });
+  expect(within(shipped).getByText("Build")).toBeTruthy();
+  expect(send).toHaveBeenLastCalledWith(expect.objectContaining({ payload: expect.objectContaining({
+    action: "configure_columns", columns: updated, previousColumns: original, moveTo: { Review: "Done" },
+  }) }));
+});
+
+it("deletes a board only after confirmation and restores an empty board in the same project", async () => {
+  const project = { id: "p", bridgeId: "home", name: "Tooling" };
+  const enabled = { project, boardEnabled: true, columns: [{ id: "Backlog", label: "Ideas" }], tickets: [] };
+  const send = vi.fn().mockResolvedValueOnce({ success: true, data: enabled })
+    .mockResolvedValueOnce({ success: true, data: { ...enabled, boardEnabled: false, columns: [] } })
+    .mockResolvedValueOnce({ success: true, data: enabled });
+  render(<ProjectBoardPanel project={project} online attentionIds={new Set()} send={send} cacheKey="account" sessions={[]} close={vi.fn()} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Board settings" }));
+  fireEvent.click(screen.getByRole("button", { name: "Delete board" }));
+  expect(send).toHaveBeenCalledTimes(1);
+  fireEvent.click(screen.getByRole("button", { name: "Confirm delete board" }));
+  const create = await screen.findByRole("button", { name: "Create board" });
+  expect(screen.queryByRole("region", { name: "Ideas" })).toBeNull();
+  fireEvent.click(create);
+  expect(await screen.findByRole("region", { name: "Ideas" })).toBeTruthy();
+  expect(send.mock.calls.map(([cmd]) => cmd.payload.action)).toEqual([undefined, "delete_board", "create_board"]);
+});
+
+it("confirms ticket deletion in its detail and keeps its subtask on the board", async () => {
+  const project = { id: "p", bridgeId: "home", name: "Tooling" };
+  const parent = { id: "a", title: "Publish", stage: "Backlog", sessionIds: [] };
+  const child = { ...parent, id: "b", title: "Check release", parentTicketId: parent.id };
+  const send = vi.fn().mockResolvedValueOnce({ success: true, data: { project, tickets: [parent, child] } })
+    .mockResolvedValueOnce({ success: true, data: { comments: [] } })
+    .mockResolvedValueOnce({ success: true, data: { project, tickets: [{ ...child, parentTicketId: null }] } });
+  render(<ProjectBoardPanel project={project} online attentionIds={new Set()} send={send} cacheKey="account" sessions={[]} close={vi.fn()} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Publish", exact: true }));
+  fireEvent.click(screen.getByRole("button", { name: "Delete ticket", exact: true }));
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  expect(send).toHaveBeenCalledTimes(2);
+  fireEvent.click(screen.getByRole("button", { name: "Delete ticket", exact: true }));
+  fireEvent.click(screen.getByRole("button", { name: "Confirm delete ticket" }));
+  const backlog = await screen.findByRole("region", { name: "Backlog" });
+  expect(within(backlog).queryByText("Publish")).toBeNull();
+  expect(within(backlog).getByText("Check release")).toBeTruthy();
+  expect(send).toHaveBeenLastCalledWith(expect.objectContaining({ payload: expect.objectContaining({ action: "delete_ticket", ticketId: "a" }) }));
 });
