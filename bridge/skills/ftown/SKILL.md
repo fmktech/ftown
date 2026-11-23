@@ -105,9 +105,9 @@ If no direct link can be made, commands keep using the relay.
 
 Use `ftown bridges --resources --json` to choose a host. Compare the local `resources` with each entry’s `peers[].resources`. Check `cpuPercent` (average utilization between samples), `freeRamBytes`, `totalRamBytes`, `freeDiskBytes` (bridge data volume), and `sampledAt` (Unix milliseconds). A null reading means unknown capacity. The dashboard’s new-session picker refreshes these readings every 15 seconds while open. The caller chooses the destination.
 
-The dashboard’s **Create project** selects a home bridge and creates one SQLite database per hosted project. Use **Board** beside a legacy project to choose its home. Boards route writes to that home; workers can run on any allowed bridge. Open a ticket to link sessions or launch a worker. Outstanding attention on linked sessions displays the ticket as Blocked. Paired bridges exchange the project directory; an offline home leaves a previously viewed board readable from the client cache.
+The dashboard’s **Create project** selects a home bridge and creates one SQLite database per hosted project. Use **Board** beside a legacy project to choose its home. Boards route writes to that home; workers can run on any allowed bridge. Open a ticket to link sessions or launch a worker. Outstanding attention is shown on the ticket and appears in the board’s Blocked column when present. Paired bridges exchange the project directory; an offline home leaves a previously viewed board readable from the client cache.
 
-Click a ticket title to edit its description, assign it to yourself or a paired bridge, add comments, and create subtasks. Each subtask has its own stage, assignee and linked workers. Drag a card to a column or use its stage selector. Linked sessions show their last reported status. Running work advances a backlog ticket to **In progress**. Use **Review** and **Done** when the work is ready.
+Click a ticket title to edit its description, assign it to yourself or a paired bridge, add comments, and create subtasks. Each subtask has its own stage, assignee and linked workers. Drag a card to a column or use its stage selector. Linked sessions show their last reported status. On the default board, running work advances a ticket from **Backlog** to **In progress**. Renaming those columns preserves that automation. Removing either column disables the transition. New tickets start in the first column.
 
 Assigning a ticket to a bridge or changing its stage while assigned sends a message to that bridge. The project home retries delivery when a bridge is offline. Run `ftown tickets inbox` on the assigned bridge, or `ftown tickets inbox --bridge <assigned-bridge>` from a paired bridge. Use `--json` for automation and pass the returned `nextCursor` to `--after` to read the next page.
 
@@ -126,6 +126,19 @@ ftown tickets update <ticket-id> --project App --stage Review
 ```
 
 Use `tickets show <ticket-id>` for details, `update --unlink <session-id>` to remove a worker, `update --assignee none` to clear ownership, and `tickets delete <ticket-id>` to delete a ticket. Supply `--project` on each command. Use `ftown board` for session-tree coordination and `ftown tickets` for project work.
+
+### Manage a project board
+
+Use `ftown boards columns list --project App --json` to discover column names, stable IDs and order. Ticket stage changes accept a display name or stable ID. Use `id:<id>` to select by ID when a display name overlaps another column’s ID. Renaming a column preserves the tickets in it.
+
+```bash
+ftown boards columns add Verification --project App
+ftown boards columns rename Verification QA --project App
+ftown boards columns reorder Backlog "In progress" Blocked Review QA Done --project App
+ftown boards columns remove QA --move-to Review --project App
+```
+
+To remove a single ticket, run `ftown tickets delete <ticket-id> --project App`. Its subtasks become top-level tickets. To remove the entire board and its tickets, run `ftown boards delete --project App`. The project and its sessions remain available. Use `ftown boards create --project App` to start a fresh board on the same project. Use `--bridge` to select the home bridge explicitly.
 
 
 

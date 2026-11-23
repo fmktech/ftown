@@ -1,13 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { type CSSProperties, useCallback, useEffect, useRef, useState } from "react";
 import type { Command, CommandResponse, Session } from "@/types";
 
 import { ProjectTicketDetail, assignmentLabel, type Ticket } from "./ProjectTicketDetail";
+import { ProjectBoardSettingsDialog } from "./ProjectBoardSettingsDialog";
+import { defaultBoardColumns, type BoardColumn } from "../../../bridge/src/board-columns";
 
-const stages = ["Backlog", "In progress", "Blocked", "Review", "Done"] as const;
 type Project = { id: string; name: string; bridgeId: string };
-type Board = { project: Project; tickets: Ticket[] };
+type Board = { project: Project; tickets: Ticket[]; columns?: BoardColumn[]; boardEnabled?: boolean };
 type BoardPage = Board & { nextCursor?: string };
 type CachedBoard = { board: Board; blocked: string[] };
 type Props = {
@@ -26,10 +27,15 @@ type Props = {
 function parseBoard(value: unknown, project: Project): Board | null {
   if (!value || typeof value !== "object") return null;
   const board = value as Partial<Board>;
+  const columns = board.columns ?? defaultBoardColumns;
+  if (!Array.isArray(columns) || !columns.every(c => c && typeof c.id === "string" && typeof c.label === "string") ||
+      (board.boardEnabled !== undefined && typeof board.boardEnabled !== "boolean") ||
+      (board.boardEnabled === false ? columns.length !== 0 : !columns.length)) return null;
+  const ids = new Set(columns.map(c => c.id));
   if (board.project?.id !== project.id || board.project.bridgeId !== project.bridgeId ||
       !Array.isArray(board.tickets) || !board.tickets.every(ticket =>
         ticket && typeof ticket.id === "string" && typeof ticket.title === "string" &&
-        stages.includes(ticket.stage) && Array.isArray(ticket.sessionIds) && ticket.sessionIds.every(id => typeof id === "string"))) return null;
+        ids.has(ticket.stage) && Array.isArray(ticket.sessionIds) && ticket.sessionIds.every(id => typeof id === "string"))) return null;
   return board as Board;
 }
 
@@ -52,6 +58,7 @@ function ProjectBoard({ project, online, send, sessions, attentionIds, bridgeNam
   const [fresh, setFresh] = useState(false);
   const [error, setError] = useState("");
   const [title, setTitle] = useState("");
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [dragTicket, setDragTicket] = useState<string | null>(null);
   const [dropStage, setDropStage] = useState<Ticket["stage"] | null>(null);
@@ -82,7 +89,7 @@ function ProjectBoard({ project, online, send, sessions, attentionIds, bridgeNam
       if (!page) throw Error("Invalid board response");
       tickets.push(...page.tickets);
       if (page.nextCursor === undefined) {
-        const board = { project: page.project, tickets };
+        const board = { project: page.project, tickets, columns: page.columns, boardEnabled: page.boardEnabled };
         setCached(previous => ({ board, blocked: previous?.blocked ?? [] }));
         setFresh(true);
         setError("");
@@ -130,6 +137,11 @@ function ProjectBoard({ project, online, send, sessions, attentionIds, bridgeNam
     };
   }, [online, send, projectId, bridgeId, receive, refresh]);
   const board = cached?.board;
+  const columns = board?.columns ?? defaultBoardColumns;
+  const columnNames = new Map(columns.map(c => [c.id, c.label]));
+  useEffect(() => {
+    if (board?.boardEnabled === false) { setSettingsOpen(false); setDetailId(null); setTitle(""); newTicketId.current = null; }
+  }, [board?.boardEnabled]);
   const editable = online && fresh && !busy;
   const currentBlocked = board?.tickets.filter(ticket => ticket.blocked || ticket.sessionIds.some(id => attentionIds.has(id))).map(ticket => ticket.id) ?? [];
   const blocked = online && fresh ? currentBlocked : cached?.blocked ?? [];
@@ -177,18 +189,22 @@ function ProjectBoard({ project, online, send, sessions, attentionIds, bridgeNam
     <header className="flex shrink-0 items-center justify-between gap-4 border-b border-[var(--border-muted)] px-4 py-3 md:px-6">
       <div><h2 id="project-board-title" className="text-lg font-semibold">{project.name} board</h2>
         <p className="text-xs text-[var(--text-muted)]">Hosted on {bridgeNames?.get(bridgeId) ?? bridgeId}</p></div>
-      <button className="btn-ghost" onClick={close} aria-label="Back to workspace">Back</button>
+      <div className="flex items-center gap-2">
+      {board?.boardEnabled === true && <button className="btn-ghost" disabled={!editable} onClick={() => setSettingsOpen(true)}>Board settings</button>}
+      <button className="btn-ghost" onClick={close} aria-label="Back to workspace">Back</button></div>
     </header>
     <div className="min-h-0 flex-1 overflow-auto p-4 md:p-6">
     {!online && <p role="status">{board ? "Home bridge offline · last saved board" : "Home bridge offline · no cached board"}</p>}
     {online && !fresh && !error && <p role="status">Loading board…</p>}
     {error && online && <p role="alert">{error} <button className="btn-ghost" onClick={() => setRefresh(n => n + 1)}>Refresh</button></p>}
-    {board && <>
+    {board?.boardEnabled === false && <div className="space-y-3"><p>This project has no board.</p>
+      <button className="btn-accent" disabled={!editable} onClick={() => void change({ action: "create_board" })}>Create board</button></div>}
+    {board && board.boardEnabled !== false && <>
       <form className="mb-4 flex items-center gap-2" onSubmit={async event => {
         event.preventDefault();
         if (!title.trim()) return;
         newTicketId.current ??= crypto.randomUUID();
-        if (await change({ action: "create_ticket", ticketId: newTicketId.current, title: title.trim(), stage: "Backlog" })) {
+        if (await change({ action: "create_ticket", ticketId: newTicketId.current, title: title.trim() })) {
           newTicketId.current = null;
           setTitle("");
         }
@@ -197,10 +213,10 @@ function ProjectBoard({ project, online, send, sessions, attentionIds, bridgeNam
           disabled={!editable} value={title} onChange={event => { newTicketId.current = null; setTitle(event.target.value); }} />
         <button className="btn-accent" disabled={!editable || !title.trim()}>Add ticket</button>
       </form>
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-        {stages.map(stage => {
-          const tickets = board.tickets.filter(ticket => (blocked.includes(ticket.id) ? "Blocked" : ticket.stage) === stage);
-          return <section aria-label={stage} key={stage}
+      <div className="grid gap-3 sm:grid-cols-2 lg:[grid-template-columns:repeat(var(--board-columns),minmax(13rem,1fr))]" style={{ "--board-columns": columns.length } as CSSProperties}>
+        {columns.map(({ id: stage, label }) => {
+          const tickets = board.tickets.filter(ticket => (columnNames.has("Blocked") && blocked.includes(ticket.id) ? "Blocked" : ticket.stage) === stage);
+          return <section aria-label={label} key={stage}
             onDragOver={event => {
               if (!editable || !dragTicket) return;
               event.preventDefault();
@@ -220,7 +236,7 @@ function ProjectBoard({ project, online, send, sessions, attentionIds, bridgeNam
             }}
             className="min-w-0 rounded-lg border border-[var(--border-muted)] bg-[var(--bg-surface)] p-2"
             style={dropStage === stage ? { outline: "2px solid var(--accent)" } : undefined}>
-            <h3 className="mb-2 flex justify-between gap-2 text-sm font-semibold">{stage}<span className="text-[var(--text-muted)]">{tickets.length}</span></h3>
+            <h3 className="mb-2 flex justify-between gap-2 break-words text-sm font-semibold">{label}<span className="text-[var(--text-muted)]">{tickets.length}</span></h3>
             {tickets.map(ticket => <article key={ticket.id} draggable={editable}
               onDragStart={event => {
                 event.dataTransfer.setData("application/x-ftown-ticket", ticket.id);
@@ -246,7 +262,7 @@ function ProjectBoard({ project, online, send, sessions, attentionIds, bridgeNam
               <label className="flex flex-wrap items-center gap-1 text-xs">Stage
                 <select aria-label={'Stage for ' + ticket.title} className="btn-ghost" disabled={!editable} value={ticket.stage}
                   onChange={event => void change({ action: "update_ticket", ticketId: ticket.id, stage: event.target.value })}>
-                  {stages.map(item => <option key={item}>{item}</option>)}
+                  {columns.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}
                 </select>
               </label>
               {onLaunch && <button className="btn-ghost mt-2" disabled={!editable} onClick={() => onLaunch(ticket.id)}>Start session</button>}
@@ -277,7 +293,10 @@ function ProjectBoard({ project, online, send, sessions, attentionIds, bridgeNam
       </div>
     </>}
     </div>
-    {detail && <ProjectTicketDetail key={detail.id} ticket={detail} tickets={board?.tickets ?? []} sessionById={sessionById} openTicket={setDetailId} openSession={onOpenSession} project={project} editable={editable} online={online}
+    {settingsOpen && board?.boardEnabled === true && <ProjectBoardSettingsDialog
+      columns={columns} tickets={board.tickets} projectName={project.name} editable={editable} error={error}
+      change={change} close={() => setSettingsOpen(false)} />}
+    {detail && <ProjectTicketDetail columnNames={columnNames} key={detail.id} ticket={detail} tickets={board?.tickets ?? []} sessionById={sessionById} openTicket={setDetailId} openSession={onOpenSession} project={project} editable={editable} online={online}
       bridgeNames={bridgeNames} send={send} change={change} error={error} close={() => setDetailId(null)} />}
   </section>;
 }

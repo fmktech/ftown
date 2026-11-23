@@ -3,6 +3,7 @@ import { Command, CommanderError } from 'commander';
 import { api, currentPeerTarget, loadPointer, setPeerTarget } from './cli-client.js';
 import type { ProjectBoardCommand } from './project-directory-protocol.js';
 import type { ProjectBoard, HomeProject } from './project-board-store.js';
+import { defaultBoardColumns, type BoardColumn } from './board-columns.js';
 import { TICKET_NOTIFICATION_INBOX, type TicketNotice } from './ticket-notification-protocol.js';
 
 type BoardPage = ProjectBoard & { nextCursor?: string };
@@ -42,12 +43,24 @@ async function readBoard(projectId: string, first?: BoardPage, ticketId?: string
     page = await getPage(page.nextCursor);
     tickets.push(...page.tickets);
   }
-  return { project: page.project, tickets };
+  return { project: page.project, tickets, columns: page.columns ?? defaultBoardColumns, boardEnabled: page.boardEnabled ?? true };
 }
 
-function ticketFields(options: TicketOptions, create: boolean) {
+function resolveColumn(columns: readonly BoardColumn[], selector: string): string {
+  // The user-visible name wins when a renamed default frees its old name for another column.
+  const explicitId = selector.startsWith('id:') && columns.find(c => c.id === selector.slice(3));
+  const column = explicitId || columns.find(c => c.label === selector) || columns.find(c => c.id === selector);
+  if (!column) throw new Error('Unknown column: ' + selector + ' (see ftown boards columns list --project <project>)');
+  return column.id;
+}
+
+async function ticketFields(options: TicketOptions, create: boolean, projectId: string) {
   const result: Record<string, unknown> = {};
-  for (const key of ['title', 'body', 'stage'] as const) if (options[key] !== undefined) result[key] = options[key];
+  for (const key of ['title', 'body'] as const) if (options[key] !== undefined) result[key] = options[key];
+  if (options.stage !== undefined) {
+    const page = await boardRequest<BoardPage>('get_project_board', { projectId });
+    result.stage = resolveColumn(page.columns ?? defaultBoardColumns, options.stage);
+  }
   if (options.assignee !== undefined) {
     if (!options.assignee.trim()) throw new Error('Supply a bridge ID, user or none for --assignee');
     result.assignee = options.assignee === 'none' ? null : options.assignee === 'user'
@@ -64,22 +77,68 @@ function ticketFields(options: TicketOptions, create: boolean) {
 
 function editOptions(command: Command) {
   return command.option('--body <text>', 'Ticket description')
-    .option('--stage <stage>', 'Backlog, In progress, Blocked, Review or Done')
+    .option('--stage <column>', 'Board column label or ID; use id:<id> for an explicit ID')
     .option('--assignee <target>', 'Bridge ID, user or none')
     .option('--parent <id>', 'Parent ticket ID, or none to make a top-level ticket')
     .option('--link <session>', 'Link a worker session by ID');
 }
 
-export async function runProjectCommands(group: 'projects' | 'tickets', args: string[]): Promise<number> {
+export async function runProjectCommands(group: 'projects' | 'boards' | 'tickets', args: string[]): Promise<number> {
   const program = new Command('ftown ' + group).exitOverride().allowExcessArguments(false)
-    .description(group === 'projects' ? 'Manage hosted projects on paired bridges' : 'Manage tickets on their project home bridge')
+    .description({ projects: 'Manage hosted projects on paired bridges', boards: 'Manage project boards and their columns', tickets: 'Manage tickets on their project home bridge' }[group])
     .option('--json', 'Emit compact JSON for automation');
   const originalTarget = currentPeerTarget();
   const print = (value: unknown) => console.log(JSON.stringify(value, null, program.opts().json ? undefined : 2));
   const mutate = (action: string, projectId: string, fields: Record<string, unknown> = {}) =>
     boardRequest<BoardPage>('mutate_project_board', { ...fields, action, projectId });
   const command = (spec: string) => program.command(spec).allowExcessArguments(false);
-  if (group === 'projects') {
+  if (group !== 'projects') program.option('--project <name|id>', 'Hosted project name or ID');
+  const project = () => locateProject(program.opts().project);
+  if (group === 'boards') {
+    const settings = (page: BoardPage) => ({
+      project: page.project, boardEnabled: page.boardEnabled ?? true, columns: page.columns ?? defaultBoardColumns,
+    });
+    command('create').description('Create an empty board on an existing project').action(async () => {
+      print(settings(await mutate('create_board', (await project()).id)));
+    });
+    command('delete').description('Delete the board, its tickets and comments; keep the project and sessions').action(async () => {
+      print(settings(await mutate('delete_board', (await project()).id)));
+    });
+    const columns = command('columns').description('Manage columns by label or ID; use id:<id> for an explicit ID');
+    const configure = async (edit: (current: BoardColumn[]) => { columns: BoardColumn[]; moveTo?: Record<string, string> }) => {
+      const { id } = await project();
+      const page = await boardRequest<BoardPage>('get_project_board', { projectId: id });
+      if (page.boardEnabled === false) throw new Error('Create the board first with ftown boards create --project <project>');
+      if (!page.columns) throw new Error('Upgrade the project home bridge to configure board columns');
+      print(settings(await mutate('configure_columns', id, { previousColumns: page.columns, ...edit(page.columns) })));
+    };
+    columns.command('list').description('Show labels and IDs in display order').action(async () => {
+      print(settings(await boardRequest<BoardPage>('get_project_board', { projectId: (await project()).id })));
+    });
+    columns.command('add <label>').description('Append a new column').action(async label => {
+      await configure(current => ({ columns: [...current, { id: randomUUID(), label }] }));
+    });
+    columns.command('rename <column> <label>').description('Change a column label').action(async (column, label) => {
+      await configure(current => {
+        const id = resolveColumn(current, column);
+        return { columns: current.map(c => c.id === id ? { ...c, label } : c) };
+      });
+    });
+    columns.command('remove <column>').description('Remove a column; select a destination for any tickets')
+      .option('--move-to <column>', 'Move tickets to this column').action(async (column, options) => {
+        await configure(current => {
+          const id = resolveColumn(current, column);
+          return { columns: current.filter(c => c.id !== id), ...(options.moveTo && { moveTo: { [id]: resolveColumn(current, options.moveTo) } }) };
+        });
+      });
+    columns.command('reorder <columns...>').description('List every column once in the desired order').action(async (selectors: string[]) => {
+      await configure(current => {
+        const ids = selectors.map(selector => resolveColumn(current, selector));
+        if (ids.length !== current.length || new Set(ids).size !== current.length) throw new Error('Supply every column exactly once to reorder');
+        return { columns: ids.map(id => current.find(c => c.id === id)!) };
+      });
+    });
+  } else if (group === 'projects') {
     command('list').description('List known projects and their homes')
       .action(async () => print({ projects: await directory() }));
     command('create <name>').option('--id <uuid>', 'Stable project ID for retries')
@@ -94,8 +153,6 @@ export async function runProjectCommands(group: 'projects' | 'tickets', args: st
       print({ projectId: id, deleted: true });
     });
   } else {
-    program.option('--project <name|id>', 'Hosted project name or ID');
-    const project = () => locateProject(program.opts().project);
     const outputTicket = async (projectId: string, ticketId: string, page?: BoardPage) => {
       const board = await readBoard(projectId, page, ticketId);
       const ticket = board.tickets.find(ticket => ticket.id === ticketId);
@@ -108,14 +165,14 @@ export async function runProjectCommands(group: 'projects' | 'tickets', args: st
       .action(async (options: TicketOptions) => {
         const { id } = await project();
         const ticketId = options.id ?? randomUUID();
-        const page = await mutate('create_ticket', id, { ...ticketFields(options, true), ticketId });
+        const page = await mutate('create_ticket', id, { ...await ticketFields(options, true, id), ticketId });
         await outputTicket(id, ticketId, page);
       });
     editOptions(command('update <ticket>')).option('--title <title>').option('--unlink <session>', 'Remove worker link')
       .action(async (ticketId, options: TicketOptions) => {
-        const fields = ticketFields(options, false);
-        if (!Object.keys(fields).length) throw new Error('Supply a ticket field to update');
         const { id } = await project();
+        const fields = await ticketFields(options, false, id);
+        if (!Object.keys(fields).length) throw new Error('Supply a ticket field to update');
         await outputTicket(id, ticketId, await mutate('update_ticket', id, { ...fields, ticketId }));
       });
     command('delete <ticket>').action(async ticketId => {

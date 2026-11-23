@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync } f
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
+import { boardColumnId as stage, boardColumns, defaultBoardColumns, type BoardColumn } from './board-columns.js';
 import type { Session } from './types.js';
 import type { ProjectDirectoryEntry } from './project-directory-protocol.js';
 import type { AttentionStore } from './attention-store.js';
@@ -10,7 +11,6 @@ import type { TicketNotice } from './ticket-notification-protocol.js';
 
 const id = z.uuid().refine(value => value === value.toLowerCase(), 'Expected a lowercase UUID');
 const name = z.string().trim().min(1).max(256);
-const stage = z.enum(['Backlog', 'In progress', 'Blocked', 'Review', 'Done']);
 const sessionId = z.string().regex(/^[a-zA-Z0-9_-]{1,200}$/);
 const title = z.string().trim().min(1).max(512);
 const assignee = z.discriminatedUnion('kind', [
@@ -27,6 +27,10 @@ const change = z.discriminatedUnion('action', [
   projectTarget.extend({ action: z.literal('create_project'), name }).strict(),
   projectTarget.extend({ action: z.literal('rename_project'), name }).strict(),
   projectTarget.extend({ action: z.literal('delete_project') }).strict(),
+  projectTarget.extend({ action: z.literal('create_board') }).strict(),
+  projectTarget.extend({ action: z.literal('delete_board') }).strict(),
+  projectTarget.extend({ action: z.literal('configure_columns'), columns: boardColumns, previousColumns: boardColumns,
+    moveTo: z.record(z.string(), stage).optional() }).strict(),
   projectTarget.extend({ ...ticketFields, action: z.literal('create_ticket'), ticketId: id, title, stage: stage.optional(),
     sessionIds: z.array(sessionId).max(500).optional() }).strict(),
   projectTarget.extend({ ...ticketFields, action: z.literal('update_ticket'), ticketId: id, title: title.optional(), stage: stage.optional(),
@@ -47,12 +51,12 @@ interface Ticket {
 }
 type WorkerState = { blocked?: boolean; status?: Session['status'] | 'disconnected' };
 type Routing = { destination: string | null; stage: Stage };
-export interface ProjectBoard { project: HomeProject; tickets: Ticket[] }
+export interface ProjectBoard { project: HomeProject; boardEnabled: boolean; columns: BoardColumn[]; tickets: Ticket[] }
 
 /** Keep each command answer within the encrypted transport budget; a cursor pins the contents across requests. */
 export function projectBoardPage(board: ProjectBoard, cursor?: unknown) {
   const encoded = JSON.stringify(board);
-  const pageBytes = 285_000;
+  const pageBytes = 298_000; // Leave room for command and peer response wrappers.
   if (cursor === undefined && Buffer.byteLength(encoded) <= pageBytes) return board;
   const hash = createHash('sha256').update(encoded).digest('hex');
   let offset = 0;
@@ -63,7 +67,7 @@ export function projectBoardPage(board: ProjectBoard, cursor?: unknown) {
     offset = Number(match[2]);
     if (offset >= board.tickets.length) throw new Error('Invalid project board offset');
   }
-  let bytes = 0;
+  let bytes = Buffer.byteLength(JSON.stringify({ ...board, tickets: [] })) + 120;
   const tickets: Ticket[] = [];
   for (const ticket of board.tickets.slice(offset)) {
     const size = Buffer.byteLength(JSON.stringify(ticket)) + 1;
@@ -73,7 +77,7 @@ export function projectBoardPage(board: ProjectBoard, cursor?: unknown) {
   }
   if (!tickets.length && offset < board.tickets.length) throw new Error('Ticket exceeds the board transport limit');
   const next = offset + tickets.length;
-  return { project: board.project, tickets, ...(next < board.tickets.length ? { nextCursor: hash + ':' + next } : {}) };
+  return { ...board, tickets, ...(next < board.tickets.length ? { nextCursor: hash + ':' + next } : {}) };
 }
 
 export class ProjectBoardChanged extends Error {
@@ -106,9 +110,44 @@ function migrate(db: DatabaseSync): void {
       CREATE TABLE notification_outbox (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, ticket_id TEXT NOT NULL, payload TEXT NOT NULL);
       PRAGMA user_version=1;
     `);
-    else if (version !== 1) throw new Error('Unsupported project database version');
+    if (version <= 1) {
+      db.exec('ALTER TABLE project ADD COLUMN board_enabled INTEGER NOT NULL DEFAULT 1; CREATE TABLE board_columns (id TEXT PRIMARY KEY, label TEXT NOT NULL, position INTEGER NOT NULL)');
+      replaceColumns(db, defaultBoardColumns);
+      db.exec('PRAGMA user_version=2');
+    } else if (version !== 2) throw new Error('Unsupported project database version');
     db.exec('COMMIT');
   } catch (error) { db.exec('ROLLBACK'); throw error; }
+}
+
+function readColumns(db: DatabaseSync): BoardColumn[] {
+  return db.prepare('SELECT id,label FROM board_columns ORDER BY position').all()
+    .map(row => ({ id: String(row.id), label: String(row.label) }));
+}
+
+function replaceColumns(db: DatabaseSync, columns: BoardColumn[]): void {
+  db.exec('DELETE FROM board_columns');
+  const insert = db.prepare('INSERT INTO board_columns (id,label,position) VALUES (?,?,?)');
+  columns.forEach((column, position) => insert.run(column.id, column.label, position));
+}
+
+function configureColumns(db: DatabaseSync, mutation: Extract<z.infer<typeof change>, {action: 'configure_columns'}>): void {
+  const saved = readColumns(db);
+  const desired = JSON.stringify(mutation.columns);
+  if (JSON.stringify(saved) === desired) return; // a retry of a committed edit
+  if (JSON.stringify(saved) !== JSON.stringify(mutation.previousColumns)) throw new Error('Board columns changed. Reload before editing.');
+  const retained = new Set(mutation.columns.map(column => column.id));
+  const removed = saved.filter(column => !retained.has(column.id));
+  for (const [source, to] of Object.entries(mutation.moveTo ?? {})) {
+    if (!removed.some(column => column.id === source) || !retained.has(to)) throw new Error('Invalid column move destination');
+  }
+  for (const column of removed) {
+    const to = mutation.moveTo?.[column.id];
+    if (to) db.prepare('UPDATE tickets SET stage=? WHERE stage=?').run(to, column.id);
+    else if (db.prepare('SELECT 1 FROM tickets WHERE stage=? LIMIT 1').get(column.id)) {
+      throw new Error('Select a destination for tickets in ' + column.label);
+    }
+  }
+  replaceColumns(db, mutation.columns);
 }
 
 function assigneeValue(value: Assignee): string | null {
@@ -118,7 +157,7 @@ function assigneeValue(value: Assignee): string | null {
 function routingBefore(db: DatabaseSync): Map<string, Routing> {
   const rows = db.prepare(`
     SELECT t.id, json_extract(t.assignee, '$.bridgeId') AS destination,
-      CASE WHEN EXISTS(SELECT 1 FROM ticket_sessions s WHERE s.ticket_id=t.id AND s.blocked=1) THEN 'Blocked' ELSE t.stage END AS stage
+      CASE WHEN EXISTS(SELECT 1 FROM board_columns WHERE id='Blocked') AND EXISTS(SELECT 1 FROM ticket_sessions s WHERE s.ticket_id=t.id AND s.blocked=1) THEN 'Blocked' ELSE t.stage END AS stage
     FROM tickets t WHERE t.assignee IS NOT NULL
   `).all();
   return new Map(rows.map(row => [String(row.id), { destination: row.destination === null ? null : String(row.destination), stage: row.stage as Stage }]));
@@ -130,11 +169,11 @@ function queueChanges(db: DatabaseSync, before: Map<string, Routing>, board: Pro
     if (ticket.assignee?.kind !== 'bridge') continue;
     const bridgeId = ticket.assignee.bridgeId;
     const old = before.get(ticket.id);
-    const current = ticket.blocked ? 'Blocked' : ticket.stage;
+    const current = ticket.blocked && board.columns.some(column => column.id === 'Blocked') ? 'Blocked' : ticket.stage;
     const reason = old?.destination !== bridgeId ? 'assignment' : old.stage !== current ? 'stage' : undefined;
     if (!reason) continue;
     const event: Omit<TicketNotification, 'seq'> = { id: randomUUID(), projectId: board.project.id, projectName: board.project.name,
-      ticketId: ticket.id, title: ticket.title, bridgeId, reason, stage: current, createdAt: new Date().toISOString() };
+      ticketId: ticket.id, title: ticket.title, bridgeId, reason, stage: board.columns.find(column => column.id === current)!.label, createdAt: new Date().toISOString() };
     insert.run(event.id, ticket.id, JSON.stringify(event));
   }
 }
@@ -146,7 +185,7 @@ function linkWorker(db: DatabaseSync, session: string, ticket: string): void {
   `).run(session, ticket);
   if (link.changes) {
     db.prepare(`
-      UPDATE tickets SET stage='In progress' WHERE id=? AND stage='Backlog'
+      UPDATE tickets SET stage='In progress' WHERE id=? AND stage='Backlog' AND EXISTS(SELECT 1 FROM board_columns WHERE id='In progress')
       AND EXISTS(SELECT 1 FROM ticket_sessions WHERE session_id=? AND observed_status='running')
     `).run(ticket, session);
   }
@@ -178,7 +217,7 @@ export class ProjectBoardStore {
     let db = new DatabaseSync(path, { readOnly });
     try {
       const version = Number(db.prepare('PRAGMA user_version').get()!.user_version);
-      if (version !== 1) {
+      if (version !== 2) {
         if (readOnly) {
           db.close();
           db = new DatabaseSync(path);
@@ -222,7 +261,7 @@ export class ProjectBoardStore {
   }
 
   private snapshot(db: DatabaseSync, projectId: string): ProjectBoard {
-    const meta = db.prepare('SELECT name FROM project WHERE deleted = 0').get();
+    const meta = db.prepare('SELECT name,board_enabled FROM project WHERE deleted = 0').get();
     if (!meta) throw new Error('Project has been deleted');
     const tickets = new Map<string, Ticket>();
     for (const row of db.prepare(`
@@ -241,7 +280,7 @@ export class ProjectBoardStore {
       if (row.observed_status !== null) ticket.sessionStatuses[workerId] = row.observed_status as Session['status'];
       if (row.blocked) ticket.blocked = true;
     }
-    return { project: { id: projectId, name: String(meta.name), bridgeId: this.bridgeId }, tickets: [...tickets.values()] };
+    return { project: { id: projectId, name: String(meta.name), bridgeId: this.bridgeId }, boardEnabled: Boolean(meta.board_enabled), columns: readColumns(db), tickets: [...tickets.values()] };
   }
 
   read(projectId: string): ProjectBoard {
@@ -319,7 +358,7 @@ export class ProjectBoardStore {
           WHERE session_id=:session AND ((:blocked IS NOT NULL AND blocked<>:blocked) OR (:status IS NOT NULL AND observed_status IS NOT :status))
         `);
         const start = db.prepare(`
-          UPDATE tickets SET stage='In progress' WHERE stage='Backlog' AND id IN
+          UPDATE tickets SET stage='In progress' WHERE stage='Backlog' AND EXISTS(SELECT 1 FROM board_columns WHERE id='In progress') AND id IN
             (SELECT ticket_id FROM ticket_sessions WHERE session_id=? AND observed_status IS NOT 'running')
         `);
         for (const [session, { blocked, status }] of observations) {
@@ -347,20 +386,34 @@ export class ProjectBoardStore {
     return this.withDb(m.projectId, false, db => {
       db.exec('BEGIN IMMEDIATE');
       try {
-        const project = db.prepare('SELECT name, deleted FROM project').get()!;
+        const project = db.prepare('SELECT name, deleted, board_enabled FROM project').get()!;
         if (project.deleted && m.action !== 'delete_project') throw new Error('Project has been deleted');
         if (m.action === 'delete_project') {
           db.exec('UPDATE project SET deleted=1; DELETE FROM notification_outbox; DELETE FROM comments; DELETE FROM ticket_sessions; DELETE FROM unlinked_sessions; DELETE FROM deleted_tickets; DELETE FROM tickets; COMMIT');
-          return { project: { id: m.projectId, name: String(project.name), bridgeId: this.bridgeId }, tickets: [] };
+          return { project: { id: m.projectId, name: String(project.name), bridgeId: this.bridgeId }, tickets: [], boardEnabled: false, columns: [] };
         }
         if (m.action === 'rename_project') db.prepare('UPDATE project SET name=?').run(m.name);
         const before = routingBefore(db);
+        if (m.action === 'delete_board') {
+          db.exec(`UPDATE project SET board_enabled=0;
+            INSERT OR IGNORE INTO deleted_tickets SELECT id FROM tickets;
+            DELETE FROM notification_outbox; DELETE FROM comments; DELETE FROM ticket_sessions;
+            DELETE FROM unlinked_sessions; DELETE FROM tickets; DELETE FROM board_columns`);
+        } else if (m.action === 'create_board' && !project.board_enabled) {
+          db.exec('UPDATE project SET board_enabled=1');
+          replaceColumns(db, defaultBoardColumns);
+        } else if (!project.board_enabled && m.action !== 'create_project' && m.action !== 'rename_project') {
+          throw new Error('Board has been deleted. Create a new board first.');
+        }
+        if (m.action === 'configure_columns') configureColumns(db, m);
+        if ((m.action === 'create_ticket' || m.action === 'update_ticket') && m.stage !== undefined &&
+            !db.prepare('SELECT 1 FROM board_columns WHERE id=?').get(m.stage)) throw new Error('Unknown board column');
         if (m.action === 'create_ticket') {
           if (db.prepare('SELECT 1 FROM deleted_tickets WHERE id=?').get(m.ticketId)) throw new Error('Ticket has been deleted');
           if (!db.prepare('SELECT 1 FROM tickets WHERE id=?').get(m.ticketId)) {
             validateParent(db, m.ticketId, m.parentTicketId);
             db.prepare('INSERT INTO tickets (id,title,stage,body,assignee,parent_id) VALUES (?,?,?,?,?,?)')
-              .run(m.ticketId, m.title, m.stage ?? 'Backlog', m.body ?? '', assigneeValue(m.assignee ?? null), m.parentTicketId ?? null);
+              .run(m.ticketId, m.title, m.stage ?? readColumns(db)[0].id, m.body ?? '', assigneeValue(m.assignee ?? null), m.parentTicketId ?? null);
             for (const session of m.sessionIds ?? []) linkWorker(db, session, m.ticketId);
           }
         }

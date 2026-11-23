@@ -43,6 +43,18 @@ test("sessions manage a project on a paired bridge using the ticket CLI", async 
     const { ticket: stored } = await command<{ ticket: { stage: string; sessionIds: string[] } }>(otherHome, ["tickets", "show", ticket.id, "--project", name]);
     expect(stored.sessionIds).toContain(workerId);
     expect(stored.stage).toBe("Review");
+
+    await command(BRIDGE_HOME, ["boards", "columns", "add", "QA", ...onHome]);
+    await command(BRIDGE_HOME, ["tickets", "update", ticket.id, "--stage", "QA", ...onHome]);
+    await command(BRIDGE_HOME, ["boards", "columns", "rename", "QA", "Verification", ...onHome]);
+    await command(BRIDGE_HOME, ["boards", "columns", "remove", "Verification", "--move-to", "Done", ...onHome]);
+    const moved = await command<{ ticket: { stage: string } }>(otherHome, ["tickets", "show", ticket.id, "--project", name]);
+    expect(moved.ticket.stage).toBe("Done");
+    await command(BRIDGE_HOME, ["tickets", "delete", ticket.id, ...onHome]);
+    await command(BRIDGE_HOME, ["boards", "delete", ...onHome]);
+    await command(BRIDGE_HOME, ["boards", "create", ...onHome]);
+    const fresh = await command<{ tickets: unknown[] }>(otherHome, ["tickets", "list", "--project", name]);
+    expect(fresh.tickets).toEqual([]);
   } finally {
     if (workerId) await bridgeApiFetch("DELETE", "/api/sessions/" + workerId);
     await command(otherHome, ["projects", "delete", project.id]);
