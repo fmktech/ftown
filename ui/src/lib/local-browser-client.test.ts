@@ -24,11 +24,15 @@ describe('encrypted local browser control', () => {
         purpose: envelope.purpose === 'hello' ? 'welcome' : 'application' }, new TextEncoder().encode(JSON.stringify(value))));
     });
     vi.stubGlobal('fetch', fetcher);
-    const client = new LocalBrowserClient({ port: 43127, bridgeId: boot.bridgeId }, boot, vi.fn(), vi.fn(), undefined, runtime);
+    const connection = vi.fn();
+    const client = new LocalBrowserClient({ port: 43127, bridgeId: boot.bridgeId }, boot, connection, vi.fn(), undefined, runtime);
     try {
       await expect(client.command({ type: 'get_attention_summary', requestId: 'summary', payload: { bridgeId: boot.bridgeId, sessionIds: ['session-one'] } }))
         .resolves.toEqual({ requestId: 'summary', success: false, error: 'Encrypted request rejected', data: { code: 'invalid_command' } });
-      expect(fetcher).toHaveBeenCalledTimes(2);
+      await expect(client.command({ type: 'list_projects', requestId: 'projects', payload: { bridgeId: boot.bridgeId } })).rejects.toThrow();
+      expect(runtime.state(boot.bridgeId).status).toBe('ready');
+      expect(connection).not.toHaveBeenCalledWith(false, expect.anything());
+      expect(fetcher).toHaveBeenCalledTimes(3);
       expect(fetcher.mock.calls.every(([url]) => url === 'http://127.0.0.1:43127/api/security/envelope')).toBe(true);
     } finally { client.close(); runtime.dispose(); }
   });

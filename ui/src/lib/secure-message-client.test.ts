@@ -365,6 +365,36 @@ async function waitingComputer(options: { knows: () => boolean; revoked?: () => 
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 describe('account computer readiness after a new browser enrolls', () => {
+  it('keeps the retry delay when another bridge reports readiness changes', async () => {
+    vi.useFakeTimers();
+    try {
+      let changed = () => {};
+      const raw = new RawClient(); raw.state = 'connected';
+      const states = new Map([['a', 'offline'], ['b', 'ready']]);
+      const handshake = vi.fn(async () => { throw new Error('unreachable'); });
+      const runtime = {
+        accountManaged: true, pinnedBridges: () => [{ bridgeId: 'a' }, { bridgeId: 'b' }],
+        state: (id: string) => ({ status: states.get(id) }), bridge: () => ({ bridgeId: 'a' }),
+        onChange: (cb: () => void) => { changed = cb; return () => {}; }, handshake,
+      } as unknown as SecureEndpointRuntime;
+      const client = new SecureMessageClient(raw as unknown as Centrifuge, userId, runtime, { retry: FAST });
+      changed(); await vi.advanceTimersByTimeAsync(0);
+      for (let i = 0; i < 10; i++) {
+        states.set('b', i % 2 ? 'ready' : 'connecting');
+        changed(); await vi.advanceTimersByTimeAsync(0);
+      }
+      expect(handshake).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(FAST.delaysMs[0]);
+      expect(handshake).toHaveBeenCalledTimes(2);
+      // The direct path recovered before the next relay retry.
+      states.set('a', 'ready'); changed();
+      const subscribed = vi.fn(); client.getSubscription(channel)?.on('subscribed', subscribed);
+      await vi.advanceTimersByTimeAsync(FAST.windowMs);
+      expect(subscribed).not.toHaveBeenCalled();
+      client.dispose();
+    } finally { vi.useRealTimers(); }
+  });
+
   it('retries a trusted computer that answered nothing until it applies the ledger, then re-lists sessions', async () => {
     let knows = false;
     const f = await waitingComputer({ knows: () => knows });

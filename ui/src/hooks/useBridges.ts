@@ -146,9 +146,22 @@ export function useBridges(client: MessageClient | null, userId: string | null,
   // deduped projection needs to trigger a re-render.
   const allClientsRef = useRef<BridgeInfo[]>([]);
 
-  const fetchPresence = useCallback(async (sub: MessageSubscription) => {
+  const presenceRevision = useRef(0);
+  const readPresence = useCallback(async (sub: MessageSubscription) => {
+    if (sub !== subRef.current) return;
+    const revision = ++presenceRevision.current;
+    const current = () => sub === subRef.current && revision === presenceRevision.current;
+    const disconnected = () => {
+      if (sub.state === "subscribed") return false;
+      localAdvertsRef.current = [];
+      allClientsRef.current = [];
+      setBridges([]);
+      return true;
+    };
+    if (disconnected()) return;
     try {
       const result = await sub.presence();
+      if (!current() || disconnected()) return;
       localAdvertsRef.current = Object.values(result.clients).map(info => info.connInfo);
       const bridgeList: BridgeInfo[] = Object.entries(result.clients)
         .filter(([, info]) => info.connInfo && typeof info.connInfo === "object" && "bridgeId" in (info.connInfo as Record<string, unknown>))
@@ -165,10 +178,20 @@ export function useBridges(client: MessageClient | null, userId: string | null,
       allClientsRef.current = bridgeList;
       setBridges(dedupeBridges(bridgeList));
     } catch {
-      allClientsRef.current = [];
-      setBridges([]);
+      // Presence reads can fail while the relay subscription is healthy.
+      if (current()) disconnected();
     }
   }, []);
+
+  const pendingPresence = useRef<{ sub: MessageSubscription; read: Promise<void> } | null>(null);
+  const fetchPresence = useCallback((sub: MessageSubscription) => {
+    if (pendingPresence.current?.sub === sub && sub.state === "subscribed") return pendingPresence.current.read;
+    const read = readPresence(sub).finally(() => {
+      if (pendingPresence.current?.read === read) pendingPresence.current = null;
+    });
+    pendingPresence.current = { sub, read };
+    return read;
+  }, [readPresence]);
 
   useEffect(() => {
     if (!client || !userId) {
@@ -177,7 +200,6 @@ export function useBridges(client: MessageClient | null, userId: string | null,
       return;
     }
 
-    const abort = new AbortController();
     const channel = accountChannel("bridges:presence", userId);
 
     const existing = client.getSubscription(channel);
@@ -196,6 +218,7 @@ export function useBridges(client: MessageClient | null, userId: string | null,
     sub.on("join", (ctx) => {
       const data = ctx.info.connInfo as { bridgeId?: string; hostname?: string; connectedAt?: string } | undefined;
       if (!data?.bridgeId) return;
+      presenceRevision.current++;
       localAdvertsRef.current.push(ctx.info.connInfo);
       const bridge: BridgeInfo = {
         clientId: ctx.info.client,
@@ -208,19 +231,19 @@ export function useBridges(client: MessageClient | null, userId: string | null,
     });
 
     sub.on("leave", (ctx) => {
+      presenceRevision.current++;
       allClientsRef.current = applyBridgeLeave(allClientsRef.current, ctx.info.client);
       setBridges(dedupeBridges(allClientsRef.current));
     });
 
-    sub.subscribe();
     subRef.current = sub;
+    sub.subscribe();
 
     const presenceInterval = setInterval(() => {
       fetchPresence(sub);
     }, 10_000);
 
     return () => {
-      abort.abort();
       localAdvertsRef.current = [];
       clearInterval(presenceInterval);
       sub.removeAllListeners();
