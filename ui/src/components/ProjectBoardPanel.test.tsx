@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeAll, expect, it, vi } from "vitest";
 import { ProjectBoardPanel } from "./ProjectBoardPanel";
 
@@ -97,14 +97,123 @@ it("confirms ticket deletion in its detail and keeps its subtask on the board", 
     .mockResolvedValueOnce({ success: true, data: { comments: [] } })
     .mockResolvedValueOnce({ success: true, data: { project, tickets: [{ ...child, parentTicketId: null }] } });
   render(<ProjectBoardPanel project={project} online attentionIds={new Set()} send={send} cacheKey="account" sessions={[]} close={vi.fn()} />);
-  fireEvent.click(await screen.findByRole("button", { name: "Publish", exact: true }));
-  fireEvent.click(screen.getByRole("button", { name: "Delete ticket", exact: true }));
+  fireEvent.click(await screen.findByRole("button", { name: "Publish" }));
+  fireEvent.click(screen.getByRole("button", { name: "Delete ticket" }));
   fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
   expect(send).toHaveBeenCalledTimes(2);
-  fireEvent.click(screen.getByRole("button", { name: "Delete ticket", exact: true }));
+  fireEvent.click(screen.getByRole("button", { name: "Delete ticket" }));
   fireEvent.click(screen.getByRole("button", { name: "Confirm delete ticket" }));
   const backlog = await screen.findByRole("region", { name: "Backlog" });
   expect(within(backlog).queryByText("Publish")).toBeNull();
   expect(within(backlog).getByText("Check release")).toBeTruthy();
   expect(send).toHaveBeenLastCalledWith(expect.objectContaining({ payload: expect.objectContaining({ action: "delete_ticket", ticketId: "a" }) }));
+});
+
+it("creates a project channel and thread, replies, and opens a linked thread from its ticket", async () => {
+  const project = { id: "p", name: "Tooling", bridgeId: "home" };
+  const ticket = { id: "t", title: "Review build", stage: "Review", sessionIds: [] };
+  const channels = [{ id: "general", name: "general", archived: false }];
+  const rows: { id: string; channelId: string; title: string; ticketId: string | null; author: {name: string}; seq: number; createdAt: string }[] = [];
+  const posts: { id: string; threadId: string; text: string; seq: number; author: {name: string}; createdAt: string }[] = [];
+  const author = { name: "User" }, createdAt = new Date().toISOString();
+  const send = vi.fn(async (cmd: import("@/types").Command) => {
+    const p = cmd.payload as Record<string, string>;
+    let data: unknown = {};
+    if (cmd.type === "get_project_board") data = { project, tickets: [ticket] };
+    else if (cmd.type === "get_ticket_comments") data = { comments: [] };
+    else if (p.action === "channels") data = { channels: [...channels] };
+    else if (p.action === "threads") data = { threads: rows.filter(row => p.ticketId ? row.ticketId === p.ticketId : row.channelId === p.channelId) };
+    else if (p.action === "thread") data = { thread: rows.find(r => r.id === p.threadId) };
+    else if (p.action === "posts") data = { posts: posts.filter(post => post.seq > Number(p.after ?? 0)) };
+    else if (p.action === "create_channel") channels.push({ id: p.channelId, name: p.name, archived: false });
+    else if (p.action === "create_thread" || p.action === "reply") {
+      if (p.action === "create_thread") rows.push({ id: p.threadId, channelId: p.channelId, title: p.title, author, createdAt, seq: 1, ticketId: null });
+      posts.push({ id: p.postId, threadId: p.threadId, text: p.text, seq: posts.length + 1, author, createdAt });
+    } else if (p.action === "link_ticket") rows[0].ticketId = p.ticketId;
+    return { success: true, requestId: cmd.requestId, data };
+  });
+  render(<ProjectBoardPanel project={project} send={send} online sessions={[]} attentionIds={new Set()} cacheKey="account" close={vi.fn()} />);
+  fireEvent.click(screen.getByRole("button", { name: "Discussion" }));
+  await screen.findByRole("button", {name: "#general"});
+  fireEvent.click(screen.getByRole("button", { name: "Create channel" }));
+  const channelDialog = screen.getByRole("dialog", { name: "Create channel" });
+  fireEvent.change(within(channelDialog).getByLabelText("Channel name"), { target: { value: "builds" } });
+  fireEvent.click(within(channelDialog).getByRole("button", { name: "Create channel" }));
+  await screen.findByRole("heading", {name: "#builds"});
+  fireEvent.click(await screen.findByRole("button", { name: "New thread" }));
+  fireEvent.change(screen.getByLabelText("Thread title"), { target: { value: "ARM build" } });
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Check this log" } });
+  fireEvent.click(screen.getByRole("button", { name: "Post thread" }));
+  await screen.findByText("Check this log");
+  fireEvent.change(screen.getByLabelText("Your reply"), { target: { value: "Verified" } });
+  fireEvent.click(screen.getByRole("button", { name: "Post reply" }));
+  await screen.findByText("Verified");
+  fireEvent.click(screen.getByRole("button", { name: "Link existing ticket" }));
+  fireEvent.change(screen.getByLabelText("Ticket", { selector: "select" }), { target: { value: "t" } });
+  fireEvent.click(screen.getByRole("button", { name: "Link ticket" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Open ticket · Review build" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Linked discussions" }));
+  fireEvent.click(await screen.findByRole("button", { name: "ARM build" }));
+  await screen.findByText("Verified");
+  expect(screen.getByRole("heading", { name: "#builds" })).toBeTruthy();
+});
+
+it("appends incoming threads and replies without overlapping reads or polling a hidden discussion", async () => {
+  vi.useFakeTimers();
+  const hidden = vi.spyOn(document, "hidden", "get").mockReturnValue(false);
+  try {
+    const project = { id: "p", name: "Tooling", bridgeId: "home" };
+    const common = { author: { name: "Worker" }, createdAt: new Date().toISOString() };
+    const thread = (seq: number) => ({ ...common, id: String(seq), seq, channelId: "general", ticketId: null, title: "Thread " + seq });
+    const post = (seq: number) => ({ ...common, id: String(seq), seq, threadId: "2", text: "Reply " + seq });
+    let finishPoll!: () => void;
+    const send = vi.fn(async (cmd: import("@/types").Command) => {
+      const p = cmd.payload as Record<string, unknown>;
+      let data: unknown;
+      if (cmd.type === "get_project_board") data = { project, tickets: [] };
+      if (p.action === "channels") data = { channels: [{ id: "general", name: "general", archived: false }] };
+      if (p.action === "threads") data = { threads: typeof p.after === "number" ? [thread(2)] : [thread(1)] };
+      if (p.action === "posts" && !p.after) data = { posts: [post(1)], nextAfter: 1 };
+      if (p.action === "posts" && p.after === 1) data = { posts: [post(2)] };
+      if (p.action === "posts" && p.after === 2) {
+        await new Promise<void>(resolve => { finishPoll = resolve; });
+        data = { posts: [post(3)] };
+      }
+      if (p.action === "posts" && p.after === 3) data = { posts: [] };
+      return { success: true, requestId: cmd.requestId, data };
+    });
+    const props = { project, send, sessions: [], attentionIds: new Set<string>(), cacheKey: "account", close: vi.fn() };
+    const panel = render(<ProjectBoardPanel {...props} online />);
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Discussion" })); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+    expect(screen.getByRole("button", { name: "Thread 1" })).toBeTruthy();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Thread 2" })); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Load more" })); });
+    const before = send.mock.calls.length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(send).toHaveBeenCalledTimes(before + 1);
+    await act(async () => { finishPoll(); });
+    for (const seq of [1, 2, 3]) expect(screen.getByText("Reply " + seq)).toBeTruthy();
+    hidden.mockReturnValue(true);
+    document.dispatchEvent(new Event("visibilitychange"));
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(send).toHaveBeenCalledTimes(before + 1);
+    hidden.mockReturnValue(false);
+    await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+    expect(send).toHaveBeenLastCalledWith(expect.objectContaining({ payload: expect.objectContaining({ action: "posts", after: 3 }) }));
+    panel.rerender(<ProjectBoardPanel {...props} online={false} />);
+    const offline = send.mock.calls.length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(send).toHaveBeenCalledTimes(offline);
+    expect(screen.getByText("Reply 1")).toBeTruthy();
+    await act(async () => { panel.rerender(<ProjectBoardPanel {...props} online />); });
+    expect(send.mock.calls.slice(offline).map(([cmd]) => cmd.payload)).toContainEqual(expect.objectContaining({ action: "posts", after: 3 }));
+    panel.unmount();
+    const stopped = send.mock.calls.length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(send).toHaveBeenCalledTimes(stopped);
+  } finally {
+    hidden.mockRestore();
+    vi.useRealTimers();
+  }
 });

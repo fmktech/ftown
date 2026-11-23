@@ -239,6 +239,36 @@ test.describe("session lifecycle", () => {
         return (body as { notifications: { projectName: string; reason: string; stage: string }[] }).notifications
           .filter(event => event.projectName === project).map(event => [event.reason, event.stage]);
       }).toEqual([["assignment", "Backlog"], ["stage", "Review"]]);
+      await board.getByRole("button", { name: "Discussion", exact: true }).click();
+      const discussion = board.getByRole("region", { name: "Project discussion" });
+      await discussion.getByRole("button", { name: "Create channel", exact: true }).click();
+      const channelDialog = page.getByRole("dialog", { name: "Create channel" });
+      await channelDialog.getByLabel("Channel name").fill("handoffs");
+      await channelDialog.getByRole("button", { name: "Create channel", exact: true }).click();
+      await expect(discussion.getByRole("heading", { name: "#handoffs" })).toBeVisible();
+      await discussion.getByRole("button", { name: "New thread" }).click();
+      const compose = page.getByRole("dialog", { name: "New thread" });
+      await compose.getByLabel("Thread title").fill("Build evidence");
+      await compose.getByLabel("Message", { exact: true }).fill("First build passed.");
+      await compose.getByRole("button", { name: "Post thread" }).click();
+      await expect(discussion.getByText("First build passed.")).toBeVisible();
+      await discussion.getByLabel("Your reply").fill("Confirmed on the second bridge.");
+      await discussion.getByRole("button", { name: "Post reply" }).click();
+      await expect(discussion.getByText("Confirmed on the second bridge.")).toBeVisible();
+      await discussion.getByRole("button", { name: "Link existing ticket" }).click();
+      const link = page.getByRole("dialog", { name: "Link existing ticket" });
+      await link.getByRole("combobox", { name: "Ticket", exact: true }).selectOption({ label: "Verify the handoff" });
+      await link.getByRole("button", { name: "Link ticket" }).click();
+      await discussion.getByRole("button", { name: /Open ticket · Verify the handoff/ }).click();
+      await detail.getByRole("button", { name: "Linked discussions" }).click();
+      await detail.getByRole("button", { name: "Build evidence" }).click();
+      await discussion.getByRole("button", { name: /← Threads/ }).click();
+      await discussion.getByRole("button", { name: "Archive", exact: true }).click();
+      await page.getByRole("dialog", { name: "Archive channel" }).getByRole("button", { name: "Archive channel", exact: true }).click();
+      await discussion.getByRole("button", { name: "Build evidence" }).click();
+      await expect(discussion.getByText("Confirmed on the second bridge.")).toBeVisible();
+      await expect(discussion.getByLabel("Your reply")).toHaveCount(0);
+
       await target.getByRole("button", { name: new RegExp(name) }).click();
       await expect(board).toBeHidden();
       await target.getByRole("button", { name: `More actions for ${project}` }).click();

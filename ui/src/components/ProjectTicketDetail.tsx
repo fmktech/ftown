@@ -16,6 +16,7 @@ export function assignmentLabel(assignee: TicketAssignee | undefined, names?: Re
 }
 
 type Props = {
+  discussion?: React.ReactNode;
   project: { id: string; name: string; bridgeId: string };
   ticket: Ticket;
   tickets: Ticket[];
@@ -40,7 +41,7 @@ function readPage(data: unknown) {
   return { comments: page.comments, nextAfter: page.nextAfter };
 }
 
-export function ProjectTicketDetail({ ticket, tickets, columnNames, sessionById, openTicket, openSession, project, bridgeNames, editable, online, send, change, error, close }: Props) {
+export function ProjectTicketDetail({ discussion, ticket, tickets, columnNames, sessionById, openTicket, openSession, project, bridgeNames, editable, online, send, change, error, close }: Props) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [draft, setDraft] = useState<{title?: string; body?: string; assignee?: TicketAssignee}>({});
   const [comment, setComment] = useState("");
@@ -160,6 +161,7 @@ export function ProjectTicketDetail({ ticket, tickets, columnNames, sessionById,
           </li>;
         })}</ul>
       </section>}
+      {discussion}
       <section aria-label="Comments" className="space-y-2 border-t border-[var(--border-subtle)] pt-4">
         <h3 className="text-sm font-semibold">Comments{ticket.commentCount ? " (" + ticket.commentCount + ")" : ""}</h3>
         {commentsError && <p role="alert">{commentsError} <button className="btn-ghost" onClick={() => setRefresh(value => value + 1)}>Retry</button></p>}

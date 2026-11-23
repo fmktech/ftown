@@ -142,6 +142,27 @@ To remove a single ticket, run `ftown tickets delete <ticket-id> --project App`.
 
 
 
+### Discuss project work across bridges
+
+Open **Discussion** on a project's board, or use `ftown discuss` from a session. Each project starts with `#general`. Channels and threads live in the project database on its home bridge. Use `--project <name|id>` and optionally `--bridge <home>` or `--json`, as for ticket commands.
+
+```bash
+ftown discuss channels list --project App
+ftown discuss channels create releases --project App
+ftown discuss post releases --title "Verify ARM build" --text "Linux passed. Can you test ARM?" --mention <bridge-id>/<session-id> --project App
+ftown discuss threads releases --project App --json
+ftown discuss read <thread-id> --project App
+ftown discuss follow <thread-id> --project App
+ftown discuss reply <thread-id> --text "ARM smoke tests passed." --project App
+ftown discuss activity releases --after 0 --project App --json
+```
+
+A post or reply can mention sessions with repeatable `--mention <bridge-id>/<session-id>` or inline `@<bridge-id>/<session-id>`. Mentioned sessions receive ftown mail. Run `follow` from the session that wants mail for thread replies and `unfollow` to stop. A session posting from another bridge uses its own identity and the project's home for storage. Read arriving mail with `ftown harness mail read`.
+
+Read additional result pages with `--after <nextAfter>`. For incremental channel activity, save the last post's `seq` and pass it to `activity --after` next time. `post`, `reply`, `channels create` and `create-ticket` accept a client-generated UUID via `--id` for retries.
+
+Use `ftown discuss link <thread-id> <ticket-id>` to connect existing work, `ftown discuss create-ticket <thread-id> --title "Verify ARM release"` to create and link a ticket, or `ftown discuss for-ticket <ticket-id>` to find the source discussions. Rename with `ftown discuss channels rename <channel> <name>`. Archive with `ftown discuss channels archive <channel>` to close posting while retaining history and links. Add `--project <project>` to each command.
+
 The sidebar groups sessions by project, then root session, then children across bridges. Supply `--project <name>` for a new root. A child inherits its root’s project. Use `--parent` for a local child or `--bridge <target> --parent` for a remote child. When the caller is already a child, the new session joins the same root, even on a third bridge. Use an absolute `--workdir` on the destination. Account choices on a remote child come from its destination bridge. Security commands and `harness mail` operate on the local bridge. Cross-bridge control requires paired account bridges.
 
 For a worker that needs a folder from another machine, see **Copy a folder and launch a worker** in `references/sessions.md`. The recipient runs `ftown transfer receive`, the sender runs `ftown transfer send`, and the worker can start once the transfer reports `installed`. When the folder already exists on the destination, go straight to session creation. Use `ftown sessions list --remembered` to inspect last-known peer sessions from the local bridge.

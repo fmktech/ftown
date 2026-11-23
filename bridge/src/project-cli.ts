@@ -1,3 +1,4 @@
+import { registerDiscussionCommands } from './discussion-cli.js';
 import { randomUUID } from 'node:crypto';
 import { Command, CommanderError } from 'commander';
 import { api, currentPeerTarget, loadPointer, setPeerTarget } from './cli-client.js';
@@ -83,9 +84,9 @@ function editOptions(command: Command) {
     .option('--link <session>', 'Link a worker session by ID');
 }
 
-export async function runProjectCommands(group: 'projects' | 'boards' | 'tickets', args: string[]): Promise<number> {
+export async function runProjectCommands(group: 'projects' | 'boards' | 'tickets' | 'discuss', args: string[]): Promise<number> {
   const program = new Command('ftown ' + group).exitOverride().allowExcessArguments(false)
-    .description({ projects: 'Manage hosted projects on paired bridges', boards: 'Manage project boards and their columns', tickets: 'Manage tickets on their project home bridge' }[group])
+    .description({ discuss: 'Use project channels and discussion threads', projects: 'Manage hosted projects on paired bridges', boards: 'Manage project boards and their columns', tickets: 'Manage tickets on their project home bridge' }[group])
     .option('--json', 'Emit compact JSON for automation');
   const originalTarget = currentPeerTarget();
   const print = (value: unknown) => console.log(JSON.stringify(value, null, program.opts().json ? undefined : 2));
@@ -94,7 +95,9 @@ export async function runProjectCommands(group: 'projects' | 'boards' | 'tickets
   const command = (spec: string) => program.command(spec).allowExcessArguments(false);
   if (group !== 'projects') program.option('--project <name|id>', 'Hosted project name or ID');
   const project = () => locateProject(program.opts().project);
-  if (group === 'boards') {
+  if (group === 'discuss') {
+    registerDiscussionCommands(program, project, print);
+  } else if (group === 'boards') {
     const settings = (page: BoardPage) => ({
       project: page.project, boardEnabled: page.boardEnabled ?? true, columns: page.columns ?? defaultBoardColumns,
     });

@@ -7,6 +7,8 @@ import { boardColumnId as stage, boardColumns, defaultBoardColumns, type BoardCo
 import type { Session } from './types.js';
 import type { ProjectDirectoryEntry } from './project-directory-protocol.js';
 import type { AttentionStore } from './attention-store.js';
+import { initializeDiscussion, readDiscussion, writeDiscussion, type DiscussionMail } from './project-discussion.js';
+import type { DiscussionAuthor } from './project-discussion-protocol.js';
 import type { TicketNotice } from './ticket-notification-protocol.js';
 
 const id = z.uuid().refine(value => value === value.toLowerCase(), 'Expected a lowercase UUID');
@@ -114,7 +116,11 @@ function migrate(db: DatabaseSync): void {
       db.exec('ALTER TABLE project ADD COLUMN board_enabled INTEGER NOT NULL DEFAULT 1; CREATE TABLE board_columns (id TEXT PRIMARY KEY, label TEXT NOT NULL, position INTEGER NOT NULL)');
       replaceColumns(db, defaultBoardColumns);
       db.exec('PRAGMA user_version=2');
-    } else if (version !== 2) throw new Error('Unsupported project database version');
+    }
+    if (version <= 2) {
+      initializeDiscussion(db);
+      db.exec('PRAGMA user_version=3');
+    } else if (version !== 3) throw new Error('Unsupported project database version');
     db.exec('COMMIT');
   } catch (error) { db.exec('ROLLBACK'); throw error; }
 }
@@ -217,7 +223,7 @@ export class ProjectBoardStore {
     let db = new DatabaseSync(path, { readOnly });
     try {
       const version = Number(db.prepare('PRAGMA user_version').get()!.user_version);
-      if (version !== 2) {
+      if (version !== 3) {
         if (readOnly) {
           db.close();
           db = new DatabaseSync(path);
@@ -285,6 +291,40 @@ export class ProjectBoardStore {
 
   read(projectId: string): ProjectBoard {
     return this.withDb(projectId, true, db => this.snapshot(db, projectId));
+  }
+
+  projectName(projectId: string): string {
+    return this.withDb(projectId, true, db => {
+      const row = db.prepare('SELECT name FROM project WHERE deleted=0').get();
+      if (!row) throw new Error('Project has been deleted');
+      return String(row.name);
+    });
+  }
+
+  discussion(projectId: string, payload: unknown, author?: DiscussionAuthor, writing = false): Record<string, unknown> {
+    return this.withDb(projectId, !writing, db => {
+      db.exec(writing ? 'BEGIN IMMEDIATE' : 'BEGIN');
+      try {
+        const project = db.prepare('SELECT name FROM project WHERE deleted=0').get();
+        if (!project) throw new Error('Project has been deleted');
+        if (writing && !author) throw new Error('A verified discussion author is required');
+        const response = writing ? writeDiscussion(db, String(project.name), payload, author!) : readDiscussion(db, payload);
+        db.exec('COMMIT');
+        return response;
+      } catch (error) { db.exec('ROLLBACK'); throw error; }
+    });
+  }
+
+  pendingDiscussionMail(projectId: string, after = 0, limit = 100): DiscussionMail[] {
+    return this.withDb(projectId, true, db => db.prepare('SELECT * FROM discussion_mail WHERE seq>? ORDER BY seq LIMIT ?')
+      .all(after, limit).map(row => ({
+        seq: Number(row.seq), id: String(row.id), threadId: String(row.thread_id), postId: String(row.post_id),
+        bridgeId: String(row.bridge_id), sessionId: String(row.session_id), body: String(row.body),
+      })));
+  }
+
+  acknowledgeDiscussionMail(projectId: string, id: string): void {
+    this.withDb(projectId, false, db => { db.prepare('DELETE FROM discussion_mail WHERE id=?').run(id); });
   }
 
   comments(projectId: string, ticketId: string, after?: number) {
@@ -389,7 +429,7 @@ export class ProjectBoardStore {
         const project = db.prepare('SELECT name, deleted, board_enabled FROM project').get()!;
         if (project.deleted && m.action !== 'delete_project') throw new Error('Project has been deleted');
         if (m.action === 'delete_project') {
-          db.exec('UPDATE project SET deleted=1; DELETE FROM notification_outbox; DELETE FROM comments; DELETE FROM ticket_sessions; DELETE FROM unlinked_sessions; DELETE FROM deleted_tickets; DELETE FROM tickets; COMMIT');
+          db.exec('UPDATE project SET deleted=1; DELETE FROM discussion_channels; DELETE FROM notification_outbox; DELETE FROM comments; DELETE FROM ticket_sessions; DELETE FROM unlinked_sessions; DELETE FROM deleted_tickets; DELETE FROM tickets; COMMIT');
           return { project: { id: m.projectId, name: String(project.name), bridgeId: this.bridgeId }, tickets: [], boardEnabled: false, columns: [] };
         }
         if (m.action === 'rename_project') db.prepare('UPDATE project SET name=?').run(m.name);

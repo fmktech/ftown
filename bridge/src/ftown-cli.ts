@@ -22,11 +22,11 @@ export { isCliEntry } from './cli-entry.js';
 
 export function usage(): string {
   return `Usage: ftown [bridge options]
-       ftown <setup|start|sessions|harness|env|accounts|security|quota|status|board|events|attention|brief|worktrees|plan|bridges|transfer|instructions|projects|boards|tickets> [args...]
+       ftown <setup|start|sessions|harness|env|accounts|security|quota|status|board|events|attention|brief|worktrees|plan|bridges|transfer|instructions|projects|boards|tickets|discuss> [args...]
 
 With no subcommand, start the bridge. Run setup explicitly before the first start.
 Add --bridge <name|id> (or set FTOWN_BRIDGE) to run sessions, status, board, events, attention, brief,
-worktrees, plan, projects, boards or tickets commands on another bridge of your account.
+worktrees, plan, projects, boards, tickets or discuss commands on another bridge of your account.
 
 Subcommands:
   setup      Install or upgrade local CLI, hooks, plugins and skill (--repair to recheck)
@@ -39,6 +39,7 @@ Subcommands:
   quota      Subscription quota left, routing advice and model lists per harness (--json for agents)
   status     Own status card: show, set or clear
   board      Child-session board for this session's tree
+  discuss     Manage project channels, threads and session notifications
   boards      Manage project boards and columns
   projects    List and manage hosted projects
   tickets      Manage project tickets, subtasks, comments, worker links and bridge messages
@@ -74,6 +75,7 @@ export async function runFtown(argv: string[], start: (argv: string[]) => Promis
     setPeerTarget(PEER_GROUPS.has(group) ? target : null);
   }
   switch (group) {
+    case 'discuss':
     case 'boards':
     case 'projects':
     case 'tickets': return runProjectCommands(group, args);
