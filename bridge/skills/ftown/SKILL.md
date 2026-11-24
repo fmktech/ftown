@@ -37,9 +37,8 @@ For upgrades, use the exact new version named by the startup readiness hint:
 npx ftown@<new-version> setup
 ```
 
-Start the bridge with `ftown start`; use `ftown start --solo` for a single-port
-LAN deployment. `npx ftown start` accepts the same options, and `ftown-bridge`
-remains compatible. `ftown start --help` only displays help. The installed alias
+Start the bridge with `ftown start`. Use `ftown start --solo` for a single-port
+LAN deployment. `npx ftown start` accepts the same options. `ftown start --help` only displays help. The installed alias
 checks npm for a newer version before starting and runs its setup when available.
 Use `--no-update` or `FTOWN_NO_AUTO_UPDATE=1` to skip the check; CI and Docker
 Solo images skip it automatically. An offline check is skipped.
@@ -158,7 +157,7 @@ ftown discuss reply <thread-id> --text "ARM smoke tests passed." --project App
 ftown discuss activity releases --after 0 --project App --json
 ```
 
-A post or reply can mention sessions with repeatable `--mention <bridge-id>/<session-id>` or inline `@<bridge-id>/<session-id>`. Mentions notify the named sessions. Run `follow` from a session to receive notifications about replies and `unfollow` to stop. A session posting from another bridge uses its own identity and the project's home for storage. Read notifications with `ftown harness mail read`. For a discussion notification, use the included `ftown discuss reply` command to post in the original thread. In Pi and OMP, use the `ftown_discuss` tool with operation `reply`, the project, thread ID, and reply text. Supply the home bridge when the notification specifies one. Use `ftown_mail` for direct session messages.
+A post or reply can mention sessions with repeatable `--mention <bridge-id>/<session-id>` or inline `@<bridge-id>/<session-id>`. Mentions notify the named sessions. Run `follow` from a session to receive notifications about replies and `unfollow` to stop. A session posting from another bridge uses its own identity and the project's home for storage. Read notifications with `ftown harness mail read`. To answer a discussion notification, run its `ftown discuss reply` command with your reply text. It identifies the original thread, project and, when supplied, the home bridge. For a direct session message, use `ftown harness mail send <session-id> "message"`.
 
 Read additional result pages with `--after <nextAfter>`. For incremental channel activity, save the last post's `seq` and pass it to `activity --after` next time. `post`, `reply`, `channels create` and `create-ticket` accept a client-generated UUID via `--id` for retries.
 
@@ -444,7 +443,5 @@ Inspect or clean up archived worktrees with `ftown worktrees list` and
 ## Connection and compatibility
 
 The commands read `~/.ftown/bridge.json`. Anyone who can read that file can
-control the bridge's sessions. Existing `ftown-sessions`, `ftown-harness`, and
-`ftown-env` launchers remain compatible; use the grouped commands above in new
-instructions. ftown does not install a ticket system or provide a workflow
+control the bridge's sessions. ftown does not install a ticket system or provide a workflow
 runner. Independently installed coordination tools remain yours to manage.

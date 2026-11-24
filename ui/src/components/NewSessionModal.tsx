@@ -993,7 +993,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, hostedProj
                 className="px-3 py-2 rounded-[var(--radius-sm)] border border-[var(--status-pending)] bg-[rgba(255,170,0,0.08)] text-xs text-[var(--status-pending)] flex items-start gap-2"
               >
                 <span aria-hidden>⚠</span>
-                <span>{allowed ? "No allowed bridges are connected for this project." : "No bridges connected — start ftown-bridge on a machine first."}</span>
+                <span>{allowed ? "No allowed bridges are connected for this project." : "No bridges connected. Run ftown start on a computer first."}</span>
               </div>
             ) : (
               <select

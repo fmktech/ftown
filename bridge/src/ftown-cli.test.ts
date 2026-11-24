@@ -100,7 +100,7 @@ describe('in-process canonical commands', () => {
       assert.equal(await runFtown(['quota', '--help']), 0);
       assert.equal(await runFtown(['quota', 'bogus']), 2);
     });
-    assert.match(text, /quota/i);
+    assert.match(text, /^Usage: ftown quota /m);
   });
   it('runs repeated harness parsers and env help without import/exit side effects', async () => {
     const text = await capture(async () => {

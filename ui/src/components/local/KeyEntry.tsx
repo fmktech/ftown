@@ -4,7 +4,7 @@ import { useEffect, useState, type FormEvent } from "react";
 
 /**
  * First-run key entry for ftown Solo. Accepts either the raw 64-hex access
- * key or the whole `…/#k=<hex>` link printed by `ftown-bridge --solo`.
+ * key or the whole `…/#k=<hex>` link printed by `ftown start --solo`.
  * Mobile-first: 16px input (no iOS focus zoom), thumb-height CTA, inline
  * validation error with a shake on rejection (disabled under
  * prefers-reduced-motion).
@@ -102,7 +102,7 @@ export function KeyEntry({ onSubmit, submitting, error }: KeyEntryProps) {
             className="mt-2 text-xs text-[var(--text-faint)] font-[family-name:var(--font-sans)]"
           >
             Paste the ftown link or key printed by{" "}
-            <code className="font-[family-name:var(--font-mono)]">ftown-bridge --solo</code>.
+            <code className="font-[family-name:var(--font-mono)]">ftown start --solo</code>.
           </p>
         </div>
 

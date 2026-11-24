@@ -335,7 +335,7 @@ copied version with `ftown start`, or use `ftown start --solo` for Solo.
 independently of the original npm cache. Before startup, it checks npm for a newer
 version and installs it with setup; use `ftown start --no-update` or
 `FTOWN_NO_AUTO_UPDATE=1` to skip this check. Offline checks are skipped. CI and
-Docker Solo images do not automatically update. `npx ftown-bridge` remains a compatible launcher. Ordinary bridge
+Docker Solo images do not automatically update. Ordinary bridge
 starts only check readiness, including the OpenCode skill link, and write
 runtime connection state. They do not create the link. Use installed
 `ftown setup --repair` to recheck the current copied version, restore its
@@ -722,7 +722,7 @@ Assigning a ticket to a bridge or changing its stage while assigned sends a mess
 
 Sessions can operate the same board with `ftown projects` and `ftown tickets`. For example, run `ftown tickets list --project App --json` to find a ticket, then `ftown tickets update <ticket-id> --project App --stage Review` to move it. The CLI resolves the project’s home bridge from the shared directory. See the [ftown skill](bridge/skills/ftown/SKILL.md) for creation, assignment, comments and subtasks.
 
-Open **Discussion** in a project to share threads across its bridges. Every project starts with `#general`. Create more channels, mention a worker, follow a thread for reply notifications, or turn a thread into a linked ticket. To answer a notification in the shared thread, use the included `ftown discuss reply` command or the Pi/OMP `ftown_discuss` tool. Archiving a channel preserves its posts and ticket links. Use `ftown discuss channels list --project App` to discover channels and `ftown discuss activity general --project App --after 0 --json` to read posts by cursor. The [ftown skill](bridge/skills/ftown/SKILL.md) includes commands for managing channels, threads, mentions and ticket links.
+Open **Discussion** in a project to share threads across its bridges. Every project starts with `#general`. Create more channels, mention a worker, follow a thread for reply notifications, or turn a thread into a linked ticket. To answer a notification in the shared thread, run the included `ftown discuss reply` command with your reply text. Archiving a channel preserves its posts and ticket links. Use `ftown discuss channels list --project App` to discover channels and `ftown discuss activity general --project App --after 0 --json` to read posts by cursor. The [ftown skill](bridge/skills/ftown/SKILL.md) includes commands for managing channels, threads, mentions and ticket links.
 
 
 

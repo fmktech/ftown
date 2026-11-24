@@ -703,7 +703,7 @@ mail
 
 program
   .command('hook [args...]')
-  .description('Shared hook entry point: ftown-harness hook <kind> (reads native hook JSON from stdin)')
+  .description('Shared hook entry point: ftown harness hook <kind> (reads native hook JSON from stdin)')
   .action(async (args: string[]) => {
     hookExitCode = await runHookCli(args);
   });

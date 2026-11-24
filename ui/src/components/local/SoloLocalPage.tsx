@@ -60,7 +60,7 @@ export default function SoloLocalPage() {
         // Rejected cached or mistyped key: forget it and re-prompt.
         clearKey();
         keyRef.current = null;
-        setKeyError("That key was rejected. Copy it again from the ftown-bridge --solo banner.");
+        setKeyError("That key was rejected. Copy it again from the ftown start --solo banner.");
         setPhase("needs-key");
       } else {
         // Network failure or 502 — the hub/panel children may still be

@@ -17,7 +17,7 @@ export function loadPointer(): BridgePointer {
   const path = bridgePointerPath();
   let pointer: Partial<BridgePointer>;
   try { pointer = JSON.parse(readFileSync(path, 'utf8')) as Partial<BridgePointer>; }
-  catch { throw new Error(`Bridge not running (no valid ${path}). Run ftown setup, then start ftown-bridge.`); }
+  catch { throw new Error(`Bridge not running (no valid ${path}). Run ftown setup, then ftown start.`); }
   if (!Number.isInteger(pointer.port) || !pointer.port || pointer.port < 1 || pointer.port > 65535 || typeof pointer.token !== 'string' || !pointer.token) {
     throw new Error(`Invalid ${path} — missing port or token`);
   }
