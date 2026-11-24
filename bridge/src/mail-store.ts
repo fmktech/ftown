@@ -16,6 +16,7 @@ export interface MailMessageInput {
   to: string;
   type: MailMessage['type'];
   threadId?: string;
+  discussion?: MailMessage['discussion'];
   idempotencyKey?: string;
   body: string;
 }

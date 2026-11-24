@@ -88,6 +88,7 @@ export interface MailMessage {
   to: string;
   type: MailType;
   threadId?: string;
+  discussion?: import('./project-discussion-protocol.js').DiscussionMailContext;
   idempotencyKey?: string;
   body: string;
   deliveredAt?: string;

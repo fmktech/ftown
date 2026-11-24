@@ -16,6 +16,7 @@ All tools talk only to the local bridge selected by `FTOWN_HOOK_PORT` or `~/.fto
 | Tool | Operation | Required input | Result | Mutation |
 | --- | --- | --- | --- | --- |
 | `ftown_mail` | `send` | `target`, `body` | Stored inbox message | Yes |
+| `ftown_discuss` | `reply` | `project`, `threadId`, `text` | Stored thread post ID | Yes |
 | `ftown_mail` | `read` | None | `{ messages }` for the current session | No |
 | `ftown_sessions` | `list` | None | `{ sessions }` | No |
 | `ftown_sessions` | `archive` | None | `{ archived }` tombstones | No |
@@ -34,6 +35,8 @@ All tools talk only to the local bridge selected by `FTOWN_HOOK_PORT` or `~/.fto
 `target` accepts an opaque ID or a unique exact name. Mail additionally accepts `parent`. Reparenting with `parent: null` clears the parent. Session creation intentionally accepts structured fields only; arbitrary session commands and environment variables are not part of the model-facing contract.
 
 The extension also registers `/ftown-mail read [--peek]`, `/ftown-mail send <session> <message>`, and `/ftown-sessions` for interactive use.
+
+Project discussion notifications carry a thread ID. Use `ftown_discuss` with `operation: "reply"`, the project ID or name, the thread ID and your reply text. Supply `bridge` to address a particular project home. A retry of the same tool call reuses its post ID.
 
 ## Mail wake-up
 

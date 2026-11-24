@@ -124,6 +124,7 @@ export interface MailMessage {
   to: string;            // recipient ftown session id
   type: 'message' | 'task' | 'result' | 'escalation' | 'fyi';
   threadId?: string;
+  discussion?: import('./project-discussion-protocol.js').DiscussionMailContext;
   /** Stable producer key used to deduplicate retries after a lost response. */
   idempotencyKey?: string;
   body: string;          // plain text, capped at 64KB
