@@ -1,7 +1,11 @@
 import { readFile } from 'node:fs/promises';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { promisify } from 'node:util';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+
+const execFileAsync = promisify(execFile);
 
 async function defaultReadBridgePointer() {
   try {
@@ -75,7 +79,14 @@ function formatMail(message) {
   const sender = message.fromName
     ? `${message.fromName} (${message.from ?? 'external'})`
     : (message.from ?? 'external');
-  return `[${message.type ?? 'message'} from ${sender}] ${message.body ?? ''}`;
+  const notice = `[${message.type ?? 'message'} from ${sender}] ${message.body ?? ''}`;
+  if (message.from !== 'project-discussion') return notice;
+  const legacyProject = /^discussion:([0-9a-f-]{36}):[0-9a-f-]{36}$/i.exec(message.idempotencyKey ?? '')?.[1];
+  const project = message.discussion?.projectId || legacyProject || message.fromName?.replace(/ discussion$/, '');
+  if (!project || !message.threadId) return notice + '\nReply in the project thread using ftown_discuss or ftown discuss reply.';
+  const args = { operation: 'reply', project, threadId: message.threadId, text: '<reply>' };
+  if (message.discussion?.homeBridgeId) args.bridge = message.discussion.homeBridgeId;
+  return notice + '\nReply to the thread using ftown_discuss ' + JSON.stringify(args);
 }
 
 function collectBranchUsage(ctx, harness) {
@@ -307,6 +318,9 @@ export function registerFtownPiExtension(pi, options = {}) {
     }
 
     const sessions = await listSessions();
+    if (params.target.trim() === 'project-discussion' && !sessions.some(s => s.name === 'project-discussion' || s.id === 'project-discussion')) {
+      throw new Error('Use ftown_discuss with operation "reply", the project, threadId and text from the discussion notification.');
+    }
     const target = resolveSession(sessions, params.target);
     const self = sessions.find((session) => session.id === ftownSessionId);
     const body = {
@@ -399,6 +413,62 @@ export function registerFtownPiExtension(pi, options = {}) {
             toolResult(await runMail(params)));
         }
         return toolResult(await runMail(params));
+      } catch (error) {
+        return toolError(error);
+      }
+    },
+  });
+
+  pi.registerTool({
+    name: 'ftown_discuss',
+    label: 'ftown discussion',
+    description: 'Post a reply to a project discussion thread as the current session.',
+    parameters: {
+      type: 'object',
+      properties: {
+        operation: { type: 'string', enum: ['reply'] },
+        project: { type: 'string', description: 'Project ID or exact name.' },
+        threadId: { type: 'string', description: 'Thread ID from the project discussion notification.' },
+        text: { type: 'string', minLength: 1 },
+        bridge: { type: 'string', description: 'Optional project home bridge ID or name.' },
+      },
+      required: ['operation', 'project', 'threadId', 'text'],
+      additionalProperties: false,
+    },
+    async execute(toolCallId, params, signal) {
+      try {
+        requireOperation(params, ['reply']);
+        for (const key of ['project', 'threadId', 'text']) requireString(params, key);
+        if (params.bridge !== undefined) requireString(params, 'bridge');
+        if (!ftownSessionId) throw new Error('FTOWN_SESSION_ID is unavailable');
+        return await executeOnce('ftown_discuss', toolCallId, async () => {
+          const pointer = await readBridgePointer();
+          const cli = pointer?.harnessCli || join(homedir(), '.ftown', 'cli', 'dist', 'ftown-cli.js');
+          const args = [cli, 'discuss', 'reply', '--json', '--project=' + params.project, '--text=' + params.text];
+          if (params.bridge) args.push('--bridge=' + params.bridge);
+          if (toolCallId) {
+            // A retried tool call can run in a new extension process after the original post was saved.
+            const bytes = createHash('sha256').update(JSON.stringify([ftownSessionId, toolCallId])).digest().subarray(0, 16);
+            bytes[6] = (bytes[6] & 0x0f) | 0x80;
+            bytes[8] = (bytes[8] & 0x3f) | 0x80;
+            const hex = bytes.toString('hex');
+            args.push('--id=' + [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join('-'));
+          }
+          args.push('--', params.threadId);
+          const directory = env.FTOWN_DATA_DIR || pointer?.dataDir;
+          let stdout;
+          try {
+            ({ stdout } = await execFileAsync(node, args, {
+              env: { ...env, FTOWN_BRIDGE: '', ...(directory && { FTOWN_DATA_DIR: directory }) },
+              signal, timeout: 180_000, maxBuffer: 64 * 1024,
+            }));
+          } catch (error) {
+            const detail = error.stderr?.split('\n').find(line => /^(?:ftown(?: discuss)?|error): /.test(line));
+            throw new Error(detail?.slice(0, 500) || 'Could not confirm the project discussion reply.');
+          }
+          try { return toolResult(JSON.parse(stdout)); }
+          catch { throw new Error('Invalid response from ftown discuss reply.'); }
+        });
       } catch (error) {
         return toolError(error);
       }
@@ -676,10 +746,11 @@ export function registerFtownPiExtension(pi, options = {}) {
     const messages = await drainMail(wait, signal);
     if (signal?.aborted || messages.length === 0) return 0;
     const formatted = messages.map(formatMail).join('\n');
-    const text = (
-      `[ftown mail]\n${formatted}\n` +
-      'Handle this message and reply with the `ftown_mail` tool where appropriate.'
-    );
+    const hasDiscussion = messages.some(message => message.from === 'project-discussion');
+    const hasDirectMail = messages.some(message => message.from !== 'project-discussion');
+    const mailHint = hasDiscussion ? 'For direct session mail, reply with ftown_mail where appropriate.'
+      : 'Handle this message and reply with the `ftown_mail` tool where appropriate.';
+    const text = `[ftown mail]\n${formatted}` + (hasDirectMail ? '\n' + mailHint : '');
     if (harness === 'omp' && sessionContext?.isIdle()) {
       // OMP queues explicit follow-ups even when idle. A normal message starts
       // a turn, whose promise lasts until completion. Keep polling during it.

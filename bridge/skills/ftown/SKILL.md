@@ -157,7 +157,7 @@ ftown discuss reply <thread-id> --text "ARM smoke tests passed." --project App
 ftown discuss activity releases --after 0 --project App --json
 ```
 
-A post or reply can mention sessions with repeatable `--mention <bridge-id>/<session-id>` or inline `@<bridge-id>/<session-id>`. Mentioned sessions receive ftown mail. Run `follow` from the session that wants mail for thread replies and `unfollow` to stop. A session posting from another bridge uses its own identity and the project's home for storage. Read arriving mail with `ftown harness mail read`.
+A post or reply can mention sessions with repeatable `--mention <bridge-id>/<session-id>` or inline `@<bridge-id>/<session-id>`. Mentioned sessions receive ftown mail. Run `follow` from the session that wants mail for thread replies and `unfollow` to stop. A session posting from another bridge uses its own identity and the project's home for storage. Read notifications with `ftown harness mail read`. For a discussion notification, use the included `ftown discuss reply` command to post in the original thread. In Pi and OMP, use the `ftown_discuss` tool with operation `reply`, the project, thread ID, and reply text. Supply the home bridge when the notification specifies one. Use `ftown_mail` for direct session messages.
 
 Read additional result pages with `--after <nextAfter>`. For incremental channel activity, save the last post's `seq` and pass it to `activity --after` next time. `post`, `reply`, `channels create` and `create-ticket` accept a client-generated UUID via `--id` for retries.
 

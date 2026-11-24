@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -62,6 +62,36 @@ describe('in-process canonical commands', () => {
       if (previous === undefined) delete process.env.HOME; else process.env.HOME = previous;
       rmSync(home, { recursive: true, force: true });
     }
+  });
+  it('directs a legacy discussion notification reply to its thread without mailing a similarly named session', async t => {
+    const home = mkdtempSync(join(tmpdir(), 'ftown-discussion-reply-'));
+    const sessions = [{ id: 'worker', name: 'project-discussion helper' }];
+    const recipients: string[] = [];
+    const secure = await secureFixture(home, async url => {
+      const path = new URL(String(url)).pathname;
+      if (path === '/api/sessions') return Response.json({ sessions });
+      recipients.push(path);
+      return Response.json({ id: 'mail-id' });
+    });
+    const previousDir = process.env.FTOWN_DATA_DIR;
+    const previousFetch = globalThis.fetch;
+    t.after(async () => {
+      globalThis.fetch = previousFetch;
+      if (previousDir === undefined) delete process.env.FTOWN_DATA_DIR; else process.env.FTOWN_DATA_DIR = previousDir;
+      await secure.security.close();
+      rmSync(home, { recursive: true, force: true });
+    });
+    writeFileSync(join(home, 'bridge.json'), JSON.stringify(secure.pointer));
+    process.env.FTOWN_DATA_DIR = home;
+    globalThis.fetch = secure.fetch;
+    const thread = 'fa944e05-796c-45de-b121-34312db94b79';
+    const args = ['harness', 'mail', 'send', 'project-discussion', 'Hello!', '--thread', thread];
+    const hint = await capture(async () => { assert.equal(await runFtown(args), 1); });
+    assert.ok(hint.includes('ftown discuss reply ' + thread));
+    assert.deepEqual(recipients, []);
+    sessions[0].name = 'project-discussion';
+    await capture(async () => { assert.equal(await runFtown(args), 0); });
+    assert.deepEqual(recipients, ['/api/sessions/worker/inbox']);
   });
   it('routes quota to the quota CLI with its own help and usage exit codes', async () => {
     assert.match(usage(), /setup\|start\|sessions\|harness\|env\|accounts\|security\|quota/);

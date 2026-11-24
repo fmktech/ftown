@@ -1,3 +1,4 @@
+export interface DiscussionMailContext { projectId: string; homeBridgeId?: string }
 export interface DiscussionAuthor { name: string; bridgeId?: string; sessionId?: string }
 export interface DiscussionChannel { id: string; name: string; archived: boolean }
 export interface DiscussionThread {

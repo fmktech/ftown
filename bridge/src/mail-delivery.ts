@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { createMailMessage, createNudgeToken } from './mail-store.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { HOOKED_SHELL_TYPES } from './harness-registry.js';
@@ -17,6 +18,10 @@ import type { MailMessage, Session, ShellType } from './types.js';
 
 export { MAIL_TYPES_V2, MAX_WAKE_ATTEMPTS, NON_WAKING_MAIL_TYPES };
 
+const discussionContext = z.object({
+  projectId: z.uuid(),
+  homeBridgeId: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/).optional(),
+}).strict();
 export const MAX_MAIL_BODY_LENGTH = 64 * 1024;
 export const MAX_INBOX_RESPONSE_BYTES = 200_000;
 export const MAX_INBOX_PAGE_BYTES = 32_000;
@@ -545,7 +550,12 @@ export class MailDeliveryService {
       return { ok: false, error: 'Idempotency key too long (max 512 chars)' };
     }
 
-    const msg = createMailMessage({ from, fromName, to: session.id, type, threadId, idempotencyKey, body: text });
+    const discussion = body.discussion === undefined ? undefined : discussionContext.safeParse(body.discussion);
+    if (discussion && (!discussion.success || from !== 'project-discussion' || !z.uuid().safeParse(threadId).success)) {
+      return { ok: false, error: 'Invalid discussion notification' };
+    }
+    const msg = createMailMessage({ from, fromName, to: session.id, type, threadId, idempotencyKey, body: text,
+      ...(discussion?.success && { discussion: discussion.data }) });
     await this.mailStore.append(msg);
     if (this.eventSink) {
       const sink = this.eventSink;

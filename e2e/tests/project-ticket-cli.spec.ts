@@ -85,16 +85,37 @@ test("sessions manage a project discussion on a paired bridge and receive thread
     expect(initial.posts[0].author).toMatchObject({ name: "ARM tester", sessionId: workerId, bridgeId: workerBridge });
     const mention = "Please run the smoke suite @" + workerBridge + "/" + workerId;
     await command(home, ["discuss", "reply", thread, "--text", mention, ...local]);
+    type Notice = { body: string; from: string; threadId: string; discussion: { projectId: string; homeBridgeId?: string } };
     const inbox = async () => {
       const { body } = await bridgeApiFetch("GET", "/api/sessions/" + workerId + "/inbox?peek=1&all=1");
-      return (body as { messages: { body: string }[] }).messages.map(message => message.body).join("\n");
+      return (body as { messages: Notice[] }).messages;
     };
-    await expect.poll(inbox, { timeout: 45_000 }).toContain("Please run the smoke suite");
+    const mentioned = async () => (await inbox()).find(message => message.body.includes("Please run the smoke suite"));
+    await expect.poll(mentioned, { timeout: 45_000 }).toMatchObject({
+      from: "project-discussion", threadId: thread, discussion: { projectId: project.id, homeBridgeId: homeId },
+    });
+    const notice = (await mentioned())!;
+    expect(notice.body).toContain(`ftown discuss reply ${thread} --project ${project.id} --bridge ${homeId}`);
+
+    // Invoke the tool registered by the shipped extension with the recipient's bridge credentials.
+    type Tool = { name: string; execute(call: string, params: Record<string, string | undefined>): Promise<{ isError?: boolean; details: unknown }> };
+    const tools: Tool[] = [];
+    const extensionPath = join(E2E_DIR, "..", "bridge", "pi-extension", "ftown.js");
+    const { registerFtownPiExtension } = await import(extensionPath);
+    registerFtownPiExtension({ registerTool: (tool: Tool) => tools.push(tool), registerCommand() {}, on() {} }, {
+      harness: "omp", env: { ...process.env, HOME: BRIDGE_HOME, FTOWN_SESSION_ID: workerId }, readBridgePointer: () => readBridgePointer(),
+    });
+    const answer = "ARM smoke suite passed.";
+    const result = await tools.find(tool => tool.name === "ftown_discuss")!.execute("verify-arm", {
+      operation: "reply", text: answer, project: notice.discussion.projectId, bridge: notice.discussion.homeBridgeId, threadId: notice.threadId,
+    });
+    expect(result.isError, JSON.stringify(result.details)).toBeFalsy();
     await command(BRIDGE_HOME, ["discuss", "follow", thread, ...remote], workerId);
     await command(home, ["discuss", "reply", thread, "--text", "CI is green", ...local]);
-    await expect.poll(inbox, { timeout: 45_000 }).toContain("CI is green");
+    await expect.poll(async () => (await inbox()).some(message => message.body.includes("CI is green")), { timeout: 45_000 }).toBe(true);
     const later = await command<{ posts: Post[] }>(BRIDGE_HOME, ["discuss", "activity", "builds", "--after", String(initial.posts[0].seq), ...remote]);
-    expect(later.posts.map(post => post.text)).toEqual([mention, "CI is green"]);
+    expect(later.posts.map(post => post.text)).toEqual([mention, answer, "CI is green"]);
+    expect(later.posts[1].author).toMatchObject({ sessionId: workerId, bridgeId: workerBridge });
     await command(BRIDGE_HOME, ["discuss", "unfollow", thread, ...remote], workerId);
     const ticketId = randomUUID();
     await command(BRIDGE_HOME, ["discuss", "create-ticket", thread, "--id", ticketId, "--title", "Release on ARM", ...remote], workerId);

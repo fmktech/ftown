@@ -39,7 +39,11 @@ export async function deliverDiscussionMail(projects: ProjectBoardStore, project
       if (deferred.has(target) || (target !== localId && !allowed?.has(target))) return;
       try {
         for (const notice of batch) {
-          const body = { body: notice.body, type: 'message', from: 'project-discussion', fromName: projectName + ' discussion',
+          const discussion = target === localId ? { projectId } : { projectId, homeBridgeId: localId };
+          const replyCommand = `ftown discuss reply ${notice.threadId} --project ${projectId}` +
+            (target === localId ? '' : ` --bridge ${localId}`) + ' --text "your reply"';
+          const body = { body: notice.body + '\n\nReply in this discussion thread: ' + replyCommand, discussion,
+            type: 'message', from: 'project-discussion', fromName: projectName + ' discussion',
             threadId: notice.threadId, discussionProject: projectName, idempotencyKey: 'discussion:' + projectId + ':' + notice.id };
           if (target === localId) {
             const recipient = await load(notice.sessionId);
