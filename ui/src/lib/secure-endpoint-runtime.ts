@@ -47,6 +47,11 @@ function application(value: unknown): SecureApplication {
   return value as unknown as SecureApplication;
 }
 
+export function isEpochChangedReply(data: unknown): boolean {
+  return record(data) && typeof data.status === "number" && data.status >= 400 &&
+    record(data.body) && data.body.code === "epoch_changed";
+}
+
 /** Account-scoped endpoint state; never shares mutable identity between accounts. */
 export class SecureEndpointRuntime {
   readonly identity: EndpointIdentity;
@@ -60,7 +65,7 @@ export class SecureEndpointRuntime {
   private enrollments = new Map<string, Pending<EnrollmentReceipt>>();
   private responses = new Map<string, Pending<ApplicationJson>>();
   private seen = new Map<string, number>();
-  private requestAliases = new Map<string, { requestId: string; expiresAt: number }>();
+  private requestEpochs = new Map<string, { epoch: string; expiresAt: number }>();
   private closed = false;
   /** Account mode only. */
   private readonly ledger: LedgerBridgeAuthority | null = null;
@@ -121,7 +126,7 @@ export class SecureEndpointRuntime {
       for (const pending of map.values()) { clearTimeout(pending.timer); pending.reject(error); }
       map.clear();
     }
-    this.epochs.clear(); this.candidates.clear(); this.requestAliases.clear(); this.seen.clear();
+    this.epochs.clear(); this.candidates.clear(); this.requestEpochs.clear(); this.seen.clear();
     for (const [id, pin] of this.bridges) this.states.set(id, { bridgeId: id, status: "revoked", endpoint: pin.endpoint });
     this.bridges.clear();
     for (const listener of this.listeners) listener();
@@ -299,8 +304,10 @@ export class SecureEndpointRuntime {
     const packet = await seal(this.identity, peer, header, encoder.encode(JSON.stringify(value)));
     if (this.closed) throw new SecurityError("endpoint_revoked", "Encrypted connection closed");
     this.recheck(packet);
-    for (const [id, alias] of this.requestAliases) if (alias.expiresAt <= Date.now()) this.requestAliases.delete(id);
-    if (value.route.kind === "command" || value.route.kind === "http") this.requestAliases.set(packet.messageId, { requestId: value.route.requestId, expiresAt: packet.expiresAt });
+    for (const [id, request] of this.requestEpochs) if (request.expiresAt <= Date.now()) this.requestEpochs.delete(id);
+    if (value.route.kind === "command" || value.route.kind === "http") {
+      this.requestEpochs.set(JSON.stringify([bridgeId, channel, packet.messageId]), { epoch, expiresAt: packet.expiresAt });
+    }
     return packet;
   }
   async receive(packet: unknown, channel: string): Promise<{ bridgeId: string; application: SecureApplication }[]> {
@@ -337,15 +344,16 @@ export class SecureEndpointRuntime {
       this.seen.set(key, now + 120_000);
       const app = application(value);
       if (envelope.createdAt > now + 30_000 || (app.route.kind !== "publication" && (envelope.expiresAt <= now || envelope.expiresAt - envelope.createdAt > 120_000))) continue;
-      if (app.route.kind === "response" && record(app.data) && typeof app.data.status === "number" && app.data.status >= 400
-        && record(app.data.body) && app.data.body.code === "epoch_changed") {
-        this.epochs.delete(envelope.bridgeId); this.disconnected(envelope.bridgeId);
-      }
       if (app.route.kind === "response") {
-        const alias = this.requestAliases.get(app.route.requestId);
-        if (alias) { this.requestAliases.delete(app.route.requestId); app.route = { kind: "response", requestId: alias.requestId }; }
+        const key = JSON.stringify([envelope.bridgeId, channel, app.route.requestId]);
+        const request = this.requestEpochs.get(key);
+        this.requestEpochs.delete(key);
+        // Other requests from before a restart can be rejected after the new handshake completes.
+        if (request && request.epoch === this.epochs.get(envelope.bridgeId) && isEpochChangedReply(app.data)) {
+          this.epochs.delete(envelope.bridgeId); this.disconnected(envelope.bridgeId);
+        }
+        this.settle(this.responses, app.route.requestId, app.data, envelope);
       }
-      if (app.route.kind === "response") this.settle(this.responses, app.route.requestId, app.data, envelope);
       delivered.push({ bridgeId: envelope.bridgeId, senderId: sender.id, application: app });
     }
     return this.closed || this.removed ? [] : delivered.filter(value => this.ledgerAllows(value.bridgeId, value.senderId))
@@ -368,7 +376,7 @@ export class SecureEndpointRuntime {
   }
   dispose(): void {
     this.unsubscribeLedger?.(); this.unsubscribeLedger = null; this.ledgerListeners.clear();
-    this.closed = true; this.epochs.clear(); this.seen.clear(); this.candidates.clear(); this.requestAliases.clear();
+    this.closed = true; this.epochs.clear(); this.seen.clear(); this.candidates.clear(); this.requestEpochs.clear();
     for (const map of [this.welcomes, this.enrollments, this.responses]) for (const pending of map.values()) {
       clearTimeout(pending.timer); pending.reject(new SecurityError("endpoint_revoked", "Encrypted connection was closed"));
     }

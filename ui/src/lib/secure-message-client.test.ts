@@ -135,21 +135,21 @@ describe('secure broker adapter', () => {
       state: (id: string) => ({ status: states.get(id) }),
     } as unknown as SecureEndpointRuntime;
     const client = new SecureMessageClient(raw as unknown as Centrifuge, userId, runtime);
-    let signals = 0;
-    client.getSubscription(channel)!.on('subscribed', () => { signals++; });
+    const signals: (readonly string[] | undefined)[] = [];
+    client.getSubscription(channel)!.on('subscribed', ctx => { signals.push(ctx.readyBridgeIds); });
     changed();
-    expect(signals).toBe(0);
+    expect(signals).toEqual([]);
     // Bridge a finishes its handshake over a direct channel: the dashboard is told to load.
     states.set('a', 'ready'); changed();
-    expect(signals).toBe(1);
+    expect(signals).toEqual([['a']]);
     // Unrelated trust changes do not repeat it.
     changed(); changed();
-    expect(signals).toBe(1);
+    expect(signals).toEqual([['a']]);
     // A second bridge, and a bridge that went away and came back, each count once.
     states.set('b', 'ready'); changed();
-    expect(signals).toBe(2);
+    expect(signals).toEqual([['a'], ['b']]);
     states.set('a', 'offline'); changed(); states.set('a', 'ready'); changed();
-    expect(signals).toBe(3);
+    expect(signals).toEqual([['a'], ['b'], ['a']]);
     client.dispose();
   });
 
@@ -258,6 +258,7 @@ describe('secure broker adapter', () => {
     f.raw.state = 'connected';
     f.client.getSubscription(channel)!.on('subscribed', () => { readRefresh++; });
     const emit = (packet: SecureEnvelope) => { const listener = sub.on.mock.calls.find(([event]) => event === 'publication')![1]; listener({ data: packet }); };
+    let delayedReply!: SecureEnvelope;
     f.raw.publish.mockImplementation(async (_channel, value) => {
       const packet = value as SecureEnvelope;
       const app = JSON.parse(new TextDecoder().decode(await open(f.a, f.browser.endpoint, packet,
@@ -266,14 +267,19 @@ describe('secure broker adapter', () => {
       const body = welcome ? { type: 'welcome', challenge: app.challenge, receiverEpoch: 'restarted-boot' }
         : { type: 'application', route: { kind: 'response', requestId: packet.messageId }, data: { status: 403, body: { code: 'epoch_changed', outcomeUnknown: false } }, mcp: null };
       const now = Date.now();
-      emit(await seal(f.a, f.browser.endpoint, { ...packet, senderId: f.a.endpoint.id, recipientId: f.browser.endpoint.id, purpose: welcome ? 'welcome' : 'application', createdAt: now, expiresAt: now + 120000 }, new TextEncoder().encode(JSON.stringify(body))));
+      const sealed = await seal(f.a, f.browser.endpoint, { ...packet, senderId: f.a.endpoint.id, recipientId: f.browser.endpoint.id, purpose: welcome ? 'welcome' : 'application', createdAt: now, expiresAt: now + 120000 }, new TextEncoder().encode(JSON.stringify(body)));
+      if (packet.messageId === 'delayed-rejection') delayedReply = sealed;
+      else emit(sealed);
     });
+    const delayed = f.client.request({ type: 'list_projects', requestId: 'delayed-rejection', payload: { bridgeId: 'bridge-a' } });
+    await vi.waitFor(() => expect(delayedReply).toBeDefined());
     await expect(f.client.request({ type: 'stop_session', requestId: 'rejected-once', payload: { bridgeId: 'bridge-a' } })).resolves.toMatchObject({ success: false, data: { code: 'epoch_changed' } });
     await vi.waitFor(() => expect(readRefresh).toBe(1));
-    await new Promise(resolve => setTimeout(resolve, 0));
+    emit(delayedReply);
+    await expect(delayed).resolves.toMatchObject({ success: false, data: { code: 'epoch_changed' } });
     expect(readRefresh).toBe(1);
     expect(f.runtime.state('bridge-a').status).toBe('ready'); expect(f.runtime.state('bridge-b').status).toBe('ready');
-    expect(f.raw.publish.mock.calls.map(([, value]) => (value as SecureEnvelope).purpose)).toEqual(['application', 'hello']);
+    expect(f.raw.publish.mock.calls.map(([, value]) => (value as SecureEnvelope).purpose)).toEqual(['application', 'application', 'hello']);
     const next = await f.runtime.sealApplication('bridge-a', channel, { type: 'application', route: { kind: 'command', command: 'list_sessions', requestId: 'fresh-read', sessionId: null }, data: {}, mcp: null });
     expect(next.receiverEpoch).toBe('restarted-boot');
     f.client.dispose(); f.runtime.dispose();
@@ -468,6 +474,22 @@ describe('dashboard commands over a direct channel', () => {
     expect(data).toMatchObject({ type: 'get_session_usage', requestId: route.requestId, payload: { sessionId: 'session-one', bridgeId: 'bridge-a' } });
     expect(seen).toEqual([{ type: 'command_response', response: { requestId: 'usage-one', success: true, data: { sessions: [{ id: 'session-two', bridgeId: 'bridge-a' }] } } }]);
     client.dispose(); runtime.dispose();
+  });
+
+  it('delivers nonempty native resume history directly without issuing a second read over the relay', async () => {
+    const { runtime, raw, client } = await setup();
+    const history = { sessionId: 'native-one', timestamp: '2026-01-01T00:00:00Z', summary: 'Review API' };
+    client.setDirectCommands(answering({ sessions: [history] }));
+    const seen = publications(client);
+    try {
+      await client.publish(channel, { type: 'list_native_sessions', requestId: 'resume-history', payload: {
+        bridgeId: 'bridge-a', workingDir: '/repo', harness: 'claude',
+      } });
+      await vi.waitFor(() => expect(seen).toEqual([{ type: 'command_response', response: {
+        requestId: 'resume-history', success: true, data: { sessions: [history] },
+      } }]));
+      expect(raw.publish).not.toHaveBeenCalled();
+    } finally { client.dispose(); runtime.dispose(); }
   });
 
   it('gives a read that asks its bridge to hold the answer that much longer on the direct channel', async () => {
