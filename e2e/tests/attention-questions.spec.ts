@@ -154,7 +154,9 @@ test("waiting CLI receives a multi-select answer directly and no mail is queued"
   } finally { waiter?.kill(); await waiter?.done.catch(() => undefined); if (id) await bridgeApiFetch("DELETE", `/api/sessions/${id}`).catch(() => undefined); }
 });
 
-test("AskUserQuestion hook blocks until the dashboard answers it", async ({ page }) => {
+for (const waiting of [true, false]) test(waiting
+  ? "AskUserQuestion hook blocks until the dashboard answers it"
+  : "After the AskUserQuestion hook exits, the dashboard answer arrives as a session message", async ({ page }) => {
   test.setTimeout(180_000);
   await page.setViewportSize({ width: 1280, height: 900 });
   await login(page); await waitForBridgeOnline(page);
@@ -181,11 +183,20 @@ test("AskUserQuestion hook blocks until the dashboard answers it", async ({ page
     const { item } = await openInboxEntry(page, id, false, 45_000);
     await expect(item.getByText(question)).toBeVisible();
     await expect(item.getByRole("radio")).toHaveCount(2);
-    await expect(item.getByText("The agent is waiting for this answer.")).toBeVisible();
+    await expect(item.getByText("If the session has stopped waiting, your answer will be sent to its inbox.")).toBeVisible();
+    if (!waiting) {
+      hook.kill();
+      await finish(hook);
+    }
     await expect(item.getByRole("button", { name: "Answer in terminal" })).toBeVisible();
     await item.getByRole("radio", { name: /^SQLite/ }).check();
     await item.getByRole("button", { name: "Send answer" }).click();
     await expect(item).toHaveCount(0);
+    if (!waiting) {
+      await expect.poll(async () => (await inboxMessages(id)).filter(message =>
+        message.threadId?.startsWith("attention:") && message.body.includes("SQLite") && message.from === "browser").length).toBe(1);
+      return;
+    }
     const result = await finish(hook);
     expect(result.code, result.stderr).toBe(0);
     const output = JSON.parse(result.stdout) as { hookSpecificOutput: { hookEventName: string; permissionDecision: string; updatedInput: { answers: Record<string, string>; questions: unknown[] } } };

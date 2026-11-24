@@ -335,8 +335,8 @@ require a bridge reporting `capabilities.attention.prompt === true`; otherwise
 the command fails before writing and asks you to update the bridge.
 
 `--wait` and `attention-status --wait` print `Waiting for an answer (attention <id>)...`
-to stderr and poll until the item is resolved or the deadline (`--timeout`
-`--timeout <s>`, 1..86400, default 600). Exit codes:
+to stderr and wait until the question is answered or dismissed. To return earlier,
+set `--timeout <seconds>` (1–86400). The question stays open when this wait ends.
 
 | Exit | Meaning |
 |------|---------|
@@ -355,8 +355,8 @@ directly. If nobody is waiting, the answer is sent as ftown mail from "You"
 (`fromName` "You", thread `attention:<id>`) whose body starts with
 `[ftown attention answer id=<id>]`. Claude Code `AskUserQuestion` calls inside an
 FTown session follow the same path and are answered from the dashboard inbox.
-The terminal picker appears only if the human chooses "Answer in terminal" or
-after an hour.
+Choosing “Answer in terminal” hands control back to Claude. FTown also returns control to Claude
+after about an hour. If the question is still open, a later dashboard answer goes to the session inbox.
 
 ### Parent-first routing
 

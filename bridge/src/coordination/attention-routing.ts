@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import type { AttentionItem } from '../attention-events.js';
 import { formatAttentionAnswerMail } from '../attention-prompt.js';
-import type { AttentionAnswerDelivery } from '../attention-prompt-protocol.js';
+import { AttentionError } from '../attention-store.js';
 import type { ArchivedSession, Session } from '../types.js';
 import {
   PARENT_QUESTION_PREFIX,
@@ -56,10 +56,9 @@ export function formatParentQuestionMail(child: Session, item: AttentionItem): s
   return header + middle + footer;
 }
 
-export interface DeliverAttentionAnswerParams {
+interface AttentionAnswerMessage {
   child: Session;
   item: AttentionItem;
-  waiterLive: boolean;
   sender: { from: string; fromName: string };
   acceptMail?: (
     session: Session,
@@ -67,22 +66,15 @@ export interface DeliverAttentionAnswerParams {
   ) => Promise<{ ok: true; id: string } | { ok: false; error: string }>;
 }
 
-export async function deliverAttentionAnswer(
-  params: DeliverAttentionAnswerParams,
-): Promise<AttentionAnswerDelivery> {
-  const { child, item, waiterLive, sender, acceptMail } = params;
-  if (item.prompt?.channel === 'hook' || waiterLive) {
-    return 'waiter';
-  }
+export async function queueAttentionAnswer({ child, item, sender, acceptMail }: AttentionAnswerMessage): Promise<void> {
   try {
-    if (!acceptMail || !item.prompt || !item.answer) {
-      throw new Error('Mail is not ready on this bridge');
-    }
+    if (!acceptMail || !item.prompt || !item.answer) throw new Error('Mail is not ready on this bridge');
     const accepted = await acceptMail(child, {
       from: sender.from,
       fromName: sender.fromName,
       type: 'message',
       threadId: `attention:${item.id}`,
+      idempotencyKey: `attention-answer:${item.id}`,
       body: formatAttentionAnswerMail({
         attentionId: item.id,
         title: item.title || undefined,
@@ -91,13 +83,9 @@ export async function deliverAttentionAnswer(
       }),
     });
     if (!accepted.ok) throw new Error(accepted.error);
-    return 'mail';
   } catch (err) {
-    console.error(
-      '[Bridge] Failed to mail attention answer:',
-      err instanceof Error ? err.message : err,
-    );
-    return 'mail_failed';
+    console.error('[Bridge] Failed to mail attention answer:', err instanceof Error ? err.message : err);
+    throw new AttentionError('attention_delivery_failed', 'Could not queue the answer for the session. Try again.', 503);
   }
 }
 

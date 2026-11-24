@@ -33,8 +33,7 @@ import type { Session } from './types.js';
 import type { SessionMessageAccepted, SessionMessageErrorCode } from './session-inbox-protocol.js';
 import { AttentionError, type AttentionStore } from './attention-store.js';
 import { ATTENTION_SUMMARY_MAX_BYTES, ATTENTION_SUMMARY_TOO_LARGE } from './attention-summary-protocol.js';
-import { formatAttentionAnswerMail } from './attention-prompt.js';
-import type { AttentionAnswerDelivery } from './attention-prompt-protocol.js';
+import { queueAttentionAnswer } from './coordination/attention-routing.js';
 import { BridgeUpdateError, type BridgeUpdateCoordinator } from './bridge-update.js';
 import type { UpdateEffects } from './update-effects.js';
 import { validFileId, validPreviewId, validRevision } from './session-preview.js';
@@ -506,24 +505,10 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
           const session = await sessionController.get(payload.sessionId);
           if (!session || session.bridgeId !== bridgeId) throw new AttentionError('session_unavailable', 'This session is no longer available', 404);
           if (!deps.attentionStore) throw new AttentionError('attention_not_ready', 'Attention store is not ready', 503);
-          const { item, snapshot, waiterLive } = await deps.attentionStore.answer(payload.sessionId, payload.eventId, payload.answers, undefined, { kind: 'human' });
+          const { snapshot, waiterLive } = await deps.attentionStore.answer(payload.sessionId, payload.eventId, payload.answers, undefined, { kind: 'human' },
+            item => queueAttentionAnswer({ child: session, item, sender: { from: 'browser', fromName: 'You' }, acceptMail: deps.acceptSessionMail }));
           try { deps.publishAttentionChanged?.(payload.sessionId); } catch (err) { console.warn('[Bridge] Could not publish answered attention:', err instanceof Error ? err.message : err); }
-          let delivery: AttentionAnswerDelivery;
-          if (item.prompt?.channel === 'hook' || waiterLive) delivery = 'waiter';
-          else {
-            try {
-              if (!deps.acceptSessionMail || !item.prompt || !item.answer) throw new Error('Mail is not ready on this bridge');
-              const accepted = await deps.acceptSessionMail(session, {
-                from: 'browser', fromName: 'You', type: 'message', threadId: `attention:${payload.eventId}`,
-                body: formatAttentionAnswerMail({ attentionId: item.id, title: item.title || undefined, prompt: item.prompt, answers: item.answer.answers }),
-              });
-              if (!accepted.ok) throw new Error(accepted.error);
-              delivery = 'mail';
-            } catch (err) {
-              console.error('[Bridge] Failed to mail attention answer:', err instanceof Error ? err.message : err);
-              delivery = 'mail_failed';
-            }
-          }
+          const delivery = waiterLive ? 'waiter' : 'mail';
           response = { requestId: command.requestId, success: true, data: { sessionId: payload.sessionId, ...snapshot, delivery } };
           break;
         }

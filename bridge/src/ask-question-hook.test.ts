@@ -226,6 +226,13 @@ describe('runAskHook', () => {
     assert.equal(h.calls[2]?.path, '/api/sessions/sess-1/attention/att-1?waitSeconds=25');
   });
 
+  it('leaves a reply already queued as a session message out of the native tool response', async () => {
+    const h = makeHarness(standard(() => ({ status: 200, body: { event: { resolution: 'answered',
+      answer: { delivery: 'mail', answers: [{ selected: [0] }, { selected: [1] }] } } } })));
+    assert.equal(await runAskHook(h.deps), 0);
+    assert.deepEqual(h.stdout, []);
+  });
+
   it('prints nothing when answered output cannot be built', async () => {
     const h = makeHarness(standard(() => ({ status: 200, body: { event: { id: 'att-1', resolution: 'answered', answer: { answeredAt: 'x', answers: [{ selected: [0] }] } } } })));
     assert.equal(await runAskHook(h.deps), 0);

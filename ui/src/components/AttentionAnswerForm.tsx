@@ -67,7 +67,7 @@ export function AttentionAnswerForm({ prompt, sessionName, disabledReason, onSub
         void submit();
       }}
     >
-      {prompt.channel === "hook" && <p className="text-xs text-[var(--text-muted)]">The agent is waiting for this answer.</p>}
+      {prompt.channel === "hook" && <p className="text-xs text-[var(--text-muted)]">If the session has stopped waiting, your answer will be sent to its inbox.</p>}
       {prompt.questions.map((question, index) => {
         const multi = question.multiSelect;
         const hasOptions = question.options.length > 0;

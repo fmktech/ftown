@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, readFile, rm, stat, unlink, writeFile } from 'node:fs/p
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
-import { ATTENTION_WAITER_TTL_MS, type AttentionPrompt } from './attention-prompt-protocol.js';
+import type { AttentionPrompt } from './attention-prompt-protocol.js';
 import { AttentionStore, AttentionError, IDLE_NOTIFICATION_DELAY_MS, type AttentionNotificationOptions } from './attention-store.js';
 
 const notice = (message = 'Approve this command?', extra: Record<string, unknown> = {}) => ({ notification_type: 'permission_prompt', message, ...extra });
@@ -489,10 +489,9 @@ test('answer resolves, persists and returns the snapshot; every error is coded',
   await assert.rejects(f.store.answer('s1', item.id, [{ selected: [0] }]), (e) => code(e, 409, 'attention_already_resolved'));
 });
 
-test('hook-channel answers need a live waiter and report waiterLive', async t => {
+test('an active native hook receives its answer', async t => {
   const f = await fixture(t);
   const item = (await f.store.record('s1', 'PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'h1', tool_input: askInput }))!;
-  await assert.rejects(f.store.answer('s1', item.id, [{ selected: [0] }]), (e) => e instanceof AttentionError && e.status === 409 && e.code === 'answer_waiter_gone');
   const poll = f.store.waitForItem('s1', item.id, 5000);
   let pollSettled = false;
   void poll.then(() => { pollSettled = true; }, () => { pollSettled = true; });
@@ -578,7 +577,7 @@ test('waitForItem leaves no waiter or liveness behind after deadline, abort, 404
   const internals = f.store as unknown as { itemWaiters: Map<string, Set<unknown>>; pollers: Map<string, unknown> };
   await f.store.waitForItem('s1', item.id, 30);
   assert.equal(internals.itemWaiters.size, 0);
-  assert.equal(f.store.hasLiveWaiter(item.id), true, 'TTL liveness remains after a deadline return');
+  assert.equal(f.store.hasLiveWaiter(item.id), false, 'a completed poll cannot receive a later answer');
   await assert.rejects(f.store.waitForItem('s1', 'ghost', 30), /Unknown attention/);
   assert.equal(internals.itemWaiters.size, 0);
   assert.equal(f.store.hasLiveWaiter('ghost'), false);
@@ -593,11 +592,11 @@ test('waitForItem leaves no waiter or liveness behind after deadline, abort, 404
   assert.equal((await f.store.waitForItem('s1', item.id, -5)).resolvedAt, undefined);
 });
 
-test('answer liveness: mail needs an active wait (no TTL), hook accepts a recent poll', async t => {
+test('both CLI and hook answers fall back to mail after a poll returns', async t => {
   const f = await fixture(t);
   const mail = (await f.store.record('s1', 'Notification', needsInput('M'), { prompt: mailPrompt() }))!;
   await f.store.waitForItem('s1', mail.id, 30);
-  assert.equal(f.store.hasLiveWaiter(mail.id), true);
+  assert.equal(f.store.hasLiveWaiter(mail.id), false);
   assert.equal((await f.store.answer('s1', mail.id, [{ selected: [0] }])).waiterLive, false);
   const mail2 = (await f.store.record('s1', 'Notification', needsInput('M2'), { prompt: mailPrompt() }))!;
   const poll = f.store.waitForItem('s1', mail2.id, 5000);
@@ -606,7 +605,7 @@ test('answer liveness: mail needs an active wait (no TTL), hook accepts a recent
   await poll;
   const hook = (await f.store.record('s1', 'PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'lv', tool_input: askInput }))!;
   await f.store.waitForItem('s1', hook.id, 30);
-  assert.equal((await f.store.answer('s1', hook.id, [{ selected: [0] }])).waiterLive, true);
+  assert.equal((await f.store.answer('s1', hook.id, [{ selected: [0] }])).waiterLive, false);
 });
 
 test('a replayed AskUserQuestion hook does not reopen or duplicate a resolved ask_user item', async t => {
@@ -715,35 +714,6 @@ test('waitForItem abort rejects as cancelled and clears liveness when no waits r
   await assert.rejects(f.store.waitForItem('s1', item.id, 5000, AbortSignal.abort()), /cancelled/);
 });
 
-test('liveness lasts ATTENTION_WAITER_TTL_MS after the latest poll started', { timeout: 10_000 }, async t => {
-  const f = await fixture(t); const time = clock();
-  const store = new AttentionStore(f.resolve, 500, undefined, time.options);
-  const runPoll = async (id: string) => {
-    const poll = store.waitForItem('s1', id, 30);
-    for (let attempts = 0; !time.tasks.size; attempts++) {
-      if (attempts >= 10_000) assert.fail('poll did not schedule its timer');
-      await new Promise<void>(resolve => setImmediate(resolve));
-    }
-    time.advance(30); await poll;
-  };
-  const item = (await store.record('s1', 'Notification', needsInput('Q'), { prompt: mailPrompt() }))!;
-  assert.equal(store.hasLiveWaiter(item.id), false);
-  await store.waitForItem('s1', item.id, 0);
-  assert.equal(store.hasLiveWaiter(item.id), false);
-  await runPoll(item.id);
-  let now = time.options.now();
-  assert.equal(store.hasLiveWaiter(item.id, now + ATTENTION_WAITER_TTL_MS), true);
-  assert.equal(store.hasLiveWaiter(item.id, now + ATTENTION_WAITER_TTL_MS + 1), false);
-  time.advance(30_000); await runPoll(item.id); now = time.options.now();
-  assert.equal(store.hasLiveWaiter(item.id, now + ATTENTION_WAITER_TTL_MS), true);
-  time.advance(ATTENTION_WAITER_TTL_MS + 1);
-  assert.equal(store.hasLiveWaiter(item.id), false);
-  const hook = (await store.record('s1', 'PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'ttl', tool_input: askInput }))!;
-  await assert.rejects(store.answer('s1', hook.id, [{ selected: [0] }]), /no longer waiting/);
-  await runPoll(hook.id);
-  assert.equal((await store.answer('s1', hook.id, [{ selected: [0] }])).waiterLive, true);
-});
-
 test('ledgers written before prompts existed still load', async t => {
   const f = await fixture(t);
   const old = { version: 1, epoch: '7b2f3c1e-8f1a-4d57-9a53-0a5b0f6a2c11', sequence: 1, prunedThrough: 0, activity: { state: 'unknown' },
@@ -751,29 +721,6 @@ test('ledgers written before prompts existed still load', async t => {
   await writeFile(join(f.dir, 's1/attention.json'), JSON.stringify(old));
   const page = await f.store.list('s1', { includeResolved: true });
   assert.equal(page.events[0].id, 'e1'); assert.equal(page.events[0].prompt, undefined);
-});
-
-test('liveness TTL runs from the end of the latest poll, not its start', { timeout: 10_000 }, async t => {
-  const f = await fixture(t); const time = clock();
-  const store = new AttentionStore(f.resolve, 500, undefined, time.options);
-  const runPoll = async (eventId: string) => {
-    const poll = store.waitForItem('s1', eventId, 25_000);
-    for (let attempts = 0; !time.tasks.size; attempts++) {
-      if (attempts >= 10_000) assert.fail('poll did not schedule its timer');
-      await new Promise<void>(resolve => setImmediate(resolve));
-    }
-    time.advance(25_000); await poll;
-  };
-  const hook = (await store.record('s1', 'PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'end', tool_input: askInput }))!;
-  await runPoll(hook.id);
-  assert.equal((await store.answer('s1', hook.id, [{ selected: [0] }])).waiterLive, true);
-  const second = (await store.record('s1', 'PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'end2', tool_input: askInput }))!;
-  await runPoll(second.id);
-  assert.equal(store.hasLiveWaiter(second.id), true, '25s poll exceeds TTL from its start');
-  time.advance(ATTENTION_WAITER_TTL_MS);
-  assert.equal(store.hasLiveWaiter(second.id), true, 'TTL includes the exact boundary');
-  time.advance(1);
-  await assert.rejects(store.answer('s1', second.id, [{ selected: [0] }]), (e) => e instanceof AttentionError && e.code === 'answer_waiter_gone');
 });
 
 test('malformed prompts of any shape give invalid_prompt, never a TypeError', async t => {
@@ -957,7 +904,7 @@ test('idle deadlines survive wall steps, restore and early rechecks', async t =>
   }
 });
 
-test('poll deadlines and waiter expiry use elapsed time across wall steps', { timeout: 10_000 }, async t => {
+test('poll deadlines use elapsed time across wall steps', { timeout: 10_000 }, async t => {
   for (const jump of [-600_000, 600_000]) {
     const f = await fixture(t); const time = clock();
     const store = new AttentionStore(f.resolve, 500, undefined, time.options);
@@ -973,15 +920,7 @@ test('poll deadlines and waiter expiry use elapsed time across wall steps', { ti
     scheduled = time.nextSchedule(); time.advance(1);
     assert.equal(await Promise.race([poll.then(() => 'settled'), scheduled.then(() => 'scheduled')]), 'settled');
     assert.equal(settled, true, 'item poll ends at elapsed deadline');
-    const endedWall = time.options.now(); time.advance(ATTENTION_WAITER_TTL_MS);
-    assert.equal(store.hasLiveWaiter(item.id), true);
-    assert.equal(store.hasLiveWaiter(item.id, endedWall + ATTENTION_WAITER_TTL_MS), true);
-    time.advance(1); assert.equal(store.hasLiveWaiter(item.id), false);
-    assert.equal(store.hasLiveWaiter(item.id, endedWall + ATTENTION_WAITER_TTL_MS + 1), false);
-    const other = (await store.record('s1', 'Notification', needsInput('Other'), { prompt: mailPrompt() }))!;
-    scheduled = time.nextSchedule(); const otherPoll = store.waitForItem('s1', other.id, 1000); await scheduled;
-    assert.equal(store.hasLiveWaiter(item.id, endedWall), false);
-    time.advance(1000); await otherPoll;
+    assert.equal(store.hasLiveWaiter(item.id), false);
     const empty = await store.list('s1'); settled = false; scheduled = time.nextSchedule();
     const wait = store.wait('s1', { cursor: empty.cursor }, 1).then(value => { settled = true; return value; });
     await scheduled; time.stepWall(-jump); scheduled = time.nextSchedule(); time.fireEarly();

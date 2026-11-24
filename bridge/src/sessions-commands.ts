@@ -218,12 +218,12 @@ function sessionProgram(): Command {
     .option('--no-text', 'Do not offer a free-text answer (needs --option)')
     .option('--questions-json <json>', 'Structured questions: an array, or { "questions": [...] } (excludes --option/--multi/--no-text)')
     .option('--wait', 'Block until the user answers; prints the answer on stdout (exit 0; 2 dismissed, 124 timeout)')
-    .option('--timeout <seconds>', 'With --wait: give up after this many seconds (1-86400, default 600)')
+    .option('--timeout <seconds>', 'Limit this wait to 1-86400 seconds (default: wait until resolved)')
     .option('--session-id <id>', 'Target session; defaults to FTOWN_SESSION_ID')
     .action((_opts, cmd: Command) => run('attention', [], cmd));
   command('attention-status <event-id>', 'Check or wait for the answer to an attention question (exit 0 answered, 2 dismissed, 3 pending, 124 timeout)')
     .option('--wait', 'Block until the user answers')
-    .option('--timeout <seconds>', 'With --wait: give up after this many seconds (1-86400, default 600)')
+    .option('--timeout <seconds>', 'Limit this wait to 1-86400 seconds (default: wait until resolved)')
     .option('--session-id <id>', 'Target session; defaults to FTOWN_SESSION_ID')
     .action((eventId: string, _opts, cmd: Command) => run('attention-status', [eventId], cmd));
   command('handoff <session-id>', 'Commit uncommitted work and continue it in a new session')
@@ -308,7 +308,6 @@ async function waitForChildLaunch(id: string): Promise<void> {
   }
 }
 
-const ATTENTION_DEFAULT_TIMEOUT_SECONDS = 600;
 const ATTENTION_MAX_TIMEOUT_SECONDS = 86400;
 const ATTENTION_POLL_RETRIES = 3;
 const ATTENTION_RETRY_BACKOFF_MS = 1000;
@@ -316,7 +315,7 @@ const ATTENTION_RETRY_BACKOFF_MS = 1000;
 interface WaitedAttentionItem { id: string; resolvedAt?: string; resolution?: string; prompt?: AttentionPrompt; answer?: AttentionAnswer }
 
 function parseAttentionTimeout(value: string | undefined): number {
-  if (value === undefined) return ATTENTION_DEFAULT_TIMEOUT_SECONDS;
+  if (value === undefined) return Infinity;
   if (!/^\d+$/.test(value.trim())) throw new Error(`--timeout must be a whole number of seconds between 1 and ${ATTENTION_MAX_TIMEOUT_SECONDS}`);
   const seconds = Number(value);
   if (seconds < 1 || seconds > ATTENTION_MAX_TIMEOUT_SECONDS) throw new Error(`--timeout must be between 1 and ${ATTENTION_MAX_TIMEOUT_SECONDS} seconds`);

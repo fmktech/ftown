@@ -448,22 +448,23 @@ test('attention with questions requires the prompt capability', async () => fixt
   assert.equal(await runSessions(['attention', '--message', 'plain']), 0);
 }, (request) => request.method === 'GET' ? newCapabilities : { event: { id: 'evt-1' } }));
 
-test('attention --wait polls until answered and prints the formatted answer', async () => withFakeClock(async () => {
-  let polls = 0;
+test('attention --wait with no deadline still receives and prints an answer after ten minutes', async () => withFakeClock(async (_sleeps, advance) => {
+  let elapsedSeconds = 0;
   await fixture(async (requests, output) => {
     process.env.FTOWN_SESSION_ID = 'self-id';
-    assert.equal(await runSessions(['attention', '--message', 'Which?', '--option', 'Alpha', '--option', 'Beta', '--wait', '--timeout', '100']), 0);
+    assert.equal(await runSessions(['attention', '--message', 'Which?', '--option', 'Alpha', '--option', 'Beta', '--wait']), 0);
     const polled = requests.filter(({ url }) => url.includes('/attention/evt-1'));
-    assert.equal(polled.length, 2);
-    assert.ok(polled[0].url.endsWith('/api/sessions/self-id/attention/evt-1?waitSeconds=25'));
+    assert.equal(polled.length, 25);
+    assert.ok(polled.every(request => request.url.endsWith('/api/sessions/self-id/attention/evt-1?waitSeconds=25')));
     assert.ok(output.includes('Waiting for an answer (attention evt-1)...'));
     assert.ok((output.at(-1) ?? '').includes('Beta'), output.at(-1));
     assert.ok(!output.some((line) => line.includes('"event"')), 'POST response is not printed with --wait');
   }, (request) => {
     if (request.method === 'POST') return { event: { id: 'evt-1' } };
     if (!request.url.includes('/attention/evt-1')) return promptCapabilities;
-    polls += 1;
-    return { event: polls < 2 ? { id: 'evt-1' } : answeredItem };
+    advance(25_000);
+    elapsedSeconds += 25;
+    return { event: elapsedSeconds <= 600 ? { id: 'evt-1' } : answeredItem };
   });
 }));
 

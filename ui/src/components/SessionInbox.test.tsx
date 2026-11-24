@@ -146,11 +146,11 @@ it("disables the answer form with the entry's reply reason", () => {
 it("maps answer outcomes to user messages", () => {
   const map = (result: Parameters<typeof attentionAnswerSubmitResult>[1]) => attentionAnswerSubmitResult("Bot", result);
   expect(map({ ok: true, delivery: "waiter" })).toEqual({ ok: true, message: "Answer delivered to Bot." });
-  expect(map({ ok: true, delivery: "mail" })).toEqual({ ok: true, message: "Answer sent to Bot." });
+  expect(map({ ok: true, delivery: "mail" })).toEqual({ ok: true, message: "Answer queued in Bot’s inbox." });
   expect(map({ ok: true, delivery: "mail_failed" })).toEqual({ ok: true, message: "Answer saved, but mail delivery failed. The agent can read it with ftown sessions attention-status." });
   expect(map({ ok: false, code: "attention_already_resolved", message: "x" })).toEqual({ ok: false, message: "This question was already answered or dismissed." });
   expect(map({ ok: false, code: "attention_not_found", message: "x" })).toEqual({ ok: false, message: "This question no longer exists." });
-  expect(map({ ok: false, code: "answer_waiter_gone", message: "x" })).toEqual({ ok: false, message: "The agent stopped waiting here. Open the session to answer in the terminal." });
+  expect(map({ ok: false, code: "answer_waiter_gone", message: "x" })).toEqual({ ok: false, message: "This bridge needs an update to queue your answer after the session stops waiting. You can still answer in the terminal." });
   expect(map({ ok: false, code: "invalid_answer", message: "too long" })).toEqual({ ok: false, message: "The answer was rejected: too long" });
   expect(map({ ok: false, code: "permission_denied", message: "x" }).message).toContain("permission");
   expect(map({ ok: false, code: "weird", message: "Bridge said no" })).toEqual({ ok: false, message: "Bridge said no" });

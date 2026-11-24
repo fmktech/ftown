@@ -174,7 +174,7 @@ export async function runAskHook(deps: AskHookDeps): Promise<0> {
       if (response && ok(response) && isRecord(response.body) && isRecord(response.body.event)) {
         lastSuccess = monotonicNow();
         const item = response.body.event;
-        if (item.resolution === 'answered' && isRecord(item.answer) && Array.isArray(item.answer.answers)) {
+        if (item.resolution === 'answered' && isRecord(item.answer) && item.answer.delivery !== 'mail' && Array.isArray(item.answer.answers)) {
           const output = buildAskUserQuestionHookOutput(toolInput, item.answer.answers as AttentionAnswerEntry[]);
           if (output && !aborted()) deps.writeStdout(JSON.stringify(output));
           return 0;

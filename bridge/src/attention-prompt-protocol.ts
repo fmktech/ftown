@@ -14,13 +14,6 @@ export const ATTENTION_PROMPT_LIMITS = {
   answerTextChars: 4000,
 } as const;
 
-/**
- * A waiter counts as live while a long-poll is active and this long after its
- * latest long-poll ended normally (an aborted poll ends liveness at once). Kept
- * short: a waiter that died between polls must not swallow an answer that
- * should have fallen back to mail.
- */
-export const ATTENTION_WAITER_TTL_MS = 10_000;
 /** Longest single long-poll on one attention item, in seconds. */
 export const ATTENTION_ITEM_WAIT_MAX_SECONDS = 25;
 /** Claude Code `timeout` for the AskUserQuestion hook, in seconds. */
@@ -44,10 +37,8 @@ export interface AttentionPromptQuestion {
 }
 
 /**
- * `mail`: an agent asked through ftown; a live waiter receives the answer,
- * otherwise it is mailed to the session.
- * `hook`: a blocking harness hook (Claude Code AskUserQuestion) receives it;
- * there is no mail fallback.
+ * `mail` identifies a question raised through ftown, and `hook` a native harness question.
+ * Both deliver answers to an active waiter or queue a message for the owning session.
  */
 export type AttentionAnswerChannel = 'mail' | 'hook';
 
@@ -66,6 +57,8 @@ export interface AttentionAnswerEntry {
 export interface AttentionAnswer {
   answers: AttentionAnswerEntry[];
   answeredAt: string;
+  /** A resumed native hook can see this answer was delivered to the session inbox. */
+  delivery?: 'mail';
 }
 
 /** What callers send as `questions` (local API, CLI --questions-json). */
@@ -101,6 +94,7 @@ export type AttentionAnswerErrorCode =
   | 'attention_already_resolved'
   | 'invalid_answer'
   | 'answer_waiter_gone'
+  | 'attention_delivery_failed'
   /** The request payload itself was malformed (bad shape, unknown event id). */
   | 'invalid_attention_request'
   /** The session the item belongs to is gone or is not served by this bridge. */
