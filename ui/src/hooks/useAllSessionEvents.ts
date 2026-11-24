@@ -791,11 +791,11 @@ export function useAllSessionEvents(
     setActivityMap(new Map());
   }, [client, userId, unsubscribe]);
 
-  useEffect(() => rpc?.onSubscribed(() => {
+  useEffect(() => rpc?.onSubscribed(readyBridgeIds => {
     if (clientRef.current !== client || userIdRef.current !== userId) return;
     const bridgeIds = new Set(Array.from(subsRef.current.keys()).flatMap(id => {
       const row = sessionsRef.current.find(session => session.id === id && session.status === "running");
-      return row ? [row.bridgeId] : [];
+      return row && (!readyBridgeIds || readyBridgeIds.includes(row.bridgeId)) ? [row.bridgeId] : [];
     }));
     for (const bridgeId of bridgeIds) {
       if (unsupportedSummaryBridges.current.has(bridgeId)) {

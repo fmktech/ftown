@@ -9,6 +9,11 @@ import { UNRECOVERED_SUBSCRIBED_CONTEXT, type MessageClient, type MessageEvents,
 import { applicationJson, SecureEndpointRuntime } from "./secure-endpoint-runtime";
 
 function record(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
+/** Provider resume entries carry a native session ID and never establish an FTown session owner. */
+function isNativeSessionSummary(value: unknown): boolean {
+  return record(value) && value.id === undefined && value.bridgeId === undefined
+    && typeof value.sessionId === "string" && typeof value.timestamp === "string" && typeof value.summary === "string";
+}
 type Listener = (context: never) => void;
 
 class SecureSubscription implements MessageSubscription {
@@ -133,7 +138,7 @@ export class SecureMessageClient implements MessageClient {
   private outbound = new Map<string, Promise<unknown>>();
   private abort = new AbortController();
   private pending = new Map<string, { resolve: (value: unknown) => void; reject: (error: unknown) => void; timer: ReturnType<typeof setTimeout> }>();
-  private expectations = new Map<string, { bridgeIds: Set<string>; expiresAt: number }>();
+  private expectations = new Map<string, { bridgeIds: Set<string>; command: string; expiresAt: number }>();
   private generation = 0;
   private closed = false;
   private recovering = new Map<string, object>();
@@ -203,11 +208,11 @@ export class SecureMessageClient implements MessageClient {
       if (this.raw.state !== "connected") {
         // A bridge can become ready over its direct channel while the relay is down. The dashboard loads its data on the command
         // channel's "subscribed" signal, which the relay cannot send then, so it is raised here.
-        if (becameReady) this.getSubscription(accountChannel("commands:rpc", this.userId))?.emit("subscribed", UNRECOVERED_SUBSCRIBED_CONTEXT);
+        if (becameReady.length) this.signalReady(becameReady);
         return;
       }
       for (const pin of securityRuntime.pinnedBridges()) if (securityRuntime.state(pin.bridgeId).status === "offline" && !this.retries.has(pin.bridgeId)) {
-        this.recoverBridge(pin.bridgeId, false);
+        this.recoverBridge(pin.bridgeId);
       }
     });
     // Account mode: a ledger change may be exactly what a waiting computer needed; re-evaluate now with a fresh window.
@@ -216,7 +221,7 @@ export class SecureMessageClient implements MessageClient {
       for (const pin of securityRuntime.pinnedBridges()) {
         if (securityRuntime.state(pin.bridgeId).status === "ready") continue;
         this.resetRetry(pin.bridgeId);
-        this.recoverBridge(pin.bridgeId, false);
+        this.recoverBridge(pin.bridgeId);
       }
     });
   }
@@ -243,7 +248,7 @@ export class SecureMessageClient implements MessageClient {
     entry.timer = setTimeout(() => {
       entry.timer = null;
       if (this.closed || this.retries.get(bridgeId) !== entry || this.raw.state !== "connected") return;
-      this.recoverBridge(bridgeId, false);
+      this.recoverBridge(bridgeId);
     }, delay);
   }
   private connected = () => {
@@ -316,7 +321,9 @@ export class SecureMessageClient implements MessageClient {
       };
       admit();
       for (const [id, expected] of this.expectations) if (expected.expiresAt <= Date.now()) this.expectations.delete(id);
-      if (record(value) && typeof value.requestId === "string") this.expectations.set(value.requestId, { bridgeIds: new Set(targets), expiresAt: deadline });
+      if (record(value) && typeof value.requestId === "string" && typeof value.type === "string") {
+        this.expectations.set(value.requestId, { bridgeIds: new Set(targets), command: value.type, expiresAt: deadline });
+      }
       return Promise.all(targets.map(bridgeId => {
         // Connection setup has its own queue: a command waiting for the direct channel must never hold up the offer that opens it.
         const setup = record(value) && typeof value.type === "string" && RELAY_ONLY.has(value.type);
@@ -354,27 +361,32 @@ export class SecureMessageClient implements MessageClient {
   }
   /** The bridges seen ready at the last trust change, to tell a bridge that just became ready from one that already was. */
   private readonly readyBridges = new Set<string>();
-  private noteReadyBridges(): boolean {
-    let becameReady = false;
+  private signalReady(readyBridgeIds: string[]): void {
+    this.getSubscription(accountChannel("commands:rpc", this.userId))?.emit("subscribed", {
+      ...UNRECOVERED_SUBSCRIBED_CONTEXT, readyBridgeIds,
+    });
+  }
+  private noteReadyBridges(): string[] {
+    const becameReady: string[] = [];
     for (const pin of this.securityRuntime.pinnedBridges()) {
       if (this.securityRuntime.state(pin.bridgeId).status !== "ready") this.readyBridges.delete(pin.bridgeId);
       else if (!this.readyBridges.has(pin.bridgeId)) {
         this.resetRetry(pin.bridgeId);
         this.readyBridges.add(pin.bridgeId);
-        becameReady = true;
+        becameReady.push(pin.bridgeId);
       }
     }
     return becameReady;
   }
-  private recoverBridge(bridgeId: string, force: boolean): void {
+  private recoverBridge(bridgeId: string): void {
     if (this.closed || this.recovering.has(bridgeId)) return;
     const cycle = {};
     const generation = this.generation;
     this.recovering.set(bridgeId, cycle);
-    void this.ensureReady(bridgeId, force).then(() => {
+    void this.ensureReady(bridgeId).then(() => {
       if (!this.closed && this.generation === generation && this.recovering.get(bridgeId) === cycle
         && this.securityRuntime.state(bridgeId).status === "ready") {
-        this.getSubscription(accountChannel("commands:rpc", this.userId))?.emit("subscribed", UNRECOVERED_SUBSCRIBED_CONTEXT);
+        this.signalReady([bridgeId]);
       }
     }).catch(() => {}).finally(() => {
       if (this.recovering.get(bridgeId) === cycle) this.recovering.delete(bridgeId);
@@ -398,12 +410,17 @@ export class SecureMessageClient implements MessageClient {
       if (application.route.kind !== "response" || response.requestId !== application.route.requestId || typeof response.requestId !== "string") return false;
       const expected = this.expectations.get(response.requestId);
       if (!expected || expected.expiresAt <= Date.now() || !expected.bridgeIds.has(bridgeId)) return false;
-      if (response.success === false && record(response.data) && response.data.code === "epoch_changed") this.recoverBridge(bridgeId, true);
       if (record(response.data)) {
         if (typeof response.data.bridgeId === "string" && response.data.bridgeId !== bridgeId) return false;
-        if (Array.isArray(response.data.sessions) && response.data.sessions.some(session => !record(session) || session.bridgeId !== bridgeId)) return false;
         if (record(response.data.session) && response.data.session.bridgeId !== bridgeId) return false;
-        if (Array.isArray(response.data.sessions)) for (const session of response.data.sessions) register(session);
+        if (Array.isArray(response.data.sessions)) {
+          if (expected.command === "list_native_sessions") {
+            if (!response.data.sessions.every(isNativeSessionSummary)) return false;
+          } else {
+            if (response.data.sessions.some(session => !record(session) || session.bridgeId !== bridgeId)) return false;
+            for (const session of response.data.sessions) register(session);
+          }
+        }
         register(response.data.session);
       }
       const pending = typeof response.requestId === "string" ? this.pending.get(response.requestId) : null;

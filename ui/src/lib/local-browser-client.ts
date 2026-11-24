@@ -2,7 +2,7 @@ import type { Command, CommandResponse } from '@/types';
 import { UNRECOVERED_SUBSCRIBED_CONTEXT, type MessageClient, type MessageEvents, type MessageSubscription, type MessagePublishOptions } from './message-client';
 import type { BridgeSecurityInfo, LocalEventPage, SecurityCommand, SecurityCommandResults } from '@security/protocol';
 import { SecurityError } from '@security/crypto';
-import { SecureEndpointRuntime } from './secure-endpoint-runtime';
+import { isEpochChangedReply, SecureEndpointRuntime } from './secure-endpoint-runtime';
 
 export interface BrowserBootstrap extends BridgeSecurityInfo {
   version: 1; userId: string; hostname: string; localPort: number;
@@ -158,14 +158,14 @@ export class LocalBrowserClient implements MessageClient {
       if (reply && typeof reply === 'object' && !Array.isArray(reply) && reply.type === 'command_response' && reply.response) return reply.response as unknown as CommandResponse;
       if (legacySummary && reply && typeof reply === 'object' && !Array.isArray(reply) && reply.status === 400
         && reply.body && typeof reply.body === 'object' && !Array.isArray(reply.body) && reply.body.code === 'invalid_command') return unsupportedSummary();
-      if (reply && typeof reply === 'object' && !Array.isArray(reply) && typeof reply.status === 'number' && reply.status >= 400
-        && reply.body && typeof reply.body === 'object' && !Array.isArray(reply.body) && reply.body.code === 'epoch_changed') throw new SecurityError('epoch_changed', 'Bridge restarted; refresh encrypted state before trying a new action');
+      if (isEpochChangedReply(reply)) throw new SecurityError('epoch_changed', 'Bridge restarted; refresh encrypted state before trying a new action');
       throw new SecurityError('permission_denied', 'Encrypted local command was rejected');
     } catch (error) {
       if (legacySummary && error instanceof LocalAccessError && error.status === 400 && error.code === 'invalid_command') return unsupportedSummary();
       // The event poll owns connection health. A single rejected, cancelled or
       // timed-out command must not disconnect the bridge and replay dashboard reads.
-      if (this.lostAuthority(error) || error instanceof SecurityError && error.code === 'epoch_changed') {
+      if (this.lostAuthority(error) || (error instanceof SecurityError && error.code === 'epoch_changed'
+        && this.securityRuntime?.state(this.boot.bridgeId).status === 'offline')) {
         this.handleError(error);
       }
       throw error;
@@ -192,6 +192,8 @@ export class LocalBrowserClient implements MessageClient {
           { kind: 'http', requestId: crypto.randomUUID(), method: 'GET', path: `/api/browser/events?after=${this.cursor}` }, {},
           this.transmit(channel, '/api/security/events')) as unknown as LocalEventPage;
         if (this.abort.signal.aborted) return;
+        // A concurrent command may already have recovered the bridge while this old poll was in flight.
+        if (isEpochChangedReply(result) && this.securityRuntime!.state(this.boot.bridgeId).status === 'ready') continue;
         if (!Array.isArray(result.events) || !Number.isSafeInteger(result.cursor)) throw new Error('Invalid local event page');
         this.cursor = result.cursor;
         for (const event of result.events) this.deliver(event.channel, event.data);

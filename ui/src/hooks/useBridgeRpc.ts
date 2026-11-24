@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { v4 as uuidv4 } from "uuid";
 import { Command, CommandResponse, BridgeExecPayload } from "@/types";
-import type { MessagePublishOptions } from "@/lib/message-client";
+import type { MessageEvents, MessagePublishOptions } from "@/lib/message-client";
 import { accountChannel } from "@security/ledger/channels";
 
 /** How long a request/response RPC waits before rejecting. */
@@ -36,9 +36,9 @@ export interface BridgeRpcSubscriptionLike {
   subscribe(): void;
   publish(data: unknown, options?: MessagePublishOptions): Promise<unknown>;
   on(event: "publication", listener: (ctx: { data: unknown; info?: { user?: string } }) => void): unknown;
-  on(event: "subscribed", listener: () => void): unknown;
+  on(event: "subscribed", listener: (ctx: MessageEvents["subscribed"]) => void): unknown;
   off(event: "publication", listener: (ctx: { data: unknown; info?: { user?: string } }) => void): unknown;
-  off(event: "subscribed", listener: () => void): unknown;
+  off(event: "subscribed", listener: (ctx: MessageEvents["subscribed"]) => void): unknown;
 }
 
 /** Minimal structural view of the Centrifuge client — only what this hook uses. */
@@ -213,9 +213,10 @@ export interface BridgeRpc {
    * Run a listener on every (re)subscribe of the commands channel — and
    * immediately, if the channel is already subscribed when registering (e.g.
    * StrictMode remount reusing useCentrifugo's subscription, where the
-   * 'subscribed' event won't re-fire). Returns an unregister function.
+   * 'subscribed' event won't re-fire). When individual bridges recover, the
+   * listener receives their IDs. A channel-wide notification has no IDs.
    */
-  onSubscribed: (listener: () => void) => () => void;
+  onSubscribed: (listener: (readyBridgeIds?: readonly string[]) => void) => () => void;
   lastResponse: CommandResponse | null;
 }
 
@@ -231,7 +232,7 @@ export function useBridgeRpc(client: CentrifugoClientLike | null, userId: string
   const [lastResponse, setLastResponse] = useState<CommandResponse | null>(null);
   const commandsSubRef = useRef<BridgeRpcSubscriptionLike | null>(null);
   const responseListenersRef = useRef<Set<(response: CommandResponse) => void>>(new Set());
-  const subscribedListenersRef = useRef<Set<() => void>>(new Set());
+  const subscribedListenersRef = useRef<Set<(readyBridgeIds?: readonly string[]) => void>>(new Set());
   const coreRef = useRef<RpcCore | null>(null);
   if (coreRef.current === null) {
     coreRef.current = createRpcCore((command, options) => {
@@ -276,8 +277,8 @@ export function useBridgeRpc(client: CentrifugoClientLike | null, userId: string
     };
     commandsSub.on("publication", onCommandsPublication);
 
-    const onSubscribedEvent = () => {
-      for (const listener of subscribedListenersRef.current) listener();
+    const onSubscribedEvent = (ctx: MessageEvents["subscribed"] = {}) => {
+      for (const listener of subscribedListenersRef.current) listener(ctx.readyBridgeIds);
     };
     commandsSub.on("subscribed", onSubscribedEvent);
 
@@ -334,7 +335,7 @@ export function useBridgeRpc(client: CentrifugoClientLike | null, userId: string
     };
   }, []);
 
-  const onSubscribed = useCallback((listener: () => void) => {
+  const onSubscribed = useCallback((listener: (readyBridgeIds?: readonly string[]) => void) => {
     subscribedListenersRef.current.add(listener);
     // The shared subscription may already be live when a consumer registers
     // (its 'subscribed' event won't re-fire), so invoke immediately.

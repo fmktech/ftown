@@ -5,7 +5,8 @@ import type { SecureEndpointRuntime } from "./secure-endpoint-runtime";
 export interface MessagePublishOptions { deadline?: number; signal?: AbortSignal }
 export interface MessageEvents {
   publication: { data: unknown; info?: { user?: string }; offset?: number; epoch?: string };
-  subscribed: { recovered?: boolean; positioned?: boolean; wasRecovering?: boolean; offset?: number; epoch?: string };
+  /** Synthetic command-ready signals identify the bridges that recovered. Broker resubscriptions cover all bridges. */
+  subscribed: { readyBridgeIds?: readonly string[]; recovered?: boolean; positioned?: boolean; wasRecovering?: boolean; offset?: number; epoch?: string };
   join: { info: { client: string; connInfo?: unknown } };
   leave: { info: { client: string } };
 }

@@ -75,6 +75,28 @@ describe('encrypted local browser control', () => {
     expect(delivered).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ type: 'command_response', response: expect.objectContaining({ requestId: 'picker', success: false, data: { code: 'permission_denied' } }) }) }));
     client.close();
   });
+  it('keeps a recovered local bridge online when pending command and event reads report the old boot', async () => {
+    const bridge = await generateEndpoint(ownerId, 'bridge');
+    const boot: BrowserBootstrap = { version: 1, protocolVersion: 1, ownerId, bridgeId: 'bridge-a', endpoint: bridge.endpoint, relayUserId: 'local-owner', userId: 'local-owner', hostname: 'laptop', localPort: 43127 };
+    const rejection = { status: 403, body: { code: 'epoch_changed' } };
+    let finishPoll!: (outcome: string) => void;
+    const outcome = new Promise<string>(resolve => { finishPoll = resolve; });
+    const runtime = {
+      state: () => ({ status: 'ready' }),
+      disconnected: vi.fn(),
+      request: vi.fn().mockResolvedValueOnce(rejection).mockResolvedValueOnce(rejection)
+        .mockImplementation(() => { finishPoll('next poll'); return new Promise(() => {}); }),
+    };
+    const client = new LocalBrowserClient({ port: 43127, bridgeId: boot.bridgeId }, boot,
+      connected => { if (!connected) finishPoll('went offline'); }, vi.fn(), undefined, runtime as unknown as SecureEndpointRuntime);
+    try {
+      await expect(client.command({ type: 'list_projects', requestId: 'old-read', payload: { bridgeId: boot.bridgeId } }))
+        .rejects.toMatchObject({ code: 'epoch_changed' });
+      client.start();
+      expect(await outcome).toBe('next poll');
+      expect(runtime.disconnected).not.toHaveBeenCalled();
+    } finally { client.close(); }
+  });
   it('limits discovery to numeric loopback and never sends cookies or legacy bearer credentials', async () => {
     for (const bad of ['0', '65536', 'localhost:123', '123/path', '1@evil.test', '-1', '1.5']) expect(() => localOrigin(bad)).toThrow();
     const bridge = await generateEndpoint(ownerId, 'bridge');

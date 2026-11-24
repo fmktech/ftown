@@ -357,6 +357,7 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, hostedProj
   const [claudeFlavor, setClaudeFlavor] = useState<ClaudeFlavor>("standard");
   const shellType: ShellType = resolveShellType(topShell, claudeFlavor);
   const [bridgeId, setBridgeId] = useState("");
+  const [fallbackBridgeId, setFallbackBridgeId] = useState("");
   const [boardHome, setBoardHome] = useState("");
   const [projectName, setProjectName] = useState("");
   const [parentSessionId, setParentSessionId] = useState("");
@@ -405,8 +406,11 @@ export function NewSessionModal({ isOpen, onClose, onSubmit, bridges, hostedProj
     !hostedProjects?.includes(projectName.trim()) && !sessions.some(session => session.projectName === projectName.trim());
   const allowed = projectBridges?.get(inheritedProject || projectName.trim());
   const eligible = allowed ? bridges.filter(bridge => allowed.includes(bridge.bridgeId)) : bridges;
-  const selectedBridge = eligible.find(b => b.bridgeId === bridgeId) ?? eligible[0];
+  const selectedBridge = eligible.find(b => b.bridgeId === bridgeId)
+    ?? eligible.find(b => b.bridgeId === fallbackBridgeId) ?? eligible[0];
   const effectiveBridgeId = selectedBridge?.bridgeId ?? "";
+  // Keep the current destination when a newly discovered computer sorts ahead of it.
+  useEffect(() => { setFallbackBridgeId(isOpen ? effectiveBridgeId : ""); }, [isOpen, effectiveBridgeId]);
   const hostname = selectedBridge?.hostname ?? "";
   const localRoot = resolvedParent?.bridgeId === effectiveBridgeId ? resolvedParent : undefined;
   const directPolicy = parent?.bridgeId === effectiveBridgeId ? parent.allowedAccounts : undefined;

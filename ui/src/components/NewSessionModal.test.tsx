@@ -309,6 +309,20 @@ it("blocks creation when the parent allows no matching account", async () => {
   expect(screen.getByText("No allowed accounts")).toBeTruthy();
 });
 
+it("keeps the chosen destination when another computer comes online during session creation", async () => {
+  const sendCommand = vi.fn(async () => ({ requestId: "accounts", success: true, data: { accounts } }));
+  const props = { isOpen: true, onSubmit: vi.fn(), onClose: vi.fn(), sendCommand };
+  const view = render(<NewSessionModal {...props} bridges={[]} />);
+  view.rerender(<NewSessionModal {...props} bridges={[bridges[1]]} />);
+  await screen.findByRole("option", { name: "Work (work)" });
+  view.rerender(<NewSessionModal {...props} bridges={bridges} />);
+  expect((screen.getByLabelText(/Bridge/) as HTMLSelectElement).value).toBe("b");
+  expect(sendCommand).toHaveBeenCalledTimes(1);
+  fireEvent.change(screen.getByLabelText(/Bridge/), { target: { value: "a" } });
+  await waitFor(() => expect(sendCommand).toHaveBeenCalledTimes(2));
+  expect(sendCommand).toHaveBeenLastCalledWith(expect.objectContaining({ payload: { bridgeId: "a" } }), expect.anything());
+});
+
 it("discards late replies from the previous computer", async () => {
   let resolveFirst!: (response: CommandResponse) => void;
   const sendCommand = vi.fn((command: Command) => command.payload && "bridgeId" in command.payload && command.payload.bridgeId === "a"

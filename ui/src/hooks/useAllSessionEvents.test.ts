@@ -238,6 +238,10 @@ describe("durable explicit attention restoration", () => {
     expect(hook.result.current.sessionActivity.get("agent")?.attention?.attentionId).toBe(saved.id);
     expect(hook.result.current.sessionActivity.get("agent-two")?.attention?.attentionId).toBe(newer.id);
 
+    // A newly paired computer must not replay reads for the already connected bridge.
+    await act(async () => commandSub.emit("subscribed", { readyBridgeIds: ["another-bridge"] }));
+    expect(commands).toHaveLength(1);
+
     // The command channel can resubscribe before the event subscriptions are
     // ready. Their later callbacks must not invalidate the shared reconnect read.
     first.state = "subscribing"; second.state = "subscribing";
