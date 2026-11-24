@@ -75,14 +75,24 @@ function sessionMetadata(ctx) {
   };
 }
 
+function quoteCommandArgument(value) {
+  return /^[a-zA-Z0-9._-]+$/.test(value) ? value : "'" + value.replaceAll("'", "'\\''") + "'";
+}
+
 function discussionReplyHint(message) {
   if (message.from !== 'project-discussion') return '';
   const legacyProject = /^discussion:([0-9a-f-]{36}):[0-9a-f-]{36}$/i.exec(message.idempotencyKey ?? '')?.[1];
   const project = message.discussion?.projectId || legacyProject || message.fromName?.replace(/ discussion$/, '');
-  if (!project || !message.threadId) return 'Reply in the project thread using ftown_discuss or ftown discuss reply.';
-  const args = { operation: 'reply', project, threadId: message.threadId, text: '<reply>' };
-  if (message.discussion?.homeBridgeId) args.bridge = message.discussion.homeBridgeId;
-  return 'Reply to the thread using ftown_discuss ' + JSON.stringify(args);
+  if (!project || !message.threadId) return 'Use ftown discuss reply --help for the project thread reply syntax.';
+  const prefix = `Reply in this discussion thread: ftown discuss reply ${quoteCommandArgument(message.threadId)} --project ${quoteCommandArgument(project)}`;
+  const textOption = ' --text "your reply"';
+  const homeBridge = message.discussion?.homeBridgeId;
+  const hint = prefix + (homeBridge ? ' --bridge ' + quoteCommandArgument(homeBridge) : '') + textOption;
+  const lastLine = message.body?.split('\n').at(-1) ?? '';
+  if (lastLine === hint) return '';
+  // A bridge running an older version can forward the full command without its home bridge metadata.
+  if (!homeBridge && lastLine.startsWith(prefix) && /^ --bridge [\w.-]+ --text "your reply"$/.test(lastLine.slice(prefix.length))) return '';
+  return hint;
 }
 
 function formatMail(message) {
@@ -329,7 +339,7 @@ export function registerFtownPiExtension(pi, options = {}) {
 
     const sessions = await listSessions();
     if (params.target.trim() === 'project-discussion' && !sessions.some(s => s.name === 'project-discussion' || s.id === 'project-discussion')) {
-      throw new Error('Use ftown_discuss with operation "reply", the project, threadId and text from the discussion notification.');
+      throw new Error('Use the ftown discuss reply command in the discussion notification to answer in the project thread.');
     }
     const target = resolveSession(sessions, params.target);
     const self = sessions.find((session) => session.id === ftownSessionId);
@@ -400,7 +410,7 @@ export function registerFtownPiExtension(pi, options = {}) {
   pi.registerTool({
     name: 'ftown_mail',
     label: 'ftown mail',
-    description: 'Send direct mail to another ftown session or read this session inbox. Use ftown_discuss to reply to project discussion notifications.',
+    description: 'Send direct mail to another ftown session or read this session inbox. Reply to project discussion notifications with ftown discuss reply.',
     parameters: {
       type: 'object',
       properties: {

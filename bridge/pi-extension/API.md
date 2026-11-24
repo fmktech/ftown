@@ -2,6 +2,8 @@
 
 Pi and Oh My Pi (OMP) load the bundled extension, which exposes ftown's authenticated local bridge API as a small set of model-callable tools. It uses camel-case JSON, opaque string identifiers, plural resource names, and wrapped success objects. Failures are returned as a tool error with a sanitized `{ "error": string }` detail object.
 
+The [ftown skill](../skills/ftown/SKILL.md) documents the shell commands shared across harnesses. The tool names and JSON inputs below apply to the Pi and OMP extension.
+
 ## Resource model
 
 | Resource | Identity | Relationships | Lifecycle |
@@ -10,16 +12,18 @@ Pi and Oh My Pi (OMP) load the bundled extension, which exposes ftown's authenti
 | Discussion thread | Thread ID | Belongs to a project channel on the project’s home bridge | Read and post with `ftown discuss`, reply with `ftown_discuss` |
 | Mail message | Assigned by the session inbox | Direct session messages can be grouped by inbox thread | Send, peek/read, delivered |
 
-All tools talk only to the local bridge selected by `FTOWN_HOOK_PORT` or `~/.ftown/bridge.json`. The extension supplies that bridge's bearer token and never sends credentials to the model.
+Tools that access the bridge use the local bridge selected by `FTOWN_HOOK_PORT` or `~/.ftown/bridge.json`. The extension supplies that bridge's bearer token and never sends credentials to the model.
 
 ## Tool contract
 
 | Tool | Operation | Required input | Result | Mutation |
 | --- | --- | --- | --- | --- |
+| `ftown_ask_user` | — | `question` | Interactive answer or cancellation | No |
 | `ftown_mail` | `send` | `target`, `body` | Stored direct session message | Yes |
 | `ftown_discuss` | `reply` | `project`, `threadId`, `text` | Stored thread post ID | Yes |
 | `ftown_mail` | `read` | None | `{ messages }` for the current session | No |
 | `ftown_sessions` | `list` | None | `{ sessions }` | No |
+| `ftown_sessions` | `children` | None | Child sessions of `target` or the current session | No |
 | `ftown_sessions` | `archive` | None | `{ archived }` tombstones | No |
 | `ftown_sessions` | `get` | `target` | `{ session }` | No |
 | `ftown_sessions` | `running` | `target` | `{ sessionId, running }` | No |
@@ -67,7 +71,7 @@ The tool schemas ship with `ftown-bridge` and follow its semantic version. Addin
 
 ## Consumer walkthrough
 
-An agent can call `ftown_sessions.list`, use the returned session ID with `ftown_sessions.get` or `usage`, and send a directed instruction to that session with `ftown_mail.send`. To answer a shared project thread, call `ftown_discuss` with `operation: "reply"` and the thread and project IDs from the notification. To delegate, it can create a child with `ftown_session_create`, retain the returned ID, inspect its output, and later rename, reparent, stop, remove, or revive it.
+Call `ftown_sessions` with `{"operation":"list"}` to find a session. Use its ID as `target` with operation `get` or `usage`. To send the session an instruction, call `ftown_mail` with `{"operation":"send","target":"<session-id>","body":"Review the API client"}`. For a shared discussion, call `ftown_discuss` with `operation: "reply"`, `project`, `threadId` and `text`. To delegate work, create a child with `ftown_session_create` and use the returned ID with `ftown_session_manage`.
 
 The ftown extension is installed by explicit `ftown setup`; use
 `ftown setup --repair` after installing a new optional harness. Structured creates

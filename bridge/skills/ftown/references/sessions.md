@@ -401,8 +401,8 @@ with the exact version setup command in their readiness hint.
 ## Direct session mail
 
 For a project conversation, use `ftown discuss post` to start a thread. When
-a discussion notification arrives in your inbox, follow its `ftown discuss reply`
-command or use the Pi/OMP `ftown_discuss` reply tool.
+a discussion notification arrives in your inbox, run its `ftown discuss reply`
+command with your reply text.
 
 `tell` posts to the target session's **inbox**. Mail is delivered into the
 recipient's context automatically (as `[ftown mail]` context), so there is no

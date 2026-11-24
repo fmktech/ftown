@@ -46,7 +46,7 @@ export const QUOTA_MAX_TIMEOUT_SECONDS = 600;
 export const QUOTA_GRACE_MS = 2000;
 
 export const QUOTA_HELP_TEXT = [
-  `Usage: ftown-quota [${QUOTA_PROVIDER_IDS.join('|')} ...] [--json] [--fresh] [--timeout <seconds>]`,
+  `Usage: ftown quota [${QUOTA_PROVIDER_IDS.join('|')} ...] [--json] [--fresh] [--timeout <seconds>]`,
   '',
   'Shows how much of each subscription\'s 5-hour and weekly allowance is left, which harness to route work to first,',
   'and the models each harness offers. The report also includes your model-routing tiers and steering for a router agent.',
@@ -345,7 +345,7 @@ function adviseOrFallback(
       runway: null,
       reason: 'routing unavailable',
     }));
-    return { routing, failure: `ftown-quota: routing advice failed: ${shortReason(error)}` };
+    return { routing, failure: `ftown quota: routing advice failed: ${shortReason(error)}` };
   }
 }
 
@@ -362,7 +362,7 @@ async function loadRoutingSafely(
   try {
     return await deps.loadRouting(deps.homeDir);
   } catch (error) {
-    warnings.push(`ftown-quota: model routing could not be loaded: ${shortReason(error)}`);
+    warnings.push(`ftown quota: model routing could not be loaded: ${shortReason(error)}`);
     return { state: unreadableRouting(), config: null };
   }
 }
@@ -381,7 +381,7 @@ function annotateRouting(
   try {
     return { routingConfig: state, tiers: deps.annotate(config, rows, routing, models, now), steering: typeof config.steering === 'string' ? config.steering : '' };
   } catch (error) {
-    warnings.push(`ftown-quota: model routing could not be annotated: ${shortReason(error)}`);
+    warnings.push(`ftown quota: model routing could not be annotated: ${shortReason(error)}`);
     return { routingConfig: unreadableRouting(), tiers: [], steering: '' };
   }
 }
@@ -775,11 +775,11 @@ export async function runQuotaCli(argv: string[]): Promise<number> {
     stderrText = result.stderr;
     exitCode = result.exitCode;
     if (stdoutFailure.message !== null) {
-      stderrText = `${stderrText}${stderrText ? '\n' : ''}ftown-quota: stdout failed: ${stdoutFailure.message}`;
+      stderrText = `${stderrText}${stderrText ? '\n' : ''}ftown quota: stdout failed: ${stdoutFailure.message}`;
       exitCode = 1;
     }
   } catch (error) {
-    stderrText = `ftown-quota: ${error instanceof Error ? error.message : String(error)}`;
+    stderrText = `ftown quota: ${error instanceof Error ? error.message : String(error)}`;
     exitCode = 1;
   } finally {
     process.stdout.off('error', onStdoutError);

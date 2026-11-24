@@ -182,7 +182,7 @@ export class BrowserAccess {
         this.rates.set(origin, recent);
         if (recent.length >= 10) fail(429, 'pairing_rate_limit', 'Too many pairing requests');
         recent.push(Date.now());
-        if (Date.now() >= this.windowExpires) fail(409, 'window_closed', 'Run ftown-bridge pair to open approval');
+        if (Date.now() >= this.windowExpires) fail(409, 'window_closed', 'Run ftown security invite on the bridge and open the invitation link');
         const body = await this.body(req);
         if (Date.now() >= this.windowExpires) fail(409, 'window_closed', 'Pairing window expired');
         if (typeof body.remember !== 'boolean') fail(400, 'invalid_pairing', 'remember must be boolean');

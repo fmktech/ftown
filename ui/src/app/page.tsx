@@ -161,7 +161,7 @@ const FEATURES = [
   {
     icon: <LayersIcon />,
     title: "Multi-bridge & multi-session",
-    desc: "Connect many machines with ftown-bridge. Run parallel agent sessions and organize them from one dashboard.",
+    desc: "Run ftown start on each computer to connect it. Run parallel agent sessions and organize them from one dashboard.",
   },
   {
     icon: <RefreshIcon />,

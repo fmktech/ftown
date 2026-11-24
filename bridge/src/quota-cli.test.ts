@@ -1081,7 +1081,7 @@ describe('runQuota JSON mode', () => {
     const report = JSON.parse(result.stdout) as QuotaReport;
 
     assert.equal(result.exitCode, 0);
-    assert.equal(result.stderr, 'ftown-quota: model routing could not be loaded: disk gone');
+    assert.equal(result.stderr, 'ftown quota: model routing could not be loaded: disk gone');
     assert.deepEqual(report.routingConfig, { status: 'invalid', path: '', errors: ['could not load the routing file'] });
     assert.deepEqual(report.tiers, []);
     assert.equal(report.steering, '');
@@ -1097,7 +1097,7 @@ describe('runQuota JSON mode', () => {
     const report = JSON.parse(result.stdout) as QuotaReport;
 
     assert.equal(result.exitCode, 0);
-    assert.equal(result.stderr, 'ftown-quota: model routing could not be annotated: bad join');
+    assert.equal(result.stderr, 'ftown quota: model routing could not be annotated: bad join');
     assert.deepEqual(report.routingConfig, { status: 'invalid', path: '', errors: ['could not load the routing file'] });
     assert.deepEqual(report.tiers, []);
     assert.equal(report.steering, '');
@@ -1402,7 +1402,7 @@ describe('runQuota hung fetchers and advice failures', () => {
     const result = await runQuota(['--json'], deps);
 
     assert.equal(result.exitCode, 0);
-    assert.equal(result.stderr, 'ftown-quota: routing advice failed: bad advice');
+    assert.equal(result.stderr, 'ftown quota: routing advice failed: bad advice');
     const report = JSON.parse(result.stdout) as QuotaReport;
     assert.deepEqual(report.providers.map(row => row.provider), [...QUOTA_PROVIDER_IDS]);
     assert.deepEqual(report.routing.map(entry => entry.provider), [...QUOTA_PROVIDER_IDS]);
@@ -1421,7 +1421,7 @@ describe('runQuota hung fetchers and advice failures', () => {
     const result = await runQuota([], deps);
 
     assert.equal(result.exitCode, 0);
-    assert.equal(result.stderr, 'ftown-quota: routing advice failed: bad advice');
+    assert.equal(result.stderr, 'ftown quota: routing advice failed: bad advice');
     assert.equal(
       result.stdout,
       'TABLE(claude,codex,grok,muse,agy,opencode,omp)\n\n'

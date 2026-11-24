@@ -152,7 +152,8 @@ describe('ftown Pi extension', () => {
           json: async () => ({
             messages: [
               { from: 'parent-id', fromName: 'Planner', type: 'task', body: 'Review the API' },
-              { from: 'project-discussion', fromName: 'Team discussion', threadId: 'thread-id', body: 'Hi pm',
+              { from: 'project-discussion', fromName: "Team's workspace discussion", threadId: 'thread-id',
+                body: harness === 'omp' ? 'Hi pm\n\nReply in this discussion thread: ftown discuss reply thread-id --project project-id --bridge build-mac --text "your reply"' : 'Hi pm',
                 ...(harness === 'omp' && { discussion: { projectId: 'project-id', homeBridgeId: 'build-mac' } }) },
             ],
           }),
@@ -225,10 +226,10 @@ describe('ftown Pi extension', () => {
     assert.equal(followUps.length, 1);
     assert.match(followUps[0], /Review the API/);
     assert.match(followUps[0], /Hi pm/);
-    assert.match(followUps[0], harness === 'omp'
-      ? /ftown_discuss.*"project":"project-id".*"threadId":"thread-id".*"bridge":"build-mac"/
-      : /ftown_discuss.*"project":"Team".*"threadId":"thread-id"/);
-    assert.doesNotMatch(followUps[0], /reply with.*ftown_mail/i);
+    assert.equal(followUps[0].split('ftown discuss reply').length - 1, 1);
+    const projectArgs = harness === 'omp' ? 'project-id --bridge build-mac' : "'Team'\\''s workspace'";
+    assert.ok(followUps[0].includes(`ftown discuss reply thread-id --project ${projectArgs} --text "your reply"`));
+    assert.doesNotMatch(followUps[0], /ftown_(discuss|mail)/);
   }
 
   for (const harness of ['pi', 'omp']) {
@@ -479,23 +480,23 @@ describe('ftown Pi extension', () => {
     assert.deepEqual(retried, result);
   });
 
-  it('identifies the discussion reply tool when reading a queued notification alongside direct mail', async () => {
+  it('shows the grouped reply command when reading a queued discussion notification alongside direct mail', async () => {
     const tools = new Map<string, any>();
     const project = '09a9d298-0e92-4339-a85f-e7a139e5bdef';
     const notice = '12f44ea7-9f8e-4c5e-8039-7a6c1f9daad8';
     const direct = { from: 'parent', body: 'Check the build' };
+    const queued = { from: 'project-discussion', threadId: 'thread-id', idempotencyKey: `discussion:${project}:${notice}` };
+    const remote = `Hi pm\n\nReply in this discussion thread: ftown discuss reply thread-id --project ${project} --bridge remote --text "your reply"`;
     registerNative({
       on() {}, registerCommand() {}, sendUserMessage() {},
       registerTool(tool: any) { tools.set(tool.name, tool); },
     }, { env: { FTOWN_SESSION_ID: 'pm' }, readBridgePointer: async () => null,
-      proxy: async () => Response.json({ messages: [direct, { from: 'project-discussion', threadId: 'thread-id',
-        body: 'Hi pm', idempotencyKey: `discussion:${project}:${notice}` }] }) });
+      proxy: async () => Response.json({ messages: [direct, { ...queued, body: 'Hi pm' }, { ...queued, body: remote }] }) });
     const result = await tools.get('ftown_mail').execute('read-inbox', { operation: 'read', peek: true });
     const { messages } = JSON.parse(result.content[0].text);
     assert.deepEqual(messages[0], direct);
-    assert.ok(messages[1].replyHint.includes('ftown_discuss ' + JSON.stringify({
-      operation: 'reply', project, threadId: 'thread-id', text: '<reply>',
-    })));
+    assert.equal(messages[1].replyHint, `Reply in this discussion thread: ftown discuss reply thread-id --project ${project} --text "your reply"`);
+    assert.deepEqual(messages[2], { ...queued, body: remote });
   });
 
   it('replies to discussions through the installed CLI, retaining the same post ID after a tool retry', async t => {
@@ -529,7 +530,7 @@ describe('ftown Pi extension', () => {
     assert.deepEqual(retry.details, result.details);
     const mistaken = await tools.get('ftown_mail').execute('mail-1', { operation: 'send', target: 'project-discussion', body: text });
     assert.equal(mistaken.isError, true);
-    assert.match(mistaken.details.error, /ftown_discuss/);
+    assert.match(mistaken.details.error, /ftown discuss reply/);
   });
 
   it('lists ftown sessions through a model tool and slash command', async () => {

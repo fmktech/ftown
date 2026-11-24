@@ -18,7 +18,7 @@ export function readLocalPointer(dataDir?: string): Pointer {
   const home = resolveFtownHome(dataDir ? resolve(dataDir) : defaultDir, defaultDir);
   let pointer: Pointer;
   try { pointer = JSON.parse(readFileSync(join(home, 'bridge.json'), 'utf8')); }
-  catch { throw new Error('No running bridge found. Start ftown-bridge --local (or your cloud bridge) first.'); }
+  catch { throw new Error('No running bridge found. Run ftown start --local or start your cloud bridge first.'); }
   if (!Number.isInteger(pointer.port) || pointer.port < 1 || pointer.port > 65535 || typeof pointer.token !== 'string' || !pointer.token) {
     throw new Error('Invalid bridge pointer. Restart the bridge and try again.');
   }

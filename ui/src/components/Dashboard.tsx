@@ -380,7 +380,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
       const script = `
 NOTIFY="$HOME/.ftown/notify.sh"
 if [ ! -x "$NOTIFY" ]; then
-  echo "ftown notify.sh missing (start ftown-bridge on this machine first)"
+  echo "ftown notify.sh missing (run ftown setup on this machine to install hooks)"
   exit 0
 fi
 python3 << 'PY'
