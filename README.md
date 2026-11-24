@@ -155,7 +155,7 @@ The file travels through the existing encrypted connection and runs in an iframe
 - Native resume support for Claude, Cursor, Codex, Pi, and OMP; workdir-based continuation for Kimi Code
 - Live per-session token/model usage for harnesses with structured native session logs
 - Hook forwarding to the dashboard (Claude/Codex settings, Cursor hooks, and ftown's bundled Pi and OMP extension)
-- Native Pi and OMP tools for session discovery/control, durable ftown mail, token usage, terminal inspection, and archives
+- Native Pi and OMP tools for session discovery/control, project discussion replies, direct session mail, token usage, terminal inspection, and archives
 - Optional [Web Push notifications](docs/push-notifications.md) for agent questions and the first observed idle transition per agent on hosted deployments
 - Multiple concurrent sessions with session management
 - Multi-bridge support (connect multiple machines)
@@ -722,7 +722,7 @@ Assigning a ticket to a bridge or changing its stage while assigned sends a mess
 
 Sessions can operate the same board with `ftown projects` and `ftown tickets`. For example, run `ftown tickets list --project App --json` to find a ticket, then `ftown tickets update <ticket-id> --project App --stage Review` to move it. The CLI resolves the project’s home bridge from the shared directory. See the [ftown skill](bridge/skills/ftown/SKILL.md) for creation, assignment, comments and subtasks.
 
-Open **Discussion** in a project to share threads across its bridges. Every project starts with `#general`. Create more channels, follow replies from a session, mention a worker to send ftown mail, or turn a thread into a linked ticket. Archiving a channel preserves its posts and ticket links. Use `ftown discuss channels list --project App` to discover channels and `ftown discuss activity general --project App --after 0 --json` to read posts by cursor. The [ftown skill](bridge/skills/ftown/SKILL.md) includes commands for managing channels, threads, mentions and ticket links.
+Open **Discussion** in a project to share threads across its bridges. Every project starts with `#general`. Create more channels, mention a worker, follow a thread for reply notifications, or turn a thread into a linked ticket. To answer a notification in the shared thread, use the included `ftown discuss reply` command or the Pi/OMP `ftown_discuss` tool. Archiving a channel preserves its posts and ticket links. Use `ftown discuss channels list --project App` to discover channels and `ftown discuss activity general --project App --after 0 --json` to read posts by cursor. The [ftown skill](bridge/skills/ftown/SKILL.md) includes commands for managing channels, threads, mentions and ticket links.
 
 
 

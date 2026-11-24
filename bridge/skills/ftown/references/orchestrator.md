@@ -7,7 +7,7 @@ List sessions first. Scope each task, files and checks; save `session.id`. Omit 
 model and effort, run `ftown quota --json` and follow `quota.md` (owner
 tiers first); never route to `exhausted`.
 
-For cross-bridge delegation, use `ftown bridges --resources --json` to compare host capacity. If the destination needs files, follow **Copy a folder and launch a worker** in `sessions.md`.
+Compare bridge capacity with `ftown bridges --resources --json`. To copy files, see **Copy a folder and launch a worker** in `sessions.md`.
 
 Keep the plan on the manager, not in a ticket system.
 Add steps with `ftown plan add` (`--after`/`--priority` set precedence;
@@ -27,9 +27,9 @@ Wait on the board for `any-done`, `any-blocked`, `any-ready` or `all-done`; act 
 progress goes on the card, never as mail. A child's question comes to you
 first: answer from facts you hold with `ftown attention answer`, or
 escalate preferences and irreversible choices
-with `ftown attention escalate --note`. Mail is for directed
-instructions, results and escalations; read it with
-`ftown harness mail read`. Use `ftown sessions screen <worker-id> --limit 100`
+with `ftown attention escalate --note`. Read direct tasks, results, escalations and discussion notifications with
+`ftown harness mail read`. For discussions, use the included `ftown discuss reply` command
+to answer in the original thread. Use `ftown sessions screen <worker-id> --limit 100`
 only to investigate. Parallel tasks need disjoint write
 ownership and serialized shared resources. Children set their card to
 done and report to the parent; you raise one "Work complete" notice

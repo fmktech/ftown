@@ -74,7 +74,8 @@ export function registerDiscussionCommands(program: Command, project: () => Prom
       const threadId = options.id ?? randomUUID();
       await write(projectId, 'create_thread', { channelId, threadId, postId: threadId, title: options.title, ...postFields(options) });
     });
-  messageOptions(program.command('reply <thread>')).option('--id <uuid>', 'Stable reply ID for retries').action(async (threadId, options: PostOptions) =>
+  messageOptions(program.command('reply <thread>')).description('Post a reply in the project discussion thread')
+    .option('--id <uuid>', 'Stable reply ID for retries').action(async (threadId, options: PostOptions) =>
     write((await project()).id, 'reply', { threadId, postId: options.id ?? randomUUID(), ...postFields(options) }));
   pageOptions(program.command('read <thread>')).description('Read posts in a thread').action(async (threadId, options) =>
     print(await read((await project()).id, 'posts', { threadId, ...cursor(options) })));
@@ -83,7 +84,7 @@ export function registerDiscussionCommands(program: Command, project: () => Prom
     print(await read(projectId, 'posts', { channelId, ...cursor(options) }));
   });
   for (const action of ['follow', 'unfollow']) program.command(action + ' <thread>').description(action === 'follow'
-    ? 'Send replies to the calling session’s ftown mailbox' : 'Stop sending replies to the calling session').action(async threadId => {
+    ? 'Notify the calling session when a reply is posted to the thread' : 'Stop reply notifications for this thread').action(async threadId => {
     if (!process.env.FTOWN_SESSION_ID) throw new Error('Run this command from an ftown session');
     await write((await project()).id, action, { threadId });
   });

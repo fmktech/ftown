@@ -322,7 +322,7 @@ describe('injected prefix sources (plugin self-submits)', () => {
     ['muse native wake', MAIL_WAKE_TEXT],
     ['claude-mod WAKE', MAIL_WAKE_TEXT],
     ['opencode effective wake', OPENCODE_MAIL_WAKE_TEXT],
-    ['pi deliverMail', '[ftown mail]\n[2026-01-01T00:00:00Z] bob (message): hello\nHandle this message and reply with the `ftown_mail` tool where appropriate.'],
+    ['pi deliverMail', '[ftown mail]\n[2026-01-01T00:00:00Z] bob (message): hello'],
   ];
   for (const [name, prompt] of cases) {
     it(`${name} is injected and resolves nothing`, async (t) => {

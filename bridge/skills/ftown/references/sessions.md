@@ -398,7 +398,11 @@ its value. New sessions/children do not implicitly inherit a parent's PR.
 New commands probe the exact bridge capability before writing; update old bridges
 with the exact version setup command in their readiness hint.
 
-## Messaging (mail)
+## Direct session mail
+
+For a project conversation, use `ftown discuss post` to start a thread. When
+a discussion notification arrives in your inbox, follow its `ftown discuss reply`
+command or use the Pi/OMP `ftown_discuss` reply tool.
 
 `tell` posts to the target session's **inbox**. Mail is delivered into the
 recipient's context automatically (as `[ftown mail]` context), so there is no
@@ -426,7 +430,7 @@ mail.
 # Tell a specific session
 ftown sessions tell <session-id> "tests are green, ship it"
 
-# Mail type / threading
+# Group related direct messages in the recipient's inbox
 ftown sessions tell <session-id> --type task "implement the API client"
 ftown sessions tell <session-id> --type result --thread <id> "done, 0 failures"
 
