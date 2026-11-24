@@ -1,3 +1,4 @@
+import { legacyDiscussionReplyHint } from './wire-types.js';
 import { spawn } from 'node:child_process';
 import { access } from 'node:fs/promises';
 import { constants } from 'node:fs';
@@ -47,7 +48,7 @@ async function drainMail(env: HookEnvironment, sessionId: string): Promise<strin
     if (typeof data.status !== 'number' || data.status < 200 || data.status >= 300 || !Array.isArray(data.body?.messages) || !data.body.messages.length) return undefined;
     const lines = data.body.messages.map((entry) => {
       const msg = entry && typeof entry === 'object' && !Array.isArray(entry) ? entry : {};
-      return `[${jqString(msg.ts, '')}] ${jqString(msg.fromName, jqString(msg.from, 'external'))} (${jqString(msg.type, 'message')}): ${jqString(msg.body, '')}`;
+      return `[${jqString(msg.ts, '')}] ${jqString(msg.fromName, jqString(msg.from, 'external'))} (${jqString(msg.type, 'message')}): ${jqString(msg.body, '')}${legacyDiscussionReplyHint(msg)}`;
     });
     let reason = `[ftown mail]\n${lines.join('\n')}`;
     const chars = Array.from(reason);

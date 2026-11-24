@@ -108,10 +108,14 @@ describe('hook-pump under Grok', () => {
   }
 
   it('points a project discussion notification at the discussion reply command during Stop', async () => {
-    const run = await runPump(EVENTS[0].hook, {}, false, { from: 'project-discussion', fromName: 'Team discussion', body: 'Hi pm' });
+    const projectId = 'ae434dc2-deec-45fd-8848-b650a00c755d';
+    const threadId = 'b3c79010-c608-481a-a99b-24164c1d9c4a';
+    const run = await runPump(EVENTS[0].hook, {}, false, { from: 'project-discussion', fromName: 'Team discussion', body: 'Hi pm',
+      threadId, idempotencyKey: 'discussion:' + projectId + ':82f41e59-e955-4af6-9d66-dacd4178a3f1' });
     const { reason } = JSON.parse(run.stdout[0]);
     assert.match(reason, /Hi pm/);
-    assert.match(reason, /ftown discuss reply/);
+    assert.ok(reason.includes("ftown discuss reply " + threadId));
+    assert.ok(reason.includes(projectId));
     assert.doesNotMatch(reason, /ftown harness mail send/);
   });
 

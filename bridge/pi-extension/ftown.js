@@ -75,18 +75,23 @@ function sessionMetadata(ctx) {
   };
 }
 
+function discussionReplyHint(message) {
+  if (message.from !== 'project-discussion') return '';
+  const legacyProject = /^discussion:([0-9a-f-]{36}):[0-9a-f-]{36}$/i.exec(message.idempotencyKey ?? '')?.[1];
+  const project = message.discussion?.projectId || legacyProject || message.fromName?.replace(/ discussion$/, '');
+  if (!project || !message.threadId) return 'Reply in the project thread using ftown_discuss or ftown discuss reply.';
+  const args = { operation: 'reply', project, threadId: message.threadId, text: '<reply>' };
+  if (message.discussion?.homeBridgeId) args.bridge = message.discussion.homeBridgeId;
+  return 'Reply to the thread using ftown_discuss ' + JSON.stringify(args);
+}
+
 function formatMail(message) {
   const sender = message.fromName
     ? `${message.fromName} (${message.from ?? 'external'})`
     : (message.from ?? 'external');
+  const hint = discussionReplyHint(message);
   const notice = `[${message.type ?? 'message'} from ${sender}] ${message.body ?? ''}`;
-  if (message.from !== 'project-discussion') return notice;
-  const legacyProject = /^discussion:([0-9a-f-]{36}):[0-9a-f-]{36}$/i.exec(message.idempotencyKey ?? '')?.[1];
-  const project = message.discussion?.projectId || legacyProject || message.fromName?.replace(/ discussion$/, '');
-  if (!project || !message.threadId) return notice + '\nReply in the project thread using ftown_discuss or ftown discuss reply.';
-  const args = { operation: 'reply', project, threadId: message.threadId, text: '<reply>' };
-  if (message.discussion?.homeBridgeId) args.bridge = message.discussion.homeBridgeId;
-  return notice + '\nReply to the thread using ftown_discuss ' + JSON.stringify(args);
+  return hint ? notice + '\n' + hint : notice;
 }
 
 function collectBranchUsage(ctx, harness) {
@@ -311,10 +316,15 @@ export function registerFtownPiExtension(pi, options = {}) {
       if (params.peek) query.set('peek', '1');
       if (params.all) query.set('all', '1');
       if (params.limit !== undefined) query.set('limit', String(params.limit));
-      return requestJson(
+      const payload = await requestJson(
         `/api/sessions/${encodeURIComponent(ftownSessionId)}/inbox?${query.toString()}`,
         { method: 'GET' },
       );
+      if (!Array.isArray(payload?.messages)) return payload;
+      return { ...payload, messages: payload.messages.map(message => {
+        const replyHint = discussionReplyHint(message);
+        return replyHint ? { ...message, replyHint } : message;
+      }) };
     }
 
     const sessions = await listSessions();
@@ -390,7 +400,7 @@ export function registerFtownPiExtension(pi, options = {}) {
   pi.registerTool({
     name: 'ftown_mail',
     label: 'ftown mail',
-    description: 'Send durable mail to another ftown session, or read this session inbox.',
+    description: 'Send direct mail to another ftown session or read this session inbox. Use ftown_discuss to reply to project discussion notifications.',
     parameters: {
       type: 'object',
       properties: {
@@ -746,11 +756,7 @@ export function registerFtownPiExtension(pi, options = {}) {
     const messages = await drainMail(wait, signal);
     if (signal?.aborted || messages.length === 0) return 0;
     const formatted = messages.map(formatMail).join('\n');
-    const hasDiscussion = messages.some(message => message.from === 'project-discussion');
-    const hasDirectMail = messages.some(message => message.from !== 'project-discussion');
-    const mailHint = hasDiscussion ? 'For direct session mail, reply with ftown_mail where appropriate.'
-      : 'Handle this message and reply with the `ftown_mail` tool where appropriate.';
-    const text = `[ftown mail]\n${formatted}` + (hasDirectMail ? '\n' + mailHint : '');
+    const text = `[ftown mail]\n${formatted}`;
     if (harness === 'omp' && sessionContext?.isIdle()) {
       // OMP queues explicit follow-ups even when idle. A normal message starts
       // a turn, whose promise lasts until completion. Keep polling during it.

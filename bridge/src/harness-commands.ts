@@ -535,21 +535,10 @@ async function cmdHookPump(codex = false): Promise<void> {
       }
       writePumpCount(sessionId, readPumpCount(sessionId) + 1);
       const formatted = messages.map(formatMailMessage).join('\n');
-      const replyHints: string[] = [];
-      if (messages.some(message => message.from === 'project-discussion')) {
-        replyHints.push('Reply in the project thread with `ftown discuss reply <thread-id> --project <project> --text "Your reply"`.');
-      }
-      if (messages.some(message => message.from !== 'project-discussion')) {
-        replyHints.push('Use `ftown harness mail send` for replies to direct session mail.');
-      }
-      console.log(
-        JSON.stringify({
-          decision: 'block',
-          reason:
-            `[ftown mail] You received message(s) while finishing your turn:\n${formatted}\n` +
-            replyHints.join(' '),
-        }),
-      );
+      console.log(JSON.stringify({
+        decision: 'block',
+        reason: `[ftown mail] You received message(s) while finishing your turn:\n${formatted}`,
+      }));
       return;
     }
 
