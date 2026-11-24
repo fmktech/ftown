@@ -38,6 +38,27 @@ test('restoring one project database independently retains its renamed board, li
   assert.equal(store.list().length, 2);
 });
 
+test('a newer board remains discoverable alongside supported projects and requires a home bridge update to open', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'ftown-newer-board-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const store = new ProjectBoardStore(dir, 'home');
+  const first = randomUUID(), second = randomUUID();
+  const newer = { bridgeId: 'home', projectId: first };
+  store.mutate({ ...newer, action: 'create_project', name: 'First' });
+  store.mutate({ bridgeId: 'home', projectId: second, action: 'create_project', name: 'Second' });
+  const db = new DatabaseSync(join(dir, 'projects', first, 'board.sqlite'));
+  t.after(() => db.close());
+  db.exec('PRAGMA user_version=999');
+  assert.deepEqual(store.list().map(project => project.id), [first, second]);
+  assert.equal(store.read(second).project.name, 'Second');
+  const requiresUpdate = /Unsupported project database version 999.*supports \d+.*Update the project's home bridge/;
+  assert.throws(() => store.read(first), requiresUpdate);
+  assert.throws(() => store.discussion(first, { action: 'channels' }), requiresUpdate);
+  assert.throws(() => store.mutate({ ...newer, action: 'rename_project', name: 'Changed' }), requiresUpdate);
+  assert.equal(db.prepare('PRAGMA user_version').get()?.user_version, 999);
+  assert.equal(db.prepare('SELECT name FROM project').get()?.name, 'First');
+});
+
 test('a cross-bridge descendant inherits once while explicit assignments and unlinks survive rediscovery', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'ftown-ticket-workers-'));
   t.after(() => rm(dir, { recursive: true, force: true }));

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeAll, expect, it, vi } from "vitest";
+import type { CommandResponse } from "@/types";
 import { ProjectBoardPanel } from "./ProjectBoardPanel";
 
 afterEach(() => { cleanup(); localStorage.clear(); });
@@ -216,4 +217,30 @@ it("appends incoming threads and replies without overlapping reads or polling a 
     hidden.mockRestore();
     vi.useRealTimers();
   }
+});
+
+it("keeps the saved tickets visible and directs a database version error to the home bridge update dialog", async () => {
+  const project = { id: "p", bridgeId: "home", name: "Tooling" };
+  const board = { project, tickets: [{ id: "t", title: "Ship release", stage: "Review", sessionIds: [] }] };
+  const openUpdates = vi.fn();
+  const props = { project, sessions: [], cacheKey: "account", attentionIds: new Set<string>(), close: vi.fn(),
+    bridgeNames: new Map([["home", "Build Mac"]]), onOpenUpdates: openUpdates };
+  const first = render(<ProjectBoardPanel {...props} online send={vi.fn().mockResolvedValue({ success: true, data: board })} />);
+  await screen.findByText("Ship release");
+  first.unmount();
+
+  let reply!: (response: CommandResponse) => void;
+  const send = vi.fn(() => new Promise<CommandResponse>(resolve => { reply = resolve; }));
+  render(<ProjectBoardPanel {...props} online send={send} />);
+  expect(screen.getByText("Ship release")).toBeTruthy();
+  expect(screen.queryByText("Loading board…")).toBeNull();
+  await act(async () => reply({ requestId: "refresh", success: false, error: "Unsupported project database version" }));
+  expect(screen.getByRole("alert").textContent).toContain("Build Mac");
+  fireEvent.click(screen.getByRole("button", { name: "Bridge updates" }));
+  expect(openUpdates).toHaveBeenCalledOnce();
+  fireEvent(document, new Event("visibilitychange"));
+  expect(screen.getByRole("alert")).toBeTruthy();
+  await act(async () => reply({ requestId: "refresh", success: true, data: board }));
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(screen.getByText("Ship release")).toBeTruthy();
 });

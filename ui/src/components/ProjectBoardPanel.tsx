@@ -4,6 +4,7 @@ import { type CSSProperties, useCallback, useEffect, useRef, useState } from "re
 import type { Command, CommandResponse, Session } from "@/types";
 
 import { ProjectTicketDetail, assignmentLabel, type Ticket } from "./ProjectTicketDetail";
+import { projectDatabaseError, ProjectDatabaseUpdate } from "./ProjectDatabaseUpdate";
 import { ProjectBoardSettingsDialog } from "./ProjectBoardSettingsDialog";
 import { ProjectDiscussion, TicketThreads } from "./ProjectDiscussion";
 import type { DiscussionThread } from "../../../bridge/src/project-discussion-protocol";
@@ -16,11 +17,13 @@ type CachedBoard = { board: Board; blocked: string[] };
 type Props = {
   project: Project;
   online: boolean;
+  unavailableMessage?: string;
   send: (command: Command) => Promise<CommandResponse>;
   sessions: Session[];
   attentionIds: ReadonlySet<string>;
   cacheKey: string;
   bridgeNames?: ReadonlyMap<string, string>;
+  onOpenUpdates?: () => void;
   onLaunch?: (ticketId: string) => void;
   onOpenSession?: (sessionId: string) => void;
   close: () => void;
@@ -54,7 +57,7 @@ export function ProjectBoardPanel(props: Props) {
   return <ProjectBoard key={storageKey} {...props} storageKey={storageKey} />;
 }
 
-function ProjectBoard({ project, online, send, sessions, attentionIds, bridgeNames, onLaunch, onOpenSession, storageKey, close }: Props & { storageKey: string }) {
+function ProjectBoard({ project, online, unavailableMessage = "Home bridge offline", send, sessions, attentionIds, bridgeNames, onOpenUpdates, onLaunch, onOpenSession, storageKey, close }: Props & { storageKey: string }) {
   const panel = useRef<HTMLElement>(null);
   const [cached, setCached] = useState(() => readCache(storageKey, project));
   const [fresh, setFresh] = useState(false);
@@ -113,8 +116,7 @@ function ProjectBoard({ project, online, send, sessions, attentionIds, bridgeNam
     return () => { mounted.current = false; };
   }, []);
   useEffect(() => {
-    setFresh(false);
-    if (!online) return;
+    if (!online) { setFresh(false); return; }
     let active = true;
     let reading = false;
     async function load() {
@@ -203,13 +205,15 @@ function ProjectBoard({ project, online, send, sessions, attentionIds, bridgeNam
         className={tab === view ? "btn-accent" : "btn-ghost"} onClick={() => setTab(view)}>{view}</button>)}
     </nav>
     {tab === "Discussion" ? <ProjectDiscussion project={project} sessions={sessions} bridgeNames={bridgeNames}
-      online={online} send={send} boardEnabled={board?.boardEnabled !== false} tickets={board?.tickets ?? []}
+      online={online} unavailableMessage={unavailableMessage} onOpenUpdates={onOpenUpdates} send={send} boardEnabled={board?.boardEnabled !== false} tickets={board?.tickets ?? []}
       initialThread={thread} onThread={setThread} openTicket={id => {
         setDetailId(id); setTab("Tickets"); setRefresh(n => n + 1);
       }} onTicketCreated={() => setRefresh(n => n + 1)} /> : <div className="min-h-0 flex-1 overflow-auto p-4 md:p-6">
-    {!online && <p role="status">{board ? "Home bridge offline · last saved board" : "Home bridge offline · no cached board"}</p>}
-    {online && !fresh && !error && <p role="status">Loading board…</p>}
-    {error && online && <p role="alert">{error} <button className="btn-ghost" onClick={() => setRefresh(n => n + 1)}>Refresh</button></p>}
+    {!online && <p role="status">{unavailableMessage} · {board ? "last saved board" : "no cached board"}</p>}
+    {online && !board && !error && <p role="status">Loading board…</p>}
+    {error && online && (projectDatabaseError(error)
+      ? <ProjectDatabaseUpdate bridgeName={bridgeNames?.get(bridgeId) ?? bridgeId} onOpenUpdates={onOpenUpdates} />
+      : <p role="alert">{error} <button className="btn-ghost" onClick={() => setRefresh(n => n + 1)}>Refresh</button></p>)}
     {board?.boardEnabled === false && <div className="space-y-3"><p>This project has no board.</p>
       <button className="btn-accent" disabled={!editable} onClick={() => void change({ action: "create_board" })}>Create board</button></div>}
     {board && board.boardEnabled !== false && <>
@@ -309,8 +313,8 @@ function ProjectBoard({ project, online, send, sessions, attentionIds, bridgeNam
     {settingsOpen && board?.boardEnabled === true && <ProjectBoardSettingsDialog
       columns={columns} tickets={board.tickets} projectName={project.name} editable={editable} error={error}
       change={change} close={() => setSettingsOpen(false)} />}
-    {tab === "Tickets" && detail && <ProjectTicketDetail discussion={<TicketThreads project={project} ticketId={detail.id}
-      online={online} send={send} open={row => { setThread(row); setDetailId(null); setTab("Discussion"); }} />} columnNames={columnNames} key={detail.id} ticket={detail} tickets={board?.tickets ?? []} sessionById={sessionById} openTicket={setDetailId} openSession={onOpenSession} project={project} editable={editable} online={online}
+    {tab === "Tickets" && detail && <ProjectTicketDetail discussion={<TicketThreads project={project} ticketId={detail.id} bridgeName={bridgeNames?.get(bridgeId)}
+      online={online} unavailableMessage={unavailableMessage} onOpenUpdates={onOpenUpdates} send={send} open={row => { setThread(row); setDetailId(null); setTab("Discussion"); }} />} columnNames={columnNames} key={detail.id} ticket={detail} tickets={board?.tickets ?? []} sessionById={sessionById} openTicket={setDetailId} openSession={onOpenSession} project={project} editable={editable} online={online}
       bridgeNames={bridgeNames} send={send} change={change} error={error} close={() => setDetailId(null)} />}
   </section>;
 }
