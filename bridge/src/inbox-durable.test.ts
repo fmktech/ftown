@@ -235,7 +235,7 @@ describe('mail nudge vs open attention (real handleHook + store)', () => {
     await hook(f.port, f.token, { ftown_session_id: 's1', ftown_session_source: 'env', hook_event_name: 'UserPromptSubmit', prompt: line });
     const item = await poll;
     assert.equal(item.resolvedAt, undefined, 'waiter must survive injected prompt');
-    assert.equal(f.attention.hasLiveWaiter(q.id), true, 'waiter liveness must remain');
+    assert.equal(f.attention.hasLiveWaiter(q.id), false, 'the poll finished at its deadline');
   });
 });
 

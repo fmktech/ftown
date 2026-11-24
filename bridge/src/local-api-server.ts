@@ -74,7 +74,7 @@ import {
 } from './coordination/contract-b.js';
 import {
   decideRoute,
-  deliverAttentionAnswer,
+  queueAttentionAnswer,
   formatParentQuestionMail,
   markArchivedWorktreeRetained,
 } from './coordination/attention-routing.js';
@@ -905,20 +905,17 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         || Object.keys(body).some((key) => key !== 'answers')) {
         throw new BadRequestError('Invalid attention answer');
       }
-      const { item, waiterLive } = await this.attention.answer(
+      const { item } = await this.attention.answer(
         child.id,
         eventId,
         body.answers,
         undefined,
         { kind: 'session', sessionId: parent.id, name: parent.name },
+        item => queueAttentionAnswer({
+          child, item, sender: { from: parent.id, fromName: parent.name },
+          acceptMail: (session, mailBody) => this.acceptSessionMail(session, mailBody),
+        }),
       );
-      await deliverAttentionAnswer({
-        child,
-        item,
-        waiterLive,
-        sender: { from: parent.id, fromName: parent.name },
-        acceptMail: (session, mailBody) => this.acceptSessionMail(session, mailBody),
-      });
       jsonResponse(res, 200, { event: item });
       return;
     }

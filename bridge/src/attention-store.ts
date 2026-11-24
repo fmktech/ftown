@@ -5,7 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { PushNotice } from './push-notifier.js';
 import { classifyAttentionHook, normalizeAttentionPrompt, promptSchema, sanitizeAttentionText, type Activity, type AttentionItem, type Resolution } from './attention-events.js';
-import { ATTENTION_ITEM_WAIT_MAX_SECONDS, ATTENTION_PROMPT_LIMITS, ATTENTION_WAITER_TTL_MS, type AttentionPrompt } from './attention-prompt-protocol.js';
+import { ATTENTION_ITEM_WAIT_MAX_SECONDS, ATTENTION_PROMPT_LIMITS, type AttentionPrompt } from './attention-prompt-protocol.js';
 import { validateAttentionAnswer } from './attention-prompt.js';
 import { ESCALATION_NOTE_MAX, type AttentionAnsweredBy, type AttentionRoute, type AttentionRoutingFields, type AttentionRoutingStoreApi } from './coordination/contract-b.js';
 
@@ -25,6 +25,7 @@ const answerSchema = z.object({
     text: z.string().max(L.answerTextChars).optional(),
   }).strict()).min(1).max(L.questions),
   answeredAt: z.string(),
+  delivery: z.literal('mail').optional(),
 }).strict();
 
 const answeredBySchema = z.object({
@@ -113,8 +114,8 @@ export class AttentionStore implements AttentionRoutingStoreApi {
   private listeners = new Map<string, Set<() => void>>();
   /** Per session: wake callbacks of item waiters, fired whenever any item is resolved. */
   private itemWaiters = new Map<string, Set<() => void>>();
-  /** Per attention event id: active item long-polls and when the latest one started. */
-  private pollers = new Map<string, { active: number; lastPollAt: number; lastPollWallAt: number }>();
+  /** Confirmed long-polls on each open question, with synchronous cancellation detection. */
+  private pollers = new Map<string, Set<{ signal?: AbortSignal }>>();
   private idleTimers = new Map<string, IdleTimer>();
   private notificationsStopped = false;
   private notificationOptions: Required<Omit<AttentionNotificationOptions, 'onIdleCanceled' | 'onSubagentIdle'>> & Pick<AttentionNotificationOptions, 'onIdleCanceled' | 'onSubagentIdle'>;
@@ -131,16 +132,9 @@ export class AttentionStore implements AttentionRoutingStoreApi {
   private isExplicit(event: StoredItem): boolean {
     return event.type === 'agent_needs_input' || (event.type === 'ask_user' && !!event.prompt);
   }
-  hasLiveWaiter(eventId: string, now?: number): boolean {
-    const poller = this.pollers.get(eventId);
-    if (!poller) return false;
-    return poller.active > 0 || (now === undefined
-      ? this.notificationOptions.monotonicNow() - poller.lastPollAt
-      : now - poller.lastPollWallAt) <= ATTENTION_WAITER_TTL_MS;
-  }
-
-  private activeWaits(eventId: string): number {
-    return this.pollers.get(eventId)?.active ?? 0;
+  hasLiveWaiter(eventId: string): boolean {
+    for (const poll of this.pollers.get(eventId) ?? []) if (!poll.signal?.aborted) return true;
+    return false;
   }
 
   private clearIdleTimer(id: string): void {
@@ -421,8 +415,9 @@ export class AttentionStore implements AttentionRoutingStoreApi {
       this.wakeItemWaiters(id);
     });
   }
-  /** Record the answer (human or parent session) and resolve the item. The caller delivers it (waiter or mail). */
-  async answer(id: string, eventId: string, answers: unknown, now?: Date, answeredBy: AttentionAnsweredBy = { kind: 'human' }): Promise<AttentionAnswerResult> {
+  /** Record the answer (human or parent session) and resolve the item. Queue a session message before resolving an unattended question. */
+  async answer(id: string, eventId: string, answers: unknown, now?: Date, answeredBy: AttentionAnsweredBy = { kind: 'human' },
+    queueMessage?: (item: AttentionItem) => Promise<void>): Promise<AttentionAnswerResult> {
     return this.withLock(id, async () => {
       const ledger = await this.load(id);
       const event = ledger.events.find(candidate => candidate.id === eventId);
@@ -432,14 +427,13 @@ export class AttentionStore implements AttentionRoutingStoreApi {
       const checked = validateAttentionAnswer(event.prompt, answers);
       if (!checked.ok) throw new AttentionError('invalid_answer', checked.error, 400);
       const at = now ?? new Date(this.notificationOptions.now());
-      // Mail answers fall back to mail when nobody is polling right now (a duplicate beats a lost answer);
-      // hook answers have no fallback, so a recent poll still counts.
-      const waiterLive = event.prompt.channel === 'mail' ? this.activeWaits(eventId) > 0 : this.hasLiveWaiter(eventId);
-      if (event.prompt.channel === 'hook' && !waiterLive) {
-        throw new AttentionError('answer_waiter_gone', 'The agent is no longer waiting for this answer', 409);
-      }
+      const waiterLive = this.hasLiveWaiter(eventId);
       const timestamp = at.toISOString();
       event.answer = { answers: checked.value, answeredAt: timestamp };
+      if (!waiterLive && queueMessage) {
+        event.answer.delivery = 'mail';
+        await queueMessage(publicItem(event));
+      }
       event.answeredBy = {
         kind: answeredBy.kind,
         ...(answeredBy.sessionId !== undefined ? { sessionId: answeredBy.sessionId } : {}),
@@ -562,7 +556,8 @@ export class AttentionStore implements AttentionRoutingStoreApi {
     const waiters = this.itemWaiters.get(id) ?? new Set<() => void>();
     const waiter = () => notify?.();
     waiters.add(waiter); this.itemWaiters.set(id, waiters);
-    let poller: { active: number; lastPollAt: number; lastPollWallAt: number } | undefined;
+    const poll = { signal };
+    let pollers: Set<{ signal?: AbortSignal }> | undefined;
     try {
       while (true) {
         if (signal?.aborted) throw new AttentionError('cancelled', 'Attention wait cancelled', 499);
@@ -571,14 +566,10 @@ export class AttentionStore implements AttentionRoutingStoreApi {
         notify = wake;
         const item = await this.readItem(id, eventId);
         if (item.resolvedAt || this.notificationOptions.monotonicNow() >= deadline) return item;
-        if (!poller) {
-          // Only a confirmed, still-open item gets a liveness record.
-          const nowMs = this.notificationOptions.monotonicNow();
-          const wallNowMs = this.notificationOptions.now();
-          for (const [key, entry] of this.pollers) if (!entry.active && nowMs - entry.lastPollAt > ATTENTION_WAITER_TTL_MS) this.pollers.delete(key);
-          poller = this.pollers.get(eventId) ?? { active: 0, lastPollAt: nowMs, lastPollWallAt: wallNowMs };
-          poller.active++; poller.lastPollAt = nowMs; poller.lastPollWallAt = wallNowMs;
-          this.pollers.set(eventId, poller);
+        if (!pollers) {
+          pollers = this.pollers.get(eventId) ?? new Set();
+          pollers.add(poll);
+          this.pollers.set(eventId, pollers);
         }
         let timer: ReturnType<typeof setTimeout> | undefined;
         const cancel = () => wake();
@@ -591,14 +582,9 @@ export class AttentionStore implements AttentionRoutingStoreApi {
       }
     } finally {
       waiters.delete(waiter); if (!waiters.size) this.itemWaiters.delete(id);
-      if (poller) {
-        poller.active--;
-        // The TTL bridges the gap between polls, so it runs from the end of the latest one.
-        if (!signal?.aborted) {
-          poller.lastPollAt = this.notificationOptions.monotonicNow();
-          poller.lastPollWallAt = this.notificationOptions.now();
-        }
-        if (signal?.aborted && poller.active === 0 && waiters.size === 0 && this.pollers.get(eventId) === poller) this.pollers.delete(eventId);
+      if (pollers) {
+        pollers.delete(poll);
+        if (!pollers.size) this.pollers.delete(eventId);
       }
     }
   }

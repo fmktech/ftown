@@ -9,7 +9,7 @@ import { SessionStore } from '../session-store.js';
 import type { Session } from '../types.js';
 import {
   decideRoute,
-  deliverAttentionAnswer,
+  queueAttentionAnswer,
   escalateOrphanedParentItems,
   escalateParentChildren,
   formatParentQuestionMail,
@@ -140,7 +140,7 @@ describe('attention-routing', () => {
     );
   });
 
-  it('deliverAttentionAnswer delivers via waiter or mail fallback with parent sender', async () => {
+  it('queues the fallback message with the parent as sender', async () => {
     const child = makeSession('child-1', { name: 'Child', parentSessionId: 'parent-1' });
     const item = makeItem({
       prompt: {
@@ -161,30 +161,14 @@ describe('attention-routing', () => {
     });
 
     const mailed: Array<{ session: Session; body: Record<string, unknown> }> = [];
-    const waiterResult = await deliverAttentionAnswer({
-      child,
-      item,
-      waiterLive: true,
+    await queueAttentionAnswer({
+      child, item,
       sender: { from: 'parent-1', fromName: 'Parent' },
       acceptMail: async (s, b) => {
         mailed.push({ session: s, body: b });
         return { ok: true, id: 'm-1' };
       },
     });
-    assert.equal(waiterResult, 'waiter');
-    assert.equal(mailed.length, 0);
-
-    const mailResult = await deliverAttentionAnswer({
-      child,
-      item,
-      waiterLive: false,
-      sender: { from: 'parent-1', fromName: 'Parent' },
-      acceptMail: async (s, b) => {
-        mailed.push({ session: s, body: b });
-        return { ok: true, id: 'm-1' };
-      },
-    });
-    assert.equal(mailResult, 'mail');
     assert.equal(mailed.length, 1);
     assert.equal(mailed[0].body.from, 'parent-1');
     assert.equal(mailed[0].body.fromName, 'Parent');

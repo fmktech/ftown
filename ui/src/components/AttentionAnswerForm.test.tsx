@@ -30,7 +30,7 @@ it("renders a single-select question as radios with header, description and an o
   expect(screen.getByLabelText(/Postgres/)).toBeTruthy();
   expect(screen.getByText("Relational")).toBeTruthy();
   expect(screen.getByLabelText("Other answer or note (optional)")).toBeTruthy();
-  expect(screen.queryByText("The agent is waiting for this answer.")).toBeNull();
+  expect(screen.queryByText("If the session has stopped waiting, your answer will be sent to its inbox.")).toBeNull();
 });
 
 it("renders a multi-select question as checkboxes without a text box", () => {
@@ -124,11 +124,11 @@ it("disables every input and shows the reason when disabledReason is set", () =>
   expect(sendButton().disabled).toBe(true);
 });
 
-it("shows the waiting helper and Answer in terminal for the hook channel only", () => {
+it("explains inbox delivery and offers Answer in terminal for hook questions", () => {
   const onAnswerInTerminal = vi.fn();
   const hook: AttentionPrompt = { ...single, channel: "hook" };
   const view = render(<AttentionAnswerForm prompt={hook} sessionName="worker" onSubmit={ok} onAnswerInTerminal={onAnswerInTerminal} />);
-  expect(screen.getByText("The agent is waiting for this answer.")).toBeTruthy();
+  expect(screen.getByText("If the session has stopped waiting, your answer will be sent to its inbox.")).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "Answer in terminal" }));
   expect(onAnswerInTerminal).toHaveBeenCalledTimes(1);
   view.unmount();
@@ -138,7 +138,7 @@ it("shows the waiting helper and Answer in terminal for the hook channel only", 
 
 it("omits Answer in terminal for the hook channel without a handler", () => {
   renderForm({ ...single, channel: "hook" });
-  expect(screen.getByText("The agent is waiting for this answer.")).toBeTruthy();
+  expect(screen.getByText("If the session has stopped waiting, your answer will be sent to its inbox.")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Answer in terminal" })).toBeNull();
 });
 

@@ -42,6 +42,7 @@ test('human answers store provenance and route fields flow through the attention
   const attentionChanges: string[] = [];
   const handler = createCommandHandler({ bridgeId: 'owner', attentionStore,
     publishAttentionChanged: id => { attentionChanges.push(id); },
+    acceptSessionMail: async () => ({ ok: true, id: 'queued' }),
     sessionController: { get: async (id: string) => id === 'session' ? { id, bridgeId: 'owner' } : null } as unknown as SessionController,
     publishCommandResponse: async response => { responses.push(response); } });
   const ask = () => attentionStore.record('session', 'Notification', { notification_type: 'agent_needs_input', message: 'Q' }, { prompt: { channel: 'mail', questions: [question] } });
@@ -381,24 +382,30 @@ test('answer_session_attention delivers via waiter, hook, or mail and maps error
   await send(mailEvent.id); assert.equal(responses.at(-1)?.success, false); assert.equal(code(), 'attention_already_resolved');
 
   const goneEvent = await ask('hook');
-  await send(goneEvent.id); assert.equal(responses.at(-1)?.success, false); assert.equal(code(), 'answer_waiter_gone');
+  await send(goneEvent.id);
+  assert.equal((responses.at(-1)?.data as { delivery: string }).delivery, 'mail');
+  assert.equal(mails.at(-1)?.threadId, `attention:${goneEvent.id}`);
+  assert.match(String(mails.at(-1)?.body), /Pick[\s\S]*B/);
 
   const hookEvent = await ask('hook');
   const waiting = attentionStore.waitForItem('session', hookEvent.id, 5000);
   await send(hookEvent.id);
   assert.equal((await waiting).resolution, 'answered');
   assert.equal((responses.at(-1)?.data as { delivery: string }).delivery, 'waiter');
-  assert.equal(mails.length, 1);
+  assert.equal(mails.length, 2);
 
   mailMode = 'fail';
   const failEvent = await ask('mail');
   await send(failEvent.id);
-  assert.equal(responses.at(-1)?.success, true);
-  assert.equal((responses.at(-1)?.data as { delivery: string }).delivery, 'mail_failed');
+  assert.equal(code(), 'attention_delivery_failed');
   mailMode = 'throw';
-  const throwEvent = await ask('mail');
-  await send(throwEvent.id);
-  assert.equal((responses.at(-1)?.data as { delivery: string }).delivery, 'mail_failed');
+  await send(failEvent.id);
+  assert.equal(code(), 'attention_delivery_failed');
+  assert.equal((await attentionStore.explicitSnapshot('session')).attention?.id, failEvent.id);
+  mailMode = 'ok';
+  await send(failEvent.id);
+  assert.equal((responses.at(-1)?.data as { delivery: string }).delivery, 'mail');
+  assert.equal(mails.filter(mail => mail.threadId === `attention:${failEvent.id}`).length, 1);
 
   const invalidEvent = await ask('mail');
   await send(invalidEvent.id, { answers: [{ selected: [9] }] }); assert.equal(responses.at(-1)?.success, false); assert.equal(code(), 'invalid_answer');
@@ -466,7 +473,7 @@ test('answer_session_attention always answers with exactly one typed error', asy
   assert.equal(responses.length, 0);
 });
 
-test('answer_session_attention: live waiter on mail channel skips mail; missing mail dep reports mail_failed but stores the answer', async t => {
+test('answer_session_attention: live waiter on mail channel skips mail; missing mail dep leaves the question open', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'attention-answer-rpc2-'));
   await mkdir(join(dir, 'session'));
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -491,11 +498,9 @@ test('answer_session_attention: live waiter on mail channel skips mail; missing 
 
   const orphan = await ask();
   await send(noMail, orphan.id);
-  assert.equal(responses.at(-1)?.success, true);
-  assert.equal((responses.at(-1)?.data as { delivery: string }).delivery, 'mail_failed');
-  const stored = (await attentionStore.explicitSnapshot('session')).attention;
-  assert.ok(stored === null || stored.id !== orphan.id);
-  assert.equal((await attentionStore.waitForItem('session', orphan.id, 0)).resolution, 'answered');
+  assert.equal(responses.at(-1)?.success, false);
+  assert.equal((responses.at(-1)?.data as { code: string }).code, 'attention_delivery_failed');
+  assert.equal((await attentionStore.explicitSnapshot('session')).attention?.id, orphan.id);
 });
 
 test('move_session_to_project routes to the owning bridge and returns the updated session', async () => {

@@ -37,14 +37,14 @@ export async function queueSessionReply(send: (command: Command) => Promise<Comm
 export function attentionAnswerSubmitResult(name: string, result: AnswerSessionAttentionResult): AttentionAnswerSubmitResult {
   if (result.ok) {
     if (result.delivery === "waiter") return { ok: true, message: `Answer delivered to ${name}.` };
-    if (result.delivery === "mail") return { ok: true, message: `Answer sent to ${name}.` };
+    if (result.delivery === "mail") return { ok: true, message: `Answer queued in ${name}’s inbox.` };
     return { ok: true, message: "Answer saved, but mail delivery failed. The agent can read it with ftown sessions attention-status." };
   }
   switch (result.code) {
     case "attention_already_resolved": return { ok: false, message: "This question was already answered or dismissed." };
     case "attention_not_found": return { ok: false, message: "This question no longer exists." };
     case "attention_not_answerable": return { ok: false, message: "This message has no question to answer. Dismiss it or open the session." };
-    case "answer_waiter_gone": return { ok: false, message: "The agent stopped waiting here. Open the session to answer in the terminal." };
+    case "answer_waiter_gone": return { ok: false, message: "This bridge needs an update to queue your answer after the session stops waiting. You can still answer in the terminal." };
     case "invalid_answer": return { ok: false, message: `The answer was rejected: ${result.message}` };
     case "invalid_attention_request": return { ok: false, message: "The answer request was malformed. Try again." };
     case "permission_denied": case "approval_required": return { ok: false, message: "This browser does not have permission to answer this session." };

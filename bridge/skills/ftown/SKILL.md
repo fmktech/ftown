@@ -346,8 +346,8 @@ provide, such as credentials or approvals.
 Add `--option <label>` (repeatable) to ask a question the human answers in the
 dashboard inbox. `--multi` allows several choices; `--no-text` disallows a
 free-text reply. Without options the question is free text. Add `--wait` to
-block until the answer arrives (`--timeout <s>`, default 600). A timeout does
-not cancel the question; check later with
+wait until the question is answered or dismissed. Set `--timeout <seconds>` for a bounded
+wait. After a timeout the question stays open. Check it later with
 `ftown sessions attention-status <event-id> --wait`. The command prints the
 event ID.
 
@@ -356,8 +356,8 @@ from "You" starting with `[ftown attention answer id=...]`. When the parent
 answers, the same delivery applies but the mail sender is the parent session.
 
 Claude Code `AskUserQuestion` calls inside an FTown session are answered from
-the same inbox, and the terminal picker appears only after "Answer in terminal"
-or an hour. Exit codes and waiting details: `references/sessions.md`.
+the same inbox. When the hook has already stopped waiting, your dashboard answer goes to
+the session as a direct message. See `references/sessions.md` for exit codes and waiting details.
 
 Attach one GitHub pull request with `ftown sessions pr <URL>`; another URL
 replaces it and `--clear` removes it. This records a link without creating a PR.
