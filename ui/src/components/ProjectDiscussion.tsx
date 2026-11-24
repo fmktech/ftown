@@ -5,6 +5,8 @@ import type { Command, CommandResponse, Session } from "@/types";
 import type { DiscussionChannel, DiscussionThread, DiscussionPost, DiscussionAuthor } from "../../../bridge/src/project-discussion-protocol";
 import { ProjectDatabaseUpdate, projectDatabaseError } from "./ProjectDatabaseUpdate";
 import type { Ticket } from "./ProjectTicketDetail";
+import { ProjectIcon } from "./ProjectIcon";
+import "./ProjectDiscussion.css";
 
 type Context = { project: { id: string; bridgeId: string; name: string }; online: boolean; unavailableMessage?: string; send: (cmd: Command) => Promise<CommandResponse> };
 type Call = (action: string, fields?: Record<string, unknown>, write?: boolean) => Promise<Record<string, unknown>>;
@@ -115,7 +117,7 @@ function More({ page }: { page: ReturnType<typeof usePage> }) {
 function Modal({ name, close, children }: { name: string; close: () => void; children: ReactNode }) {
   const dialog = useRef<HTMLDialogElement>(null);
   useEffect(() => { const el = dialog.current; el?.showModal(); return () => el?.close(); }, []);
-  return <dialog ref={dialog} aria-label={name} className="computers-dialog p-5"
+  return <dialog ref={dialog} aria-label={name} className="computers-dialog discussion-dialog p-5"
     onCancel={e => { e.preventDefault(); close(); }}>
     <header className="mb-4 flex items-center justify-between gap-4"><h3 className="text-base font-semibold">{name}</h3>
       <button className="btn-ghost" aria-label={"Close " + name} onClick={close}>×</button></header>
@@ -157,10 +159,14 @@ function ChannelDialog({ selection, call, close, saved }: { selection: Selection
   </form></Modal>;
 }
 
-function Byline({ author, time, bridges }: { author: DiscussionAuthor; time: string; bridges?: ReadonlyMap<string,string> }) {
-  return <span className={muted}>
-    <span title={author.sessionId}>{author.name}</span>
-    {author.bridgeId && <> · {bridges?.get(author.bridgeId) ?? author.bridgeId}</>} · <time dateTime={time}>{new Date(time).toLocaleString()}</time>
+function Byline({ author, time, bridges, id }: { author: DiscussionAuthor; time: string; bridges?: ReadonlyMap<string,string>; id?: string }) {
+  const date = new Date(time);
+  return <span id={id} className="discussion-byline">
+    <span className="discussion-author" title={author.sessionId}>{author.name}</span>
+    {author.bridgeId && <span>{bridges?.get(author.bridgeId) ?? author.bridgeId}</span>}
+    <time dateTime={time} title={date.toLocaleString()}>{date.toLocaleDateString(undefined, {
+      month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit",
+    })}</time>
   </span>;
 }
 
@@ -188,8 +194,8 @@ function Composer({ canPost, sessions, bridges, call, channelId, threadId, saved
       setBody(""); setTitle(""); setMentions([]); ids.current = null; saved(attempt.thread);
     });
   };
-  return <form className="space-y-3" onSubmit={submit}>
-    <fieldset className="space-y-2" disabled={busy}>
+  return <form className="discussion-composer" onSubmit={submit}>
+    <fieldset disabled={busy}>
       {!threadId && <label className="block text-sm">Thread title<input required className={input} maxLength={256}
         value={title} onChange={e => { ids.current = null; setTitle(e.target.value); }} /></label>}
       <label className="block text-sm">{threadId ? "Your reply" : "Message"}<textarea required className={input} rows={3} value={body}
@@ -204,7 +210,7 @@ function Composer({ canPost, sessions, bridges, call, channelId, threadId, saved
     </fieldset>
     {bytes > 8192 && <p role="alert">Message exceeds 8 KiB.</p>}
     {error && <p role="alert">{error}</p>}
-    <button className="btn-accent" disabled={!canPost || busy || !body.trim() || (!threadId && !title.trim()) || bytes > 8192}>{threadId ? "Post reply" : "Post thread"}</button>
+    <button className="btn-accent" disabled={!canPost || busy || !body.trim() || (!threadId && !title.trim()) || bytes > 8192}><ProjectIcon name="send" />{threadId ? "Post reply" : "Post thread"}</button>
   </form>;
 }
 
@@ -288,55 +294,66 @@ export function ProjectDiscussion({ project, online, unavailableMessage = "Home 
     } catch (cause) { if (mounted.current && navigation.current === token) setError(message(cause)); }
   }
   const channelButton = (c: DiscussionChannel) => <button key={c.id} aria-pressed={channelId === c.id}
-    className={"block w-full truncate rounded px-3 py-2 text-left text-sm hover:bg-[var(--bg-hover)] " + (channelId === c.id ? "bg-[var(--bg-surface)] font-semibold text-[var(--accent)]" : "")}
-    onClick={() => selectChannel(c.id)}>#{c.name}</button>;
-  return <section aria-label="Project discussion" className="grid min-h-0 flex-1 overflow-auto md:grid-cols-[minmax(11rem,15rem)_1fr]">
-    <aside className="min-w-0 border-b border-[var(--border-subtle)] p-4 md:border-b-0 md:border-r md:overflow-auto">
-      <header className="mb-2 flex items-center justify-between"><h3 className="text-sm font-semibold">Channels</h3>
-        <button className="btn-ghost" disabled={!online || versionError} aria-label="Create channel" onClick={() => setChannelEdit({ action: "create", channel: null })}>＋</button></header>
-      <nav aria-label="Discussion channels">{channels.rows.filter(c => !c.archived).map(channelButton)}</nav>
-      {channels.rows.some(c => c.archived) && <details open={channel?.archived || undefined} className="mt-3"><summary className={"cursor-pointer " + muted}>Archived channels</summary>
-        {channels.rows.filter(c => c.archived).map(channelButton)}</details>}
-      <More page={channels} />
-    </aside>
-    <div className="min-w-0 space-y-4 p-4 md:overflow-auto md:p-6">
-      {!online && <p role="status">{unavailableMessage}</p>}
-      {versionError && <ProjectDatabaseUpdate bridgeName={bridgeNames?.get(project.bridgeId) ?? project.bridgeId} onOpenUpdates={onOpenUpdates} />}
-      {error && !projectDatabaseError(error) && <p role="alert">{error}</p>}
-      <header className="flex flex-wrap items-center justify-between gap-2">
-        <h3 className="break-all text-lg font-semibold">#{channel?.name ?? channelId}</h3>
-        <div className="flex flex-wrap items-center gap-2">
-          {!thread && writableChannel && <button disabled={!canPost} className="btn-accent" onClick={() => setCompose(true)}>New thread</button>}
-          {!thread && writableChannel && <button className="btn-ghost" disabled={!canPost} onClick={() => setChannelEdit({ action: "rename", channel })}>Rename</button>}
-          {!thread && writableChannel && <button className="btn-ghost" disabled={!canPost} onClick={() => setChannelEdit({ action: "archive", channel })}>Archive</button>}
-          <button className="btn-ghost" disabled={!online || channels.loading || posts.loading || threads.loading} onClick={() => {
-            setChannelRev(n => n + 1);
-            if (thread) { void posts.loadNew(); void openById(thread.id); }
-            else void threads.loadNew();
-          }}>Refresh</button>
-        </div>
-      </header>
-      {channel?.archived && <p className={muted}>Archived · read only</p>}
-      {thread ? <article key={thread.id} className="space-y-4">
-        <button className="btn-ghost" onClick={() => { navigation.current++; setReplySaved(false); onThread(null); setError(""); }}>← Threads</button>
-        <h4 className="break-words text-xl font-semibold">{thread.title}</h4>
-        <TicketLinks thread={thread} call={call} tickets={tickets} createEnabled={boardEnabled} writable={canPost} openTicket={openTicket}
-          updated={id => { onThread({ ...thread, ticketId: id }); onTicketCreated(); }} />
-        <ol aria-label="Thread messages" className="space-y-3">{posts.rows.map(post => <li key={post.id} className="rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3">
-          <Byline author={post.author} time={post.createdAt} bridges={bridgeNames} />
-          <p className="mt-2 whitespace-pre-wrap break-words text-sm">{post.text}</p></li>)}</ol>
-        <More page={posts} />
-        {replySaved && <p role="status" className={muted}>Reply posted.</p>}
-        {writableChannel && <Composer canPost={canPost} sessions={projectSessions} bridges={bridgeNames} call={call} channelId={channelId} threadId={thread.id} saved={() => {
-          setReplySaved(true); if (posts.next === null) void posts.loadNew();
-        }} />}
-      </article> : <>
-        {online && threads.loaded && !threads.error && !threads.rows.length && <p className={muted}>No threads in this channel.</p>}
-        <ul className="divide-y divide-[var(--border-subtle)]">{threads.rows.map(t => <li key={t.id} className="py-3">
-          <button className="block break-words text-left font-semibold underline decoration-[var(--border-muted)] underline-offset-4" onClick={() => onThread(t)}>{t.title}</button>
-          <Byline author={t.author} time={t.createdAt} bridges={bridgeNames} /></li>)}</ul>
-        <More page={threads} />
-      </>}
+    className="discussion-channel" title={"#" + c.name} aria-label={"#" + c.name}
+    onClick={() => selectChannel(c.id)}><span aria-hidden="true">#</span><span>{c.name}</span></button>;
+  return <section aria-label="Project discussion" className="project-discussion">
+    <div className="discussion-layout">
+      <aside className="discussion-rail">
+        <header><h3>Channels</h3>
+          <button className="btn-ghost discussion-icon-button" disabled={!online || versionError} aria-label="Create channel" title="Create channel" onClick={() => setChannelEdit({ action: "create", channel: null })}><ProjectIcon name="plus" /></button>
+        </header>
+        <nav aria-label="Discussion channels">{channels.rows.filter(c => !c.archived).map(channelButton)}</nav>
+        {channels.rows.some(c => c.archived) && <details open={channel?.archived || undefined}><summary>Archived channels</summary>
+          <div className="discussion-archived-channels">{channels.rows.filter(c => c.archived).map(channelButton)}</div></details>}
+        <More page={channels} />
+      </aside>
+      <div className="discussion-pane">
+        {!online && <p role="status" className="discussion-notice">{unavailableMessage}</p>}
+        {versionError && <ProjectDatabaseUpdate bridgeName={bridgeNames?.get(project.bridgeId) ?? project.bridgeId} onOpenUpdates={onOpenUpdates} />}
+        {error && !projectDatabaseError(error) && <p role="alert" className="discussion-notice">{error}</p>}
+        <header className="discussion-toolbar">
+          <h3 aria-label={"#" + (channel?.name ?? channelId)}><span aria-hidden="true">#</span>{channel?.name ?? channelId}</h3>
+          <div className="discussion-actions">
+            {!thread && writableChannel && <button disabled={!canPost} className="btn-accent" onClick={() => setCompose(true)}><ProjectIcon name="plus" />New thread</button>}
+            {!thread && writableChannel && <button className="btn-ghost discussion-icon-button" disabled={!canPost} title="Rename" aria-label="Rename" onClick={() => setChannelEdit({ action: "rename", channel })}><ProjectIcon name="edit" /></button>}
+            {!thread && writableChannel && <button className="btn-ghost discussion-icon-button" disabled={!canPost} title="Archive" aria-label="Archive" onClick={() => setChannelEdit({ action: "archive", channel })}><ProjectIcon name="archive" /></button>}
+            <button className="btn-ghost discussion-icon-button" title="Refresh" aria-label="Refresh" disabled={!online || channels.loading || posts.loading || threads.loading} onClick={() => {
+              setChannelRev(n => n + 1);
+              if (thread) { void posts.loadNew(); void openById(thread.id); }
+              else void threads.loadNew();
+            }}><ProjectIcon name="refresh" /></button>
+          </div>
+        </header>
+        {channel?.archived && <p className="discussion-notice">Archived · read only</p>}
+        {thread ? <article key={thread.id} className="discussion-thread">
+          <header className="discussion-thread-heading">
+            <button className="btn-ghost" onClick={() => { navigation.current++; setReplySaved(false); onThread(null); setError(""); }}>← Threads</button>
+            <h4>{thread.title}</h4>
+            <TicketLinks thread={thread} call={call} tickets={tickets} createEnabled={boardEnabled} writable={canPost} openTicket={openTicket}
+              updated={id => { onThread({ ...thread, ticketId: id }); onTicketCreated(); }} />
+          </header>
+          <ol aria-label="Thread messages" className="discussion-messages">{posts.rows.map(post => <li key={post.id}>
+            <span className="discussion-avatar" aria-hidden="true">{Array.from(post.author.name.trim())[0]?.toUpperCase() || "·"}</span>
+            <div><Byline author={post.author} time={post.createdAt} bridges={bridgeNames} />
+              <p>{post.text}</p></div>
+          </li>)}</ol>
+          <More page={posts} />
+          {replySaved && <p role="status" className={muted}>Reply posted.</p>}
+          {writableChannel && <Composer canPost={canPost} sessions={projectSessions} bridges={bridgeNames} call={call} channelId={channelId} threadId={thread.id} saved={() => {
+            setReplySaved(true); if (posts.next === null) void posts.loadNew();
+          }} />}
+        </article> : <div className="discussion-index">
+          {online && threads.loaded && !threads.error && !threads.rows.length && <div className="discussion-empty"><ProjectIcon name="discussion" /><p>No threads in this channel.</p></div>}
+          {threads.rows.length > 0 && <ul className="discussion-thread-list">{threads.rows.map(t => <li key={t.id}>
+            <button aria-label={t.title} aria-describedby={"discussion-byline-" + t.id} onClick={() => onThread(t)}>
+              <span className="discussion-thread-icon"><ProjectIcon name="discussion" /></span>
+              <span className="discussion-thread-summary"><strong>{t.title}</strong><Byline id={"discussion-byline-" + t.id} author={t.author} time={t.createdAt} bridges={bridgeNames} /></span>
+              <ProjectIcon name="chevron" />
+            </button>
+          </li>)}</ul>}
+          <More page={threads} />
+        </div>}
+      </div>
     </div>
     {channelEdit && <ChannelDialog selection={channelEdit} call={call} close={() => setChannelEdit(null)} saved={id => { setChannelRev(n => n + 1); selectChannel(id); }} />}
     {compose && <Modal name="New thread" close={() => setCompose(false)}><Composer canPost={canPost} sessions={projectSessions} bridges={bridgeNames} call={call} channelId={channelId}

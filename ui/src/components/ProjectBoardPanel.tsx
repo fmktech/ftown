@@ -5,6 +5,8 @@ import type { Command, CommandResponse, Session } from "@/types";
 
 import { ProjectTicketDetail, assignmentLabel, type Ticket } from "./ProjectTicketDetail";
 import { projectDatabaseError, ProjectDatabaseUpdate } from "./ProjectDatabaseUpdate";
+import { ProjectIcon } from "./ProjectIcon";
+import "./project-workspace.css";
 import { ProjectBoardSettingsDialog } from "./ProjectBoardSettingsDialog";
 import { ProjectDiscussion, TicketThreads } from "./ProjectDiscussion";
 import type { DiscussionThread } from "../../../bridge/src/project-discussion-protocol";
@@ -192,121 +194,152 @@ function ProjectBoard({ project, online, unavailableMessage = "Home bridge offli
     for (const id of ticket.sessionIds) ticketBySession.set(id, ticket.title);
   }
   return <section ref={panel} tabIndex={-1} aria-labelledby="project-board-title"
-    className="flex min-h-0 min-w-0 flex-1 flex-col bg-[var(--bg-base)] text-[var(--text-primary)] outline-none">
-    <header className="flex shrink-0 items-center justify-between gap-4 border-b border-[var(--border-muted)] px-4 py-3 md:px-6">
-      <div><h2 id="project-board-title" className="text-lg font-semibold">{project.name} board</h2>
-        <p className="text-xs text-[var(--text-muted)]">Hosted on {bridgeNames?.get(bridgeId) ?? bridgeId}</p></div>
-      <div className="flex items-center gap-2">
-      {tab === "Tickets" && board?.boardEnabled === true && <button className="btn-ghost" disabled={!editable} onClick={() => setSettingsOpen(true)}>Board settings</button>}
-      <button className="btn-ghost" onClick={close} aria-label="Back to workspace">Back</button></div>
+    className="project-workspace flex min-h-0 min-w-0 flex-1 flex-col outline-none">
+    <header className="project-workspace-header">
+      <div className="project-workspace-identity">
+        <span className="project-workspace-mark"><ProjectIcon name="project" size={22} /></span>
+        <div className="min-w-0">
+          <h2 id="project-board-title" className="project-workspace-title">{project.name}<span className="sr-only"> board</span></h2>
+          <p className="project-workspace-host" title={bridgeNames?.get(bridgeId) ?? bridgeId}>
+            <ProjectIcon name="bridge" size={13} /><span>Hosted on {bridgeNames?.get(bridgeId) ?? bridgeId}</span>
+          </p>
+        </div>
+      </div>
+      <div className="project-workspace-actions">
+        {tab === "Tickets" && board?.boardEnabled === true &&
+          <button className="project-header-action" disabled={!editable} onClick={() => setSettingsOpen(true)} aria-label="Board settings" title="Board settings">
+            <ProjectIcon name="settings" /><span>Board settings</span>
+          </button>}
+        <button className="project-header-action" onClick={close} aria-label="Back to workspace" title="Back to workspace">
+          <ProjectIcon name="back" /><span>Back</span>
+        </button>
+      </div>
     </header>
-    <nav aria-label="Project views" className="flex shrink-0 gap-1 border-b border-[var(--border-muted)] px-4 py-2 md:px-6">
-      {(["Tickets", "Discussion"] as const).map(view => <button key={view} aria-pressed={tab === view}
-        className={tab === view ? "btn-accent" : "btn-ghost"} onClick={() => setTab(view)}>{view}</button>)}
+    <nav aria-label="Project views" className="project-workspace-tabs">
+      {(["Tickets", "Discussion"] as const).map(view => <button key={view} aria-pressed={tab === view} onClick={() => setTab(view)}>
+        <ProjectIcon name={view === "Tickets" ? "tickets" : "discussion"} /><span>{view}</span>
+      </button>)}
     </nav>
     {tab === "Discussion" ? <ProjectDiscussion project={project} sessions={sessions} bridgeNames={bridgeNames}
       online={online} unavailableMessage={unavailableMessage} onOpenUpdates={onOpenUpdates} send={send} boardEnabled={board?.boardEnabled !== false} tickets={board?.tickets ?? []}
       initialThread={thread} onThread={setThread} openTicket={id => {
         setDetailId(id); setTab("Tickets"); setRefresh(n => n + 1);
-      }} onTicketCreated={() => setRefresh(n => n + 1)} /> : <div className="min-h-0 flex-1 overflow-auto p-4 md:p-6">
-    {!online && <p role="status">{unavailableMessage} · {board ? "last saved board" : "no cached board"}</p>}
-    {online && !board && !error && <p role="status">Loading board…</p>}
+      }} onTicketCreated={() => setRefresh(n => n + 1)} /> : <div className="ticket-board">
+    {!online && <p role="status" className="ticket-board-notice">{unavailableMessage} · {board ? "last saved board" : "no cached board"}</p>}
+    {online && !board && !error && <p role="status" className="ticket-board-notice">Loading board…</p>}
     {error && online && (projectDatabaseError(error)
       ? <ProjectDatabaseUpdate bridgeName={bridgeNames?.get(bridgeId) ?? bridgeId} onOpenUpdates={onOpenUpdates} />
-      : <p role="alert">{error} <button className="btn-ghost" onClick={() => setRefresh(n => n + 1)}>Refresh</button></p>)}
-    {board?.boardEnabled === false && <div className="space-y-3"><p>This project has no board.</p>
+      : <p role="alert" className="ticket-board-notice">{error} <button className="btn-ghost" onClick={() => setRefresh(n => n + 1)}>Refresh</button></p>)}
+    {board?.boardEnabled === false && <div className="ticket-board-empty"><ProjectIcon name="tickets" size={24} /><p>This project has no board.</p>
       <button className="btn-accent" disabled={!editable} onClick={() => void change({ action: "create_board" })}>Create board</button></div>}
     {board && board.boardEnabled !== false && <>
-      <form className="mb-4 flex items-center gap-2" onSubmit={async event => {
-        event.preventDefault();
-        if (!title.trim()) return;
-        newTicketId.current ??= crypto.randomUUID();
-        if (await change({ action: "create_ticket", ticketId: newTicketId.current, title: title.trim() })) {
-          newTicketId.current = null;
-          setTitle("");
-        }
-      }}>
-        <input className="min-w-0 flex-1 rounded border border-[var(--border-muted)] p-2 text-sm" aria-label="Ticket title" placeholder="Ticket title" maxLength={512}
-          disabled={!editable} value={title} onChange={event => { newTicketId.current = null; setTitle(event.target.value); }} />
-        <button className="btn-accent" disabled={!editable || !title.trim()}>Add ticket</button>
-      </form>
-      <div className="grid gap-3 sm:grid-cols-2 lg:[grid-template-columns:repeat(var(--board-columns),minmax(13rem,1fr))]" style={{ "--board-columns": columns.length } as CSSProperties}>
-        {columns.map(({ id: stage, label }) => {
-          const tickets = board.tickets.filter(ticket => (columnNames.has("Blocked") && blocked.includes(ticket.id) ? "Blocked" : ticket.stage) === stage);
-          return <section aria-label={label} key={stage}
-            onDragOver={event => {
-              if (!editable || !dragTicket) return;
-              event.preventDefault();
-              event.dataTransfer.dropEffect = "move";
-              setDropStage(stage);
-            }}
-            onDragLeave={event => {
-              if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropStage(null);
-            }}
-            onDrop={event => {
-              event.preventDefault();
-              if (editable && dragTicket && event.dataTransfer.getData("application/x-ftown-ticket") === dragTicket &&
-                  ticketById.get(dragTicket)?.stage !== stage) {
-                void change({ action: "update_ticket", ticketId: dragTicket, stage });
-              }
-              setDragTicket(null); setDropStage(null);
-            }}
-            className="min-w-0 rounded-lg border border-[var(--border-muted)] bg-[var(--bg-surface)] p-2"
-            style={dropStage === stage ? { outline: "2px solid var(--accent)" } : undefined}>
-            <h3 className="mb-2 flex justify-between gap-2 break-words text-sm font-semibold">{label}<span className="text-[var(--text-muted)]">{tickets.length}</span></h3>
-            {tickets.map(ticket => <article key={ticket.id} draggable={editable}
-              onDragStart={event => {
-                event.dataTransfer.setData("application/x-ftown-ticket", ticket.id);
-                event.dataTransfer.effectAllowed = "move";
-                setDragTicket(ticket.id);
+      <div className="ticket-board-toolbar">
+        <p className="ticket-board-total"><span>{board.tickets.length}</span> {board.tickets.length === 1 ? "ticket" : "tickets"}</p>
+        <form className="ticket-board-compose" onSubmit={async event => {
+          event.preventDefault();
+          if (!title.trim()) return;
+          newTicketId.current ??= crypto.randomUUID();
+          if (await change({ action: "create_ticket", ticketId: newTicketId.current, title: title.trim() })) {
+            newTicketId.current = null;
+            setTitle("");
+          }
+        }}>
+          <input aria-label="Ticket title" placeholder="New ticket title…" maxLength={512}
+            disabled={!editable} value={title} onChange={event => { newTicketId.current = null; setTitle(event.target.value); }} />
+          <button className="ticket-primary" disabled={!editable || !title.trim()}><ProjectIcon name="plus" size={15} />Add ticket</button>
+        </form>
+      </div>
+      <div className="ticket-board-scroll">
+        <div className="ticket-board-lanes" style={{ "--board-columns": columns.length } as CSSProperties}>
+          {columns.map(({ id: stage, label }) => {
+            const tickets = board.tickets.filter(ticket => (columnNames.has("Blocked") && blocked.includes(ticket.id) ? "Blocked" : ticket.stage) === stage);
+            return <section aria-label={label} key={stage} className="ticket-lane" data-stage={stage} data-drop={dropStage === stage}
+              onDragOver={event => {
+                if (!editable || !dragTicket) return;
+                event.preventDefault();
+                event.dataTransfer.dropEffect = "move";
+                setDropStage(stage);
               }}
-              onDragEnd={() => { setDragTicket(null); setDropStage(null); }}
-              className="mb-2 rounded border border-[var(--border-subtle)] bg-[var(--bg-base)] p-2 text-sm">
-              {ticket.parentTicketId && ticketById.has(ticket.parentTicketId) && <button className="mb-1 block truncate text-xs text-[var(--text-muted)] underline"
-                onClick={() => setDetailId(ticket.parentTicketId ?? null)} aria-label={"Open parent ticket " + ticketById.get(ticket.parentTicketId)?.title}>
-                {ticketById.get(ticket.parentTicketId)?.title}</button>}
-              <div className="mb-1 flex items-start justify-between gap-2">
-                <h4 className="min-w-0 font-semibold">
-                <button className="cursor-pointer break-words text-left underline decoration-[var(--border-muted)] underline-offset-2 hover:text-[var(--accent)]"
-                  onClick={() => setDetailId(ticket.id)}>{ticket.title}</button>
-                </h4>
-                {editable && <span role="img" aria-label={"Drag " + ticket.title} title={"Drag " + ticket.title} draggable
-                className="cursor-grab select-none rounded px-1 text-[var(--text-muted)] active:cursor-grabbing">⠿</span>}
+              onDragLeave={event => {
+                if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropStage(null);
+              }}
+              onDrop={event => {
+                event.preventDefault();
+                if (editable && dragTicket && event.dataTransfer.getData("application/x-ftown-ticket") === dragTicket &&
+                    ticketById.get(dragTicket)?.stage !== stage) {
+                  void change({ action: "update_ticket", ticketId: dragTicket, stage });
+                }
+                setDragTicket(null); setDropStage(null);
+              }}>
+              <h3 className="ticket-lane-heading"><span className="ticket-stage-mark" aria-hidden="true" />
+                <span className="min-w-0 break-words">{label}</span><span className="ticket-lane-count">{tickets.length}</span>
+              </h3>
+              <div className="ticket-lane-cards">
+                {!tickets.length && <p className="ticket-lane-empty">{dragTicket ? "Drop ticket here" : "No tickets"}</p>}
+                {tickets.map(ticket => <article key={ticket.id} draggable={editable}
+                  onDragStart={event => {
+                    event.dataTransfer.setData("application/x-ftown-ticket", ticket.id);
+                    event.dataTransfer.effectAllowed = "move";
+                    setDragTicket(ticket.id);
+                  }}
+                  onDragEnd={() => { setDragTicket(null); setDropStage(null); }}
+                  className="project-ticket-card" data-dragging={dragTicket === ticket.id}>
+                  {ticket.parentTicketId && ticketById.has(ticket.parentTicketId) && <button className="ticket-parent" title={ticketById.get(ticket.parentTicketId)?.title}
+                    onClick={() => setDetailId(ticket.parentTicketId ?? null)} aria-label={"Open parent ticket " + ticketById.get(ticket.parentTicketId)?.title}>
+                    <ProjectIcon name="link" size={12} /><span className="truncate">{ticketById.get(ticket.parentTicketId)?.title}</span></button>}
+                  <div className="flex items-start justify-between gap-1">
+                    <h4 className="min-w-0">
+                      <button className="ticket-card-title" onClick={() => setDetailId(ticket.id)}>{ticket.title}</button>
+                    </h4>
+                    {editable && <span role="img" aria-label={"Drag " + ticket.title} title={"Drag " + ticket.title} draggable
+                      className="ticket-drag"><ProjectIcon name="grip" size={15} /></span>}
+                  </div>
+                  {ticket.body && <p className="ticket-card-body">{ticket.body}</p>}
+                  {blocked.includes(ticket.id) && <p className="ticket-attention">Session needs attention</p>}
+                  <div className="ticket-card-meta">
+                    <span className="ticket-assignee" title={"Assignee · " + assignmentLabel(ticket.assignee, bridgeNames)}>
+                      <ProjectIcon name={ticket.assignee?.kind === "bridge" ? "bridge" : "person"} size={13} />
+                      <span className="sr-only">Assignee </span><span className="truncate">{assignmentLabel(ticket.assignee, bridgeNames)}</span>
+                    </span>
+                    {!!ticket.commentCount && <span className="ticket-comment-count" title={ticket.commentCount + " comments"}>
+                      <ProjectIcon name="discussion" size={13} /><span>{ticket.commentCount}</span><span className="sr-only"> comments</span>
+                    </span>}
+                  </div>
+                  <div className="ticket-card-actions">
+                    <select aria-label={'Stage for ' + ticket.title} title="Change stage" className="ticket-select" disabled={!editable} value={ticket.stage}
+                      onChange={event => void change({ action: "update_ticket", ticketId: ticket.id, stage: event.target.value })}>
+                      {columns.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}
+                    </select>
+                    {onLaunch && <button className="ticket-start" disabled={!editable} aria-label="Start session" title="Start session" onClick={() => onLaunch(ticket.id)}>
+                      <ProjectIcon name="session" size={14} />
+                    </button>}
+                  </div>
+                  <details className="ticket-sessions"><summary>Sessions ({ticket.sessionIds.length})</summary>
+                    <ul>{ticket.sessionIds.map(id => {
+                      const linked = sessionById.get(id);
+                      return <li className="my-1 flex items-center justify-between gap-1 text-xs" key={id}>
+                        {onOpenSession && linked
+                          ? <button className="btn-ghost min-w-0 truncate" title={bridgeNames?.get(linked.bridgeId) ?? linked.bridgeId}
+                              onClick={() => onOpenSession(id)}>{linked.name}</button>
+                          : <span className="break-all">{linked?.name ?? id}</span>}
+                        <span className="text-[var(--text-muted)]">{ticket.sessionStatuses?.[id] ?? linked?.status ?? "Unknown status"}</span>
+                        <button className="btn-ghost" aria-label={'Unlink ' + (linked?.name ?? id)} disabled={!editable}
+                          onClick={() => void change({ action: "update_ticket", ticketId: ticket.id, removeSessionId: id })}>×</button>
+                      </li>;
+                    })}</ul>
+                    <select className="ticket-select mt-1 w-full" aria-label={'Link session to ' + ticket.title} disabled={!editable} value="" onChange={event =>
+                      void change({ action: "update_ticket", ticketId: ticket.id, addSessionId: event.target.value })}>
+                      <option value="" disabled>Link session…</option>
+                      {sessions.filter(session => session.projectName === project.name && !ticket.sessionIds.includes(session.id))
+                        .map(session => <option key={session.id} value={session.id}>{session.name} · {bridgeNames?.get(session.bridgeId) ?? session.bridgeId}
+                          {ticketBySession.has(session.id) ? " (move from " + ticketBySession.get(session.id) + ")" : ""}</option>)}
+                    </select>
+                  </details>
+                </article>)}
               </div>
-              <p className="mb-2 flex flex-wrap items-baseline gap-1 text-xs"><span className="text-[var(--text-muted)]">Assignee</span>
-                <span>{assignmentLabel(ticket.assignee, bridgeNames)}</span></p>
-              {blocked.includes(ticket.id) && <p className="mb-1 text-xs text-[var(--status-pending)]">Session needs attention</p>}
-              <label className="flex flex-wrap items-center gap-1 text-xs">Stage
-                <select aria-label={'Stage for ' + ticket.title} className="btn-ghost" disabled={!editable} value={ticket.stage}
-                  onChange={event => void change({ action: "update_ticket", ticketId: ticket.id, stage: event.target.value })}>
-                  {columns.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}
-                </select>
-              </label>
-              {onLaunch && <button className="btn-ghost mt-2" disabled={!editable} onClick={() => onLaunch(ticket.id)}>Start session</button>}
-              <details className="mt-2"><summary className="cursor-pointer text-xs">Sessions ({ticket.sessionIds.length})</summary>
-                <ul>{ticket.sessionIds.map(id => {
-                  const linked = sessionById.get(id);
-                  return <li className="my-1 flex items-center justify-between gap-1 text-xs" key={id}>
-                    {onOpenSession && linked
-                      ? <button className="btn-ghost min-w-0 truncate" title={bridgeNames?.get(linked.bridgeId) ?? linked.bridgeId}
-                          onClick={() => onOpenSession(id)}>{linked.name}</button>
-                      : <span className="break-all">{linked?.name ?? id}</span>}
-                    <span className="text-[var(--text-muted)]">{ticket.sessionStatuses?.[id] ?? linked?.status ?? "Unknown status"}</span>
-                    <button className="btn-ghost" aria-label={'Unlink ' + (linked?.name ?? id)} disabled={!editable}
-                      onClick={() => void change({ action: "update_ticket", ticketId: ticket.id, removeSessionId: id })}>×</button>
-                  </li>;
-                })}</ul>
-                <select className="btn-ghost mt-1 w-full" aria-label={'Link session to ' + ticket.title} disabled={!editable} value="" onChange={event =>
-                  void change({ action: "update_ticket", ticketId: ticket.id, addSessionId: event.target.value })}>
-                  <option value="" disabled>Link session…</option>
-                  {sessions.filter(session => session.projectName === project.name && !ticket.sessionIds.includes(session.id))
-                    .map(session => <option key={session.id} value={session.id}>{session.name} · {bridgeNames?.get(session.bridgeId) ?? session.bridgeId}
-                      {ticketBySession.has(session.id) ? " (move from " + ticketBySession.get(session.id) + ")" : ""}</option>)}
-                </select>
-              </details>
-            </article>)}
-          </section>;
-        })}
+            </section>;
+          })}
+        </div>
       </div>
     </>}
     </div>}
