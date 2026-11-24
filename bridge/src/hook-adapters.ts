@@ -1,3 +1,4 @@
+import { legacyDiscussionReplyHint } from './wire-types.js';
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
@@ -183,7 +184,7 @@ async function drainMuseMail(env: HookEnvironment, sessionId: string): Promise<s
         || (typeof message.from === 'string' && message.from) || 'external';
       const type = typeof message.type === 'string' ? message.type : 'message';
       const body = typeof message.body === 'string' ? message.body : '';
-      return `[${nativeString(message.ts)}] ${from} (${type}): ${body}`;
+      return `[${nativeString(message.ts)}] ${from} (${type}): ${body}${legacyDiscussionReplyHint(message)}`;
     }).join('\n');
     return JSON.stringify({
       hookSpecificOutput: {
@@ -337,7 +338,7 @@ export function formatAntigravityMail(messages: JsonValue[]): string {
     const m = isJsonObject(message) ? message : {};
     const from = m.fromName ?? m.from ?? 'external';
     const type = m.type ?? 'message';
-    return `[${antigravityString(m.ts)}] ${antigravityString(from)} (${antigravityString(type)}): ${antigravityString(m.body)}`;
+    return `[${antigravityString(m.ts)}] ${antigravityString(from)} (${antigravityString(type)}): ${antigravityString(m.body)}${legacyDiscussionReplyHint(m)}`;
   });
   return `[ftown mail]\n${lines.join('\n')}`;
 }

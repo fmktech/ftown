@@ -7,6 +7,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Command, CommanderError } from 'commander';
 import { api, loadPointer, bridgePointerPath, listSessions, resolveSessionId, fetchInbox, fetchInboxPage, readInboxForCli, sendMail } from './cli-client.js';
+import { quoteShellArgument } from './session-shell.js';
 import { runAskHookCli, runningUnderGrokHook } from './ask-question-hook.js';
 import { runHookCli } from './hook-cli.js';
 import { cleanTerminalLine, formatLogLines, isDisplayableLine } from './harness-format.js';
@@ -395,6 +396,11 @@ async function cmdMailSend(
     targetId = parent;
   } else {
     if (!opts.target) throw new Error('Missing target (session id/name, or use --parent)');
+    if (opts.target === 'project-discussion' && !sessions.some(s => s.name === opts.target || s.id === opts.target)) {
+      const thread = opts.thread && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(opts.thread) ? opts.thread : '<thread-id>';
+      const project = sessions.find(s => s.id === process.env.FTOWN_SESSION_ID)?.projectName;
+      throw new Error(`Reply to the thread from the discussion notification with ftown discuss reply ${thread} --project ${project ? quoteShellArgument(project) : '<project-name-or-id>'} --text "Your reply"`);
+    }
     targetId = resolveSessionId(sessions, opts.target);
   }
 
@@ -529,14 +535,10 @@ async function cmdHookPump(codex = false): Promise<void> {
       }
       writePumpCount(sessionId, readPumpCount(sessionId) + 1);
       const formatted = messages.map(formatMailMessage).join('\n');
-      console.log(
-        JSON.stringify({
-          decision: 'block',
-          reason:
-            `[ftown mail] You received message(s) while finishing your turn:\n${formatted}\n` +
-            'Handle them now; reply with `ftown harness mail send ...` where appropriate.',
-        }),
-      );
+      console.log(JSON.stringify({
+        decision: 'block',
+        reason: `[ftown mail] You received message(s) while finishing your turn:\n${formatted}`,
+      }));
       return;
     }
 

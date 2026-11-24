@@ -1,4 +1,5 @@
 // Shared wire shapes for the in-process CLI runtime and local bridge API.
+import { discussionReplyHint } from './project-discussion-protocol.js';
 
 /** Contents of ~/.ftown/bridge.json, pointing a CLI at the running LocalApiServer. */
 export interface BridgePointer {
@@ -88,6 +89,7 @@ export interface MailMessage {
   to: string;
   type: MailType;
   threadId?: string;
+  discussion?: import('./project-discussion-protocol.js').DiscussionMailContext;
   idempotencyKey?: string;
   body: string;
   deliveredAt?: string;
@@ -113,7 +115,27 @@ export function submitSuffix(_shellType?: string): string {
   return '\r';
 }
 
-/** Human-readable one-line rendering of a MailMessage. */
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Older bridges retained the project UUID in the delivery key but omitted the reply instruction. */
+export function legacyDiscussionReplyHint(message: {
+  from?: unknown;
+  discussion?: unknown;
+  threadId?: unknown;
+  idempotencyKey?: unknown;
+  body?: unknown;
+}): string {
+  if (message.from !== 'project-discussion' || message.discussion || typeof message.body !== 'string' ||
+      typeof message.threadId !== 'string' || !uuid.test(message.threadId) || typeof message.idempotencyKey !== 'string') return '';
+  const [kind, projectId, noticeId, extra] = message.idempotencyKey.split(':', 4);
+  if (kind !== 'discussion' || extra !== undefined || !uuid.test(projectId) || !uuid.test(noticeId)) return '';
+  // An older receiving bridge may discard the structured context on a newer sender's complete notice.
+  const existingHome = / --bridge (\S+) --text "your reply"$/.exec(message.body)?.[1];
+  if (message.body.endsWith(discussionReplyHint(message.threadId, projectId, existingHome))) return '';
+  return discussionReplyHint(message.threadId, projectId);
+}
+
+/** Human-readable rendering of a MailMessage. */
 export function formatMailMessage(m: MailMessage): string {
-  return `[${m.ts}] ${m.fromName ?? m.from} (${m.type}): ${m.body}`;
+  return `[${m.ts}] ${m.fromName ?? m.from} (${m.type}): ${m.body}${legacyDiscussionReplyHint(m)}`;
 }

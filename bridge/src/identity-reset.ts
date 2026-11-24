@@ -166,13 +166,13 @@ export function argvForPairingRestart(argv: readonly string[]): string[] {
   return out;
 }
 
-export function reexec(scriptPath: string, argv: string[]): boolean {
-  if (typeof process.execve !== 'function') return false;
+export function reexec(scriptPath: string, argv: string[], options?: { env: NodeJS.ProcessEnv; nodeArgs: string[] }): boolean {
+  if (process.platform === 'win32' || typeof process.execve !== 'function') return false;
   // A failing execve aborts the process (SIGABRT) instead of throwing, e.g. when the node binary was replaced under us.
   try {
     accessSync(process.execPath, constants.X_OK);
     accessSync(scriptPath, constants.R_OK);
   } catch { return false; }
-  process.execve(process.execPath, [process.execPath, ...process.execArgv, scriptPath, ...argv], process.env);
+  process.execve(process.execPath, [process.execPath, ...(options?.nodeArgs ?? process.execArgv), scriptPath, ...argv], options?.env ?? process.env);
   return true;
 }

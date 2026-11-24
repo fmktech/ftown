@@ -3,9 +3,10 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import type { Command, CommandResponse, Session } from "@/types";
 import type { DiscussionChannel, DiscussionThread, DiscussionPost, DiscussionAuthor } from "../../../bridge/src/project-discussion-protocol";
+import { ProjectDatabaseUpdate, projectDatabaseError } from "./ProjectDatabaseUpdate";
 import type { Ticket } from "./ProjectTicketDetail";
 
-type Context = { project: { id: string; bridgeId: string; name: string }; online: boolean; send: (cmd: Command) => Promise<CommandResponse> };
+type Context = { project: { id: string; bridgeId: string; name: string }; online: boolean; unavailableMessage?: string; send: (cmd: Command) => Promise<CommandResponse> };
 type Call = (action: string, fields?: Record<string, unknown>, write?: boolean) => Promise<Record<string, unknown>>;
 type Selection = { action: "create" | "rename" | "archive"; channel: DiscussionChannel | null };
 const input = "w-full min-w-0 rounded border border-[var(--border-muted)] bg-[var(--bg-base)] px-3 py-2 text-sm";
@@ -35,33 +36,43 @@ function useCall({ project, online, send }: Context): Call {
 }
 
 function usePage<T>(call: Call, enabled: boolean, action: string, filter: string, id: string, revision: number, live = false) {
-  const [rows, setRows] = useState<T[]>([]);
+  const [rows, setRows] = useState<T[] | null>(null);
   const [next, setNext] = useState<number | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const gen = useRef(0);
   const pending = useRef(false);
+  const incompatible = useRef(false);
   const cursor = useRef<number | undefined>(undefined);
-  const load = useCallback(async (after?: number) => {
-    if (!enabled || pending.current) return;
+  const load = useCallback(async (after?: number, background = false) => {
+    if (!enabled || pending.current || (background && incompatible.current)) return;
     pending.current = true;
     const token = ++gen.current;
-    setLoading(true); setError("");
+    if (!background) setLoading(true);
     try {
       const page = await call(action, { ...(filter ? { [filter]: id } : {}), ...(after !== undefined ? { after } : {}) });
       const items = page[action];
       if (!Array.isArray(items) || !items.every(row => validRow(action, row)) || (page.nextAfter !== undefined && (!Number.isSafeInteger(page.nextAfter) || Number(page.nextAfter) <= (after ?? 0)))) throw Error("Invalid discussion page");
       if (token !== gen.current) return;
       if (action !== "channels" && items.length) cursor.current = items.at(-1).seq;
-      setRows(old => after === undefined ? items : items.length ? [...old, ...items] : old);
+      setError("");
+      incompatible.current = false;
+      setRows(old => after === undefined || old === null ? items : items.length ? [...old, ...items] : old);
       setNext(typeof page.nextAfter === "number" ? page.nextAfter : null);
-    } catch (err) { if (token === gen.current) setError(message(err)); }
+    } catch (err) {
+      if (token === gen.current) {
+        const reason = message(err);
+        incompatible.current = projectDatabaseError(reason);
+        setError(reason);
+      }
+    }
     finally { if (token === gen.current) { pending.current = false; setLoading(false); } }
   }, [call, enabled, action, filter, id]);
   useEffect(() => {
-    setRows([]); setNext(null); setError("");
+    setRows(null); setNext(null); setError("");
+    incompatible.current = false;
     cursor.current = undefined;
-  }, [action, filter, id, revision]);
+  }, [action, filter, id]);
   useEffect(() => {
     setLoading(false);
     const invalidate = () => { gen.current++; pending.current = false; };
@@ -72,7 +83,7 @@ function usePage<T>(call: Call, enabled: boolean, action: string, filter: string
     // Each tick requests one bounded page after the last displayed record.
     // Pausing/resuming keeps that cursor and the already loaded pages intact.
     let timer: number | undefined;
-    const poll = () => { if (!document.hidden) void load(cursor.current); };
+    const poll = () => { if (!document.hidden) void load(cursor.current, true); };
     const visibility = () => {
       window.clearInterval(timer);
       if (!document.hidden) {
@@ -80,7 +91,10 @@ function usePage<T>(call: Call, enabled: boolean, action: string, filter: string
         timer = window.setInterval(poll, 15_000);
       }
     };
-    visibility();
+    if (!document.hidden) {
+      void load(cursor.current);
+      timer = window.setInterval(poll, 15_000);
+    }
     document.addEventListener("visibilitychange", visibility);
     return () => {
       invalidate();
@@ -88,12 +102,12 @@ function usePage<T>(call: Call, enabled: boolean, action: string, filter: string
       document.removeEventListener("visibilitychange", visibility);
     };
   }, [load, revision, enabled, live]);
-  return { rows, next, error, loading, load, loadNew: () => load(cursor.current) };
+  return { rows: rows ?? [], loaded: rows !== null, next, error, loading, load, loadNew: () => load(cursor.current) };
 }
 
 function More({ page }: { page: ReturnType<typeof usePage> }) {
   return <>
-    {page.error && <p role="alert" className="text-sm">{page.error} <button className="btn-ghost" onClick={() => void page.loadNew()}>Retry</button></p>}
+    {page.error && !projectDatabaseError(page.error) && <p role="alert" className="text-sm">{page.error} <button className="btn-ghost" onClick={() => void page.loadNew()}>Retry</button></p>}
     {page.next !== null && <button className="btn-ghost" disabled={page.loading} onClick={() => void page.load(page.next!)}>Load more</button>}
   </>;
 }
@@ -150,8 +164,8 @@ function Byline({ author, time, bridges }: { author: DiscussionAuthor; time: str
   </span>;
 }
 
-type ComposerProps = { sessions: Session[]; bridges?: ReadonlyMap<string,string>; call: Call; channelId: string; threadId?: string; saved: (id: string) => void };
-function Composer({ sessions, bridges, call, channelId, threadId, saved }: ComposerProps) {
+type ComposerProps = { canPost: boolean; sessions: Session[]; bridges?: ReadonlyMap<string,string>; call: Call; channelId: string; threadId?: string; saved: (id: string) => void };
+function Composer({ canPost, sessions, bridges, call, channelId, threadId, saved }: ComposerProps) {
   const [body, setBody] = useState("");
   const [title, setTitle] = useState("");
   const ids = useRef<{ thread: string; post: string } | null>(null);
@@ -163,7 +177,7 @@ function Composer({ sessions, bridges, call, channelId, threadId, saved }: Compo
   const tag = (s: Session) => "@" + s.id;
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    if (!body.trim() || (!threadId && !title.trim())) return;
+    if (!canPost || !body.trim() || (!threadId && !title.trim())) return;
     void run(async () => {
       const attempt = ids.current ??= { thread: threadId ?? crypto.randomUUID(), post: crypto.randomUUID() };
       const tokens = new Set(body.split(/\s+/));
@@ -190,7 +204,7 @@ function Composer({ sessions, bridges, call, channelId, threadId, saved }: Compo
     </fieldset>
     {bytes > 8192 && <p role="alert">Message exceeds 8 KiB.</p>}
     {error && <p role="alert">{error}</p>}
-    <button className="btn-accent" disabled={busy || !body.trim() || (!threadId && !title.trim()) || bytes > 8192}>{threadId ? "Post reply" : "Post thread"}</button>
+    <button className="btn-accent" disabled={!canPost || busy || !body.trim() || (!threadId && !title.trim()) || bytes > 8192}>{threadId ? "Post reply" : "Post thread"}</button>
   </form>;
 }
 
@@ -226,40 +240,42 @@ function TicketLinks({ thread, call, tickets, createEnabled, writable, openTicke
     </form></Modal>}</>;
 }
 
-export function TicketThreads({ ticketId, open, ...ctx }: Context & { ticketId: string; open: (row: DiscussionThread) => void }) {
+export function TicketThreads({ ticketId, open, onOpenUpdates, bridgeName, ...ctx }: Context & { ticketId: string; open: (row: DiscussionThread) => void; onOpenUpdates?: () => void; bridgeName?: string }) {
   const [expanded, setExpanded] = useState(false);
   const call = useCall(ctx);
   const page = usePage<DiscussionThread>(call, expanded && ctx.online, "threads", "ticketId", ticketId, 0);
   return <section aria-label="Linked discussions"><button className="btn-ghost" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>Linked discussions</button>
     {expanded && <div className="mt-2 space-y-1">
-      {!ctx.online && <p className={muted}>Home bridge offline</p>}
+      {!ctx.online && <p className={muted}>{ctx.unavailableMessage ?? "Home bridge offline"}</p>}
       {page.rows.map(t => <button key={t.id} className="btn-ghost block" onClick={() => open(t)}>{t.title}</button>)}
-      {ctx.online && !page.rows.length && !page.loading && !page.error && <p className={muted}>No linked threads.</p>}
+      {projectDatabaseError(page.error) && <ProjectDatabaseUpdate bridgeName={bridgeName ?? ctx.project.bridgeId} onOpenUpdates={onOpenUpdates} />}
+      {ctx.online && page.loaded && !page.rows.length && !page.error && <p className={muted}>No linked threads.</p>}
       <More page={page} />
     </div>}</section>;
 }
 
 type Props = Context & {
   sessions: Session[]; bridgeNames?: ReadonlyMap<string, string>; tickets: Ticket[]; boardEnabled: boolean;
-  initialThread: DiscussionThread | null; onThread: (row: DiscussionThread | null) => void; openTicket: (id: string) => void; onTicketCreated: () => void;
+  onOpenUpdates?: () => void; initialThread: DiscussionThread | null; onThread: (row: DiscussionThread | null) => void; openTicket: (id: string) => void; onTicketCreated: () => void;
 };
 
-export function ProjectDiscussion({ project, online, send, sessions, bridgeNames, tickets, boardEnabled, initialThread: thread, onThread, openTicket, onTicketCreated }: Props) {
+export function ProjectDiscussion({ project, online, unavailableMessage = "Home bridge offline", send, sessions, bridgeNames, tickets, boardEnabled, initialThread: thread, onThread, openTicket, onTicketCreated, onOpenUpdates }: Props) {
   const call = useCall({ project, online, send });
   const [channelId, setChannelId] = useState(thread?.channelId ?? "general");
   const [channelRev, setChannelRev] = useState(0);
-  const [threadRev, setThreadRev] = useState(0);
   const [channelEdit, setChannelEdit] = useState<Selection | null>(null);
   const [compose, setCompose] = useState(false);
   const [error, setError] = useState("");
   const channels = usePage<DiscussionChannel>(call, online, "channels", "", "", channelRev);
-  const threads = usePage<DiscussionThread>(call, online && !thread, "threads", "channelId", channelId, threadRev, true);
+  const threads = usePage<DiscussionThread>(call, online && !thread, "threads", "channelId", channelId, 0, true);
   const channel = channels.rows.find(c => c.id === channelId);
   const navigation = useRef(0);
   const [replySaved, setReplySaved] = useState(false);
   const posts = usePage<DiscussionPost>(call, online && !!thread, "posts", "threadId", thread?.id ?? "", 0, true);
   const projectSessions = sessions.filter(s => s.projectName === project.name);
-  const canPost = online && channel && !channel.archived;
+  const versionError = projectDatabaseError(channels.error) || projectDatabaseError(thread ? posts.error : threads.error) || projectDatabaseError(error);
+  const writableChannel = !!channel && !channel.archived;
+  const canPost = online && !versionError && writableChannel;
   const mounted = useRef(false);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   function selectChannel(id: string) { navigation.current++; setReplySaved(false); setChannelId(id); onThread(null); setError(""); setCompose(false); }
@@ -268,7 +284,7 @@ export function ProjectDiscussion({ project, online, send, sessions, bridgeNames
     try {
       const { thread: created } = await call("thread", { threadId: id });
       if (!validRow("threads", created) || (created as DiscussionThread).id !== id) throw Error("Invalid thread response");
-      if (mounted.current && navigation.current === token) onThread(created as DiscussionThread);
+      if (mounted.current && navigation.current === token) { setError(""); onThread(created as DiscussionThread); }
     } catch (cause) { if (mounted.current && navigation.current === token) setError(message(cause)); }
   }
   const channelButton = (c: DiscussionChannel) => <button key={c.id} aria-pressed={channelId === c.id}
@@ -277,21 +293,22 @@ export function ProjectDiscussion({ project, online, send, sessions, bridgeNames
   return <section aria-label="Project discussion" className="grid min-h-0 flex-1 overflow-auto md:grid-cols-[minmax(11rem,15rem)_1fr]">
     <aside className="min-w-0 border-b border-[var(--border-subtle)] p-4 md:border-b-0 md:border-r md:overflow-auto">
       <header className="mb-2 flex items-center justify-between"><h3 className="text-sm font-semibold">Channels</h3>
-        <button className="btn-ghost" disabled={!online} aria-label="Create channel" onClick={() => setChannelEdit({ action: "create", channel: null })}>＋</button></header>
+        <button className="btn-ghost" disabled={!online || versionError} aria-label="Create channel" onClick={() => setChannelEdit({ action: "create", channel: null })}>＋</button></header>
       <nav aria-label="Discussion channels">{channels.rows.filter(c => !c.archived).map(channelButton)}</nav>
       {channels.rows.some(c => c.archived) && <details open={channel?.archived || undefined} className="mt-3"><summary className={"cursor-pointer " + muted}>Archived channels</summary>
         {channels.rows.filter(c => c.archived).map(channelButton)}</details>}
       <More page={channels} />
     </aside>
     <div className="min-w-0 space-y-4 p-4 md:overflow-auto md:p-6">
-      {!online && <p role="status">Home bridge offline</p>}
-      {error && <p role="alert">{error}</p>}
+      {!online && <p role="status">{unavailableMessage}</p>}
+      {versionError && <ProjectDatabaseUpdate bridgeName={bridgeNames?.get(project.bridgeId) ?? project.bridgeId} onOpenUpdates={onOpenUpdates} />}
+      {error && !projectDatabaseError(error) && <p role="alert">{error}</p>}
       <header className="flex flex-wrap items-center justify-between gap-2">
         <h3 className="break-all text-lg font-semibold">#{channel?.name ?? channelId}</h3>
         <div className="flex flex-wrap items-center gap-2">
-          {!thread && canPost && <button className="btn-accent" onClick={() => setCompose(true)}>New thread</button>}
-          {!thread && channel && !channel.archived && <button className="btn-ghost" disabled={!online} onClick={() => setChannelEdit({ action: "rename", channel })}>Rename</button>}
-          {!thread && channel && !channel.archived && <button className="btn-ghost" disabled={!online} onClick={() => setChannelEdit({ action: "archive", channel })}>Archive</button>}
+          {!thread && writableChannel && <button disabled={!canPost} className="btn-accent" onClick={() => setCompose(true)}>New thread</button>}
+          {!thread && writableChannel && <button className="btn-ghost" disabled={!canPost} onClick={() => setChannelEdit({ action: "rename", channel })}>Rename</button>}
+          {!thread && writableChannel && <button className="btn-ghost" disabled={!canPost} onClick={() => setChannelEdit({ action: "archive", channel })}>Archive</button>}
           <button className="btn-ghost" disabled={!online || channels.loading || posts.loading || threads.loading} onClick={() => {
             setChannelRev(n => n + 1);
             if (thread) { void posts.loadNew(); void openById(thread.id); }
@@ -303,18 +320,18 @@ export function ProjectDiscussion({ project, online, send, sessions, bridgeNames
       {thread ? <article key={thread.id} className="space-y-4">
         <button className="btn-ghost" onClick={() => { navigation.current++; setReplySaved(false); onThread(null); setError(""); }}>← Threads</button>
         <h4 className="break-words text-xl font-semibold">{thread.title}</h4>
-        <TicketLinks thread={thread} call={call} tickets={tickets} createEnabled={boardEnabled} writable={!!canPost} openTicket={openTicket}
+        <TicketLinks thread={thread} call={call} tickets={tickets} createEnabled={boardEnabled} writable={canPost} openTicket={openTicket}
           updated={id => { onThread({ ...thread, ticketId: id }); onTicketCreated(); }} />
         <ol aria-label="Thread messages" className="space-y-3">{posts.rows.map(post => <li key={post.id} className="rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3">
           <Byline author={post.author} time={post.createdAt} bridges={bridgeNames} />
           <p className="mt-2 whitespace-pre-wrap break-words text-sm">{post.text}</p></li>)}</ol>
         <More page={posts} />
         {replySaved && <p role="status" className={muted}>Reply posted.</p>}
-        {canPost && <Composer sessions={projectSessions} bridges={bridgeNames} call={call} channelId={channelId} threadId={thread.id} saved={() => {
+        {writableChannel && <Composer canPost={canPost} sessions={projectSessions} bridges={bridgeNames} call={call} channelId={channelId} threadId={thread.id} saved={() => {
           setReplySaved(true); if (posts.next === null) void posts.loadNew();
         }} />}
       </article> : <>
-        {online && !threads.loading && !threads.error && !threads.rows.length && <p className={muted}>No threads in this channel.</p>}
+        {online && threads.loaded && !threads.error && !threads.rows.length && <p className={muted}>No threads in this channel.</p>}
         <ul className="divide-y divide-[var(--border-subtle)]">{threads.rows.map(t => <li key={t.id} className="py-3">
           <button className="block break-words text-left font-semibold underline decoration-[var(--border-muted)] underline-offset-4" onClick={() => onThread(t)}>{t.title}</button>
           <Byline author={t.author} time={t.createdAt} bridges={bridgeNames} /></li>)}</ul>
@@ -322,7 +339,7 @@ export function ProjectDiscussion({ project, online, send, sessions, bridgeNames
       </>}
     </div>
     {channelEdit && <ChannelDialog selection={channelEdit} call={call} close={() => setChannelEdit(null)} saved={id => { setChannelRev(n => n + 1); selectChannel(id); }} />}
-    {compose && <Modal name="New thread" close={() => setCompose(false)}><Composer sessions={projectSessions} bridges={bridgeNames} call={call} channelId={channelId}
-      saved={id => { setCompose(false); setThreadRev(n => n + 1); void openById(id); }} /></Modal>}
+    {compose && <Modal name="New thread" close={() => setCompose(false)}><Composer canPost={canPost} sessions={projectSessions} bridges={bridgeNames} call={call} channelId={channelId}
+      saved={id => { setCompose(false); void threads.loadNew(); void openById(id); }} /></Modal>}
   </section>;
 }

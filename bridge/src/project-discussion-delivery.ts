@@ -1,3 +1,4 @@
+import { discussionReplyHint } from './project-discussion-protocol.js';
 import type { ProjectBoardStore } from './project-board-store.js';
 import type { PeerControl } from './peer-control.js';
 import type { Session } from './types.js';
@@ -39,7 +40,9 @@ export async function deliverDiscussionMail(projects: ProjectBoardStore, project
       if (deferred.has(target) || (target !== localId && !allowed?.has(target))) return;
       try {
         for (const notice of batch) {
-          const body = { body: notice.body, type: 'message', from: 'project-discussion', fromName: projectName + ' discussion',
+          const discussion = target === localId ? { projectId } : { projectId, homeBridgeId: localId };
+          const body = { body: notice.body + discussionReplyHint(notice.threadId, projectId, discussion.homeBridgeId), discussion,
+            type: 'message', from: 'project-discussion', fromName: projectName + ' discussion',
             threadId: notice.threadId, discussionProject: projectName, idempotencyKey: 'discussion:' + projectId + ':' + notice.id };
           if (target === localId) {
             const recipient = await load(notice.sessionId);

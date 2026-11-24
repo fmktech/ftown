@@ -1,5 +1,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { registerFtownPiExtension as registerNative } from '../pi-extension/ftown.js';
 
@@ -37,6 +40,7 @@ describe('ftown Pi extension', () => {
     assert.deepEqual(tools.map((tool) => tool.name), [
       'ftown_ask_user',
       'ftown_mail',
+      'ftown_discuss',
       'ftown_sessions',
       'ftown_session_create',
       'ftown_session_manage',
@@ -146,7 +150,11 @@ describe('ftown Pi extension', () => {
         return {
           ok: true,
           json: async () => ({
-            messages: [{ from: 'parent-id', fromName: 'Planner', type: 'task', body: 'Review the API' }],
+            messages: [
+              { from: 'parent-id', fromName: 'Planner', type: 'task', body: 'Review the API' },
+              { from: 'project-discussion', fromName: 'Team discussion', threadId: 'thread-id', body: 'Hi pm',
+                ...(harness === 'omp' && { discussion: { projectId: 'project-id', homeBridgeId: 'build-mac' } }) },
+            ],
           }),
         };
       }
@@ -214,9 +222,13 @@ describe('ftown Pi extension', () => {
       requests[1].url,
       'http://127.0.0.1:4321/api/sessions/ftown-session/inbox?wait=0',
     );
-    assert.deepEqual(followUps, [
-      '[ftown mail]\n[task from Planner (parent-id)] Review the API\nHandle this message and reply with the `ftown_mail` tool where appropriate.',
-    ]);
+    assert.equal(followUps.length, 1);
+    assert.match(followUps[0], /Review the API/);
+    assert.match(followUps[0], /Hi pm/);
+    assert.match(followUps[0], harness === 'omp'
+      ? /ftown_discuss.*"project":"project-id".*"threadId":"thread-id".*"bridge":"build-mac"/
+      : /ftown_discuss.*"project":"Team".*"threadId":"thread-id"/);
+    assert.doesNotMatch(followUps[0], /reply with.*ftown_mail/i);
   }
 
   for (const harness of ['pi', 'omp']) {
@@ -278,7 +290,7 @@ describe('ftown Pi extension', () => {
         'http://127.0.0.1:4321/api/sessions/ftown-session/inbox?wait=30',
       );
       assert.deepEqual(followUps, [{
-        message: '[ftown mail]\n[task from Planner (planner-id)] Wake up\nHandle this message and reply with the `ftown_mail` tool where appropriate.',
+        message: '[ftown mail]\n[task from Planner (planner-id)] Wake up',
         options: harness === 'omp' ? undefined : { deliverAs: 'followUp' },
       }]);
 
@@ -465,6 +477,59 @@ describe('ftown Pi extension', () => {
     assert.equal(result.isError, undefined);
     assert.match(result.content[0].text, /mail-1/);
     assert.deepEqual(retried, result);
+  });
+
+  it('identifies the discussion reply tool when reading a queued notification alongside direct mail', async () => {
+    const tools = new Map<string, any>();
+    const project = '09a9d298-0e92-4339-a85f-e7a139e5bdef';
+    const notice = '12f44ea7-9f8e-4c5e-8039-7a6c1f9daad8';
+    const direct = { from: 'parent', body: 'Check the build' };
+    registerNative({
+      on() {}, registerCommand() {}, sendUserMessage() {},
+      registerTool(tool: any) { tools.set(tool.name, tool); },
+    }, { env: { FTOWN_SESSION_ID: 'pm' }, readBridgePointer: async () => null,
+      proxy: async () => Response.json({ messages: [direct, { from: 'project-discussion', threadId: 'thread-id',
+        body: 'Hi pm', idempotencyKey: `discussion:${project}:${notice}` }] }) });
+    const result = await tools.get('ftown_mail').execute('read-inbox', { operation: 'read', peek: true });
+    const { messages } = JSON.parse(result.content[0].text);
+    assert.deepEqual(messages[0], direct);
+    assert.ok(messages[1].replyHint.includes('ftown_discuss ' + JSON.stringify({
+      operation: 'reply', project, threadId: 'thread-id', text: '<reply>',
+    })));
+  });
+
+  it('replies to discussions through the installed CLI, retaining the same post ID after a tool retry', async t => {
+    const dir = await mkdtemp(join(tmpdir(), 'ftown-discuss-tool-'));
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    const harnessCli = join(dir, 'ftown-cli.cjs');
+    await writeFile(harnessCli, `console.log(JSON.stringify({ argv: process.argv.slice(2), session: process.env.FTOWN_SESSION_ID }));`);
+    function register() {
+      const tools = new Map<string, any>();
+      registerNative({
+        on() {}, registerCommand() {}, sendUserMessage() {},
+        registerTool(tool: any) { tools.set(tool.name, tool); },
+      }, { env: { FTOWN_SESSION_ID: 'pm' }, readBridgePointer: async () => ({ harnessCli }),
+        proxy: async () => Response.json({ sessions: [] }) });
+      return tools;
+    }
+    const tools = register();
+    const text = '--bridge=other\n"literal" $(echo test)';
+    const input = { operation: 'reply', project: 'Support desk', bridge: 'home', threadId: 'thread-id', text };
+    const result = await tools.get('ftown_discuss').execute('call-17', input);
+    assert.equal(result.isError, undefined, result.details?.error);
+    assert.equal(result.details.session, 'pm');
+    const argv: string[] = result.details.argv;
+    assert.deepEqual(argv.slice(0, 2), ['discuss', 'reply']);
+    assert.ok(argv.includes('--text=' + text));
+    assert.ok(argv.includes('--project=Support desk'));
+    assert.ok(argv.includes('--bridge=home'));
+    assert.equal(argv.at(-1), 'thread-id');
+    assert.match(argv.find(arg => arg.startsWith('--id=')) ?? '', /^--id=[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/);
+    const retry = await register().get('ftown_discuss').execute('call-17', input);
+    assert.deepEqual(retry.details, result.details);
+    const mistaken = await tools.get('ftown_mail').execute('mail-1', { operation: 'send', target: 'project-discussion', body: text });
+    assert.equal(mistaken.isError, true);
+    assert.match(mistaken.details.error, /ftown_discuss/);
   });
 
   it('lists ftown sessions through a model tool and slash command', async () => {

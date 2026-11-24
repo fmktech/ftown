@@ -7,7 +7,8 @@ Pi and Oh My Pi (OMP) load the bundled extension, which exposes ftown's authenti
 | Resource | Identity | Relationships | Lifecycle |
 | --- | --- | --- | --- |
 | Session | Opaque UUID, or a unique exact name for lookup | Optional parent session; owns inbox, usage, screen, and log | Create, inspect, rename, reparent, stop, remove, revive |
-| Mail message | Assigned by the session inbox | Sent from one session to another; optional thread | Send, peek/read, delivered |
+| Discussion thread | Thread ID | Belongs to a project channel on the project’s home bridge | Read and post with `ftown discuss`, reply with `ftown_discuss` |
+| Mail message | Assigned by the session inbox | Direct session messages can be grouped by inbox thread | Send, peek/read, delivered |
 
 All tools talk only to the local bridge selected by `FTOWN_HOOK_PORT` or `~/.ftown/bridge.json`. The extension supplies that bridge's bearer token and never sends credentials to the model.
 
@@ -15,7 +16,8 @@ All tools talk only to the local bridge selected by `FTOWN_HOOK_PORT` or `~/.fto
 
 | Tool | Operation | Required input | Result | Mutation |
 | --- | --- | --- | --- | --- |
-| `ftown_mail` | `send` | `target`, `body` | Stored inbox message | Yes |
+| `ftown_mail` | `send` | `target`, `body` | Stored direct session message | Yes |
+| `ftown_discuss` | `reply` | `project`, `threadId`, `text` | Stored thread post ID | Yes |
 | `ftown_mail` | `read` | None | `{ messages }` for the current session | No |
 | `ftown_sessions` | `list` | None | `{ sessions }` | No |
 | `ftown_sessions` | `archive` | None | `{ archived }` tombstones | No |
@@ -34,6 +36,8 @@ All tools talk only to the local bridge selected by `FTOWN_HOOK_PORT` or `~/.fto
 `target` accepts an opaque ID or a unique exact name. Mail additionally accepts `parent`. Reparenting with `parent: null` clears the parent. Session creation intentionally accepts structured fields only; arbitrary session commands and environment variables are not part of the model-facing contract.
 
 The extension also registers `/ftown-mail read [--peek]`, `/ftown-mail send <session> <message>`, and `/ftown-sessions` for interactive use.
+
+Project discussion notifications carry a thread ID. Use `ftown_discuss` with `operation: "reply"`, the project ID or name, the thread ID and your reply text. Supply `bridge` to address a particular project home. A retry of the same tool call reuses its post ID.
 
 ## Mail wake-up
 
@@ -63,7 +67,7 @@ The tool schemas ship with `ftown-bridge` and follow its semantic version. Addin
 
 ## Consumer walkthrough
 
-An agent can call `ftown_sessions.list`, use the returned session ID with `ftown_sessions.get` or `usage`, and then send context with `ftown_mail.send`. To delegate, it can create a child with `ftown_session_create`, retain the returned ID, inspect its output, and later rename, reparent, stop, remove, or revive it.
+An agent can call `ftown_sessions.list`, use the returned session ID with `ftown_sessions.get` or `usage`, and send a directed instruction to that session with `ftown_mail.send`. To answer a shared project thread, call `ftown_discuss` with `operation: "reply"` and the thread and project IDs from the notification. To delegate, it can create a child with `ftown_session_create`, retain the returned ID, inspect its output, and later rename, reparent, stop, remove, or revive it.
 
 The ftown extension is installed by explicit `ftown setup`; use
 `ftown setup --repair` after installing a new optional harness. Structured creates

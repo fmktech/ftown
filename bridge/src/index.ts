@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, realpathSync, chmodSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { cleanup as ndcCleanup } from 'node-datachannel';
+import { acquireBridgeInstance } from './bridge-instance.js';
 import { configureUpdateOptions } from './update-options.js';
 
 import { CentrifugoClient, type LedgerMessage } from './centrifugo-client.js';
@@ -194,6 +195,12 @@ program
     const dataDir = opts.dataDir ? resolve(opts.dataDir) : defaultDataDir;
     // No bridge starts, and no identity is reset, while an update holds the reservation.
     assertUpdateReservationAllowed(homedir());
+    if (!opts.rotateKey) {
+      const instance = await acquireBridgeInstance(dataDir);
+      // Hold ownership through teardown, including partial startup failures. The update
+      // helper starts its successor only after this process exits.
+      process.once('exit', () => instance.close());
+    }
     const runMode = bridgeMode(opts);
     // Restart context is authenticated by the private helper channel before any mutation. It is read before any reset because a
     // helper-started bridge has no visible terminal: it must never print a pairing link (an invalid context matters only below).

@@ -2,7 +2,7 @@
 name: ftown
 description: >-
   Control ftown sessions and multi-provider routing: sessions
-  (create/list/read/drive, archive/revive/remove), worktrees, and ftown mail.
+  (create/list/read/drive, archive/revive/remove), worktrees, project discussions, and direct session mail.
   Choose bridges by capacity, transfer folders between paired computers, and
   launch workers under the same project across bridges.
   Handle human attention and questions routed to the parent first. Support
@@ -73,6 +73,7 @@ ftown sessions create --parent --plan-item p2 --require-green-pr --prompt "Revie
 ftown brief set --file brief.md
 ftown attention list
 ftown worktrees list
+ftown discuss reply <thread-id> --project App --text "Reviewed the API client"
 ftown harness mail send <session-id> --type task "review the API client"
 ftown harness mail read
 ftown sessions handoff <session-id> --shell grok --model fast
@@ -157,7 +158,7 @@ ftown discuss reply <thread-id> --text "ARM smoke tests passed." --project App
 ftown discuss activity releases --after 0 --project App --json
 ```
 
-A post or reply can mention sessions with repeatable `--mention <bridge-id>/<session-id>` or inline `@<bridge-id>/<session-id>`. Mentioned sessions receive ftown mail. Run `follow` from the session that wants mail for thread replies and `unfollow` to stop. A session posting from another bridge uses its own identity and the project's home for storage. Read arriving mail with `ftown harness mail read`.
+A post or reply can mention sessions with repeatable `--mention <bridge-id>/<session-id>` or inline `@<bridge-id>/<session-id>`. Mentions notify the named sessions. Run `follow` from a session to receive notifications about replies and `unfollow` to stop. A session posting from another bridge uses its own identity and the project's home for storage. Read notifications with `ftown harness mail read`. For a discussion notification, use the included `ftown discuss reply` command to post in the original thread. In Pi and OMP, use the `ftown_discuss` tool with operation `reply`, the project, thread ID, and reply text. Supply the home bridge when the notification specifies one. Use `ftown_mail` for direct session messages.
 
 Read additional result pages with `--after <nextAfter>`. For incremental channel activity, save the last post's `seq` and pass it to `activity --after` next time. `post`, `reply`, `channels create` and `create-ticket` accept a client-generated UUID via `--id` for retries.
 
@@ -209,8 +210,8 @@ available. Mail is for directed instructions (`--type task`), results
 non-urgent notes; `fyi` never wakes the recipient. Progress and status go on
 your card (below), never as mail. Each new batch of mail nudges the recipient
 at most once; un-read mail stays in the inbox — read it with
-`ftown harness mail read`. Prefer mail for agent communication; use terminal
-key injection only when the task needs it. Inspect peers with `ftown board`
+`ftown harness mail read`. Keep project conversations in their channel with `ftown discuss post`
+and `ftown discuss reply`. Inspect peers with `ftown board`
 and `ftown sessions list`.
 
 ## Status and board

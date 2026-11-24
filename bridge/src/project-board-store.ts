@@ -92,11 +92,22 @@ export async function sessionBlocksTicket(session: Session, attention: Attention
   return !!(await attention.explicitSnapshot(session.id)).attention;
 }
 
+const supportedProjectVersion = 3;
+
+function projectSchemaVersion(db: DatabaseSync): number {
+  const version = Number(db.prepare('PRAGMA user_version').get()!.user_version);
+  if (version > supportedProjectVersion) {
+    throw new Error(`Unsupported project database version ${version}. This bridge supports ${supportedProjectVersion}. Update the project's home bridge to open this board.`);
+  }
+  if (version < 0) throw new Error(`Invalid project database version ${version}.`);
+  return version;
+}
+
 /** Upgrade the original board in place; interruption rolls back all schema changes. */
 function migrate(db: DatabaseSync): void {
   db.exec('BEGIN IMMEDIATE');
   try {
-    const version = Number(db.prepare('PRAGMA user_version').get()!.user_version);
+    const version = projectSchemaVersion(db);
     if (version === 0) db.exec(`
       ALTER TABLE tickets ADD COLUMN body TEXT NOT NULL DEFAULT '';
       ALTER TABLE tickets ADD COLUMN assignee TEXT;
@@ -120,7 +131,7 @@ function migrate(db: DatabaseSync): void {
     if (version <= 2) {
       initializeDiscussion(db);
       db.exec('PRAGMA user_version=3');
-    } else if (version !== 3) throw new Error('Unsupported project database version');
+    }
     db.exec('COMMIT');
   } catch (error) { db.exec('ROLLBACK'); throw error; }
 }
@@ -222,8 +233,8 @@ export class ProjectBoardStore {
     if (!existsSync(path)) throw new Error('Project not found on this bridge');
     let db = new DatabaseSync(path, { readOnly });
     try {
-      const version = Number(db.prepare('PRAGMA user_version').get()!.user_version);
-      if (version !== 3) {
+      const version = projectSchemaVersion(db);
+      if (version < supportedProjectVersion) {
         if (readOnly) {
           db.close();
           db = new DatabaseSync(path);
@@ -239,8 +250,13 @@ export class ProjectBoardStore {
     const projects: HomeProject[] = [];
     for (const dir of readdirSync(this.root, { withFileTypes: true })) {
       if (!dir.isDirectory() || !id.safeParse(dir.name).success) continue;
-      const row = this.withDb(dir.name, true, db => db.prepare('SELECT name FROM project WHERE deleted = 0').get());
-      if (row) projects.push({ id: dir.name, name: String(row.name), bridgeId: this.bridgeId });
+      // Project discovery uses the original directory metadata, even when a newer
+      // home bridge has upgraded the ticket or discussion tables.
+      const db = new DatabaseSync(join(this.root, dir.name, 'board.sqlite'), { readOnly: true });
+      try {
+        const row = db.prepare('SELECT name FROM project WHERE deleted = 0').get();
+        if (row) projects.push({ id: dir.name, name: String(row.name), bridgeId: this.bridgeId });
+      } finally { db.close(); }
     }
     return projects.sort((a, b) => a.name.localeCompare(b.name));
   }

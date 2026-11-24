@@ -23,11 +23,11 @@ interface PumpRun {
  * minimal environment built from scratch (and restored), so a real bridge or
  * real FTOWN_* values in the parent environment are never touched.
  */
-async function runPump(hook: Record<string, unknown>, extraEnv: Record<string, string>, codex = false): Promise<PumpRun> {
+async function runPump(hook: Record<string, unknown>, extraEnv: Record<string, string>, codex = false, message?: Partial<MailMessage>): Promise<PumpRun> {
   const home = mkdtempSync(join(tmpdir(), 'ftown-hook-pump-'));
   const sessionId = `pump-${randomBytes(6).toString('hex')}`;
   const mail: MailMessage[] = [
-    { id: 'm1', ts: '2026-01-01T00:00:00.000Z', from: 'sender', fromName: 'sender', to: sessionId, type: 'message', body: 'hello pump' },
+    { id: 'm1', ts: '2026-01-01T00:00:00.000Z', from: 'sender', fromName: 'sender', to: sessionId, type: 'message', body: 'hello pump', ...message },
   ];
   const inboxRequests: string[] = [];
   const stdout: string[] = [];
@@ -106,6 +106,18 @@ describe('hook-pump under Grok', () => {
       assert.equal(run.mail[0].deliveredAt, undefined);
     });
   }
+
+  it('points a project discussion notification at the discussion reply command during Stop', async () => {
+    const projectId = 'ae434dc2-deec-45fd-8848-b650a00c755d';
+    const threadId = 'b3c79010-c608-481a-a99b-24164c1d9c4a';
+    const run = await runPump(EVENTS[0].hook, {}, false, { from: 'project-discussion', fromName: 'Team discussion', body: 'Hi pm',
+      threadId, idempotencyKey: 'discussion:' + projectId + ':82f41e59-e955-4af6-9d66-dacd4178a3f1' });
+    const { reason } = JSON.parse(run.stdout[0]);
+    assert.match(reason, /Hi pm/);
+    assert.ok(reason.includes("ftown discuss reply " + threadId));
+    assert.ok(reason.includes(projectId));
+    assert.doesNotMatch(reason, /ftown harness mail send/);
+  });
 
   it('inherited GROK_HOOK_EVENT with a Claude-shaped Stop payload still drains and blocks', async () => {
     const run = await runPump(EVENTS[0].hook, { GROK_HOOK_EVENT: 'stop' });

@@ -1,8 +1,11 @@
 import { spawn } from 'node:child_process';
 import { cpSync, existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { acquireBridgeInstance } from './bridge-instance.js';
+import { resolveDefaultDataDir } from './ftown-home.js';
 import { debuglog } from 'node:util';
+import { reexec } from './identity-reset.js';
 import { assertUpdateReservationAllowed } from './update-handoff.js';
 import { acquireSetupLock, assertSetupReady, readSetupState } from './setup-state.js';
 import { packageVersion } from './setup.js';
@@ -19,7 +22,7 @@ export interface StartDependencies {
   fetchLatest?: () => Promise<string>;
   spawn?: (command: string, args: string[], env: NodeJS.ProcessEnv) => Promise<number>;
   debug?: (message: string) => void;
-  beginUpgrade?: () => UpgradeTransaction;
+  beginUpgrade?: (args: string[]) => UpgradeTransaction | Promise<UpgradeTransaction>;
 }
 
 export interface UpgradeTransaction { commit(): void; rollback(): Promise<'current' | 'installed'> | 'current' | 'installed' }
@@ -150,11 +153,29 @@ export function isNewerVersion(latest: string, current: string): boolean {
 }
 
 async function spawnCommand(command: string, args: string[], env: NodeJS.ProcessEnv): Promise<number> {
+  // Keep the service manager's PID when switching to the installed runtime.
+  if (command === process.execPath && reexec(args[0], args.slice(1), { env, nodeArgs: [] })) return 0;
   return await new Promise((resolve, reject) => {
     const child = spawn(command, args, { stdio: 'inherit', env });
     child.once('error', reject);
     child.once('exit', (code, signal) => resolve(code ?? (signal ? 1 : 0)));
   });
+}
+
+async function reserveStartupUpgrade(args: string[]): Promise<UpgradeTransaction> {
+  let dataDir = resolveDefaultDataDir();
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--data-dir' && args[i + 1]) dataDir = resolve(args[++i]);
+    else if (args[i].startsWith('--data-dir=')) dataDir = resolve(args[i].slice('--data-dir='.length));
+  }
+  const instance = await acquireBridgeInstance(dataDir);
+  try {
+    const upgrade = beginUpgrade();
+    return {
+      commit() { try { upgrade.commit(); } finally { instance.close(); } },
+      async rollback() { try { return await upgrade.rollback(); } finally { instance.close(); } },
+    };
+  } catch (error) { instance.close(); throw error; }
 }
 
 const dependencies: StartDependencies = {
@@ -167,7 +188,7 @@ export async function runStart(argv: string[], deps: StartDependencies = depende
   const env = deps.env ?? process.env;
   const args = argv.filter(arg => arg !== '--no-update');
   const helpOnly = args.length === 1 && (args[0] === '--help' || args[0] === '-h');
-  const skipUpdate = argv.includes('--no-update') || argv.includes('--help') || argv.includes('-h')
+  const skipUpdate = ['pair', 'devices', 'revoke'].includes(argv[0]) || argv.includes('--rotate-key') || argv.includes('--no-update') || argv.includes('--help') || argv.includes('-h')
     || env.FTOWN_NO_AUTO_UPDATE === '1' || env.FTOWN_UPGRADE_DONE === '1' || !!env.FTOWN_VERSION
     || !!env.CI || !!env.NODE_TEST_CONTEXT || env.NODE_ENV === 'test';
   if (!skipUpdate) {
@@ -187,7 +208,7 @@ export async function runStart(argv: string[], deps: StartDependencies = depende
       // Load the current bridge first so it remains available for fallback.
       deps.assertReady();
       const currentBridge = await deps.loadBridge();
-      const transaction = (deps.beginUpgrade ?? beginUpgrade)();
+      const transaction = await (deps.beginUpgrade ?? reserveStartupUpgrade)(args);
       const run = deps.spawn ?? spawnCommand;
       let setupSucceeded = false;
       try { setupSucceeded = await run('npx', ['-y', `ftown@${latest}`, 'setup'], env) === 0; }
