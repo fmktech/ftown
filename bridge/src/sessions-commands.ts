@@ -235,7 +235,7 @@ function sessionProgram(): Command {
     .option('--clear', 'Remove the current pull request association')
     .option('--session-id <id>', 'Target session; defaults to FTOWN_SESSION_ID')
     .action((url: string | undefined, _opts, cmd: Command) => run('pr', url === undefined ? [] : [url], cmd));
-  command('preview [paths...]', 'Register up to 12 preview files (.html/.htm/.md/.markdown, 1MiB each, duplicate basenames rejected)')
+  command('preview [paths...]', 'Register up to 12 preview files (.html/.htm/.md/.markdown, 8 MiB each, duplicate basenames rejected)')
     .option('--add <paths...>', 'Append files to the current preview set (an already-registered file is re-registered in place with a new file id)')
     .option('--remove <names...>', 'Remove files by basename (removing the last file clears the preview)')
     .option('--clear', 'Remove the preview registration')

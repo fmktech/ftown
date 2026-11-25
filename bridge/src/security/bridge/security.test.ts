@@ -4,10 +4,14 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { gunzipSync } from 'node:zlib';
 import { EventEmitter } from 'node:events';
 import { generateEndpoint, open, seal } from '../crypto.js';
 import type { ApplicationJson, EndpointIdentity, InboundTransportContext, LocalEventPage, SecureApplication, SecureEnvelope } from '../protocol.js';
 import { BridgeSecurityService } from './security.js';
+import { secureFixture } from './fixtures.test.js';
+import { loadLocalIdentity } from './identity.js';
+import { localApplication } from './local-client.js';
 import { executeSecurePacket } from './execute.js';
 import { CentrifugoClient } from '../../centrifugo-client.js';
 import { nativeWake } from './native-wake.js';
@@ -49,6 +53,86 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
   };
   return { dir, identity, client, security, route, packet };
 }
+
+test('authenticated hello negotiates gzip for each relay reader and shared legacy browser tabs keep receiving JSON', async t => {
+  const f = await fixture(t);
+  async function addBrowser(label: string) {
+    const browser = await generateEndpoint(owner, 'browser');
+    const invitation = await f.security.policy.createInvitation(await f.security.policy.principal(f.client.endpoint.id), { label });
+    await f.security.policy.consumeInvitation({ type: 'enroll', candidate: browser.endpoint, invitationId: invitation.invitationId,
+      invitationSecret: invitation.secret, label });
+    return browser;
+  }
+  async function hello(browser: EndpointIdentity, challenge: string) {
+    const packet = await seal(browser, f.identity.endpoint, { type: 'ftown_encrypted', version: 1, senderId: browser.endpoint.id,
+      recipientId: f.identity.endpoint.id, ownerId: owner, bridgeId: 'bridge', channel: f.route.channel, purpose: 'hello',
+      messageId: randomUUID(), createdAt: Date.now(), expiresAt: Date.now() + 60_000, receiverEpoch: null },
+    Buffer.from(JSON.stringify({ type: 'hello', challenge })));
+    const response = await f.security.handleHandshake(packet, f.route);
+    const welcome = await open(browser, f.identity.endpoint, response, { ownerId: owner, bridgeId: 'bridge',
+      channel: f.route.channel, recipientId: browser.endpoint.id, purpose: 'welcome' });
+    assert.equal(JSON.parse(Buffer.from(welcome).toString()).challenge, challenge);
+  }
+
+  const modern = await addBrowser('modern');
+  const legacy = await addBrowser('legacy');
+  await hello(modern, 'gz1_' + randomUUID());
+  await hello(legacy, randomUUID());
+  const publication: SecureApplication = { type: 'application', route: { kind: 'publication' }, data: 'log line'.repeat(500), mcp: null };
+  async function publicationBytes() {
+    const packets = await f.security.sealPublication(f.route.channel, publication);
+    return Promise.all([modern, legacy].map(async browser => {
+      const packet = packets.find((p): p is SecureEnvelope => p.type === 'ftown_encrypted' && p.recipientId === browser.endpoint.id);
+      assert.ok(packet);
+      return Buffer.from(await open(browser, f.identity.endpoint, packet, { ownerId: owner, bridgeId: 'bridge',
+        channel: f.route.channel, recipientId: browser.endpoint.id, purpose: 'application' }));
+    }));
+  }
+  const [compressed, json] = await publicationBytes();
+  assert.deepEqual(JSON.parse(gunzipSync(compressed).toString()), publication);
+  assert.deepEqual(JSON.parse(json.toString()), publication);
+  // The same key can be used by different tabs, with their hellos arriving in either order.
+  await hello(modern, randomUUID());
+  await hello(legacy, 'gz1_' + randomUUID());
+  for (const bytes of await publicationBytes()) assert.deepEqual(JSON.parse(bytes.toString()), publication);
+});
+
+test('a legacy CLI can finish a pending request after a newer CLI handshakes with the same stored key', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'ftown-gzip-cli-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const started = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const data = 'session data '.repeat(100);
+  const f = await secureFixture(dir, async url => {
+    if (String(url).endsWith('/api/sessions')) {
+      started.resolve();
+      await release.promise;
+    }
+    return Response.json(data);
+  });
+  const client = await loadLocalIdentity(dir, owner);
+  const channel = 'local-http:bridge';
+  const request = async (purpose: 'application' | 'hello', body: unknown, receiverEpoch: string | null, messageId = randomUUID()) => {
+    const packet = await seal(client, f.security.endpoint, { type: 'ftown_encrypted', version: 1, senderId: client.endpoint.id,
+      recipientId: f.security.endpoint.id, ownerId: owner, bridgeId: 'bridge', channel, purpose, messageId,
+      createdAt: Date.now(), expiresAt: Date.now() + 60_000, receiverEpoch }, Buffer.from(JSON.stringify(body)));
+    const response = await f.fetch('http://127.0.0.1:1234/api/security/envelope', { method: 'POST', body: JSON.stringify(packet) });
+    return open(client, f.security.endpoint, await response.json() as SecureEnvelope, { ownerId: owner, bridgeId: 'bridge',
+      channel, recipientId: client.endpoint.id, purpose: purpose === 'hello' ? 'welcome' : 'application' });
+  };
+  const welcome = JSON.parse(Buffer.from(await request('hello', { type: 'hello', challenge: randomUUID() }, null)).toString());
+  const requestId = randomUUID();
+  const legacy = request('application', { type: 'application', route: { kind: 'http', requestId, method: 'GET', path: '/api/sessions' },
+    data: {}, mcp: null }, welcome.receiverEpoch, requestId);
+  await started.promise;
+  try {
+    const current = await localApplication(f.pointer, { type: 'application',
+      route: { kind: 'http', requestId: randomUUID(), method: 'GET', path: '/api/host-resources' }, data: {}, mcp: null }, undefined, f.fetch);
+    assert.deepEqual(current, { status: 200, body: data });
+  } finally { release.resolve(); }
+  const legacyJson = JSON.parse(Buffer.from(await legacy).toString());
+  assert.deepEqual(legacyJson.data, { status: 200, body: data });
+});
 
 test('encrypted browser read commands dispatch account metadata and session lists', async t => {
   const f = await fixture(t);

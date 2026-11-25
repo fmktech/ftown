@@ -1,3 +1,4 @@
+import { gzipSync, gunzipSync } from 'node:zlib';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { EndpointIdentity, EnvelopePurpose, SecureEnvelope } from '@security/protocol';
 import { generateEndpoint, open, seal } from '@security/crypto';
@@ -30,12 +31,15 @@ async function packet(sender: EndpointIdentity, recipient: EndpointIdentity, pur
   return seal(sender, recipient.endpoint, { type: 'ftown_encrypted', version: 1, senderId: sender.endpoint.id, recipientId: recipient.endpoint.id,
     ownerId, bridgeId: 'bridge-one', channel, purpose, messageId: crypto.randomUUID(), createdAt: now, expiresAt: now + 120000, receiverEpoch: null, ...override }, text.encode(JSON.stringify(data)));
 }
-async function establish(runtime: SecureEndpointRuntime, bridge: EndpointIdentity, browser: EndpointIdentity, owner = ownerId) {
+async function establish(runtime: SecureEndpointRuntime, bridge: EndpointIdentity, browser: EndpointIdentity, owner = ownerId, epoch = 'boot-one') {
+  let challenge = '';
   await runtime.handshake('bridge-one', channel, async message => {
     const envelope = message as SecureEnvelope;
     const hello = JSON.parse(new TextDecoder().decode(await open(bridge, browser.endpoint, envelope, { ownerId: owner, bridgeId: 'bridge-one', channel, recipientId: bridge.endpoint.id, purpose: 'hello' })));
-    await runtime.receive(await packet(bridge, browser, 'welcome', { type: 'welcome', challenge: hello.challenge, receiverEpoch: 'boot-one' }, { ownerId: owner }), channel);
+    challenge = hello.challenge;
+    await runtime.receive(await packet(bridge, browser, 'welcome', { type: 'welcome', challenge: hello.challenge, receiverEpoch: epoch }, { ownerId: owner }), channel);
   });
+  return challenge;
 }
 
 describe('browser secure runtime', () => {
@@ -46,6 +50,21 @@ describe('browser secure runtime', () => {
     expect(envelope.messageId).toBe(requestId); expect(envelope.receiverEpoch).toBe('boot-one');
     const value = JSON.parse(new TextDecoder().decode(await open(bridge, browser.endpoint, envelope, { ownerId, bridgeId: 'bridge-one', channel, recipientId: bridge.endpoint.id, purpose: 'application' })));
     expect(value.route.requestId).toBe(requestId); runtime.dispose();
+  });
+
+  it('exchanges compressed applications with a gzip-capable bridge using the original authenticated routes', async () => {
+    const { browser, bridge, runtime } = await fixture();
+    const epoch = 'gz1_' + crypto.randomUUID();
+    expect(await establish(runtime, bridge, browser, ownerId, epoch)).toMatch(/^gz1_/);
+    const app = { type: 'application' as const, route: { kind: 'publication' as const }, data: { output: 'abcdefgh'.repeat(500) }, mcp: null };
+    const outbound = await runtime.sealApplication('bridge-one', channel, app);
+    const bytes = await open(bridge, browser.endpoint, outbound, { ownerId, bridgeId: 'bridge-one', channel, recipientId: bridge.endpoint.id, purpose: 'application' });
+    expect(JSON.parse(gunzipSync(bytes).toString())).toEqual(app);
+    const { bridgeId, purpose, createdAt, expiresAt } = outbound;
+    const inbound = await seal(bridge, browser.endpoint, { type: 'ftown_encrypted', version: 1, channel, ownerId, bridgeId, purpose, createdAt, expiresAt,
+      messageId: crypto.randomUUID(), senderId: bridge.endpoint.id, recipientId: browser.endpoint.id, receiverEpoch: null }, gzipSync(JSON.stringify(app)));
+    expect(await runtime.receive(inbound, channel)).toEqual([{ bridgeId: 'bridge-one', application: app }]);
+    runtime.dispose();
   });
 
   it('deduplicates authenticated publication recovery and rejects expired fresh responses', async () => {

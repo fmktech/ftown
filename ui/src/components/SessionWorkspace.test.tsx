@@ -913,7 +913,7 @@ it('mounts the switched iframe exactly once for unchanged bytes (P3)', async () 
 
 it.each([
   { reason: 'missing', expected: 'a.html is missing' },
-  { reason: 'too_large', expected: 'a.html exceeds the 1 MiB limit' },
+  { reason: 'too_large', expected: 'a.html exceeds this bridge’s preview size limit' },
   { reason: 'invalid_utf8', expected: 'a.html is not valid UTF-8' },
   { reason: 'invalid_file', expected: 'a.html is unavailable' },
   { reason: 'unavailable', expected: 'a.html is unavailable' },

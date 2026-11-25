@@ -234,7 +234,7 @@ ftown sessions preview --session-id <id> ./preview.html ./notes.md
 The target defaults to `FTOWN_SESSION_ID`. A session holds up to 12 files, in
 registration order. Kind is by extension (case-insensitive): `.html`/`.htm` →
 HTML, `.md`/`.markdown` → Markdown; anything else is rejected. Each file must
-be UTF-8, at most 1 MiB, and inside that session's working directory; relative
+be UTF-8, at most 8 MiB before compression (1 MiB on older bridges), and inside that session's working directory; relative
 paths resolve from the CLI's current directory. Two registered files may not
 share a basename (the selector and links are by basename): a duplicate basename
 is rejected with a clear error. Registration is all-or-nothing — if any path

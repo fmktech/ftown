@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
-import { act, cleanup, renderHook } from '@testing-library/react';
+import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { createHash, webcrypto } from 'node:crypto';
+import { gzipSync } from 'node:zlib';
 import type { MessageClient } from '@/lib/message-client';
 import type { Command, CommandResponse } from '@/types';
 import type { SessionPreviewFile } from '../../../bridge/src/preview-protocol';
@@ -65,6 +67,29 @@ it('keeps the document key on unchanged polls, remounts on manual refresh, and p
   await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
   expect(sendCommand).toHaveBeenCalledTimes(count);
 });
+it.each([true, false])('loads a gzip-capable bridge preview with browser decompression support %s', async supportsGzip => {
+  vi.useRealTimers();
+  vi.stubGlobal('crypto', webcrypto);
+  if (!supportsGzip) vi.stubGlobal('DecompressionStream', undefined);
+  const html = '<p>☕</p>'.repeat(600);
+  const source = Buffer.from(html);
+  const gzip = gzipSync(source);
+  const revision = createHash('sha256').update(source).digest('hex');
+  const base = { previewId: id, fileId, revision };
+  const sendCommand = vi.fn(async (cmd: Command) => {
+    if (cmd.type === 'session_preview_status') {
+      return { requestId: 's', success: true, data: { ...base, state: 'ready', totalBytes: source.length, gzipBytes: gzip.length } };
+    }
+    const encoding = (cmd.payload as Record<string, unknown>).encoding;
+    const bytes = encoding === 'gzip' ? gzip : source;
+    return { requestId: 'c', success: true, data: { ...base, state: 'chunk', encoding, totalBytes: bytes.length, offset: 0, dataBase64: bytes.toString('base64'), done: true } };
+  });
+  const hook = renderHook(() => useSessionPreview({ client, userId: 'user', target, visible: true, readable: true, securityGeneration: 0, sendCommand }));
+  await waitFor(() => expect(hook.result.current.state).toMatchObject({ kind: 'ready', html, revision }));
+  const chunk = sendCommand.mock.calls.find(([cmd]) => cmd.type === 'session_preview_chunk')![0];
+  expect((chunk.payload as Record<string, unknown>).encoding).toBe(supportsGzip ? 'gzip' : undefined);
+});
+
 it('keeps automatic status checks quiet but shows actual updates and manual refresh', async () => {
   const { createHash } = await import('node:crypto');
   const first = '<p>one</p>'; const second = '<p>two</p>';

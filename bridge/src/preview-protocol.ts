@@ -1,5 +1,5 @@
 /** Frozen cross-package session preview contract. No filesystem paths belong in wire metadata. */
-export const PREVIEW_MAX_BYTES = 1_048_576;
+export const PREVIEW_MAX_BYTES = 8 * 1024 * 1024;
 export const PREVIEW_MAX_FILES = 12;
 export const PREVIEW_CHUNK_BYTES = 98_304;
 export const PREVIEW_POLL_MS = 1_000;
@@ -72,6 +72,7 @@ export interface SessionPreviewChunkRequest {
   fileId: string;
   revision: string;
   offset: number;
+  encoding?: 'gzip';
 }
 
 export interface SessionPreviewUnavailable {
@@ -81,11 +82,13 @@ export interface SessionPreviewUnavailable {
   reason: PreviewUnavailableReason;
 }
 
+/** totalBytes and revision always describe the original file. gzipBytes offers an alternate transfer size. */
 export type SessionPreviewStatus =
   | { state: 'unregistered' }
   | SessionPreviewUnavailable
-  | { state: 'ready' | 'unchanged'; previewId: string; fileId: string; revision: string; totalBytes: number; wait?: true };
+  | { state: 'ready' | 'unchanged'; previewId: string; fileId: string; revision: string; totalBytes: number; gzipBytes?: number; wait?: true };
 
+/** Chunk sizes and offsets refer to the requested representation. The revision still identifies the original bytes. */
 export type SessionPreviewChunk =
   | { state: 'stale_revision' }
   | SessionPreviewUnavailable
@@ -95,6 +98,7 @@ export type SessionPreviewChunk =
       fileId: string;
       revision: string;
       totalBytes: number;
+      encoding?: 'gzip';
       offset: number;
       dataBase64: string;
       done: boolean;

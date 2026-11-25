@@ -72,7 +72,7 @@ async function expectBadgeGeometry(row: Locator) {
   expect(metrics.link.y + metrics.link.height).toBeLessThanOrEqual(metrics.button.y + metrics.button.height);
 }
 
-interface ReceivedHook { channel: string; eventName: string; notificationType?: string; toolName?: string }
+interface ReceivedHook { channel: string; eventName: string; gzip: boolean; originalBytes: number; notificationType?: string; toolName?: string }
 
 async function observeHooks(page: Page): Promise<{ received: ReceivedHook[]; brokerFrames: string[] }> {
   const received: ReceivedHook[] = [];
@@ -100,15 +100,18 @@ async function observeHooks(page: Page): Promise<{ received: ReceivedHook[]; bro
         if (!Array.isArray(header) || header.length !== 13 || header[0] !== "ftown/e2ee/v1"
           || header[1] !== "ftown_encrypted" || header[2] !== 1 || header[8] !== "application"
           || typeof header[7] !== "string" || !/^events:[^#]+#.+$/.test(header[7])) return result;
-        const application: unknown = JSON.parse(new TextDecoder().decode(result));
+        const bytes = new Uint8Array(result);
+        const gzip = bytes[0] === 0x1f && bytes[1] === 0x8b;
+        const plaintext = gzip
+          ? await new Response(new Blob([result]).stream().pipeThrough(new DecompressionStream("gzip"))).text()
+          : new TextDecoder().decode(result);
+        const application: unknown = JSON.parse(plaintext);
         if (!object(application) || application.type !== "application" || !object(application.route)
           || application.route.kind !== "publication" || !object(application.data)) return result;
         const event = application.data;
         if (event.type !== "hook_event" || typeof event.eventName !== "string" || !object(event.data)) return result;
-        const observer = globalThis as unknown as { __recordDecryptedHook: (event: {
-          channel: string; eventName: string; notificationType?: string; toolName?: string;
-        }) => Promise<void> };
-        await observer.__recordDecryptedHook({ channel: header[7], eventName: event.eventName,
+        const observer = globalThis as unknown as { __recordDecryptedHook: (event: ReceivedHook) => Promise<void> };
+        await observer.__recordDecryptedHook({ channel: header[7], eventName: event.eventName, gzip, originalBytes: new TextEncoder().encode(plaintext).byteLength,
           notificationType: typeof event.data.notification_type === "string" ? event.data.notification_type : undefined,
           toolName: typeof event.data.tool_name === "string" ? event.data.tool_name : undefined });
       } catch { /* Observer parsing/binding failures cannot change native crypto behavior. */ }
@@ -428,7 +431,7 @@ for (const viewport of [
       expect(thinkingHook.status, JSON.stringify(thinkingHook.body)).toBeGreaterThanOrEqual(200);
       expect(thinkingHook.status, JSON.stringify(thinkingHook.body)).toBeLessThan(300);
       await expect.poll(() => receivedHooks.slice(beforeThinking).some(event =>
-        event.channel.startsWith(`events:${targetId}#`) && event.eventName === "PostToolUse",
+        event.channel.startsWith(`events:${targetId}#`) && event.eventName === "PostToolUse" && event.gzip && event.originalBytes < 96 * 1024,
       )).toBe(true);
       await showWorkspace();
       await expect(originalRow(page, targetName).getByText(/^◌\s*thinking\.\.\.$/)).toBeVisible();

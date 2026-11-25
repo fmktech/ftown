@@ -1,11 +1,13 @@
 # Session file preview
 
 A session can register up to 12 files, each a UTF-8 HTML or Markdown document
-of at most 1 MiB from its working directory:
+from its working directory. The limit is 8 MiB per file before compression.
 
 ```sh
 ftown sessions preview ./preview.html ./notes.md
 ```
+
+The bridge can gzip a complete file revision before sending it in 96 KiB chunks. The dashboard requests the smaller representation when available and verifies the original file after decompression. Previewing files above 1 MiB requires both an updated bridge and an updated dashboard.
 
 The command uses `FTOWN_SESSION_ID`, or an explicit `--session-id <id>`. Relative paths resolve from the CLI's current directory. It checks bridge support before changing registration; update an older bridge using the setup command in its readiness hint.
 

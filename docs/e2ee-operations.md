@@ -3,6 +3,12 @@
 Bridge-facing content uses pinned, locally approved HPKE endpoints. The public
 endpoint directory provides discovery metadata and grants no access.
 
+Peers that support gzip can compress individual application messages before
+encryption, including terminal frames, commands, replies and publications.
+Each message uses its own compression stream and travels as gzip only when it
+shrinks. Handshakes and enrollment use their existing encrypted format. A peer
+using an older version continues to receive ordinary encrypted JSON.
+
 Apply `ui/migrations/0006_endpoint_security.sql` before starting the upgraded
 UI. This additive migration creates empty security tables and indexes; it does
 not rewrite existing users or bridge credentials. DDL uses five-second lock and

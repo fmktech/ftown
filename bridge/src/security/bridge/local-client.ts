@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { BridgePointer } from '../../wire-types.js';
 import type { ApplicationJson, EndpointPublic, SecureApplication } from '../protocol.js';
 import { open, parseSecureEnvelope, seal } from '../crypto.js';
+import { acceptsApplicationGzip, decodeApplicationBytes, encodeApplicationBytes, gzipHandshakeToken } from '../application-compression.js';
 import { loadLocalIdentity } from './identity.js';
 import { BridgeSecurityError } from './errors.js';
 
@@ -18,9 +19,11 @@ export async function localApplication(pointer: BridgePointer, application: Secu
     ? application.route.requestId : randomUUID();
   const post = async (purpose: 'hello' | 'application', body: unknown, epoch: string | null, messageId: string) => {
     const createdAt = Date.now();
+    const raw = new TextEncoder().encode(JSON.stringify(body));
+    const plaintext = purpose === 'application' ? await encodeApplicationBytes(raw, acceptsApplicationGzip(epoch)) : raw;
     const packet = await seal(identity, bridge, { type: 'ftown_encrypted', version: 1, senderId: identity.endpoint.id,
       recipientId: bridge.id, ownerId: pointer.ownerId!, bridgeId: pointer.bridgeId!, channel, purpose, messageId,
-      createdAt, expiresAt: createdAt + 120000, receiverEpoch: epoch }, new TextEncoder().encode(JSON.stringify(body)));
+      createdAt, expiresAt: createdAt + 120000, receiverEpoch: epoch }, plaintext);
     const response = await fetchFn(`http://127.0.0.1:${pointer.port}/api/security/envelope`, { method: 'POST',
       headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(packet), redirect: 'error',
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(65000)]) : AbortSignal.timeout(65000) });
@@ -30,9 +33,9 @@ export async function localApplication(pointer: BridgePointer, application: Secu
     const bytes = await open(identity, bridge, envelope, { ownerId: pointer.ownerId!, bridgeId: pointer.bridgeId!, channel,
       recipientId: identity.endpoint.id, purpose: purpose === 'hello' ? 'welcome' : 'application' });
     if (envelope.expiresAt <= Date.now() || envelope.createdAt > Date.now() + 30000) throw new BridgeSecurityError('expired');
-    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as unknown;
+    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(purpose === 'application' ? await decodeApplicationBytes(bytes) : bytes)) as unknown;
   };
-  const challenge = randomUUID();
+  const challenge = gzipHandshakeToken(randomUUID());
   const hello = z.object({ type: z.literal('welcome'), challenge: z.literal(challenge), receiverEpoch: z.string().min(1).max(128) }).strict()
     .parse(await post('hello', { type: 'hello', challenge }, null, randomUUID()));
   const result = z.object({ type: z.literal('application'), route: z.object({ kind: z.literal('response'), requestId: z.literal(requestId) }).strict(),

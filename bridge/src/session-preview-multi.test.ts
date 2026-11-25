@@ -4,8 +4,9 @@ import { mkdir, mkdtemp, realpath, rename, rm, symlink, writeFile } from 'node:f
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createHash, randomUUID } from 'node:crypto';
-import { PREVIEW_MAX_WAITERS, PREVIEW_MAX_WAIT_MS } from './preview-protocol.js';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { gunzipSync } from 'node:zlib';
+import { PREVIEW_CHUNK_BYTES, PREVIEW_MAX_WAITERS, PREVIEW_MAX_WAIT_MS } from './preview-protocol.js';
 import { SessionController, type SessionStoreLike } from './session-controller.js';
 import type { Session } from './types.js';
 import { createCommandHandler, type CommandRpcDeps } from './command-rpc.js';
@@ -257,6 +258,49 @@ test('status and chunk fail for unknown fileId or stale previewId, validate ids,
     assert.equal(goneChunk.preview.state, 'unavailable');
     if (goneChunk.preview.state === 'unavailable') assert.equal(goneChunk.preview.fileId, fileId);
   }
+});
+
+test('gzip is optional for multi-chunk previews and follows the registered file revision', async t => {
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'ftown-preview-multi-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, 'results.html');
+  const original = Buffer.from(randomBytes(160_000).toString('base64') + 'x'.repeat(1_000_000));
+  await writeFile(path, original);
+  const { controller } = setup([makeSession(root)]);
+  const set = await controller.setPreview('sess-1', [path]);
+  assert.ok(set.ok);
+  const preview = set.session.preview!;
+  const args = ['sess-1', preview.id, preview.files[0].id] as const;
+  const status = await controller.getPreviewStatus(...args);
+  assert.ok(status.ok && status.preview.state === 'ready');
+  const { revision, totalBytes, gzipBytes } = status.preview;
+  assert.equal(totalBytes, original.length);
+  assert.equal(revision, createHash('sha256').update(original).digest('hex'));
+  assert.ok(gzipBytes && gzipBytes > PREVIEW_CHUNK_BYTES && gzipBytes < totalBytes);
+  const compressed = [];
+  for (let offset = 0; offset < gzipBytes; offset += PREVIEW_CHUNK_BYTES) {
+    const response = await controller.getPreviewChunk(...args, revision, offset, 'gzip');
+    assert.ok(response.ok && response.preview.state === 'chunk');
+    assert.equal(response.preview.encoding, 'gzip');
+    assert.equal(response.preview.totalBytes, gzipBytes);
+    assert.equal(response.preview.done, offset + PREVIEW_CHUNK_BYTES >= gzipBytes);
+    compressed.push(Buffer.from(response.preview.dataBase64, 'base64'));
+  }
+  assert.deepEqual(gunzipSync(Buffer.concat(compressed)), original);
+  const raw = await controller.getPreviewChunk(...args, revision, 0);
+  assert.ok(raw.ok && raw.preview.state === 'chunk');
+  assert.equal(raw.preview.encoding, undefined);
+  assert.deepEqual(Buffer.from(raw.preview.dataBase64, 'base64'), original.subarray(0, PREVIEW_CHUNK_BYTES));
+
+  await writeFile(path, Buffer.alloc(PREVIEW_CHUNK_BYTES, 'a'));
+  assert.deepEqual(await controller.getPreviewChunk(...args, revision, 0, 'gzip'), { ok: true, preview: { state: 'stale_revision' } });
+  const oneChunk = await controller.getPreviewStatus(...args);
+  assert.ok(oneChunk.ok && oneChunk.preview.state === 'ready');
+  assert.ok(oneChunk.preview.gzipBytes && oneChunk.preview.gzipBytes < PREVIEW_CHUNK_BYTES);
+  await writeFile(path, 'a');
+  const tiny = await controller.getPreviewStatus(...args);
+  assert.ok(tiny.ok && tiny.preview.state === 'ready');
+  assert.equal(tiny.preview.gzipBytes, undefined);
 });
 
 test('old persisted shape (version:1) loads as no preview for status, chunk and remove', async (t) => {

@@ -306,7 +306,7 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
           const payload = command.payload;
           const keys = Object.keys(payload);
           const common = ['bridgeId', 'sessionId', 'previewId', 'fileId'];
-          const allowed = command.type === 'session_preview_status' ? [...common, 'knownRevision', 'waitMs'] : [...common, 'revision', 'offset'];
+          const allowed = command.type === 'session_preview_status' ? [...common, 'knownRevision', 'waitMs'] : [...common, 'revision', 'offset', 'encoding'];
           if (keys.some(key => !allowed.includes(key)) || !('bridgeId' in payload) || payload.bridgeId !== bridgeId
             || !('sessionId' in payload) || typeof payload.sessionId !== 'string' || !/^[A-Za-z0-9_-]{1,200}$/.test(payload.sessionId)
             || !('previewId' in payload) || !validPreviewId(payload.previewId)
@@ -316,6 +316,7 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
             || (command.type === 'session_preview_status' && 'waitMs' in payload && (!('knownRevision' in payload) || typeof payload.waitMs !== 'number'
               || !Number.isInteger(payload.waitMs) || payload.waitMs < 1 || payload.waitMs > PREVIEW_MAX_WAIT_MS))
             || (command.type === 'session_preview_chunk' && (!('revision' in payload) || !validRevision(payload.revision)
+              || ('encoding' in payload && payload.encoding !== 'gzip')
               || !('offset' in payload) || typeof payload.offset !== 'number' || !Number.isSafeInteger(payload.offset)
               || payload.offset < 0 || payload.offset % PREVIEW_CHUNK_BYTES !== 0))) {
             response = { requestId: command.requestId, success: false, error: 'Invalid preview request', data: { code: 'invalid' } };
@@ -324,7 +325,8 @@ export function createCommandHandler(deps: CommandRpcDeps): (command: Command, v
           const result = command.type === 'session_preview_status'
             ? await sessionController.getPreviewStatus(payload.sessionId, payload.previewId, payload.fileId, 'knownRevision' in payload && typeof payload.knownRevision === 'string' ? payload.knownRevision : undefined,
               'waitMs' in payload && typeof payload.waitMs === 'number' ? payload.waitMs : 0)
-            : await sessionController.getPreviewChunk(payload.sessionId, payload.previewId, payload.fileId, 'revision' in payload && typeof payload.revision === 'string' ? payload.revision : '', 'offset' in payload && typeof payload.offset === 'number' ? payload.offset : -1);
+            : await sessionController.getPreviewChunk(payload.sessionId, payload.previewId, payload.fileId, 'revision' in payload && typeof payload.revision === 'string' ? payload.revision : '', 'offset' in payload && typeof payload.offset === 'number' ? payload.offset : -1,
+              'encoding' in payload && payload.encoding === 'gzip' ? 'gzip' : undefined);
           response = result.ok ? { requestId: command.requestId, success: true, data: result.preview }
             : { requestId: command.requestId, success: false, error: result.message, data: { code: result.code } };
           break;

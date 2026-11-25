@@ -180,19 +180,22 @@ export function useSessionPreview({ client, userId, target: requestedTarget, vis
           store.complete = complete; store.status = { kind: 'ready', ...complete, updating: false };
         } else {
           if (complete) { store.status = { kind: 'ready', ...complete, updating: true }; render(); }
-          const bytes = new Uint8Array(status.totalBytes);
+          const gzipBytes = typeof DecompressionStream === 'function' ? status.gzipBytes : undefined;
+          const transferBytes = gzipBytes ?? status.totalBytes;
+          const encoding = gzipBytes === undefined ? undefined : 'gzip';
+          const bytes = new Uint8Array(transferBytes);
           let offset = 0; let abandoned = false;
           do {
-            const rawChunk = await command('session_preview_chunk', { ...base, revision: status.revision, offset });
+            const rawChunk = await command('session_preview_chunk', { ...base, revision: status.revision, offset, ...(encoding && { encoding }) });
             if (!mayCommit()) return;
-            const chunk = parseChunk(rawChunk, target.preview.id, target.file.id, status.revision, status.totalBytes, offset);
+            const chunk = parseChunk(rawChunk, target.preview.id, target.file.id, status.revision, transferBytes, offset, encoding);
             if (chunk.state === 'stale_revision') { abandoned = true; break; }
             if (chunk.state === 'unavailable') { store.hardEpoch++; store.complete = null; store.status = { kind: 'unavailable', reason: chunk.reason }; abandoned = true; break; }
             bytes.set(chunk.bytes, offset); offset += chunk.bytes.length;
             if (chunk.done) break;
-          } while (offset < status.totalBytes);
+          } while (offset < transferBytes);
           if (!abandoned) {
-            const html = await verifyPreview(bytes, status.revision);
+            const html = await verifyPreview(bytes, status.revision, encoding ? status.totalBytes : undefined);
             if (!mayCommit()) return;
             complete = { html, revision: status.revision, totalBytes: status.totalBytes, key: `${identity}:${status.revision}:${++store.nonce}`, file: target.file };
             if (manual) store.manualApplied = manualVersion;

@@ -668,7 +668,7 @@ export class SessionController {
 
   /** What `lstat` says about a file, as one comparable string: a different string means the file was replaced or rewritten. */
   private async previewFileSignature(path: string): Promise<string> {
-    try { const info = await lstat(path); return `${info.dev}:${info.ino}:${info.size}:${info.mtimeMs}:${info.ctimeMs}`; }
+    try { const info = await lstat(path, { bigint: true }); return `${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`; }
     catch { return 'missing'; }
   }
 
@@ -702,7 +702,7 @@ export class SessionController {
     }
   }
 
-  async getPreviewChunk(sessionId: string, previewId: string, fileId: string, revision: string, offset: number): Promise<SessionControllerResult<{ preview: SessionPreviewChunk }>> {
+  async getPreviewChunk(sessionId: string, previewId: string, fileId: string, revision: string, offset: number, encoding?: 'gzip'): Promise<SessionControllerResult<{ preview: SessionPreviewChunk }>> {
     if (!validPreviewId(previewId) || !validFileId(fileId) || !validRevision(revision) || !Number.isSafeInteger(offset) || offset < 0 || offset % PREVIEW_CHUNK_BYTES !== 0) return { ok: false, code: 'invalid', message: 'Invalid preview request' };
     const selected = await this.previewSnapshot(sessionId, previewId);
     if (!selected) return { ok: false, code: 'not_found', message: 'Session not found' };
@@ -711,8 +711,9 @@ export class SessionController {
       const data = await this.previewReader.read(selected.session, selected.source, fileId);
       const current = await this.previewSnapshot(sessionId, previewId);
       if (!current?.source || current.session.workingDir !== selected.session.workingDir || JSON.stringify(current.source) !== JSON.stringify(selected.source) || !current.source.files.some((file) => file.id === fileId)) return { ok: true, preview: { state: 'stale_revision' } };
-      if (data.revision === revision && (data.bytes.length === 0 ? offset !== 0 : offset >= data.bytes.length)) return { ok: false, code: 'invalid', message: 'Invalid preview request' };
-      return { ok: true, preview: previewChunk(previewId, fileId, data, revision, offset) };
+      const bytes = encoding === 'gzip' ? data.compressed : data.bytes;
+      if (data.revision === revision && (!bytes || (bytes.length === 0 ? offset !== 0 : offset >= bytes.length))) return { ok: false, code: 'invalid', message: 'Invalid preview request' };
+      return { ok: true, preview: previewChunk(previewId, fileId, data, revision, offset, encoding) };
     } catch (error) {
       const current = await this.previewSnapshot(sessionId, previewId);
       if (!current?.source || current.session.workingDir !== selected.session.workingDir || JSON.stringify(current.source) !== JSON.stringify(selected.source) || !current.source.files.some((file) => file.id === fileId)) return { ok: true, preview: { state: 'stale_revision' } };
