@@ -175,7 +175,7 @@ work (`ftown quota --json`). Each command group also has `--help`.
 `ftown sessions preview <path...>` registers up to 12 files in the current
 session's working directory for the dashboard, in this order. Kind is by
 extension: `.html`/`.htm` → HTML, `.md`/`.markdown` → Markdown, anything else
-is rejected. Each file is at most 1 MiB. A duplicate basename is rejected.
+is rejected. Each file is at most 8 MiB. A duplicate basename is rejected.
 `--add <path...>` appends to the current set, `--remove <name...>` removes by
 basename, and `--clear` removes the whole registration (never deletes files).
 HTML previews are self-contained: inline CSS and scripts and data images work;

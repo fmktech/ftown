@@ -64,7 +64,7 @@ type PreviewErrorReason = 'missing' | 'too_large' | 'invalid_utf8' | 'invalid_fi
 function previewErrorMessage(reason: PreviewErrorReason, fileName: string): string {
   switch (reason) {
     case 'missing': return `${fileName} is missing`;
-    case 'too_large': return `${fileName} exceeds the 1 MiB limit`;
+    case 'too_large': return `${fileName} exceeds this bridge’s preview size limit`;
     case 'invalid_utf8': return `${fileName} is not valid UTF-8`;
     case 'invalid_file':
     case 'unavailable': return `${fileName} is unavailable`;

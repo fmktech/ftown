@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import { gzipSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { runInNewContext } from 'node:vm';
-import { PREVIEW_CHUNK_BYTES } from '../../../bridge/src/preview-protocol';
+import { PREVIEW_CHUNK_BYTES, PREVIEW_MAX_BYTES } from '../../../bridge/src/preview-protocol';
 import { clampPreviewRatio, isPreviewDescriptor, markdownPreviewDocument, parseChunk, parseStatus, previewDocument, previewRatioBounds, verifyPreview } from './session-preview';
 const id = '12345678-1234-4234-8234-123456789abc';
 const fileId = '22345678-2234-4234-8234-123456789abc';
@@ -30,13 +31,16 @@ describe('preview protocol validation', () => {
     expect(parseStatus(status, id, fileId)).toMatchObject({ state: 'ready', fileId });
     expect(() => parseStatus(status, id, otherFileId)).toThrow();
     expect(() => parseStatus({ state: 'ready', previewId: id, revision, totalBytes: 1 }, id, fileId)).toThrow();
-    expect(() => parseStatus({ ...status, totalBytes: 1048577 }, id, fileId)).toThrow();
+    expect(() => parseStatus({ ...status, totalBytes: PREVIEW_MAX_BYTES + 1 }, id, fileId)).toThrow();
+    for (const gzipBytes of [0, -1, 0.5, 1, PREVIEW_MAX_BYTES + 1]) {
+      expect(() => parseStatus({ ...status, gzipBytes }, id, fileId)).toThrow();
+    }
     const chunk = { state: 'chunk', previewId: id, fileId, revision, totalBytes: 1, offset: 0, dataBase64: 'YQ==', done: true };
     expect(parseChunk(chunk, id, fileId, revision, 1, 0)).toMatchObject({ state: 'chunk', fileId, bytes: Uint8Array.of(97) });
     expect(() => parseChunk({ ...chunk, fileId: otherFileId }, id, fileId, revision, 1, 0)).toThrow();
     const noFile = { ...chunk } as Record<string, unknown>; delete noFile.fileId;
     expect(() => parseChunk(noFile, id, fileId, revision, 1, 0)).toThrow();
-    for (const patch of [{ offset: 1 }, { done: false }, { dataBase64: 'YR==' }, { revision: 'b'.repeat(64) }]) expect(() => parseChunk({ ...chunk, ...patch }, id, fileId, revision, 1, 0)).toThrow();
+    for (const patch of [{ encoding: 'gzip' }, { offset: 1 }, { done: false }, { dataBase64: 'YR==' }, { revision: 'b'.repeat(64) }]) expect(() => parseChunk({ ...chunk, ...patch }, id, fileId, revision, 1, 0)).toThrow();
     expect(parseChunk({ ...chunk, totalBytes: 0, dataBase64: '' }, id, fileId, revision, 0, 0)).toMatchObject({ state: 'chunk', done: true });
   });
   it('verifies bytes after a UTF-8 character crosses a chunk boundary', async () => {
@@ -52,6 +56,14 @@ describe('preview protocol validation', () => {
     }
     expect(await verifyPreview(joined, hash)).toBe(text);
     await expect(verifyPreview(joined, revision)).rejects.toThrow();
+  });
+  it('rejects gzip output shorter or longer than its advertised source length even with the correct digest', async () => {
+    const source = 'x'.repeat(5000);
+    const gzip = gzipSync(source);
+    const hash = createHash('sha256').update(source).digest('hex');
+    for (const length of [source.length - 1, source.length + 1]) {
+      await expect(verifyPreview(gzip, hash, length)).rejects.toThrow();
+    }
   });
   it('places the fixed policy before all untrusted markup and clamps split bounds', () => {
     const html = previewDocument('<head><base href="https://evil.example"><script>1</script>');

@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { symlink, unlink, writeFile } from "node:fs/promises";
 import { expect, type CDPSession, type Locator, type Page, type TestInfo } from "@playwright/test";
@@ -112,6 +113,8 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
   const path = join(fixture.directory, fileName);
   const otherPath = join(fixture.directory, otherFileName);
   const tall = (html: string) => html.replace("</body>", '<div style="height:2400px">Scroll fixture</div></body>');
+  // Browsers without gzip support still receive raw chunks, including UTF-8 spanning two replies.
+  await page.addInitScript(() => Object.defineProperty(globalThis, "DecompressionStream", { value: undefined }));
   const first = tall(previewHtml(marker, 1, true));
   const second = tall(previewHtml(marker, 2, true));
   expect(Buffer.byteLength(first)).toBeGreaterThan(98_304);
@@ -423,7 +426,7 @@ test("real CLI preview is encrypted, interactive, revision-consistent and isolat
     const outside = join(fixture.outside, "outside.html");
     await writeFile(outside, "<!doctype html><p>outside fixture</p>");
     await symlink(outside, join(fixture.directory, "linked.html"));
-    await writeFile(join(fixture.directory, "oversized.html"), "x".repeat(1_048_577));
+    await writeFile(join(fixture.directory, "oversized.html"), "x".repeat(8 * 1024 * 1024 + 1));
     for (const invalid of ["../outside/outside.html", "linked.html", "oversized.html"]) {
       const rejected = await fixture.cli(target, ["preview", invalid]);
       expect(rejected.code).not.toBe(0);
@@ -507,7 +510,10 @@ test("multi-file preview with markdown selector and cross-file links", async ({ 
   transport.markers.add('"previewSource"');
 
   try {
-    await atomicHtml(aPath, previewSimpleHtml(marker, 1));
+    // An inline results table and its base64 attachment take multiple chunks even after gzip.
+    const payload = "model,task,score\n".repeat(65_536) + randomBytes(128 * 1024).toString("base64");
+    const report = (version: number) => previewSimpleHtml(marker, version).replace("</body>", `<script type="text/plain">${payload}</script></body>`);
+    await atomicHtml(aPath, report(1));
     await atomicHtml(mdPath, previewMarkdown(marker));
     await atomicHtml(cPath, previewSimpleHtml(`${marker} C`, 1));
 
@@ -522,15 +528,12 @@ test("multi-file preview with markdown selector and cross-file links", async ({ 
     const initialBody: unknown = JSON.parse(initial.stdout);
     assertSanitized(initialBody, aPath);
     assertSanitized(initialBody, mdPath);
-    {
-      const sess = sessionRecord(initialBody);
-      const preview = sess.preview as { id: string; files: Array<{ fileName: string; kind: string }> };
-      expect(preview.files).toHaveLength(2);
-      expect(preview.files[0].fileName).toBe(aName);
-      expect(preview.files[1].fileName).toBe(mdName);
-      expect(preview.files[0].kind).toBe("html");
-      expect(preview.files[1].kind).toBe("markdown");
-    }
+    const preview = sessionRecord(initialBody).preview as { id: string; files: Array<{ fileName: string; kind: string }> };
+    expect(preview.files).toHaveLength(2);
+    expect(preview.files[0].fileName).toBe(aName);
+    expect(preview.files[1].fileName).toBe(mdName);
+    expect(preview.files[0].kind).toBe("html");
+    expect(preview.files[1].kind).toBe("markdown");
 
     const tablist = page.getByRole("tablist", { name: "Preview file" });
     await expect(tablist).toBeVisible({ timeout: 15_000 });
@@ -540,6 +543,10 @@ test("multi-file preview with markdown selector and cross-file links", async ({ 
     await expect(page.locator(`iframe[title="Preview: ${aName}"]`)).toHaveAttribute("sandbox", "allow-scripts");
     await expect(page.locator(`iframe[title="Preview: ${aName}"]`)).toHaveAttribute("referrerpolicy", "no-referrer");
     await expect.poll(() => inPreviewFrame(page, aName, (body, expected) => body.querySelector("h1")?.textContent?.includes(expected) ? "ok" : null, null, marker)).toBe("ok");
+
+    await expect.poll(() => transport.reads.some(entry => entry.previewId === preview.id && entry.encoding === "gzip" && (entry.offset ?? 0) > 0)).toBe(true);
+    await atomicHtml(aPath, report(2));
+    await expect(documentFrame(page, aName).getByRole("heading", { name: marker + " version 2", exact: true })).toBeVisible();
 
     // Switch to markdown file via selector
     await page.getByRole("tab", { name: mdName }).click();

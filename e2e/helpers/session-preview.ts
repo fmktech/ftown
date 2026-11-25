@@ -65,7 +65,7 @@ export async function clickPreviewLinkAndExpectSelected(page: Page, fromFileName
 }
 
 export interface CliOutput { code: number; stdout: string; stderr: string }
-export interface PreviewReadObservation { state: string; previewId: string; transport: "cloud" | "local"; offset?: number }
+export interface PreviewReadObservation { state: string; previewId: string; transport: "cloud" | "local"; offset?: number; encoding?: "gzip" }
 export interface PreviewTransportObservation {
   reads: PreviewReadObservation[];
   encryptedCloudPublications: number;
@@ -233,13 +233,18 @@ export async function observePreviewTransport(page: Page, localPort: number): Pr
         if (typeof algorithm === "string" || algorithm.name !== "AES-GCM") return result;
         const header: unknown = JSON.parse(new TextDecoder().decode((algorithm as AesGcmParams).additionalData));
         if (!Array.isArray(header) || header[0] !== "ftown/e2ee/v1" || typeof header[7] !== "string") return result;
-        const app: unknown = JSON.parse(new TextDecoder().decode(result));
+        const bytes = new Uint8Array(result);
+        const plaintext = bytes[0] === 0x1f && bytes[1] === 0x8b
+          ? await new Response(new Blob([result]).stream().pipeThrough(new DecompressionStream("gzip"))).text()
+          : new TextDecoder().decode(result);
+        const app: unknown = JSON.parse(plaintext);
         if (!object(app) || !object(app.data) || !object(app.data.response) || !object(app.data.response.data)) return result;
         const value = app.data.response.data;
         if (typeof value.state !== "string" || typeof value.previewId !== "string") return result;
-        const binding = globalThis as typeof globalThis & { __recordSessionPreviewRead: (entry: { state: string; previewId: string; transport: "local" | "cloud"; offset?: number }) => Promise<void> };
+        const binding = globalThis as typeof globalThis & { __recordSessionPreviewRead: (entry: PreviewReadObservation) => Promise<void> };
         await binding.__recordSessionPreviewRead({ state: value.state, previewId: value.previewId,
-          transport: header[7].startsWith("local-http:") ? "local" : "cloud", ...(typeof value.offset === "number" ? { offset: value.offset } : {}) });
+          transport: header[7].startsWith("local-http:") ? "local" : "cloud", ...(value.encoding === "gzip" ? { encoding: "gzip" } : {}),
+          ...(typeof value.offset === "number" ? { offset: value.offset } : {}) });
       } catch { /* Observing cannot alter successful native decryption. */ }
       return result;
     } });

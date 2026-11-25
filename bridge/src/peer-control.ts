@@ -3,6 +3,7 @@ import { PROJECT_DIRECTORY } from './project-directory-protocol.js';
 import { INSTRUCTIONS_LOCAL, INSTRUCTIONS_SYNC, INSTRUCTIONS_WIRE } from './instructions-protocol.js';
 import { TRANSFER_LOCAL, TRANSFER_WIRE, TRANSFER_REQUEST_TTL_MS } from './folder-transfer-protocol.js';
 import { randomUUID } from 'node:crypto';
+import { gzipHandshakeToken } from './security/application-compression.js';
 import { z } from 'zod';
 import type { ApplicationJson, SecureEnvelope } from './security/protocol.js';
 import type { LedgerBridge } from './security/ledger/protocol.js';
@@ -232,7 +233,7 @@ export class PeerControl {
 
   private async hello(peer: LedgerBridge, route: PeerPath, timeoutMs: number): Promise<string> {
     const channel = route.channel;
-    const challenge = randomUUID();
+    const challenge = gzipHandshakeToken(randomUUID());
     const messageId = randomUUID();
     const packet = await this.security.sealToPeer(peer, 'hello', { type: 'hello', challenge }, channel, messageId, null);
     const answer = await route.send(packet, timeoutMs);

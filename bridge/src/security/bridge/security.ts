@@ -2,6 +2,7 @@ import { TRANSFER_REQUEST_TTL_MS } from '../../folder-transfer-protocol.js';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { open, seal, parseSecureEnvelope } from '../crypto.js';
+import { acceptsApplicationGzip, decodeApplicationBytes, encodeApplicationBytes, gzipHandshakeToken } from '../application-compression.js';
 import type { ApplicationJson, ApplicationRoute, ApprovedEndpoint, BridgeInvitation, BridgeSecurity, EndpointIdentity, EnrollmentPacket,
   InboundTransportContext, InvitationOptions, LocalRecoveryAuthority,
   SecureApplication, SecureEnvelope, SecurePublication, VerifiedApplication, VerifiedPrincipal } from '../protocol.js';
@@ -103,7 +104,8 @@ async function chainTip(candidate: unknown): Promise<LedgerTip | null> {
 // adoptAccount is v1 (removed from this service); the shared interface drops it in the v1 cleanup.
 export class BridgeSecurityService implements Omit<BridgeSecurity, 'adoptAccount'> {
   readonly endpoint;
-  readonly receiverEpoch = randomUUID();
+  readonly receiverEpoch = gzipHandshakeToken(randomUUID());
+  private readonly gzipRecipients = new Map<string, boolean>();
   readonly policy: BridgePolicyStore;
   private readonly now: () => number;
   private readonly replay = new Map<string, number>();
@@ -181,12 +183,15 @@ export class BridgeSecurityService implements Omit<BridgeSecurity, 'adoptAccount
     this.context(route);
     const bytes = await open(this.identity, sender, envelope, { ownerId: this.endpoint.ownerId, bridgeId: this.bridgeId,
       channel: route.channel, recipientId: this.endpoint.id, purpose: envelope.purpose });
-    try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); }
+    const plaintext = envelope.purpose === 'application' ? await decodeApplicationBytes(bytes) : bytes;
+    try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(plaintext)); }
     catch { throw new BridgeSecurityError('invalid_envelope'); }
   }
   private async reply(recipient: ApprovedEndpoint['endpoint'], purpose: SecureEnvelope['purpose'], data: unknown,
     route: InboundTransportContext, messageId: string = randomUUID()): Promise<SecureEnvelope> {
-    return this.replyBytes(recipient, purpose, new TextEncoder().encode(JSON.stringify(data)), route, messageId);
+    const raw = new TextEncoder().encode(JSON.stringify(data));
+    const plaintext = purpose === 'application' ? await encodeApplicationBytes(raw, this.gzipRecipients.get(recipient.id) === true) : raw;
+    return this.replyBytes(recipient, purpose, plaintext, route, messageId);
   }
   /** One fresh encapsulation of already serialized content. */
   private async replyBytes(recipient: ApprovedEndpoint['endpoint'], purpose: SecureEnvelope['purpose'], plaintext: Uint8Array,
@@ -217,6 +222,12 @@ export class BridgeSecurityService implements Omit<BridgeSecurity, 'adoptAccount
     const welcome = await this.reply(principal.endpoint, 'welcome', { type: 'welcome', challenge: hello.challenge, receiverEpoch: this.receiverEpoch }, route, envelope.messageId);
     const current = await this.policy.principal(principal.endpoint.id);
     if (current.endpoint.publicKey !== principal.endpoint.publicKey) throw new BridgeSecurityError('wrong_context');
+    const id = current.endpoint.id;
+    // Tabs and CLI processes can share a key, with overlapping requests. After a legacy
+    // hello, that key and any untracked recipients receive plain JSON for this bridge lifetime.
+    if (this.gzipRecipients.has(id) || this.gzipRecipients.size < 1024) {
+      this.gzipRecipients.set(id, this.gzipRecipients.get(id) !== false && acceptsApplicationGzip(hello.challenge));
+    }
     return welcome;
   }
   private parseApplication(value: unknown): SecureApplication {
@@ -330,9 +341,11 @@ export class BridgeSecurityService implements Omit<BridgeSecurity, 'adoptAccount
       throw new BridgeSecurityError('permission_denied');
     }
     const now = this.now();
+    const raw = new TextEncoder().encode(JSON.stringify(body));
+    const plaintext = purpose === 'application' ? await encodeApplicationBytes(raw, acceptsApplicationGzip(receiverEpoch)) : raw;
     return seal(this.identity, peer.endpoint, { type: 'ftown_encrypted', version: 1, senderId: this.endpoint.id, recipientId: peer.endpoint.id,
       ownerId: this.endpoint.ownerId, bridgeId: peer.bridgeId, channel, purpose, messageId, createdAt: now, expiresAt: now + ttlMs,
-      receiverEpoch }, new TextEncoder().encode(JSON.stringify(body)));
+      receiverEpoch }, plaintext);
   }
   /** Opens a peer bridge's answer to a request sealed by sealToPeer (same channel; `welcome` answers a hello). */
   async openFromPeer(peer: LedgerBridge, packet: SecureEnvelope, purpose: 'welcome' | 'application', channel: string): Promise<unknown> {
@@ -341,7 +354,8 @@ export class BridgeSecurityService implements Omit<BridgeSecurity, 'adoptAccount
       recipientId: this.endpoint.id, purpose });
     const now = this.now();
     if (envelope.expiresAt <= now || envelope.createdAt > now + 30000) throw new BridgeSecurityError('expired');
-    try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); }
+    const plaintext = envelope.purpose === 'application' ? await decodeApplicationBytes(bytes) : bytes;
+    try { return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(plaintext)); }
     catch { throw new BridgeSecurityError('invalid_envelope'); }
   }
   async sealTo(recipientId: string, application: SecureApplication, route: InboundTransportContext): Promise<SecureEnvelope> {
@@ -363,9 +377,12 @@ export class BridgeSecurityService implements Omit<BridgeSecurity, 'adoptAccount
     // Peer bridges read by request (cross-bridge control), never by fan-out: sealing every publication to them would only add relay load.
     const readers = (await this.policy.readers()).filter(reader => reader.endpoint.kind === 'browser');
     const route: InboundTransportContext = { transport: 'cloud', channel, bridgeId: this.bridgeId, pairId: null };
-    const plaintext = new TextEncoder().encode(JSON.stringify(application));
+    const raw = new TextEncoder().encode(JSON.stringify(application));
+    const encoded = readers.some(reader => this.gzipRecipients.get(reader.endpoint.id) === true)
+      ? await encodeApplicationBytes(raw, true) : raw;
     const packets: SecureEnvelope[] = [];
     for (const reader of readers) {
+      const plaintext = this.gzipRecipients.get(reader.endpoint.id) === true ? encoded : raw;
       packets.push(await this.replyBytes(reader.endpoint, 'application', plaintext, route,
         application.route.kind === 'response' ? application.route.requestId : randomUUID()));
     }
@@ -375,6 +392,7 @@ export class BridgeSecurityService implements Omit<BridgeSecurity, 'adoptAccount
   listDevices(actor: VerifiedPrincipal): Promise<ApprovedEndpoint[]> { return this.policy.list(actor); }
   async revokeEndpoint(actor: VerifiedPrincipal, endpointId: string): Promise<void> {
     await this.policy.revoke(actor, endpointId);
+    this.gzipRecipients.delete(endpointId);
     for (const listener of this.revoked) listener(endpointId);
   }
   /**
@@ -726,7 +744,7 @@ export class BridgeSecurityService implements Omit<BridgeSecurity, 'adoptAccount
     this.closed = true;
     await this.ledgerTail.catch(() => undefined);
     this.revoked.clear(); this.bridgeRevokedListeners.clear(); this.approvalListeners.clear(); this.approvalEmitted.clear(); this.replay.clear(); this.transferReplay.clear();
-    this.headListeners.clear();
+    this.headListeners.clear(); this.gzipRecipients.clear();
     await this.policy.close();
   }
 }

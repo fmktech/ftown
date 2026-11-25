@@ -1,5 +1,6 @@
+import { gunzipBounded } from '../../../bridge/src/gzip';
 import { PREVIEW_SCROLL_CHANNEL, PREVIEW_SCROLL_MAX, PREVIEW_SCROLL_REPORT_MS, PREVIEW_SCROLL_RESTORE_MS, PREVIEW_LINK_CHANNEL } from './preview-scroll-protocol';
-import { PREVIEW_CHUNK_BYTES, PREVIEW_MAX_BYTES, type PreviewUnavailableReason } from '../../../bridge/src/preview-protocol';
+import { PREVIEW_CHUNK_BYTES, PREVIEW_MAX_BYTES, type PreviewUnavailableReason, type SessionPreviewStatus } from '../../../bridge/src/preview-protocol';
 import { markdownDocument } from './session-preview-markdown';
 
 const revisionPattern = /^[0-9a-f]{64}$/;
@@ -39,26 +40,26 @@ export function isPreviewDescriptor(value: unknown): value is SessionPreviewDesc
   return true;
 }
 
-export type SessionPreviewStatus =
-  | { state: 'unregistered' }
-  | { state: 'unavailable'; previewId: string; fileId: string; reason: PreviewUnavailableReason }
-  | { state: 'ready' | 'unchanged'; previewId: string; fileId: string; revision: string; totalBytes: number; wait?: true };
-
 export function parseStatus(value: unknown, previewId: string, fileId: string): SessionPreviewStatus {
   if (!record(value)) throw new Error('Invalid preview response');
   if (value.state === 'unregistered') return { state: 'unregistered' };
   if (value.previewId !== previewId || value.fileId !== fileId) throw new Error('Invalid preview response');
   if (value.state === 'unavailable' && typeof value.reason === 'string' && reasons.includes(value.reason as PreviewUnavailableReason)) return { state: 'unavailable', previewId, fileId, reason: value.reason as PreviewUnavailableReason };
-  if ((value.state === 'ready' || value.state === 'unchanged') && typeof value.revision === 'string' && revisionPattern.test(value.revision) && size(value.totalBytes)) return { state: value.state, previewId, fileId, revision: value.revision, totalBytes: value.totalBytes, ...(value.wait === true ? { wait: true as const } : {}) };
+  if ((value.state === 'ready' || value.state === 'unchanged') && typeof value.revision === 'string' && revisionPattern.test(value.revision) && size(value.totalBytes)) {
+    const gzipBytes = value.gzipBytes;
+    if (gzipBytes !== undefined && (!size(gzipBytes) || gzipBytes === 0 || gzipBytes >= value.totalBytes)) throw new Error('Invalid gzip preview size');
+    return { state: value.state, previewId, fileId, revision: value.revision, totalBytes: value.totalBytes,
+      ...(gzipBytes !== undefined && { gzipBytes }), ...(value.wait === true && { wait: true as const }) };
+  }
   throw new Error('Invalid preview response');
 }
 
-export function parseChunk(value: unknown, previewId: string, fileId: string, revision: string, totalBytes: number, offset: number): { state: 'stale_revision'; fileId: string } | { state: 'unavailable'; fileId: string; reason: PreviewUnavailableReason } | { state: 'chunk'; fileId: string; bytes: Uint8Array; done: boolean } {
+export function parseChunk(value: unknown, previewId: string, fileId: string, revision: string, totalBytes: number, offset: number, encoding?: 'gzip'): { state: 'stale_revision'; fileId: string } | { state: 'unavailable'; fileId: string; reason: PreviewUnavailableReason } | { state: 'chunk'; fileId: string; bytes: Uint8Array; done: boolean } {
   if (!record(value)) throw new Error('Invalid preview chunk');
   if (value.state === 'stale_revision') return { state: 'stale_revision', fileId };
   if (value.previewId !== previewId || value.fileId !== fileId) throw new Error('Invalid preview chunk');
   if (value.state === 'unavailable' && typeof value.reason === 'string' && reasons.includes(value.reason as PreviewUnavailableReason)) return { state: 'unavailable', fileId, reason: value.reason as PreviewUnavailableReason };
-  if (value.state !== 'chunk' || value.revision !== revision || value.totalBytes !== totalBytes || value.offset !== offset || typeof value.dataBase64 !== 'string' || typeof value.done !== 'boolean' || value.dataBase64.length > Math.ceil(PREVIEW_CHUNK_BYTES / 3) * 4) throw new Error('Invalid preview chunk');
+  if (value.state !== 'chunk' || value.encoding !== encoding || value.revision !== revision || value.totalBytes !== totalBytes || value.offset !== offset || typeof value.dataBase64 !== 'string' || typeof value.done !== 'boolean' || value.dataBase64.length > Math.ceil(PREVIEW_CHUNK_BYTES / 3) * 4) throw new Error('Invalid preview chunk');
   let decoded: string;
   try { decoded = atob(value.dataBase64); } catch { throw new Error('Invalid preview chunk'); }
   if (btoa(decoded) !== value.dataBase64) throw new Error('Invalid preview chunk');
@@ -68,8 +69,12 @@ export function parseChunk(value: unknown, previewId: string, fileId: string, re
   return { state: 'chunk', fileId, bytes, done: value.done };
 }
 
-export async function verifyPreview(bytes: Uint8Array, revision: string): Promise<string> {
-  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', Uint8Array.from(bytes)));
+export async function verifyPreview(bytes: Uint8Array<ArrayBuffer>, revision: string, gzipDecodedBytes?: number): Promise<string> {
+  if (gzipDecodedBytes !== undefined) {
+    bytes = await gunzipBounded(bytes, gzipDecodedBytes);
+    if (bytes.length !== gzipDecodedBytes) throw new Error('Invalid decompressed preview size');
+  }
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
   if (Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join('') !== revision) throw new Error('Invalid preview digest');
   return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
 }

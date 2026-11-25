@@ -1,3 +1,4 @@
+import { acceptsApplicationGzip, decodeApplicationBytes, encodeApplicationBytes, gzipHandshakeToken } from "@security/application-compression";
 import { open, seal, parseSecureEnvelope, parseSecurePublication, SecurityError } from "@security/crypto";
 import type { ApplicationJson, ApplicationRoute, ApprovedBridge, BridgeInvitation, BridgeSecurityState, EndpointIdentity,
   EndpointPublic, EnrollmentPacket, EnrollmentReceipt, EnvelopeHeader, EnvelopePurpose, SecureApplication, SecureEnvelope,
@@ -251,7 +252,7 @@ export class SecureEndpointRuntime {
    */
   async handshake(bridgeId: string, channel: string, transmit: SecureTransmit, timeoutMs?: number): Promise<void> {
     const peer = this.usable(bridgeId);
-    const challenge = crypto.randomUUID();
+    const challenge = gzipHandshakeToken(crypto.randomUUID());
     const waiting = this.pending(this.welcomes, challenge, bridgeId, channel, timeoutMs);
     const direct = channel.startsWith("direct:");
     const successesAtStart = this.handshakeSuccesses.get(bridgeId) ?? 0;
@@ -301,7 +302,8 @@ export class SecureEndpointRuntime {
     if (!epoch) throw new SecurityError("approval_required", "Establish an encrypted bridge handshake first");
     const header = this.header(bridgeId, peer, channel, "application", epoch);
     if (value.route.kind === "command" || value.route.kind === "http") header.messageId = value.route.requestId;
-    const packet = await seal(this.identity, peer, header, encoder.encode(JSON.stringify(value)));
+    const bytes = await encodeApplicationBytes(encoder.encode(JSON.stringify(value)), acceptsApplicationGzip(epoch));
+    const packet = await seal(this.identity, peer, header, bytes);
     if (this.closed) throw new SecurityError("endpoint_revoked", "Encrypted connection closed");
     this.recheck(packet);
     for (const [id, request] of this.requestEpochs) if (request.expiresAt <= Date.now()) this.requestEpochs.delete(id);
@@ -320,8 +322,9 @@ export class SecureEndpointRuntime {
       if (!sender || sender.id !== envelope.senderId) continue;
       if (envelope.purpose !== "enrolled" && !this.ledgerAllows(envelope.bridgeId, sender.id)) continue;
       if (envelope.purpose !== "enrolled" && (this.state(envelope.bridgeId).status === "revoked" || this.state(envelope.bridgeId).status === "key_changed")) continue;
-      const value = decoded(await open(this.identity, sender, envelope, { ownerId: this.ownerId, bridgeId: envelope.bridgeId,
-        recipientId: this.identity.endpoint.id, channel, purpose: envelope.purpose }));
+      const bytes = await open(this.identity, sender, envelope, { ownerId: this.ownerId, bridgeId: envelope.bridgeId,
+        recipientId: this.identity.endpoint.id, channel, purpose: envelope.purpose });
+      const value = decoded(envelope.purpose === "application" ? await decodeApplicationBytes(bytes) : bytes);
       if (this.closed || this.removed) return [];
       if (envelope.purpose !== "enrolled" && !this.ledgerAllows(envelope.bridgeId, sender.id)) continue;
       if (envelope.purpose !== "enrolled" && (!this.bridges.has(envelope.bridgeId) || ["revoked", "key_changed"].includes(this.state(envelope.bridgeId).status))) continue;
