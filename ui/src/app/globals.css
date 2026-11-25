@@ -804,9 +804,14 @@ body {
 .computer-status { margin-left:auto; display:inline-flex; align-items:center; gap:5px; font-size:11px; color:var(--text-muted); }
 .computer-status::before { content:""; width:6px; height:6px; border-radius:50%; background:var(--text-faint); }
 .computer-status[data-online=true]::before { background:var(--status-running); }
+.computer-version { margin-top:4px; color:var(--text-muted); font-size:12px; overflow-wrap:anywhere; }
+.computer-version strong { color:var(--text-secondary); font-family:var(--font-mono); font-weight:500; }
 .computer-load { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin:16px 0; }
 .computer-load dt { font-size:11px; color:var(--text-muted); }
 .computer-load dd { font:14px/1.7 var(--font-mono); }
+.computer-load dd small { display:block; color:var(--text-muted); font:11px/1.5 var(--font-mono); }
+.computer-pressure { grid-column:1 / -1; display:flex; align-items:baseline; gap:6px; }
+.computer-pressure dd { font-size:12px; text-transform:capitalize; }
 .computer-load meter { display:block; width:100%; height:5px; }
 .computer-load-empty { margin:16px 0; }
 .computer-toolbar { display:flex; gap:4px; border-top:1px solid var(--border-subtle); padding-top:6px; }

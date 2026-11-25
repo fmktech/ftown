@@ -5,7 +5,7 @@ import type { Command, CommandResponse } from "@/types";
 import type { BridgeUpdateStatus, BridgeUpdateAccepted, BridgeUpdateOperation, GetBridgeUpdatePayload, UpdateBridgePayload } from "../../../bridge/src/update-protocol";
 
 type Send = (command: Command) => Promise<CommandResponse>;
-export type UpdateView = { status: BridgeUpdateStatus | null; loading: boolean; message: string | null; operation: { id: string; target: string } | null; complete: boolean };
+export type UpdateView = { status: BridgeUpdateStatus | null; lastKnownVersion?: string; loading: boolean; message: string | null; operation: { id: string; target: string } | null; complete: boolean };
 const empty = (): UpdateView => ({ status: null, loading: false, message: null, operation: null, complete: false });
 const obj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 const version = (v: unknown): v is string => typeof v === "string" && v.length <= 100 && /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(v);
@@ -102,7 +102,7 @@ export class BridgeUpdatesController {
         const match = op && status.operation?.id === op.id && status.operation.targetVersion === op.target;
         const complete = Boolean(match && status.operation?.phase === "succeeded" && status.currentVersion === op?.target);
         const failed = Boolean(match && status.operation?.phase === "failed");
-        this.put(bridgeId, { status, loading: false, operation: complete || failed ? null : op, complete,
+        this.put(bridgeId, { status, lastKnownVersion: status.currentVersion, loading: false, operation: complete || failed ? null : op, complete,
           message: complete ? "Update completed and the computer reconnected." : failed ? "Update failed. Follow the manual setup instructions below." : op ? "Checking the update and reconnection." : null });
       } catch {
         if (!this.disposed && this.active.has(bridgeId) && this.epochs.get(bridgeId) === epoch) this.put(bridgeId, { ...this.get(bridgeId), status: null, loading: false, message: "Update information unavailable. This bridge may need a manual upgrade." });
