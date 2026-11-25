@@ -35,6 +35,7 @@
  *   transitions (-> 'direct' / -> 'centrifugo') do.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { WatchRegistry } from '../../../../bridge/src/direct-transport/watch-registry';
 import {
   LOOPBACK_TIMEOUT_MS,
   WATCH_HEARTBEAT_MS,
@@ -276,25 +277,58 @@ describe('HybridTerminalTransport', () => {
     expect(publishCommand).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'terminal_watch' }));
 
     sub!.simulateSubscribed();
-    expect(publishCommand).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'terminal_watch', sessionId: 'session-1', clientId: CLIENT_ID }),
-    );
+    const watch = publishCommand.mock.calls.at(-1)![0];
+    expect(watch).toMatchObject({ type: 'terminal_watch', sessionId: 'session-1', clientId: expect.any(String) });
 
     publishCommand.mockClear();
     await vi.advanceTimersByTimeAsync(WATCH_HEARTBEAT_MS);
-    expect(publishCommand).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'terminal_watch', sessionId: 'session-1' }),
-    );
+    expect(publishCommand).toHaveBeenCalledWith(watch);
 
     publishCommand.mockClear();
     unsubscribe();
-    expect(publishCommand).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'terminal_unwatch', sessionId: 'session-1', clientId: CLIENT_ID }),
-    );
+    expect(publishCommand).toHaveBeenCalledWith({ ...watch, type: 'terminal_unwatch' });
 
     publishCommand.mockClear();
     await vi.advanceTimersByTimeAsync(WATCH_HEARTBEAT_MS * 2);
     expect(publishCommand).not.toHaveBeenCalled();
+  });
+
+  it('restores the screen when switching back before the old unwatch reaches the bridge', async () => {
+    const { transport, centrifuge, publishCommand } = makeTransport((opts) => {
+      const peer = new FakePeer(opts.bridgeId);
+      peer.connectMode = 'reject';
+      return peer;
+    });
+    const watchers = new WatchRegistry({ sweepIntervalMs: 0 });
+    const unwatch: Array<() => void> = [];
+    publishCommand.mockImplementation((msg) => {
+      if (msg.type === 'terminal_watch') watchers.watch(msg.sessionId, msg.clientId);
+      if (msg.type === 'terminal_unwatch') unwatch.push(() => watchers.unwatch(msg.sessionId, msg.clientId));
+    });
+    watchers.onNewWatcher((sessionId) => {
+      const channel = centrifuge.getSubscription(`terminal:${sessionId}#${USER_ID}`)!;
+      const data = { type: 'screen_dump', raw: `Screen of ${sessionId}` };
+      for (const receive of channel.listeners.publication ?? []) receive({ data });
+    });
+    const open = async (id: string) => {
+      const terminal = handlers();
+      const close = transport.subscribeTerminal(id, 'bridge-1', terminal);
+      await flush();
+      centrifuge.getSubscription(`terminal:${id}#${USER_ID}`)!.simulateSubscribed();
+      expect(terminal.onScreen).toHaveBeenCalledWith(`Screen of ${id}`);
+      return close;
+    };
+
+    const closeA = await open('a');
+    closeA();
+    const closeB = await open('b');
+    closeB();
+    await open('a');
+    for (const deliver of unwatch) deliver();
+    expect(watchers.hasWatchers('a')).toBe(true);
+    expect(watchers.hasWatchers('b')).toBe(false);
+    transport.dispose();
+    watchers.dispose();
   });
 
   it('falls back when the peer closes mid-session: mode change fired, watch heartbeats start', async () => {
@@ -360,19 +394,20 @@ describe('HybridTerminalTransport', () => {
     expect(sub).not.toBeNull();
     sub!.simulateSubscribed();
 
-    const watchCount = () =>
-      publishCommand.mock.calls.filter((c) => (c[0] as { type: string }).type === 'terminal_watch').length;
+    const watchCommands = () =>
+      publishCommand.mock.calls.map(([msg]) => msg).filter((msg) => msg.type === 'terminal_watch');
+    const [first] = watchCommands();
 
+    // Reconnect while the bridge still remembers the previous subscription.
     publishCommand.mockClear();
-    // Reconnect: Centrifugo re-emits 'subscribed' on the same subscription.
     sub!.simulateSubscribed();
-    expect(watchCount()).toBe(1);
+    const watches = watchCommands();
+    expect(watches).toHaveLength(1);
+    expect(watches[0].clientId).not.toBe(first.clientId);
 
-    // One heartbeat period later there must be exactly one more watch — a stacked
-    // (duplicate) interval would produce two.
     publishCommand.mockClear();
     await vi.advanceTimersByTimeAsync(WATCH_HEARTBEAT_MS);
-    expect(watchCount()).toBe(1);
+    expect(watchCommands()).toEqual(watches);
   });
 
   it('routes sendInput/sendResize to the active path (peer frame vs terminal-input publish)', async () => {
@@ -456,7 +491,7 @@ describe('HybridTerminalTransport', () => {
   });
 
   it('dispose() unwatches sessions that were on the centrifugo fallback path', async () => {
-    const { transport, publishCommand } = makeTransport((opts) => {
+    const { transport, centrifuge, publishCommand } = makeTransport((opts) => {
       const p = new FakePeer(opts.bridgeId);
       p.connectMode = 'reject';
       return p;
@@ -464,7 +499,7 @@ describe('HybridTerminalTransport', () => {
 
     transport.subscribeTerminal('session-1', 'bridge-1', handlers());
     await flush();
-    expect(transport.getMode('session-1')).toBe('centrifugo');
+    centrifuge.getSubscription(`terminal:session-1#${USER_ID}`)!.simulateSubscribed();
 
     publishCommand.mockClear();
     transport.dispose();
