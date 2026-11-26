@@ -1,5 +1,6 @@
-import { describe, it } from 'node:test';
+import { describe, it, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter, once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,7 +8,7 @@ import { LocalApiServer } from './local-api-server.js';
 import type { HookEvent } from './local-api-server.js';
 import { SessionStore } from './session-store.js';
 import { MailStore } from './mail-store.js';
-import { MailDeliveryService, MAIL_WAKE_TEXT, OPENCODE_MAIL_WAKE_TEXT, type MailTimerHandle } from './mail-delivery.js';
+import { MailDeliveryService, MAIL_NUDGE_DELAY_MS, MAIL_WAKE_TEXT, OPENCODE_MAIL_WAKE_TEXT, type MailDeliveryOptions, type MailTimerHandle } from './mail-delivery.js';
 import { AttentionStore } from './attention-store.js';
 import type { Session } from './types.js';
 import type { ProcessRunner } from './claude-runner.js';
@@ -17,23 +18,6 @@ import type { Command, CommandResponse } from './types.js';
 import type { BridgeSecurityService } from './security/bridge/security.js';
 import type { VerifiedApplication } from './security/protocol.js';
 import type { SessionController } from './session-controller.js';
-
-async function flushAsync(): Promise<void> {
-  for (let i = 0; i < 10; i++) await new Promise<void>((resolve) => setImmediate(resolve));
-}
-
-/** Advance the fake clock in steps, letting real-fs IO settle between steps. */
-async function settle(clock: FakeClock, ms: number): Promise<void> {
-  const step = 1_000;
-  let left = ms;
-  while (left > 0) {
-    const chunk = Math.min(step, left);
-    await clock.advance(chunk);
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    left -= chunk;
-  }
-  await flushAsync();
-}
 
 interface FakeTimer extends MailTimerHandle { id: number; }
 class FakeClock {
@@ -65,25 +49,21 @@ class FakeClock {
       this.timers.delete(nextId);
       this.time = timer.at;
       timer.fn();
-      await flushAsync();
+      await Promise.resolve();
     }
     this.time = target;
-    await flushAsync();
   }
 }
 
-class FakeRunner {
+class FakeRunner extends EventEmitter {
   running = new Set<string>();
-  writes: Array<{ sessionId: string; data: string }> = [];
   isRunning(sessionId: string): boolean { return this.running.has(sessionId); }
   write(sessionId: string, data: string): boolean {
     if (!this.running.has(sessionId)) return false;
-    this.writes.push({ sessionId, data });
+    this.emit('write', data);
     return true;
   }
-  nudgeLines(): string[] {
-    return this.writes.filter((w) => w.data.includes('new mail (') || w.data.includes('You have new ftown mail') || w.data.includes('FTown mail may be available') || w.data.includes('[ftown mail]')).map((w) => w.data);
-  }
+
 }
 
 async function hook(port: number, token: string, body: Record<string, unknown>): Promise<{ status: number; data: Record<string, unknown> }> {
@@ -101,17 +81,21 @@ const makeSession = (id: string, overrides: Partial<Session> = {}): Session => (
   createdAt: '2026-10-26T00:00:00Z', updatedAt: '2026-10-26T00:00:00Z', shellType: 'cursor', ...overrides,
 });
 
-async function fixture(t: { after: (fn: () => void | Promise<void>) => void }) {
+async function fixture(t: TestContext, nativeWake: MailDeliveryOptions['nativeWake'] = async () => ({ status: 'unsupported' })) {
   const home = mkdtempSync(join(tmpdir(), 'ftown-inbox-durable-'));
   const store = new SessionStore(join(home, 'data'));
   const session = makeSession('s1');
   await store.saveSession(session);
   const mailStore = new MailStore((id) => store.sessionDir(id));
-  const attention = new AttentionStore((id) => store.sessionDir(id));
   const clock = new FakeClock();
+  const attention = new AttentionStore((id) => store.sessionDir(id), 500, undefined, {
+    monotonicNow: clock.now,
+    schedule: (fn, ms) => clock.setTimeout(fn, ms) as NodeJS.Timeout,
+    cancel: clock.clearTimeout,
+  });
   const runner = new FakeRunner();
   runner.running.add('s1');
-  const mail = new MailDeliveryService({ now: clock.now, monotonicNow: clock.now, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, nativeWake: async () => ({ status: 'unsupported' }) });
+  const mail = new MailDeliveryService({ now: clock.now, monotonicNow: clock.now, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, nativeWake });
   const server = new LocalApiServer();
   (server as unknown as { mail: MailDeliveryService }).mail = mail;
   const token = 'inbox-durable-token';
@@ -124,7 +108,16 @@ async function fixture(t: { after: (fn: () => void | Promise<void>) => void }) {
   server.on('event', (event: HookEvent) => { events.push(event); });
   const port = await server.start();
   t.after(async () => { attention.stopNotifications(); mail.stop(); server.getHttpServer()?.closeAllConnections(); server.stop(); rmSync(home, { recursive: true, force: true }); });
-  return { home, store, mailStore, attention, clock, runner, mail, server, token, port, events, session };
+  async function receiveNudge(): Promise<string> {
+    const written = once(runner, 'write', { signal: AbortSignal.timeout(10_000) });
+    await clock.advance(MAIL_NUDGE_DELAY_MS);
+    const [line] = await written;
+    assert.match(line, /^\[ftown msg from ftown-mail\]/);
+    // Finish both composer submits now that the text has reached the PTY.
+    await clock.advance(2_000);
+    return line.trim();
+  }
+  return { home, store, mailStore, attention, clock, runner, mail, server, token, port, events, session, receiveNudge };
 }
 
 const askInput = { questions: [{ question: 'Pick one', header: 'Choice', options: [{ label: 'A' }, { label: 'B' }], multiSelect: false }] };
@@ -144,11 +137,7 @@ describe('mail nudge vs open attention (real handleHook + store)', () => {
     await openTwo(f);
     // Agent-to-agent mail is nudged: bridge types the pointer into the PTY.
     await f.mail.acceptMail(f.session, { body: 'hello from agent', from: 'agent-2', fromName: 'Agent 2' });
-    await settle(f.clock, 10_000);
-    await flushAsync();
-    const nudges = f.runner.nudgeLines();
-    assert.ok(nudges.length > 0, 'nudge should type a pointer line');
-    const injectedLine = nudges[0].trim();
+    const injectedLine = await f.receiveNudge();
     // The harness fires UserPromptSubmit with the submitted prompt text.
     const res = await hook(f.port, f.token, { ftown_session_id: 's1', ftown_session_source: 'env', hook_event_name: 'UserPromptSubmit', prompt: injectedLine });
     assert.equal(res.status, 200);
@@ -160,29 +149,14 @@ describe('mail nudge vs open attention (real handleHook + store)', () => {
     assert.equal(published.data.injected, true, 'published hook event should carry injected:true');
   });
 
-  it('no-prompt-text UserPromptSubmit within 15s of injection is injected; 16s later is human', async (t) => {
+  it('a promptless UserPromptSubmit following a PTY mail nudge leaves attention open', async (t) => {
     const f = await fixture(t);
-    const { req } = await openTwo(f);
+    await openTwo(f);
     await f.mail.acceptMail(f.session, { body: 'hi', from: 'agent-2' });
-    await settle(f.clock, 10_000);
-    await flushAsync();
-    assert.ok(f.runner.nudgeLines().length > 0);
-    // Within 15s, no prompt text (opencode shape): injected, resolves nothing.
+    await f.receiveNudge();
     await hook(f.port, f.token, { ftown_session_id: 's1', ftown_session_source: 'env', hook_event_name: 'UserPromptSubmit' });
-    let page = await f.attention.list('s1');
-    assert.equal(page.events.length, 2, `no-prompt within 15s must not resolve, got ${page.events.length}`);
-    let published = f.events.filter((e) => e.eventName === 'UserPromptSubmit').at(-1)!;
-    assert.equal(published.data.injected, true);
-    // 16s after the injection: human, but prompts never auto-resolve explicit items (C1).
-    await settle(f.clock, 16_000);
-    await hook(f.port, f.token, { ftown_session_id: 's1', ftown_session_source: 'env', hook_event_name: 'UserPromptSubmit', prompt: 'human answer in terminal' });
-    page = await f.attention.list('s1');
-    const open = await f.attention.list('s1', { includeResolved: true });
-    const reqItem = open.events.find((e) => e.id === req.id)!;
-    assert.equal(reqItem.resolution, undefined, 'human prompt must leave agent_needs_input open');
-    assert.equal(page.events.length, 2, `human prompt should leave both explicit items open, got ${page.events.length}`);
-    published = f.events.filter((e) => e.eventName === 'UserPromptSubmit').at(-1)!;
-    assert.equal(published.data.injected, undefined, 'human prompt should not carry injected');
+    assert.equal((await f.attention.list('s1')).events.length, 2);
+    assert.equal(f.events.filter((e) => e.eventName === 'UserPromptSubmit').at(-1)?.data.injected, true);
   });
 
   it('human UserPromptSubmit resolves only non-explicit items; explicit stays open', async (t) => {
@@ -204,10 +178,7 @@ describe('mail nudge vs open attention (real handleHook + store)', () => {
     await openTwo(f);
     // Preview-conversation path: LocalApiServer.enqueuePreviewChat -> acceptMail -> nudge.
     await f.server.enqueuePreviewChat(f.session, 'preview hello');
-    await settle(f.clock, 10_000);
-    await flushAsync();
-    assert.ok(f.runner.nudgeLines().length > 0, 'preview mail should nudge');
-    const line = f.runner.nudgeLines()[0].trim();
+    const line = await f.receiveNudge();
     await hook(f.port, f.token, { ftown_session_id: 's1', ftown_session_source: 'env', hook_event_name: 'UserPromptSubmit', prompt: line });
     assert.equal((await f.attention.list('s1')).events.length, 2, 'preview mail injected prompt must not resolve');
     assert.equal(f.events.filter((e) => e.eventName === 'UserPromptSubmit').at(-1)?.data.injected, true);
@@ -215,9 +186,7 @@ describe('mail nudge vs open attention (real handleHook + store)', () => {
     const f2 = await fixture(t);
     await openTwo(f2);
     await f2.mail.acceptMail(f2.session, { body: 'Child session c has been idle for 120 seconds.', from: 'child-1', fromName: 'Child', threadId: 'cycle-1' });
-    await settle(f2.clock, 10_000);
-    await flushAsync();
-    const line2 = f2.runner.nudgeLines()[0].trim();
+    const line2 = await f2.receiveNudge();
     await hook(f2.port, f2.token, { ftown_session_id: 's1', ftown_session_source: 'env', hook_event_name: 'UserPromptSubmit', prompt: line2 });
     assert.equal((await f2.attention.list('s1')).events.length, 2, 'child-idle injected prompt must not resolve');
   });
@@ -226,13 +195,12 @@ describe('mail nudge vs open attention (real handleHook + store)', () => {
     const f = await fixture(t);
     const { q } = await openTwo(f);
     await f.mail.acceptMail(f.session, { body: 'hi', from: 'agent-2' });
-    await settle(f.clock, 10_000);
-    await flushAsync();
+    const line = await f.receiveNudge();
     const poll = f.attention.waitForItem('s1', q.id, 200);
-    // Give the waiter a moment to register liveness.
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    const line = f.runner.nudgeLines()[0].trim();
+    await t.waitFor(() => assert.ok(f.attention.hasLiveWaiter(q.id)), { timeout: 10_000 });
     await hook(f.port, f.token, { ftown_session_id: 's1', ftown_session_source: 'env', hook_event_name: 'UserPromptSubmit', prompt: line });
+    assert.ok(f.attention.hasLiveWaiter(q.id));
+    await f.clock.advance(200);
     const item = await poll;
     assert.equal(item.resolvedAt, undefined, 'waiter must survive injected prompt');
     assert.equal(f.attention.hasLiveWaiter(q.id), false, 'the poll finished at its deadline');
@@ -336,21 +304,17 @@ describe('injected prefix sources (plugin self-submits)', () => {
   }
 
   it('codex native wake generation is captured as injected', async (t) => {
-    const f = await fixture(t);
-    await openTwo(f);
     const captured: string[] = [];
+    const f = await fixture(t, async (_session, text) => { captured.push(text); return { status: 'accepted' }; });
+    await openTwo(f);
     const nativeId = '12345678-1234-4234-8234-123456789abc';
     await f.store.saveSession(makeSession('s1', { shellType: 'codex', codexSessionId: nativeId }));
-    const service = new MailDeliveryService({ now: f.clock.now, monotonicNow: f.clock.now, setTimeout: f.clock.setTimeout, clearTimeout: f.clock.clearTimeout, nativeWake: async (_s: Session, text: string) => { captured.push(text); return { status: 'accepted' }; } });
-    service.setStore(f.store);
-    service.setMailStore(f.mailStore);
-    service.setRunner(f.runner);
-    (f.server as unknown as { mail: MailDeliveryService }).mail = service;
-    await service.acceptMail(makeSession('s1', { shellType: 'codex', codexSessionId: nativeId }), { body: 'codex body', from: 'agent-2' });
-    await settle(f.clock, 10_000);
+    await f.mail.acceptMail(makeSession('s1', { shellType: 'codex', codexSessionId: nativeId }), { body: 'codex body', from: 'agent-2' });
+    await f.clock.advance(MAIL_NUDGE_DELAY_MS);
+    await t.waitFor(async () => assert.ok((await f.mailStore.listAll('s1', 1))[0]?.nudgedAt), { timeout: 10_000 });
     assert.equal(captured.length, 1, `expected one codex wake, got ${captured.length}`);
     assert.ok(captured[0].startsWith('[ftown mail]'), `codex wake: ${captured[0].slice(0, 60)}`);
-    assert.equal(service.isInjectedPrompt('s1', { prompt: captured[0] }), true);
+    assert.equal(f.mail.isInjectedPrompt('s1', { prompt: captured[0] }), true);
     await hook(f.port, f.token, { ftown_session_id: 's1', ftown_session_source: 'env', hook_event_name: 'UserPromptSubmit', prompt: captured[0] });
     assert.equal((await f.attention.list('s1')).events.length, 2);
     assert.equal(f.events.filter((e) => e.eventName === 'UserPromptSubmit').at(-1)?.data.injected, true);
@@ -380,11 +344,13 @@ describe('injected prefix sources (plugin self-submits)', () => {
   it('opencode bridge-side handoff applies the no-prompt 15s rule', async (t) => {
     const f = await fixture(t);
     await openTwo(f);
-    f.mail.notePluginHandoff('s1');
+    await f.mail.notePluginHandoff('s1');
     await hook(f.port, f.token, { ftown_session_id: 's1', ftown_session_source: 'env', hook_event_name: 'UserPromptSubmit' });
     assert.equal((await f.attention.list('s1')).events.length, 2, 'no-prompt within 15s of handoff must not resolve');
     assert.equal(f.events.filter((e) => e.eventName === 'UserPromptSubmit').at(-1)?.data.injected, true);
-    await settle(f.clock, 16_000);
+    // The first prompt consumed the prior handoff. Age a fresh, unconsumed one.
+    await f.mail.notePluginHandoff('s1');
+    await f.clock.advance(16_000);
     await hook(f.port, f.token, { ftown_session_id: 's1', ftown_session_source: 'env', hook_event_name: 'UserPromptSubmit' });
     assert.equal((await f.attention.list('s1')).events.length, 2, 'no-prompt 16s after handoff is human and leaves explicit open');
     assert.equal(f.events.filter((e) => e.eventName === 'UserPromptSubmit').at(-1)?.data.injected, undefined);
@@ -408,41 +374,35 @@ describe('injected prefix sources (plugin self-submits)', () => {
     await hook(f.port, f.token, { ftown_session_id: 's1', ftown_session_source: 'env', hook_event_name: 'UserPromptSubmit' });
     assert.equal((await f.attention.list('s1')).events.length, 2, 'mid-injection no-prompt hook must not resolve');
     assert.equal(f.events.filter((e) => e.eventName === 'UserPromptSubmit').at(-1)?.data.injected, true);
-    await settle(f.clock, 2_000);
+    await f.clock.advance(2_000);
     assert.equal(await pending, true);
   });
 
-  it('mid native-wake (before nativeWake resolves) is injected', async (t) => {
-    const f = await fixture(t);
+  it('mid native-wake (before nativeWake resolves) is injected', { timeout: 15_000 }, async (t) => {
+    const entered = Promise.withResolvers<void>();
+    const gate = Promise.withResolvers<{ status: 'accepted' }>();
+    const f = await fixture(t, async () => { entered.resolve(); return gate.promise; });
     await openTwo(f);
     const nativeId = '12345678-1234-4234-8234-123456789abc';
     await f.store.saveSession(makeSession('s1', { shellType: 'codex', codexSessionId: nativeId }));
-    let release!: (v: { status: 'accepted' }) => void;
-    const gate = new Promise<{ status: 'accepted' }>((resolve) => { release = resolve; });
-    const captured: string[] = [];
-    const service = new MailDeliveryService({ now: f.clock.now, monotonicNow: f.clock.now, setTimeout: f.clock.setTimeout, clearTimeout: f.clock.clearTimeout, nativeWake: async (_s: Session, text: string) => { captured.push(text); return gate; } });
-    service.setStore(f.store);
-    service.setMailStore(f.mailStore);
-    service.setRunner(f.runner);
-    (f.server as unknown as { mail: MailDeliveryService }).mail = service;
-    await service.acceptMail(makeSession('s1', { shellType: 'codex', codexSessionId: nativeId }), { body: 'codex body', from: 'agent-2' });
-    await settle(f.clock, 6_000);
-    assert.equal(captured.length, 1, 'nativeWake should be in flight');
+    await f.mail.acceptMail(makeSession('s1', { shellType: 'codex', codexSessionId: nativeId }), { body: 'codex body', from: 'agent-2' });
+    await f.clock.advance(MAIL_NUDGE_DELAY_MS);
+    await entered.promise;
     // Hook arrives before nativeWake resolves.
     await hook(f.port, f.token, { ftown_session_id: 's1', ftown_session_source: 'env', hook_event_name: 'UserPromptSubmit' });
     assert.equal((await f.attention.list('s1')).events.length, 2, 'mid-wake no-prompt hook must not resolve');
     assert.equal(f.events.filter((e) => e.eventName === 'UserPromptSubmit').at(-1)?.data.injected, true);
-    release({ status: 'accepted' });
-    await settle(f.clock, 2_000);
+    gate.resolve({ status: 'accepted' });
+    await t.waitFor(async () => assert.ok((await f.mailStore.listAll('s1', 1))[0]?.nudgedAt), { timeout: 10_000 });
   });
 
   it('no-prompt 15s rule is one-shot; text rule is not consumed', async (t) => {
     const f = await fixture(t);
     await openTwo(f);
-    f.mail.notePluginHandoff('s1');
+    await f.mail.notePluginHandoff('s1');
     await hook(f.port, f.token, { ftown_session_id: 's1', ftown_session_source: 'env', hook_event_name: 'UserPromptSubmit' });
     assert.equal(f.events.filter((e) => e.eventName === 'UserPromptSubmit').at(-1)?.data.injected, true);
-    await settle(f.clock, 2_000);
+    await f.clock.advance(2_000);
     await hook(f.port, f.token, { ftown_session_id: 's1', ftown_session_source: 'env', hook_event_name: 'UserPromptSubmit' });
     assert.equal((await f.attention.list('s1')).events.length, 2, 'second no-prompt hook 2s later is human (explicit stays)');
     assert.equal(f.events.filter((e) => e.eventName === 'UserPromptSubmit').at(-1)?.data.injected, undefined);
@@ -452,7 +412,7 @@ describe('injected prefix sources (plugin self-submits)', () => {
     for (let i = 0; i < 2; i++) {
       await hook(f2.port, f2.token, { ftown_session_id: 's1', ftown_session_source: 'env', hook_event_name: 'UserPromptSubmit', prompt: '[ftown mail] id="x" from="b" type="message"' });
       assert.equal(f2.events.filter((e) => e.eventName === 'UserPromptSubmit').at(-1)?.data.injected, true);
-      await settle(f2.clock, 1_000);
+      await f2.clock.advance(1_000);
     }
     assert.equal((await f2.attention.list('s1')).events.length, 2);
   });
@@ -460,7 +420,7 @@ describe('injected prefix sources (plugin self-submits)', () => {
   it('SessionEnd deletes the injection record', async (t) => {
     const f = await fixture(t);
     await openTwo(f);
-    f.mail.notePluginHandoff('s1');
+    await f.mail.notePluginHandoff('s1');
     assert.ok(f.mail.lastPromptInjection('s1'), 'record exists');
     await hook(f.port, f.token, { ftown_session_id: 's1', ftown_session_source: 'env', hook_event_name: 'SessionEnd' });
     assert.equal(f.mail.lastPromptInjection('s1'), undefined, 'SessionEnd must delete the record');
@@ -471,7 +431,7 @@ describe('injected prefix sources (plugin self-submits)', () => {
   it('record, Stop, no-text UserPromptSubmit stays injected', async (t) => {
     const f = await fixture(t);
     await openTwo(f);
-    f.mail.notePluginHandoff('s1');
+    await f.mail.notePluginHandoff('s1');
     await hook(f.port, f.token, { ftown_session_id: 's1', ftown_session_source: 'env', hook_event_name: 'Stop' });
     assert.ok(f.mail.lastPromptInjection('s1'), 'Stop must keep the record');
     await hook(f.port, f.token, { ftown_session_id: 's1', ftown_session_source: 'env', hook_event_name: 'UserPromptSubmit' });
