@@ -107,7 +107,16 @@ async function fixture(t: TestContext, nativeWake: MailDeliveryOptions['nativeWa
   const events: HookEvent[] = [];
   server.on('event', (event: HookEvent) => { events.push(event); });
   const port = await server.start();
-  t.after(async () => { attention.stopNotifications(); mail.stop(); server.getHttpServer()?.closeAllConnections(); server.stop(); rmSync(home, { recursive: true, force: true }); });
+  t.after(async () => {
+    attention.stopNotifications();
+    mail.stop();
+    server.getHttpServer()?.closeAllConnections();
+    server.stop();
+    // Native delivery can still be reading the inbox after its receipt is committed.
+    // The store serializes reads and writes for the session. Drain them before removing its files.
+    await mailStore.listAll(session.id, 1);
+    rmSync(home, { recursive: true, force: true });
+  });
   async function receiveNudge(): Promise<string> {
     const written = once(runner, 'write', { signal: AbortSignal.timeout(10_000) });
     await clock.advance(MAIL_NUDGE_DELAY_MS);
