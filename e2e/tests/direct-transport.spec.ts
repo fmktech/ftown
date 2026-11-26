@@ -91,6 +91,11 @@ async function terminalFlow(page: Page, sessionName: string, marker: string): Pr
 
   const before = await sessionIdsFor(accountId);
   await createShellSession(page, sessionName);
+  // The sidebar row and input channel can appear before create_session returns.
+  // Wait for the form to close on success, or surface its rejection before clicking behind it.
+  const dialog = page.getByRole("dialog", { name: "New Session" });
+  await expect(dialog.filter({ hasNot: page.getByRole("alert") })).toBeHidden({ timeout: test.info().timeout });
+  expect(await dialog.getByRole("alert").allTextContents(), "The bridge rejected shell creation").toEqual([]);
   const sessionId = await waitForNewSessionId(accountId, before);
   await openSession(page, sessionName);
   await runMarkerInTerminal(page, marker);
