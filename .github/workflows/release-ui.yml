@@ -134,52 +134,7 @@ jobs:
             | awk '{print $1}' > "ftown-ui-standalone-$VERSION.tar.gz.sha256"
           cat "ftown-ui-standalone-$VERSION.tar.gz.sha256"
 
-      - name: Check for existing release
-        id: existing
+      - name: Publish and verify panel assets
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          : "${VERSION:?VERSION is not set — Version parity step did not export it}"
-          if gh release view "ui-v$VERSION" >/dev/null 2>&1; then
-            echo "::notice::release ui-v$VERSION already exists, uploading assets to it (--clobber) instead of creating it"
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Release (create)
-        if: steps.existing.outputs.exists != 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          : "${VERSION:?VERSION is not set — Version parity step did not export it}"
-          gh release create "ui-v$VERSION" \
-            --title "Solo panel ui-v$VERSION" \
-            --notes "Standalone panel bundle for \`ftown-bridge --solo\`. Fetched automatically by bridge >= 0.19.20." \
-            "ftown-ui-standalone-$VERSION.tar.gz" \
-            "ftown-ui-standalone-$VERSION.tar.gz.sha256"
-
-      - name: Release (upload assets to existing)
-        if: steps.existing.outputs.exists == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          : "${VERSION:?VERSION is not set — Version parity step did not export it}"
-          gh release upload "ui-v$VERSION" \
-            "ftown-ui-standalone-$VERSION.tar.gz" \
-            "ftown-ui-standalone-$VERSION.tar.gz.sha256" \
-            --clobber
-
-      - name: Verify assets
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          : "${VERSION:?VERSION is not set — Version parity step did not export it}"
-          ASSETS=$(gh release view "ui-v$VERSION" --json assets -q '.assets[].name')
-          echo "$ASSETS"
-          for name in "ftown-ui-standalone-$VERSION.tar.gz" "ftown-ui-standalone-$VERSION.tar.gz.sha256"; do
-            if ! grep -qxF "$name" <<< "$ASSETS"; then
-              echo "::error::expected asset '$name' missing from release ui-v$VERSION"
-              exit 1
-            fi
-          done
+        run: node ../scripts/release/publish-panel.mjs
