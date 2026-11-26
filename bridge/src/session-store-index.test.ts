@@ -377,6 +377,23 @@ test('a session removed while a cold listing is in flight is skipped, not fatal'
   assert.equal(await again.loadSession('a'), null);
 });
 
+test('a catalog scan excludes a session retired after its record was read', async (t) => {
+  const f = await fixture(t);
+  const cold = f.newStore();
+  let first: string | undefined;
+  for (const id of ['a', 'b']) {
+    await f.store.saveSession(makeSession(id));
+    f.beforeRead.set(f.recordPath(id), async () => {
+      if (first) await cold.deleteSession(first);
+      else first = id;
+    });
+  }
+  const listed = await cold.listSessions();
+  assert.equal(listed.length, 1);
+  assert.notEqual(listed[0].id, first);
+  assert.deepEqual(listed, await f.uncached());
+});
+
 test('a save overtaken by another writer does not index its own content', async (t) => {
   const f = await fixture(t);
   await f.store.saveSession(makeSession('a'));

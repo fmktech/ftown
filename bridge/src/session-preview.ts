@@ -109,14 +109,22 @@ export async function preparePreview(session: Session, paths: unknown): Promise<
   }
 }
 
+type RevisionInfo = { revision: string; totalBytes: number; gzipBytes?: number };
 type Snapshot = { bytes: Buffer; revision: string; compressed?: Buffer };
 const gzipAsync = promisify(gzip);
 const cacheByteLimit = 32 * 1024 * 1024;
 const cacheEntryLimit = 16;
 const cacheLifetimeMs = 60_000;
+const revisionEntryLimit = 256;
 
 function fileSignature(stat: BigIntStats): string {
   return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(':');
+}
+
+function revisionInfo(snapshot: Snapshot | RevisionInfo): RevisionInfo {
+  if ('totalBytes' in snapshot) return snapshot;
+  return { revision: snapshot.revision, totalBytes: snapshot.bytes.length,
+    ...(snapshot.compressed && { gzipBytes: snapshot.compressed.length }) };
 }
 
 async function readSnapshot(handle: FileHandle, size: number): Promise<Snapshot> {
@@ -138,6 +146,8 @@ export class SessionPreviewReader {
   private active = 0;
   private readonly pending = new Map<string, Promise<Snapshot>>();
   private readonly cache = new Map<string, { snapshot: Snapshot; size: number; expiry: NodeJS.Timeout }>();
+  // Keep only lengths and the digest for idle status polls after the payload buffers expire.
+  private readonly revisions = new Map<string, RevisionInfo>();
   private cachedBytes = 0;
   protected openFile(path: string) { return open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
   protected initialStat(handle: FileHandle) { return handle.stat({ bigint: true }); }
@@ -152,6 +162,10 @@ export class SessionPreviewReader {
   }
 
   private remember(key: string, snapshot: Snapshot): void {
+    if (!this.revisions.has(key) && this.revisions.size >= revisionEntryLimit) {
+      this.revisions.delete(this.revisions.keys().next().value!);
+    }
+    this.revisions.set(key, revisionInfo(snapshot));
     if (this.cache.has(key)) return;
     const size = snapshot.bytes.buffer.byteLength + (snapshot.compressed?.buffer.byteLength ?? 0);
     if (size > cacheByteLimit) return;
@@ -164,7 +178,17 @@ export class SessionPreviewReader {
     this.cachedBytes += size;
   }
 
-  async read(session: Session, source: SessionPreviewSource, fileId: string): Promise<Snapshot> {
+  read(session: Session, source: SessionPreviewSource, fileId: string): Promise<Snapshot> {
+    return this.load(session, source, fileId, 'content');
+  }
+
+  readStatus(session: Session, source: SessionPreviewSource, fileId: string): Promise<RevisionInfo> {
+    return this.load(session, source, fileId, 'status');
+  }
+
+  private load(session: Session, source: SessionPreviewSource, fileId: string, mode: 'content'): Promise<Snapshot>;
+  private load(session: Session, source: SessionPreviewSource, fileId: string, mode: 'status'): Promise<RevisionInfo>;
+  private async load(session: Session, source: SessionPreviewSource, fileId: string, mode: 'status' | 'content'): Promise<Snapshot | RevisionInfo> {
     if (this.active >= PREVIEW_MAX_CONCURRENT_READS) throw new PreviewError('unavailable');
     this.active++;
     try {
@@ -180,19 +204,20 @@ export class SessionPreviewReader {
         if (before.size > PREVIEW_MAX_BYTES) throw new PreviewError('too_large');
         const signature = fileSignature(before);
         const key = JSON.stringify([session.id, source.id, fileId, filePath, signature]);
-        const cached = this.cache.get(key);
-        let work = this.pending.get(key);
+        const cached = (mode === 'status' ? this.revisions.get(key) : undefined) ?? this.cache.get(key)?.snapshot;
+        let work = cached ? undefined : this.pending.get(key);
         if (!cached && !work) {
           work = readSnapshot(handle, Number(before.size));
           this.pending.set(key, work);
         }
         try {
-          const snapshot = cached ? cached.snapshot : await work!;
+          const loaded = cached ? undefined : await work!;
           const current = await lstat(filePath, { bigint: true });
           if (current.size > PREVIEW_MAX_BYTES) throw new PreviewError('too_large');
           if (!current.isFile() || fileSignature(current) !== signature) throw new PreviewError('unavailable');
-          this.remember(key, snapshot);
-          return snapshot;
+          if (loaded) this.remember(key, loaded);
+          const result = cached ?? loaded!;
+          return mode === 'status' ? revisionInfo(result) : result;
         } finally {
           if (work && this.pending.get(key) === work) this.pending.delete(key);
         }
@@ -294,9 +319,10 @@ export async function preparePreviewAdd(
   }
 }
 
-export function previewStatus(id: string, fileId: string, snapshot: Snapshot, knownRevision?: string): SessionPreviewStatus {
-  return { state: snapshot.revision === knownRevision ? 'unchanged' : 'ready', previewId: id, fileId, revision: snapshot.revision, totalBytes: snapshot.bytes.length, wait: true,
-    ...(snapshot.compressed && snapshot.revision !== knownRevision && { gzipBytes: snapshot.compressed.length }) };
+export function previewStatus(id: string, fileId: string, snapshot: Snapshot | RevisionInfo, knownRevision?: string): SessionPreviewStatus {
+  const { revision, totalBytes, gzipBytes } = revisionInfo(snapshot);
+  return { state: revision === knownRevision ? 'unchanged' : 'ready', previewId: id, fileId, revision, totalBytes, wait: true,
+    ...(gzipBytes && revision !== knownRevision && { gzipBytes }) };
 }
 export function previewChunk(id: string, fileId: string, snapshot: Snapshot, revision: string, offset: number, encoding?: 'gzip'): SessionPreviewChunk {
   if (snapshot.revision !== revision) return { state: 'stale_revision' };

@@ -119,6 +119,7 @@ export class CentrifugoClient {
   private readonly client: Centrifuge;
   private readonly subscriptions: Map<string, Subscription> = new Map();
   private readonly onReconnect?: () => void | Promise<void>;
+  private readonly isSessionRetired?: (sessionId: string) => boolean;
   private hasConnected = false;
   private security: BridgeSecurityService | null = null;
   private readonly outbound = createOutboundPipeline({ logger: console });
@@ -146,9 +147,10 @@ export class CentrifugoClient {
     url: string,
     token: string,
     getToken: () => Promise<string>,
-    opts?: { onReconnect?: () => void | Promise<void>; disabled?: boolean; onLedgerMessage?: (message: LedgerMessage) => void; onLedgerSubscribed?: () => void },
+    opts?: { onReconnect?: () => void | Promise<void>; disabled?: boolean; isSessionRetired?: (sessionId: string) => boolean; onLedgerMessage?: (message: LedgerMessage) => void; onLedgerSubscribed?: () => void },
   ) {
     this.onReconnect = opts?.onReconnect;
+    this.isSessionRetired = opts?.isSessionRetired;
     this.disabled = opts?.disabled ?? false;
     this.onLedgerMessage = opts?.onLedgerMessage;
     this.onLedgerSubscribed = opts?.onLedgerSubscribed;
@@ -302,6 +304,8 @@ export class CentrifugoClient {
   }
 
   async publishSessionUpdate(userId: string, session: Session): Promise<void> {
+    // An exit handler or reconnect snapshot can still hold a record after deletion.
+    if ((session.status as string) !== 'removed' && this.isSessionRetired?.(session.id)) return;
     const channel = accountChannel('sessions:updates', userId);
     // State has already committed. Observe delivery without delaying CRUD or
     // turning a relay failure into a failed mutation. A failed delta instead

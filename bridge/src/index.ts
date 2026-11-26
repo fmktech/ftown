@@ -664,6 +664,7 @@ program
     const centrifugo = new CentrifugoClient(centrifugoUrl, auth.token, getToken, {
       ...ledgerOptions,
       disabled: opts.local,
+      isSessionRetired: id => store.isRetired(id),
       // On a transport reconnect, re-publish the session snapshot. The UI does
       // not re-request its list on reconnect, so without this its session list
       // goes stale/empty after a Centrifugo blip until a page reload.
