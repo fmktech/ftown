@@ -23,7 +23,7 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
   const secure = await secureFixture(directory, async () => new Response('{}'));
   const identity = await loadLocalIdentity(directory, secure.pointer.ownerId!);
   const subscriptions = new Map<string, EventEmitter>();
-  const transport = Object.assign(new EventEmitter(), { state: 'connected', publish: async (_channel: string, _data: unknown) => {}, newSubscription: (channel: string) => {
+  const transport = Object.assign(new EventEmitter(), { state: 'connected', disconnect() { this.state = 'disconnected'; }, publish: async (_channel: string, _data: unknown) => {}, newSubscription: (channel: string) => {
     const sub = Object.assign(new EventEmitter(), { state: 'unsubscribed', subscribe() { this.state = 'subscribed'; this.emit('subscribed'); }, unsubscribe() { this.state = 'unsubscribed'; this.emit('unsubscribed'); } }); subscriptions.set(channel, sub); return sub;
   } });
   const client = new CentrifugoClient('ws://127.0.0.1:1/unused', '', async () => '');
@@ -60,6 +60,24 @@ test('secure readiness is bound to current connected and subscribed transport', 
   f.transport.state = 'connected'; f.transport.emit('connected', { transport: 'test' });
   await assert.rejects(f.client.waitUntilSecureCommandsReady(5), /timed out/);
   f.subscriptions.get(`commands:rpc#${email}`)!.emit('subscribed'); await f.client.waitUntilSecureCommandsReady(50);
+});
+
+test('disconnect releases outstanding peer exchanges and prevents queued requests from publishing', async t => {
+  const f = await fixture(t);
+  f.client.subscribeSecureCommands(email, async () => ({}));
+  const channel = f.client.peerChannel()!;
+  const packet = await f.packet(channel, { type: 'application', route: { kind: 'http', requestId: randomUUID(), method: 'GET', path: '/api/sessions' }, data: {}, mcp: null });
+  const published = Promise.withResolvers<void>();
+  let sends = 0;
+  f.transport.publish = async () => { sends++; published.resolve(); };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const sent = f.client.peerExchange(packet, packet.recipientId, 60_000);
+  await published.promise;
+  const queued = f.client.peerExchange({ ...packet, messageId: randomUUID() }, packet.recipientId, 60_000);
+  f.client.disconnect();
+  assert.equal(f.client.peerChannel(), null);
+  await Promise.all([sent, queued].map(p => assert.rejects(p, /bridge_offline/)));
+  assert.equal(sends, 1);
 });
 
 test('cloud delivery starts a verified ticket only after publish resolves and cancels on rejection', async t => {

@@ -102,6 +102,8 @@ class PeerLink {
   private dc?: LinkDataChannel;
   private opened = false;
   private closed = false;
+  private resolveClosed!: () => void;
+  readonly whenClosed = new Promise<void>(resolve => { this.resolveClosed = resolve; });
   private readonly assembler = new FrameAssembler();
   private readonly pending = new Map<string, Pending>();
   private inFlight = 0;
@@ -117,6 +119,7 @@ class PeerLink {
     this.openTimer.unref?.();
   }
 
+  get isClosed(): boolean { return this.closed; }
   get isOpen(): boolean { return this.opened && !this.closed && !!this.dc?.isOpen(); }
 
   bind(dc: LinkDataChannel): void {
@@ -165,6 +168,7 @@ class PeerLink {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.resolveClosed();
     clearTimeout(this.openTimer); if (this.idleTimer) clearTimeout(this.idleTimer);
     for (const waiter of this.openWaiters.splice(0)) waiter(false);
     for (const [id, pending] of this.pending) { clearTimeout(pending.timer); this.pending.delete(id); pending.reject(new PeerLinkError('lost')); }
@@ -336,12 +340,14 @@ export class PeerLinks {
       const pc = this.factory(`ftown-link-${pairId}`, { iceServers: [...STUN_SERVERS] });
       link = new PeerLink(this, pc, peer, pairId);
       this.links.add(link);
-      const gathered = this.gathered(pc);
+      const gathered = this.gathered(link);
       link.bind(pc.createDataChannel(PEER_LINK_LABEL));
       const offer = await gathered;
+      if (link.isClosed) return false;
       if (!offer || offer.type !== 'offer') throw new Error('No offer');
-      const answer = await signal({ pairId, sdp: offer.sdp });
-      if (typeof answer?.sdp !== 'string' || !answer.sdp || answer.sdp.length > MAX_LINK_SDP_CHARS) throw new Error('Invalid answer');
+      const answer = await Promise.race([signal({ pairId, sdp: offer.sdp }), link.whenClosed]);
+      if (link.isClosed) return false;
+      if (!answer || typeof answer.sdp !== 'string' || !answer.sdp || answer.sdp.length > MAX_LINK_SDP_CHARS) throw new Error('Invalid answer');
       pc.setRemoteDescription(answer.sdp, 'answer');
       if (!await link.whenOpen()) throw new Error('the connection did not open');
       return true;
@@ -364,10 +370,10 @@ export class PeerLinks {
     this.links.add(link);
     try {
       pc.onDataChannel(dc => link.bind(dc));
-      const gathered = this.gathered(pc);
+      const gathered = this.gathered(link);
       pc.setRemoteDescription(sdp, 'offer');
       const answer = await gathered;
-      if (!answer || answer.type !== 'answer' || answer.sdp.length > MAX_LINK_SDP_CHARS) throw new Error('No answer');
+      if (link.isClosed || !answer || answer.type !== 'answer' || answer.sdp.length > MAX_LINK_SDP_CHARS) throw new Error('No answer');
       return { sdp: answer.sdp };
     } catch (error) {
       link.close();
@@ -380,14 +386,15 @@ export class PeerLinks {
    * library says so, when candidates stop appearing (with a STUN server configured it may never report completion), or when the
    * budget runs out.
    */
-  private gathered(pc: LinkPeerConnection): Promise<{ sdp: string; type: string } | null> {
+  private gathered(link: PeerLink): Promise<{ sdp: string; type: string } | null> {
     return new Promise(resolve => {
       let done = false;
       let quiet: ReturnType<typeof setTimeout> | undefined;
-      const finish = () => { if (done) return; done = true; clearTimeout(budget); clearTimeout(quiet); resolve(pc.localDescription()); };
+      const finish = () => { if (done) return; done = true; clearTimeout(budget); clearTimeout(quiet); resolve(link.isClosed ? null : link.pc.localDescription()); };
       const budget = setTimeout(finish, this.timings.gatherMs);
-      pc.onGatheringStateChange(state => { if (state === 'complete') finish(); });
-      pc.onLocalCandidate(() => { if (done) return; clearTimeout(quiet); quiet = setTimeout(finish, this.timings.gatherQuietMs); });
+      void link.whenClosed.then(finish);
+      link.pc.onGatheringStateChange(state => { if (state === 'complete') finish(); });
+      link.pc.onLocalCandidate(() => { if (done) return; clearTimeout(quiet); quiet = setTimeout(finish, this.timings.gatherQuietMs); });
     });
   }
 

@@ -28,8 +28,7 @@ const dispatch = declaration('dispatchCommand');
 const finishRestart = one(node => ts.isFunctionDeclaration(node) && node.name?.text === 'finishUpdateRestartAdmission');
 const advice = one(node => ts.isExpressionStatement(node)
   && node.getText(indexTree).startsWith("console.log('[Bridge] Encrypted endpoint ready. Run ftown security invite"));
-const timer = one(node => ts.isExpressionStatement(node) && node.getText(indexTree).startsWith('setTimeout(')
-  && node.getText(indexTree).includes('ready = true;'));
+const timer = declaration('startupTimer');
 const cliSource = readFileSync(new URL('./cli-client.ts', import.meta.url), 'utf8');
 const cliTree = ts.createSourceFile('cli-client.ts', cliSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
 const command = cliTree.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === 'securityCommand');
@@ -51,11 +50,10 @@ async function startup(pointerFails = false, restart: 'none' | 'success' | 'fail
 }> {
   const adviceWithinTimer = advice.getStart(indexTree) >= timer.getStart(indexTree)
     && advice.end <= timer.end;
-  const timerSource = timer.getText(indexTree).replace('void (async () => {', 'startupWork = (async () => {');
-  assert.notEqual(timerSource, timer.getText(indexTree), 'Startup callback must expose its actual async completion');
   const harness = `
     let callback: (() => void) | undefined;
-    let startupWork: Promise<void> | undefined;
+    ${declaration('startupWork').getText(indexTree)}
+    ${declaration('shutdownRun').getText(indexTree)}
     const waitBounded = <T>(work: Promise<T>): Promise<T> => new Promise((resolve, reject) => {
       const deadline = realSetTimeout(() => reject(new Error('Readiness did not complete')), 2000);
       work.then(value => { realClearTimeout(deadline); resolve(value); }, error => { realClearTimeout(deadline); reject(error); });
@@ -140,7 +138,7 @@ async function startup(pointerFails = false, restart: 'none' | 'success' | 'fail
     const probe = { type: 'application', route: { kind: 'command', command: 'security_invite', requestId: 'isolated-command', sessionId: null }, data: { type: 'security_invite' }, mcp: null };
     const before = await dispatchCommand(messageFor(probe) as never);
     ${adviceWithinTimer ? '' : advice.getText(indexTree)}
-    ${timerSource}
+    ${timer.getText(indexTree)}
     callback!();
     let during = null;
     let frozenDuring = false;

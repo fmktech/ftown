@@ -130,7 +130,8 @@ export class CentrifugoClient {
   /** Channel of the current secure commands subscription (the account's commands:rpc), or null before subscribeSecureCommands. */
   private secureCommandChannel: string | null = null;
   /** Cross-bridge control: our outstanding requests to peer bridges, by request message id, with the peer endpoint expected to answer. */
-  private readonly peerPending = new Map<string, { senderId: string; resolve: (packet: SecureEnvelope) => void }>();
+  private readonly peerPending = new Map<string, { senderId: string; resolve: (packet: SecureEnvelope) => void; reject: (error: Error) => void }>();
+  private readonly shutdown = new AbortController();
   /** One coalesced reconciliation per account, independent of mutation acknowledgements. */
   private readonly sessionReconciliations = new Map<string, {
     bridgeId: string; revision: number; attempts: number; running: boolean; blocked: boolean;
@@ -273,11 +274,14 @@ export class CentrifugoClient {
   }
 
   connect(): void {
-    if (this.disabled) return;
+    if (this.disabled || this.shutdown.signal.aborted) return;
     this.client.connect();
   }
 
   disconnect(): void {
+    this.shutdown.abort();
+    this.secureCommandChannel = null;
+    for (const pending of this.peerPending.values()) pending.reject(new BridgeSecurityError('bridge_offline'));
     for (const pending of this.sessionReconciliations.values()) clearTimeout(pending.timer);
     this.sessionReconciliations.clear();
     this.secureCommandReady = false;
@@ -492,19 +496,17 @@ export class CentrifugoClient {
     const channel = this.peerChannel();
     if (!channel || packet.channel !== channel) throw new BridgeSecurityError('bridge_offline');
     await this.waitUntilSecureCommandsReady(Math.min(timeoutMs, 10000)).catch(() => { throw new BridgeSecurityError('bridge_offline'); });
+    if (this.peerChannel() !== channel) throw new BridgeSecurityError('bridge_offline');
     if (this.peerPending.has(packet.messageId) || this.peerPending.size >= 256) throw new BridgeSecurityError('capacity_exceeded');
     return new Promise<SecureEnvelope>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        if (this.peerPending.get(packet.messageId)?.resolve === settle) this.peerPending.delete(packet.messageId);
-        reject(new BridgeSecurityError('bridge_offline'));
-      }, timeoutMs);
-      const settle = (answer: SecureEnvelope) => { clearTimeout(timer); resolve(answer); };
-      this.peerPending.set(packet.messageId, { senderId: peerEndpointId, resolve: settle });
-      this.client.publish(channel, packet).catch((error: unknown) => {
+      const fail = (error: Error) => {
         clearTimeout(timer);
-        if (this.peerPending.get(packet.messageId)?.resolve === settle) this.peerPending.delete(packet.messageId);
-        reject(error instanceof Error ? error : new Error(String(error)));
-      });
+        if (this.peerPending.get(packet.messageId)?.reject === fail) this.peerPending.delete(packet.messageId);
+        reject(error);
+      };
+      const timer = setTimeout(() => fail(new BridgeSecurityError('bridge_offline')), timeoutMs);
+      this.peerPending.set(packet.messageId, { senderId: peerEndpointId, resolve: answer => { clearTimeout(timer); resolve(answer); }, reject: fail });
+      this.client.publish(channel, packet).catch((error: unknown) => fail(error instanceof Error ? error : new Error(String(error))));
     });
   }
 
@@ -512,11 +514,12 @@ export class CentrifugoClient {
   waitUntilSecureCommandsReady(timeoutMs: number): Promise<void> {
     const sub = this.secureCommandSubscription;
     if (this.client.state !== 'connected') this.secureCommandReady = false;
-    if (this.disabled || !sub || !Number.isFinite(timeoutMs) || timeoutMs <= 0) return Promise.reject(new Error('Secure commands unavailable'));
+    if (this.shutdown.signal.aborted || this.disabled || !sub || !Number.isFinite(timeoutMs) || timeoutMs <= 0) return Promise.reject(new Error('Secure commands unavailable'));
     return new Promise<void>((resolve, reject) => {
       let done = false;
       const finish = (error?: Error) => {
         if (done) return; done = true; clearTimeout(timer);
+        this.shutdown.signal.removeEventListener('abort', disconnected);
         this.client.off('connected', check); this.client.off('disconnected', disconnected);
         sub.off('subscribed', check); sub.off('unsubscribed', disconnected);
         error ? reject(error) : resolve();
@@ -527,6 +530,7 @@ export class CentrifugoClient {
       };
       const disconnected = () => finish(new Error('Secure commands disconnected'));
       const timer = setTimeout(() => finish(new Error('Secure commands readiness timed out')), timeoutMs);
+      this.shutdown.signal.addEventListener('abort', disconnected);
       this.client.on('connected', check); this.client.on('disconnected', disconnected);
       sub.on('subscribed', check); sub.on('unsubscribed', disconnected);
       check();
