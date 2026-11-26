@@ -718,23 +718,6 @@ describe('buildScriptArgs', () => {
   });
 });
 
-/** Waits for the fake script to record a complete, newline-terminated argv. */
-async function waitForScriptArgs(outFile: string, timeoutMs = 5000): Promise<string[]> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const text = await readFile(outFile, 'utf8');
-      if (text.length > 0 && text.endsWith('\n')) {
-        return text.trimEnd().split('\n');
-      }
-    } catch {
-      // Not written yet.
-    }
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error(`fake script did not record its arguments in ${outFile}`);
-}
-
 describe('spawnTui with a fake script on PATH', () => {
   const cases: Array<{
     platform: NodeJS.Platform;
@@ -751,7 +734,7 @@ describe('spawnTui with a fake script on PATH', () => {
   ];
 
   for (const { platform, expected } of cases) {
-    it(`finds script through PATH and passes the ${platform} dialect argv`, async () => {
+    it(`finds script through PATH and passes the ${platform} dialect argv`, async t => {
       const binDir = join(root, `fake-script-${platform}`);
       const outFile = join(binDir, 'args.txt');
       await mkdir(binDir, { recursive: true });
@@ -769,7 +752,9 @@ describe('spawnTui with a fake script on PATH', () => {
       try {
         const tui = createGrokSys(platform).spawnTui(grokBinary, scratchDir);
         assert.notEqual(tui.pid, undefined, 'a script child was spawned');
-        assert.deepEqual(await waitForScriptArgs(outFile), expected(grokBinary, scratchDir));
+        await t.waitFor(() => assert.ok(tui.hasExited(), 'the fake script has finished writing its arguments'), { timeout: 5000 });
+        const args = (await readFile(outFile, 'utf8')).trimEnd().split('\n');
+        assert.deepEqual(args, expected(grokBinary, scratchDir));
       } finally {
         if (originalPath === undefined) delete process.env.PATH;
         else process.env.PATH = originalPath;
