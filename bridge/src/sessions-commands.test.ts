@@ -649,13 +649,13 @@ test('remembered list reads the local bridge cache', async () => fixture(async r
 }));
 
 test('ftown bridges --resources reports capacity in JSON and text', async () => {
-  const resources = { sampledAt: 123, cpuPercent: 18, freeRamBytes: 2 ** 30, totalRamBytes: 2 ** 31, freeDiskBytes: 2 ** 32, memoryPressure: 'warning' };
+  const resources = { sampledAt: 123, cpuPercent: 18, freeRamBytes: 2 ** 30, totalRamBytes: 2 ** 31, freeDiskBytes: 2 ** 32, availableRamBytes: 1.5 * 2 ** 30, memoryPressure: 'warning' };
   const report = { bridgeId: 'local', resources, peers: [{ bridgeId: 'peer', resources: null }] };
   await fixture(async (requests, output) => {
     assert.equal(await runBridges(['--resources', '--json']), 0);
     assert.ok(requests[0].url.endsWith('/api/peers?resources=1'));
     assert.deepEqual(JSON.parse(output.at(-1)!), report);
     assert.equal(await runBridges(['--resources']), 0);
-    assert.ok(output.some(line => line.includes('memory pressure warning')));
+    assert.ok(output.some(line => line.includes('1.5/2.0 GiB available') && line.includes('memory pressure warning')));
   }, () => report);
 });

@@ -3,7 +3,7 @@
 import { useEffect, useRef } from "react";
 import { bridgeLetter } from "./BridgeBadge";
 import type { UpdateView } from "@/hooks/useBridgeUpdates";
-import type { HostResources } from "@/lib/host-resources";
+import { ramCapacity, type HostResources } from "@/lib/host-resources";
 
 import type { BridgeSecurityState } from "@security/protocol";
 import { bridgeConnectionLock, SecurityLockIcon } from "./SecurityLockIcon";
@@ -46,13 +46,14 @@ export function BridgesDialog({ computers, resources, create, updates, security,
     dialog?.showModal();
     return () => dialog?.close();
   }, []);
-  const gib = (bytes: number) => (bytes / 2 ** 30).toLocaleString(undefined, { maximumFractionDigits: 1 }) + " GiB";
+  const gib = (bytes: number) => (bytes / 2 ** 30).toLocaleString(undefined, { maximumFractionDigits: 1 });
   return <dialog ref={ref} aria-label="Bridges" onCancel={event => { event.preventDefault(); close(); }} className="computers-dialog">
     <header className="computers-heading"><div><h2>Computers</h2><p>{computers.filter(b => b.online).length} online · {computers.length} total</p></div>
       <button className="btn-ghost min-h-11 min-w-11" aria-label="Close bridges" onClick={close}>×</button></header>
     {!computers.length && <p className="p-5">No known bridges.</p>}
     <div className="computers-list">{computers.map(bridge => {
       const sample = bridge.online ? resources.get(bridge.id) : undefined;
+      const ram = sample && ramCapacity(sample);
       const lock = bridgeConnectionLock(bridge.connection);
       const runningVersion = bridge.online ? bridge.update?.status?.currentVersion : undefined;
       const version = runningVersion ?? bridge.update?.lastKnownVersion;
@@ -60,12 +61,15 @@ export function BridgesDialog({ computers, resources, create, updates, security,
         <header><span className="bridge-index">{bridge.number ? bridgeLetter(bridge.number) : "—"}</span><strong title={bridge.label}>{bridge.label}</strong>
           <span className="computer-status" data-online={bridge.online}>{bridge.online ? "Online" : "Offline"}</span></header>
         <p className="computer-version">Bridge version <strong>{version ?? "Unknown"}</strong>{version && !runningVersion && " (last reported)"}</p>
-        {sample ? <dl className="computer-load" title={`Sampled at ${new Date(sample.sampledAt).toLocaleTimeString()}`}>
+        {sample && ram ? <dl className="computer-load" title={`Sampled at ${new Date(sample.sampledAt).toLocaleTimeString()}`}>
           <div><dt>CPU</dt><dd>{sample.cpuPercent === null ? "—" : sample.cpuPercent + "%"}</dd>
             {sample.cpuPercent !== null && <meter aria-label="CPU usage" min={0} max={100} value={sample.cpuPercent} />}</div>
-          <div><dt>RAM free</dt><dd>{gib(sample.freeRamBytes)}<small>of {gib(sample.totalRamBytes)} total</small></dd></div>
-          <div><dt>Disk free</dt><dd>{sample.freeDiskBytes === null ? "—" : gib(sample.freeDiskBytes)}</dd></div>
-          {sample.memoryPressure && <div className="computer-pressure"><dt>Memory pressure</dt><dd>{sample.memoryPressure}</dd></div>}
+          <div><dt className="computer-ram-label"><span title={ram.label === "available" ? "Estimated capacity, including reclaimable memory" : undefined}>RAM {ram.label}</span>
+            {sample.memoryPressure && <span className="computer-pressure" data-pressure={sample.memoryPressure} title="macOS memory pressure">{sample.memoryPressure} pressure</span>}</dt>
+            <dd>{gib(ram.bytes)} / {gib(sample.totalRamBytes)} GiB</dd>
+            {sample.totalRamBytes > 0 && <meter aria-label="RAM usage" min={0} max={sample.totalRamBytes} value={sample.totalRamBytes - ram.bytes}
+              aria-valuetext={`${gib(ram.bytes)} GiB ${ram.label} of ${gib(sample.totalRamBytes)} GiB total`} />}</div>
+          <div><dt>Disk free</dt><dd>{sample.freeDiskBytes === null ? "—" : gib(sample.freeDiskBytes) + " GiB"}</dd></div>
         </dl> : <p className="computer-load-empty">Load unavailable</p>}
         <div role="toolbar" aria-label={`Actions for ${bridge.label}`} className="computer-toolbar"
           onKeyDown={event => {

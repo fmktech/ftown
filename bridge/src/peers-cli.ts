@@ -64,8 +64,11 @@ export async function runBridges(args: string[]): Promise<number> {
     if (!resources) return '';
     if (!sample) return '  capacity unavailable';
     const gib = (n: number) => (n / 2 ** 30).toFixed(1);
+    const ram = sample.availableRamBytes === undefined
+      ? `${gib(sample.freeRamBytes)}/${gib(sample.totalRamBytes)} GiB free`
+      : `${gib(sample.availableRamBytes)}/${gib(sample.totalRamBytes)} GiB available (estimated, ${gib(sample.freeRamBytes)} GiB free)`;
     const pressure = sample.memoryPressure ? `  memory pressure ${sample.memoryPressure}` : '';
-    return `  CPU ${sample.cpuPercent === null ? 'unknown' : sample.cpuPercent + '%'}  RAM ${gib(sample.freeRamBytes)}/${gib(sample.totalRamBytes)} GiB free${pressure}  disk ${sample.freeDiskBytes === null ? 'unknown' : gib(sample.freeDiskBytes) + ' GiB free'}`;
+    return `  CPU ${sample.cpuPercent === null ? 'unknown' : sample.cpuPercent + '%'}  RAM ${ram}${pressure}  disk ${sample.freeDiskBytes === null ? 'unknown' : gib(sample.freeDiskBytes) + ' GiB free'}`;
   };
   const peers = body?.peers ?? [];
   console.log(`this bridge: ${body?.bridgeId ?? 'unknown'}${capacity(body?.resources)}`);
