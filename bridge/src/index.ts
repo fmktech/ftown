@@ -1185,6 +1185,7 @@ program
     });
 
     let ready = false;
+    let shutdownRun: Promise<void> | undefined;
     const modelRouting = createRealModelRoutingService(homedir());
     const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
     const stopHandoffSession = async (id: string): Promise<void> => {
@@ -1229,6 +1230,7 @@ program
     localApiServer.setTicketInbox(ticketInbox);
     const deliveries = new Map<string, Promise<void>>();
     function deliverProject(id: string) {
+      if (!ready) return Promise.resolve(); // Unsent outbox records are retried on the next start.
       const current = deliveries.get(id);
       if (current) return current;
       const next = Promise.all([
@@ -1352,8 +1354,9 @@ program
       if (!ready) throw new BridgeStartingError();
       return localApiServer.dispatchSecure(message);
     }, updateEffects);
-    setTimeout(() => {
-      void (async () => {
+    let startupWork: Promise<void> | undefined;
+    const startupTimer = setTimeout(() => {
+      startupWork = (async () => {
         if (!updateRestart) {
           ready = true;
           console.log('[Bridge] Ready and listening for commands');
@@ -1365,6 +1368,7 @@ program
         }
         try {
           await resurrection.resurrectSessions();
+          if (shutdownRun) return;
           resurrectionComplete = true;
           // Start-up sweep: parents already dead (or removed) before this
           // bridge started never hit resurrection's dead path, so escalate
@@ -1375,10 +1379,11 @@ program
           await attentionStore.restoreIdleNotifications(knownSessions
             .filter(session => session.status === 'running' && session.shellType !== 'shell')
             .map(session => session.id));
-          if (updateRestart) {
+          if (updateRestart && !shutdownRun) {
             if (!bridgePointerPublished) throw new Error('Update restart pointer unavailable');
             if (!opts.local) await centrifugo.waitUntilSecureCommandsReady(45_000);
             await finishUpdateRestartAdmission(updateAdmission, () => reportUpdateReady({ version: BRIDGE_VERSION, bridgeId, ownerId: auth.ownerId, endpointId: security.endpoint.id }));
+            if (shutdownRun) return;
             ready = true;
             console.log('[Bridge] Update restart ready and listening for commands');
           }
@@ -1395,16 +1400,14 @@ program
 
     // Leaves tmux sessions running and the process alive; a revoked restart re-executes this same PID
     // afterwards, so the local port, pointer, relay connection and timers must all be released here.
-    let shutdownRun: Promise<void> | undefined;
     function shutdown(): Promise<void> {
       shutdownRun ??= (async () => {
+        console.log('\n[Bridge] Shutting down...');
+        ready = false;
+        clearTimeout(startupTimer);
         clearInterval(autoUpdateTimer);
         clearInterval(ticketTimer);
-        console.log('\n[Bridge] Shutting down...');
         try {
-          await maintenance;
-          await Promise.all([...deliveries.values(), peerCache.stop(), projectDirectory.stop()]);
-          await pullRequestEvents.stop();
           attentionStore.stopNotifications();
           stopPushSessionObserver();
           stopBoardObserver();
@@ -1412,42 +1415,56 @@ program
           pushNotifier?.stop();
           ledgerRelay?.stop();
           accountRegistrar?.stop();
-          // Solo L2 ordering: stop accepting first, then children (panel before
-          // hub), then the rest of the bridge teardown.
           if (solo) {
             void solo.front.close().catch(() => {});
             solo.panel.stop();
             solo.hub.stop();
           }
+          // Close ingress and release pending network requests before draining their callers.
+          localApiServer.stop();
+          loopbackServer.closeAll();
+          addressed?.listener.stop();
+          directPeers.closeAll();
+          peerLinks.closeAll();
+          watchRegistry.dispose();
+          centrifugo.disconnect();
+
+          const drained = await Promise.allSettled([
+            localApiServer.closeTransfers(), peerCache.stop(), projectDirectory.stop(), pullRequestEvents.stop(),
+            maintenance, ...deliveries.values(),
+            // An already-started resurrection can still attach a PTY. Detach once it finishes.
+            Promise.resolve(startupWork).then(() => terminalOutput.stop()),
+          ]);
+          for (const result of drained) if (result.status === 'rejected') throw result.reason;
         } finally {
-          // The port and the pointer would outlive a same-PID re-exec, so no earlier failure may skip them.
-          try { await localApiServer.closeTransfers(); }
-          finally {
-            try { localApiServer.stop(); } finally { cleanupPointer(); }
-          }
+          cleanupPointer();
+          // node-datachannel module-level cleanup — avoids the native crash-on-exit race.
+          try { ndcCleanup(); } catch { /* native lib already torn down */ }
+          await security.close();
         }
-        await terminalOutput.stop();
-        loopbackServer.closeAll();
-        addressed?.listener.stop();
-        directPeers.closeAll();
-        peerLinks.closeAll();
-        watchRegistry.dispose();
-        // node-datachannel module-level cleanup — avoids the native crash-on-exit race.
-        try { ndcCleanup(); } catch { /* native lib already torn down */ }
-        centrifugo.disconnect();
-        try { await security.close(); }
-        catch (err) { console.error('[Bridge] Failed to persist security shutdown state.'); throw err; }
       })();
       return shutdownRun;
     }
     const shutdownAndExit = async (): Promise<void> => {
-      try { await shutdown(); } catch { process.exit(1); }
+      try { await shutdown(); } catch (err) {
+        console.error('[Bridge] Shutdown failed:', err instanceof Error ? err.message : err);
+        process.exit(1);
+      }
       process.exit(0);
     };
     releaseForRestart = shutdown;
 
-    process.on('SIGINT', () => { void shutdownAndExit(); });
-    process.on('SIGTERM', () => { void shutdownAndExit(); });
+    let receivedStopSignal = false;
+    const onStopSignal = (signal: NodeJS.Signals): void => {
+      if (receivedStopSignal) {
+        console.error('[Bridge] Second stop signal received; exiting immediately.');
+        process.exit(signal === 'SIGINT' ? 130 : 143);
+      }
+      receivedStopSignal = true;
+      void shutdownAndExit();
+    };
+    process.on('SIGINT', onStopSignal);
+    process.on('SIGTERM', onStopSignal);
   });
 
 registerLocalBrowserCommands(program);

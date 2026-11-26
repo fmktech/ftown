@@ -259,6 +259,23 @@ class FakeConnection implements LinkPeerConnection {
   close(): void { this.channel?.close(); }
 }
 
+test('closing a bridge link settles a pending dial during ICE gathering and during signaling', async t => {
+  const w = await world();
+  const studio = await bridge(t, w, w.studio, w.both);
+  const peer = studio.peerBridges()[0];
+  for (const phase of ['gathering', 'signaling']) {
+    const links = new PeerLinks({ bridgeId: studio.bridgeId, endpointId: studio.endpoint.id, peers: () => [peer],
+      execute: async () => { throw Error('unexpected request'); }, factory: () => new FakeConnection(), log() {} });
+    const offered = Promise.withResolvers<void>();
+    let offers = 0;
+    const dialing = links.ensure(peer, async () => { offers++; offered.resolve(); return new Promise(() => {}); });
+    if (phase === 'signaling') await offered.promise;
+    links.closeAll();
+    assert.equal(await Promise.race([dialing, new Promise(resolve => setImmediate(() => resolve('still waiting')))]), false);
+    assert.equal(offers, phase === 'signaling' ? 1 : 0);
+  }
+});
+
 interface Linked { peers: PeerControl; transport: ReturnType<typeof relay>; studioLinks: PeerLinks; deskLinks: PeerLinks; connections: FakeConnection[];
   studio: BridgeSecurityService; desk: BridgeSecurityService; settle: () => Promise<void> }
 
