@@ -16,20 +16,33 @@ function cpuTime() {
   return { idle, total };
 }
 
-// XNU exposes NOTE_MEMORYSTATUS_PRESSURE_* flags through this sysctl on macOS.
+function macMemoryProbe(file: string, args: string[]): Promise<string | undefined> {
+  return new Promise<string>((resolve, reject) => {
+    execFile(file, args, { timeout: 1000, maxBuffer: 8192 }, (error, stdout) => error ? reject(error) : resolve(stdout));
+  }).catch(() => undefined);
+}
+
+// XNU exposes NOTE_MEMORYSTATUS_PRESSURE_* flags through kern.memorystatus_vm_pressure_level.
 // https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/event_private.h
-function macMemoryPressure(): Promise<HostResources['memoryPressure']> {
-  const output = new Promise<string>((resolve, reject) => {
-    execFile('/usr/sbin/sysctl', ['-n', 'kern.memorystatus_vm_pressure_level'], { timeout: 1000, maxBuffer: 1024 },
-      (error, stdout) => error ? reject(error) : resolve(stdout));
-  });
-  return output.then(stdout => {
-    switch (stdout.trim()) {
-      case '1': return 'normal';
-      case '2': return 'warning';
-      case '4': return 'critical';
-    }
-  }, () => undefined);
+function macPressureLevel(output: string | undefined): HostResources['memoryPressure'] {
+  switch (output?.trim()) {
+    case '1': return 'normal';
+    case '2': return 'warning';
+    case '4': return 'critical';
+  }
+}
+
+function macAvailableRam(output: string | undefined, total: number): number | undefined {
+  if (!output) return;
+  const pageSize = Number(output.match(/\(page size of (\d+) bytes\)/)?.[1]);
+  // vm_stat splits speculative pages out of Mach's free count. Recombine them
+  // and include inactive pages to estimate RAM available for new work.
+  // https://github.com/apple-oss-distributions/system_cmds/blob/main/vm_stat/vm_stat.c
+  const free = Number(output.match(/^Pages free:[ \t]+(\d+)\.\s*$/m)?.[1]);
+  const speculative = Number(output.match(/^Pages speculative:[ \t]+(\d+)\.\s*$/m)?.[1]);
+  const inactive = Number(output.match(/^Pages inactive:[ \t]+(\d+)\.\s*$/m)?.[1]);
+  const available = (free + speculative + inactive) * pageSize;
+  if (pageSize > 0 && Number.isSafeInteger(available) && available <= total) return available;
 }
 
 export function hostResourceSampler(dataDir: string) {
@@ -46,13 +59,20 @@ export function hostResourceSampler(dataDir: string) {
     sampledAt = now;
     const freeRamBytes = freemem();
     const totalRamBytes = totalmem();
+    const mac = platform() === 'darwin';
     cached = Promise.all([
       statfs(dataDir).then(fs => fs.bavail * fs.bsize, () => null),
-      platform() === 'darwin' ? macMemoryPressure() : undefined,
-    ]).then(([freeDiskBytes, memoryPressure]) => ({
-      sampledAt: now, cpuPercent, freeRamBytes, totalRamBytes, freeDiskBytes,
-      ...(memoryPressure && { memoryPressure }),
-    }));
+      mac ? macMemoryProbe('/usr/sbin/sysctl', ['-n', 'kern.memorystatus_vm_pressure_level']) : undefined,
+      mac ? macMemoryProbe('/usr/bin/vm_stat', []) : undefined,
+    ]).then(([freeDiskBytes, pressureOutput, vmOutput]) => {
+      const memoryPressure = macPressureLevel(pressureOutput);
+      const availableRamBytes = macAvailableRam(vmOutput, totalRamBytes);
+      return {
+        sampledAt: now, cpuPercent, freeRamBytes, totalRamBytes, freeDiskBytes,
+        ...(memoryPressure && { memoryPressure }),
+        ...(availableRamBytes === undefined ? {} : { availableRamBytes }),
+      };
+    });
     return cached;
   };
 }

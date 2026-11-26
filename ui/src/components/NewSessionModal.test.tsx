@@ -356,9 +356,11 @@ it("starts a fresh modal opening with the default account after a canceled selec
 });
 
 it("shows CPU, RAM and disk space beside the reporting computer", () => {
+  const sample = { sampledAt: 1, cpuPercent: 62, freeRamBytes: 4 * 2 ** 30, totalRamBytes: 16 * 2 ** 30, freeDiskBytes: 21 * 2 ** 30 };
   render(<NewSessionModal isOpen onClose={vi.fn()} onSubmit={vi.fn()} bridges={bridges}
-    resourcesByBridge={new Map([["b", { sampledAt: 1, cpuPercent: 62, freeRamBytes: 4 * 2 ** 30, totalRamBytes: 16 * 2 ** 30, freeDiskBytes: 21 * 2 ** 30 }]])}
+    resourcesByBridge={new Map([["a", { ...sample, availableRamBytes: 12 * 2 ** 30, memoryPressure: "normal" as const }], ["b", sample]])}
     sendCommand={vi.fn(async () => ({ requestId: "accounts", success: true, data: { accounts } }))} />);
+  expect(screen.getByRole("option", { name: /first.*RAM 12.0\/16.0 GiB available.*memory pressure normal/ })).toBeTruthy();
   expect(screen.getByRole("option", { name: /second.*CPU 62%.*RAM 4.0\/16.0 GiB free.*disk 21.0 GiB free/ })).toBeTruthy();
 });
 
