@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdir, mkdtemp, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -50,6 +50,41 @@ function makeSession(root: string, overrides: Partial<Session> = {}): Session {
     ...overrides,
   };
 }
+
+test('status polls reuse the validated revision after payload expiry and detect file replacement', async t => {
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'ftown-preview-revision-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, 'page.html');
+  const original = '<p>one</p>'.repeat(1024);
+  const replacement = '<p>two</p>'.repeat(1024);
+  await writeFile(path, original);
+  const { controller } = setup([makeSession(root)]);
+  const registered = await controller.setPreview('sess-1', [path]);
+  assert.ok(registered.ok && registered.session.preview);
+  const { id, files: [file] } = registered.session.preview;
+  const handle = await open(path);
+  const reads = t.mock.method(Object.getPrototypeOf(handle), 'read');
+  await handle.close();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const first = await controller.getPreviewStatus('sess-1', id, file.id);
+  assert.ok(first.ok && first.preview.state === 'ready' && first.preview.gzipBytes);
+  const count = reads.mock.callCount();
+  assert.ok(count > 0);
+  t.mock.timers.tick(24 * 60 * 60 * 1_000);
+  const idle = await controller.getPreviewStatus('sess-1', id, file.id, first.preview.revision);
+  assert.ok(idle.ok && idle.preview.state === 'unchanged');
+  assert.deepEqual(await controller.getPreviewStatus('sess-1', id, file.id), first);
+  assert.equal(reads.mock.callCount(), count, 'unchanged file contents must not be reread');
+  const chunk = await controller.getPreviewChunk('sess-1', id, file.id, first.preview.revision, 0, 'gzip');
+  assert.ok(chunk.ok && chunk.preview.state === 'chunk');
+  assert.equal(gunzipSync(Buffer.from(chunk.preview.dataBase64, 'base64')).toString(), original);
+  assert.ok(reads.mock.callCount() > count, 'the payload buffers should have expired');
+  await writeFile(join(root, 'next.html'), replacement);
+  await rename(join(root, 'next.html'), path);
+  const changed = await controller.getPreviewStatus('sess-1', id, file.id, first.preview.revision);
+  assert.ok(changed.ok && changed.preview.state === 'ready');
+  assert.equal(changed.preview.revision, createHash('sha256').update(replacement).digest('hex'));
+});
 
 test('addPreview appends with new ids and re-registers in place, preserving untouched ids', async (t) => {
   const root = await mkdtemp(join(await realpath(tmpdir()), 'ftown-preview-multi-'));

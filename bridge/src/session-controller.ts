@@ -691,7 +691,7 @@ export class SessionController {
     if (!selected.source || !entry) return outcome({ ok: true, preview: { state: 'unregistered' } });
     const signature = await this.previewFileSignature(entry.filePath);
     try {
-      const data = await this.previewReader.read(selected.session, selected.source, fileId);
+      const data = await this.previewReader.readStatus(selected.session, selected.source, fileId);
       const current = await this.previewSnapshot(sessionId, previewId);
       if (!current?.source || current.session.workingDir !== selected.session.workingDir || JSON.stringify(current.source) !== JSON.stringify(selected.source) || !current.source.files.some((file) => file.id === fileId)) return outcome({ ok: true, preview: { state: 'unregistered' } });
       return outcome({ ok: true, preview: previewStatus(previewId, fileId, data, knownRevision) }, signature, entry.filePath);
