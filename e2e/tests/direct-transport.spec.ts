@@ -1,4 +1,11 @@
+import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { expect, type BrowserContext, type Page } from "@playwright/test";
+import { BRIDGE_HOME, E2E_DIR } from "../helpers/config";
+import { bridgeApiFetch, readBridgePointer } from "../helpers/bridge-api";
+import { isolatedBridgeEnv, tmuxSocket } from "../helpers/ledger-bridge";
 import { test } from "../helpers/fixtures";
 import {
   sharedAccountId,
@@ -143,6 +150,52 @@ test.describe("transport ladder", () => {
       expect(await commandsRpcClients(accountId)).toBeGreaterThanOrEqual(1);
     } finally {
       await context.close();
+    }
+  });
+
+  test("switching to a surviving tmux session over a direct connection restores the same shell", async ({ page }) => {
+    const id = randomUUID();
+    const name = `surviving-${id}`;
+    const directory = join(BRIDGE_HOME, ".ftown", "data", "sessions", id);
+    const first = `first-${id}`;
+    const created = await bridgeApiFetch("POST", "/api/sessions", {
+      body: { name: first, projectName: "E2E", shellType: "shell" },
+    });
+    expect(created.status).toBe(201);
+    const firstId = (created.body as { session: { id: string } }).session.id;
+    try {
+      const tmuxDir = (await readFile(join(E2E_DIR, ".bridge.tmux"), "utf8")).trim();
+      // The session survived with its shell running but no bridge PTY client attached.
+      const panePid = execFileSync("tmux", [
+        "-S", tmuxSocket(tmuxDir), "new-session", "-d", "-P", "-F", "#{pane_pid}", "-s", `ftown-${id}`,
+        'printf "SURVIVED%s\\n" "$$"; exec /bin/sh -i',
+      ], { encoding: "utf8", env: isolatedBridgeEnv(BRIDGE_HOME, tmuxDir) }).trim();
+      const stamp = new Date().toISOString();
+      await mkdir(directory, { recursive: true });
+      await writeFile(join(directory, "session.json"), JSON.stringify({
+        id, name, bridgeId: readBridgePointer().bridgeId, shellType: "shell", command: "/bin/sh",
+        projectName: "E2E", workingDir: BRIDGE_HOME, status: "running", createdAt: stamp, updatedAt: stamp,
+      }));
+
+      await login(page);
+      await waitForBridgeOnline(page);
+      await openSession(page, first);
+      await runMarkerInTerminal(page, "FIRSTALIVE");
+      await expectBadge(page, "Local");
+      await openSession(page, name);
+      await expectBadge(page, "Local");
+      const rows = page.locator(".xterm-rows").first();
+      await expect(rows).toContainText(`SURVIVED${panePid}`);
+      await openSession(page, first);
+      await openSession(page, name);
+      await expect(rows).toContainText(`SURVIVED${panePid}`);
+      await page.locator(".xterm").first().click();
+      await page.keyboard.type('printf "RESTORED%s\\n" "$$"');
+      await page.keyboard.press("Enter");
+      await expect(rows).toContainText(`RESTORED${panePid}`);
+    } finally {
+      await bridgeApiFetch("DELETE", `/api/sessions/${id}`);
+      await bridgeApiFetch("DELETE", `/api/sessions/${firstId}`);
     }
   });
 

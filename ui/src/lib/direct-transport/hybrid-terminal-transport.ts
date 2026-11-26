@@ -259,6 +259,7 @@ interface SessionEntry {
   disposed: boolean;
   outputSub: CentrifugoSubscriptionLike | null;
   inputSub: CentrifugoSubscriptionLike | null;
+  watchId: string | null;
   watchTimer: ReturnType<typeof setInterval> | null;
   /** Why this session is on the centrifugo path; null when direct/connecting. */
   reason: FallbackReason;
@@ -395,6 +396,7 @@ export class HybridTerminalTransport implements TerminalTransportApi {
       disposed: false,
       outputSub: null,
       inputSub: null,
+      watchId: null,
       watchTimer: null,
       reason: null,
       pendingInput: [],
@@ -1195,7 +1197,7 @@ export class HybridTerminalTransport implements TerminalTransportApi {
     entry.reason = null;
     entry.pendingSwitchPeer = null;
     // terminal_unwatch while mode is still 'centrifugo' (R3 teardown).
-    this.sendWatch('terminal_unwatch', entry.sessionId);
+    this.sendWatch('terminal_unwatch', entry);
     this.detachCentrifugo(entry);
     // fallbackReason cleared by this successful mode change (T5); onModeChange
     // fires Cloud -> Local/P2P (T8).
@@ -1355,15 +1357,16 @@ export class HybridTerminalTransport implements TerminalTransportApi {
     // Send terminal_watch only once the subscription is active: the bridge
     // reacts to the watch with a screen_dump, which would be lost if published
     // before we are subscribed (fresh subscribes don't recover history).
-    // Centrifuge re-emits 'subscribed' after reconnects — re-sending a single
-    // watch then refreshes the bridge watcher after possible TTL expiry, but
-    // the heartbeat interval must not stack (R3).
+    // Every successful subscribe needs a fresh screen, even if the bridge still
+    // remembers our previous watch. Only heartbeats reuse the same watcher ID.
     outputSub.on('subscribed', () => {
       if (entry.disposed) return;
-      this.sendWatch('terminal_watch', entry.sessionId);
+      this.sendWatch('terminal_unwatch', entry);
+      entry.watchId = crypto.randomUUID();
+      this.sendWatch('terminal_watch', entry);
       if (entry.watchTimer === null) {
         entry.watchTimer = setInterval(
-          () => this.sendWatch('terminal_watch', entry.sessionId),
+          () => this.sendWatch('terminal_watch', entry),
           WATCH_HEARTBEAT_MS,
         );
       }
@@ -1545,8 +1548,10 @@ export class HybridTerminalTransport implements TerminalTransportApi {
 
   // --- internals ---------------------------------------------------------
 
-  private sendWatch(type: 'terminal_watch' | 'terminal_unwatch', sessionId: string): void {
-    this.publishCommand({ type, sessionId, clientId: this.clientId });
+  private sendWatch(type: 'terminal_watch' | 'terminal_unwatch', entry: SessionEntry): void {
+    if (!entry.watchId) return;
+    this.publishCommand({ type, sessionId: entry.sessionId, clientId: entry.watchId });
+    if (type === 'terminal_unwatch') entry.watchId = null;
   }
 
   private dropSubscription(channel: string): void {
@@ -1606,7 +1611,7 @@ export class HybridTerminalTransport implements TerminalTransportApi {
     if (entry.direct) {
       this.peers.get(entry.bridgeId)?.peer?.detach(entry.sessionId);
     } else if (entry.mode === 'centrifugo') {
-      this.sendWatch('terminal_unwatch', entry.sessionId);
+      this.sendWatch('terminal_unwatch', entry);
     }
 
     if (entry.watchTimer) {

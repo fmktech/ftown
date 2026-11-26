@@ -725,7 +725,7 @@ program
       },
       onInput: (sid, data) => { runner.write(sid, data); },
       onResize: (sid, cols, rows) => { handleClientResize(sid, cols, rows); },
-      onAttach: (sid, deliver) => terminalOutput.attachScreen(sid, deliver),
+      onAttach: attachDirectScreen,
       onCommand: { dispatch: message => serveDirectCommand(message), get observer() { return updateEffects; } },
     });
     // Loopback WebSocket rung: same DirectMessage protocol as WebRTC, tunneled
@@ -743,7 +743,7 @@ program
       allowedOrigins: apiOrigin ? [apiOrigin] : [],
       onInput: (sid, data) => { runner.write(sid, data); },
       onResize: (sid, cols, rows) => { handleClientResize(sid, cols, rows); },
-      onAttach: (sid, deliver) => terminalOutput.attachScreen(sid, deliver),
+      onAttach: attachDirectScreen,
       onCommand: { dispatch: message => serveDirectCommand(message), get observer() { return updateEffects; } },
     });
     // Fixed-address rung: a browser that remembers this bridge's address, port and certificate connects with no signaling at
@@ -783,14 +783,15 @@ program
     // path session resurrection uses (runner.reattach); tmux redraws the full
     // screen to a joining client, so live output resumes within milliseconds and
     // rides the already-attached pump. No new pump, no new tmux plumbing.
-    const watchReattachInFlight = new Set<string>();
-    const ensureWatchedSessionAttached = (sid: string): void => {
-      if (runner.isRunning(sid) || watchReattachInFlight.has(sid)) return;
+    const watchReattachInFlight = new Map<string, Promise<void>>();
+    const ensureWatchedSessionAttached = (sid: string): Promise<void> | undefined => {
+      if (runner.isRunning(sid)) return;
+      const pending = watchReattachInFlight.get(sid);
+      if (pending) return pending;
       if (!runner.hasTmuxSession(sid)) return;
       let release: () => void;
       try { release = updateAdmission.enter(); } catch { return; }
-      watchReattachInFlight.add(sid);
-      void store.loadSession(sid)
+      const reattach = store.loadSession(sid)
         .then((session) => {
           // Only adopt what this store still considers live: a tmux session with
           // no live record may belong to another bridge on this machine.
@@ -808,7 +809,15 @@ program
           console.error(`[Bridge] Failed to reattach ${sid} for a terminal watcher:`, err);
         })
         .finally(() => { watchReattachInFlight.delete(sid); release(); });
+      watchReattachInFlight.set(sid, reattach);
+      return reattach;
     };
+
+    function attachDirectScreen(sid: string, deliver: (screen: string) => void): void {
+      const reattach = ensureWatchedSessionAttached(sid);
+      if (reattach) void reattach.then(() => terminalOutput.attachScreen(sid, deliver));
+      else terminalOutput.attachScreen(sid, deliver);
+    }
 
     // Every NEW remote watcher (first, each additional distinct client, or a
     // post-expiry re-registration) ⇒ push a full screen resync so the joining

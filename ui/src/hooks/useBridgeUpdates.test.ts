@@ -64,7 +64,7 @@ describe("authenticated bridge update controller", () => {
     expect(send.mock.calls.filter(([command]) => command.type === "update_bridge")).toHaveLength(1);
     const op = c.get("a").operation!; mutation.resolve({ requestId: "r", success: true, data: {} }); await first;
     expect(c.get("a").operation?.id).toBe(op.id);
-    c.setActive([]); expect(c.get("a").status).toBeNull(); c.setActive(["a"]);
+    c.setActive([]); expect(c.get("a").status).toBeNull(); expect(c.get("a").lastKnownVersion).toBe("1.0.0"); c.setActive(["a"]);
     latest = status("a", { currentVersion: op.target, availability: "current", canUpdate: false }); await c.check("a");
     expect(c.get("a").complete).toBe(false);
     latest = status("a", { currentVersion: op.target, availability: "current", canUpdate: false, operation: { id: op.id, targetVersion: op.target, phase: "succeeded", startedAt: "2026-10-28T00:00:00Z", updatedAt: "2026-10-28T00:00:01Z", error: null } });
