@@ -1,4 +1,4 @@
-import { resolveSessionParent, type RemoteParentLookup } from './session-parent.js';
+import { resolveSessionParent, type RemoteParentLookup, type SessionHierarchyWrites } from './session-parent.js';
 import { assertSessionCanLaunch } from './retired-automation.js';
 import { v4 as uuidv4 } from 'uuid';
 import { existsSync, lstatSync, mkdirSync, statSync } from 'node:fs';
@@ -26,7 +26,7 @@ import { PROVIDER_AUTH_ENV, PROVIDER_RUNTIME_ENV, loadProviderEnv } from './prov
 import { registerSessionWorkspace } from './session-registry.js';
 import { GitWorktrees } from './worktrees.js';
 import { WorktreeError, type SessionWorktree, type WorktreeApi } from './coordination/contract-b.js';
-import type { SessionPlan } from './coordination/contract-c.js';
+import type { PlanItem } from './coordination/contract-c.js';
 import { detectWsl2, isUnderWslMnt, wslMntWorkdirWarning, type Wsl2Probe } from './wsl2.js';
 import { accountEnv, loadAccounts } from './accounts.js';
 
@@ -59,10 +59,11 @@ export class AccountSelectionError extends Error {
 /** The slice of the plan store the create path needs (see contract-c.ts). */
 export interface CreatePlanStoreDep {
   startForChild(parentId: string, itemId: string, childId: string): Promise<void>;
-  get(parentId: string): Promise<SessionPlan | null>;
+  get(parentId: string): Promise<{ items: Pick<PlanItem, 'id' | 'state'>[] } | null>;
 }
 
 export interface CreateFtownSessionDeps {
+  hierarchyWrites?: SessionHierarchyWrites;
   loadRemoteParent?: RemoteParentLookup;
   hasRemoteChildren?: (id: string) => Promise<boolean>;
   store: SessionStore;
@@ -79,6 +80,8 @@ export interface CreateFtownSessionDeps {
   worktrees?: Pick<WorktreeApi, 'create' | 'remove'>;
   /** Optional plan store (contract-c): enables `--plan-item` child creation. */
   planStore?: CreatePlanStoreDep;
+  remotePlanStore?: (bridgeId: string) => CreatePlanStoreDep;
+  releaseRemotePlan?: (child: Session) => void;
   /** Injectable WSL2 probe; defaults to reading the kernel release files. */
   isWsl2?: Wsl2Probe;
   /** Sink for operator-facing warnings; defaults to console.warn. */
@@ -534,14 +537,14 @@ async function createFtownSessionImpl(
   const prompt = input.prompt?.trim() ?? '';
 
   const requestedParentId = input.parentSessionId;
-  const relationship = requestedParentId ? await resolveSessionParent(deps.store, deps.bridgeId, requestedParentId, input.parentBridgeId, deps.loadRemoteParent) : undefined;
-  const parentSession = relationship?.direct;
-  const resolvedParentSession = relationship?.root;
-  const parentSessionId = resolvedParentSession?.id;
-  const parentName = resolvedParentSession?.name;
-  const localRoot = resolvedParentSession?.bridgeId === deps.bridgeId ? resolvedParentSession : undefined;
-  const parentWorkingDir = localRoot?.workingDir;
-  const projectName = resolvedParentSession?.projectName || (typeof input.projectName === 'string' && input.projectName.trim()) || (relationship ? 'Unassigned' : undefined);
+  const ancestry = requestedParentId ? await resolveSessionParent(deps.store, deps.bridgeId, requestedParentId, input.parentBridgeId, deps.loadRemoteParent, deps.hierarchyWrites) : [];
+  const parent = ancestry[0];
+  const parentSessionId = parent?.id;
+  const parentName = parent?.name;
+  const localParent = parent?.bridgeId === deps.bridgeId ? parent : undefined;
+  const parentWorkingDir = localParent?.workingDir;
+  const projectName = ancestry.find(ancestor => ancestor.projectName)?.projectName
+    || (typeof input.projectName === 'string' && input.projectName.trim()) || (parent ? 'Unassigned' : undefined);
   if (!projectName) throw new Error('Project name is required');
   if (projectName.length > 256) throw new Error('Project name exceeds 256 characters');
   if (input.account !== undefined && typeof input.account !== 'string') throw new AccountSelectionError('unknown_account', 'account must be a registered account id');
@@ -549,33 +552,37 @@ async function createFtownSessionImpl(
   const registeredAccounts = loadAccounts().accounts;
   const registeredIds = new Set(registeredAccounts.map(entry => entry.id));
   if (input.allowedAccounts?.some(id => id !== 'default' && (!/^[a-z0-9-]{1,32}$/.test(id) || !registeredIds.has(id)))) throw new AccountSelectionError('unknown_account', 'allowedAccounts contains an unknown account id');
-  let account = input.account ?? localRoot?.account;
-  const resolvedPolicy = localRoot?.allowedAccounts;
-  const directPolicy = parentSession?.bridgeId === deps.bridgeId ? parentSession.allowedAccounts : undefined;
-  // An alias may impose a narrower policy than its resolved parent; preserve both restrictions.
-  const parentPolicy = resolvedPolicy && directPolicy
-    ? resolvedPolicy.filter(id => directPolicy.includes(id))
-    : resolvedPolicy ?? directPolicy;
+  const account = input.account ?? localParent?.account;
+  // Accounts are registered independently on each bridge. Preserve every applicable
+  // restriction when delegation passes through another bridge and then returns.
+  let parentPolicy: string[] | undefined;
+  for (const ancestor of ancestry) {
+    if (ancestor.bridgeId !== deps.bridgeId || !ancestor.allowedAccounts) continue;
+    const policy = ancestor.allowedAccounts;
+    parentPolicy = parentPolicy ? parentPolicy.filter(id => policy.includes(id)) : policy;
+  }
   if (parentPolicy) {
     const inheritedOrRequestedAccount = account ?? 'default';
     if (!parentPolicy.includes(inheritedOrRequestedAccount)) throw new AccountSelectionError('account_not_allowed', `Account ${inheritedOrRequestedAccount} is not allowed by parent session`);
   }
   const allowedAccounts = parentPolicy
-    ? input.allowedAccounts ? [...new Set(input.allowedAccounts.filter(id => parentPolicy.includes(id)))] : parentPolicy
+    ? input.allowedAccounts ? [...new Set(input.allowedAccounts.filter(id => parentPolicy!.includes(id)))] : parentPolicy
     : input.allowedAccounts;
   if (allowedAccounts && allowedAccounts.some(id => typeof id !== 'string' || !/^(default|[a-z0-9-]{1,32})$/.test(id))) throw new AccountSelectionError('unknown_account', 'allowedAccounts must contain registered account ids');
 
   // `--plan-item` binds the new child to a todo item on the parent's plan.
   // Validation happens BEFORE any session record is created; failures are 400s.
   const planItem = input.planItem;
+  const parentPlan = planItem && parent && parent.bridgeId !== deps.bridgeId
+    ? deps.remotePlanStore?.(parent.bridgeId) : deps.planStore;
   if (planItem !== undefined) {
     if (!parentSessionId) {
       throw new PlanItemError('--plan-item requires a parent session');
     }
-    if (!deps.planStore) {
+    if (!parentPlan) {
       throw new PlanItemError('Plan tracking is not available');
     }
-    const plan = await deps.planStore.get(parentSessionId);
+    const plan = await parentPlan.get(parentSessionId);
     const item = plan?.items.find((candidate) => candidate.id === planItem);
     if (!item) {
       throw new PlanItemError(`Plan item ${planItem} does not exist on parent ${parentSessionId}`);
@@ -585,7 +592,7 @@ async function createFtownSessionImpl(
     }
   }
 
-  const shellType = input.shellType !== undefined ? normalizeShellType(input.shellType) : resolvedParentSession?.shellType;
+  const shellType = input.shellType !== undefined ? normalizeShellType(input.shellType) : parent?.shellType;
   const harness = shellType === 'codex' ? 'codex' : shellType === 'claude' || shellType === undefined ? 'claude' : undefined;
   let selectedAccountEnv: Record<string, string> = {};
   if (account && account !== 'default') {
@@ -668,6 +675,8 @@ async function createFtownSessionImpl(
     workingDir = worktree.path;
   }
 
+  let remotePlanChild: Session | undefined;
+  let launched = false;
   try {
     const effectiveInput: CreateFtownSessionInput = { ...effectiveBaseInput, workingDir };
     // Base command (no prompt arg) — persisted on the session and used for the
@@ -678,7 +687,7 @@ async function createFtownSessionImpl(
     const session: Session = {
       id: sessionId,
       projectName,
-      parentBridgeId: resolvedParentSession?.bridgeId,
+      parentBridgeId: parent?.bridgeId,
       name: sessionName,
       command,
       prompt: prompt || undefined,
@@ -709,6 +718,12 @@ async function createFtownSessionImpl(
     };
 
     await deps.store.saveSession(session);
+    // The owning bridge verifies the persisted edge before binding. Bind before
+    // launching so a fast child cannot finish ahead of its plan assignment.
+    if (planItem && parent && parent.bridgeId !== deps.bridgeId && parentPlan) {
+      remotePlanChild = session;
+      await parentPlan.startForChild(parent.id, planItem, sessionId);
+    }
     try {
       await deps.centrifugo.publishSessionUpdate(deps.userId, session);
     } catch (err) {
@@ -802,14 +817,15 @@ async function createFtownSessionImpl(
       parentSessionId,
     });
 
+    launched = true;
     deps.wireTerminalInput(sessionId);
 
     // Bind the plan item after the child exists and is launched. A failure here
     // must not roll back the session — the manager still sees it and can start
     // the item manually.
-    if (planItem !== undefined && parentSessionId && deps.planStore) {
+    if (!remotePlanChild && planItem !== undefined && parentSessionId && parentPlan) {
       try {
-        await deps.planStore.startForChild(parentSessionId, planItem, sessionId);
+        await parentPlan.startForChild(parentSessionId, planItem, sessionId);
       } catch (err) {
         console.warn(
           `[Bridge] Failed to start plan item ${planItem} for child ${sessionId}:`,
@@ -820,7 +836,13 @@ async function createFtownSessionImpl(
 
     return session;
   } catch (err) {
-    if (worktree && worktrees) {
+    if (remotePlanChild && !launched) {
+      // An interrupted response may have committed the binding. Release by the
+      // qualified child id, which is harmless if the manager rejected the bind.
+      deps.releaseRemotePlan?.(remotePlanChild);
+      await deps.store.deleteSession(remotePlanChild.id);
+    }
+    if (!launched && worktree && worktrees) {
       try {
         await worktrees.remove(worktree, { force: false, deleteBranch: true });
       } catch (cleanupErr) {
@@ -926,5 +948,6 @@ export async function relaunchFtownSession(deps: CreateFtownSessionDeps, session
 
 export async function createFtownSession(deps: CreateFtownSessionDeps, input: CreateFtownSessionInput): Promise<Session> {
   const release = deps.updateAdmission?.enter();
-  try { return await createFtownSessionImpl(deps, input); } finally { release?.(); }
+  const done = input.parentSessionId ? deps.hierarchyWrites?.begin(undefined, { bridgeId: input.parentBridgeId ?? deps.bridgeId, id: input.parentSessionId }) : undefined;
+  try { return await createFtownSessionImpl(deps, input); } finally { done?.(); release?.(); }
 }

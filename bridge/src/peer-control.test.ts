@@ -1,3 +1,4 @@
+import { ProjectStorageMoves } from './project-storage-move.js';
 import { ProjectBoardStore } from './project-board-store.js';
 import { TicketNotificationInbox, deliverTicketNotifications } from './ticket-notifications.js';
 import { TICKET_NOTIFICATION_INBOX, TICKET_NOTIFICATION_WIRE } from './ticket-notification-protocol.js';
@@ -335,6 +336,9 @@ test('offline ticket assignments arrive once after restart and later stages foll
   assert.equal((await peers.directHttp(desk.bridgeId, TICKET_NOTIFICATION_WIRE, notice)).status, 200);
   const remoteInbox = new TicketNotificationInbox(remotePath, desk.bridgeId);
   remote.setTicketInbox(remoteInbox);
+  // A project move can replay the same in-flight delivery from its new home.
+  remoteInbox.receive(desk.bridgeId, notice);
+  assert.equal(remoteInbox.list(0, 10).notifications.length, 1);
   boards.mutate({ ...base, action: 'update_ticket', ticketId, stage: 'Review' });
   await deliverTicketNotifications(boards, localInbox, studio.bridgeId, peers, projectId);
   assert.deepEqual(boards.pendingNotifications(projectId), []);
@@ -381,6 +385,32 @@ test('sessions on a paired bridge operate the project home board and read its ti
   assert.deepEqual((await post('get_project_board', { projectId })).body, JSON.parse(JSON.stringify(projectBoards.read(projectId))));
   assert.equal((await write({ action: 'delete_project', bridgeId: studio.bridgeId })).status, 400);
   assert.deepEqual(await peers.http(desk.bridgeId, 'GET', TICKET_NOTIFICATION_INBOX), { status: 200, body: { notifications: [], nextCursor: 0 } });
+});
+
+test('paired bridges transfer a multi-batch board through the authenticated direct storage endpoint', async t => {
+  const w = await world();
+  const remote = new LocalApiServer();
+  const { peers, desk, studio } = await linked(t, w, w.both, remote);
+  remote.setSecurity(desk, { protocolVersion: 1, ownerId: w.root.accountId, bridgeId: desk.bridgeId,
+    endpoint: desk.endpoint, relayUserId: w.root.accountId }, async () => null);
+  const dir = await mkdtemp(join(tmpdir(), 'ftown-board-transfer-'));
+  t.after(() => rm(dir, {recursive: true, force: true}));
+  const source = new ProjectBoardStore(dir, studio.bridgeId);
+  const destDir = join(dir, 'destination');
+  const destination = new ProjectBoardStore(destDir, desk.bridgeId);
+  remote.setBoardCommands({bridgeId: desk.bridgeId, security: desk, projectBoards: destination,
+    storageMoves: new ProjectStorageMoves(destDir, desk.bridgeId, destination, new PeerControl(desk, relay(w, studio, echo))),
+    ready: () => true, deliverProject: async () => {}});
+  const projectId = crypto.randomUUID();
+  const base = {projectId, bridgeId: studio.bridgeId};
+  source.mutate({...base, action:'create_project', name:'Release'});
+  for (let i = 0; i < 5; i++) {
+    source.mutate({...base, action:'create_ticket', title:'Review ' + i, ticketId:crypto.randomUUID(), body:randomBytes(22_000).toString('base64')});
+  }
+  const before = source.read(projectId);
+  const project = await new ProjectStorageMoves(dir, studio.bridgeId, source, peers).move(projectId, 'Desk');
+  assert.deepEqual(destination.read(projectId), {...before, project});
+  assert.deepEqual(source.list(), []);
 });
 
 test('an empty project is discoverable across a direct link and remembered after a disconnected restart', async t => {

@@ -8,6 +8,7 @@ import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, typ
 import { createPortal } from "react-dom";
 import { Session } from "@/types";
 import { SessionActivity } from "@/hooks/useAllSessionEvents";
+import { sessionLineage } from "@/lib/session-lineage";
 import { getSessionDropZone, resolveSessionDrop, type SessionDropZone } from "@/lib/session-drop";
 import { StatusDot } from "@/lib/StatusDot";
 import { usePersistentState, stringSetCodec } from "@/lib/use-persistent-state";
@@ -29,12 +30,14 @@ interface ProjectBoardControls {
   projects: HomeProject[];
   homes: Array<{ id: string; label: string }>;
   open: (project: HomeProject) => void;
+  move?: (project: HomeProject, target: string) => Promise<void>;
   create: (name: string, home: string) => Promise<HomeProject>;
   change: (project: HomeProject, name: string | null) => Promise<void>;
 }
 
 interface SessionListProps {
   boards?: ProjectBoardControls;
+  upgradedBridges?: ReadonlySet<string>;
   bridgeIdentities?: ReadonlyMap<string, BridgeIdentity>;
   bridges?: import("@/hooks/useBridges").BridgeInfo[];
   sessions: Session[];
@@ -46,13 +49,13 @@ interface SessionListProps {
   onStopSession?: (sessionId: string) => void;
   onRemoveSession?: (sessionId: string, onlyIfFinished?: boolean) => void;
   onCloneSession?: (session: Session) => void;
-  onSetSessionParent?: (sessionId: string, parentSessionId: string | null) => void;
+  onSetSessionParent?: (sessionId: string, parentSessionId: string | null) => void | Promise<void>;
   onReorderSessions?: (orderedIds: string[]) => void;
   projectBridges?: ReadonlyMap<string, string[]>;
   projectComputers?: Array<{ id: string; label: string }>;
   onProjectBridgesChange?: (project: string, bridges: string[] | undefined) => void;
   projectStorageKey?: string;
-  onAddSession?: (project: string) => void;
+  onAddSession?: (project: string, parent?: Session) => void;
   onHiddenProjectsChange?: (projects: Set<string>) => void;
   sessionActivity?: Map<string, SessionActivity>;
   collapsed?: boolean;
@@ -123,7 +126,9 @@ function buildSessionTree(orderedSessions: Session[]): SessionTreeNode[] {
     while (current !== undefined) {
       if (seen.has(current)) return true;
       seen.add(current);
-      current = byId.get(current)?.parentSessionId;
+      const row = byId.get(current);
+      const parent = row?.parentSessionId && byId.get(row.parentSessionId);
+      current = parent && (!row?.parentBridgeId || row.parentBridgeId === parent.bridgeId) ? parent.id : undefined;
     }
     return false;
   };
@@ -135,7 +140,7 @@ function buildSessionTree(orderedSessions: Session[]): SessionTreeNode[] {
     const parentId = s.parentSessionId;
     const parentNode =
       parentId !== undefined && parentId !== s.id ? nodeById.get(parentId) : undefined;
-    if (parentNode !== undefined && !hasAncestorCycle(s.id)) {
+    if (parentNode !== undefined && (!s.parentBridgeId || s.parentBridgeId === parentNode.session.bridgeId) && !hasAncestorCycle(s.id)) {
       parentNode.children.push(node);
     } else {
       roots.push(node);
@@ -331,6 +336,7 @@ function SessionContextMenu({
   menu,
   onRename,
   canMove,
+  onAddChild,
   onMoveToProject,
   onReviewPullRequest,
   onStop,
@@ -343,6 +349,7 @@ function SessionContextMenu({
   menu: Extract<ContextMenuState, { kind: "session" }>;
   onRename: (session: Session) => void;
   canMove: boolean;
+  onAddChild?: () => void;
   onMoveToProject: () => void;
   onReviewPullRequest?: (sessionId: string) => void;
   onStop: (sessionId: string) => void;
@@ -394,6 +401,7 @@ function SessionContextMenu({
       {menu.session.block && onDismissBlock && (
         <ContextMenuButton largeOnMobile label="Dismiss badge" onClick={() => { void onDismissBlock(menu.session).catch(console.error); onClose(); }} />
       )}
+      {onAddChild && <ContextMenuButton largeOnMobile label="Create subsession" onClick={() => { onAddChild(); onClose(); }} />}
       {canMove && <ContextMenuButton largeOnMobile label="Move to project…" onClick={() => { onMoveToProject(); onClose(); }} />}
       <ContextMenuButton largeOnMobile label="Rename" onClick={() => { onRename(menu.session); onClose(); }} />
       <ContextMenuButton largeOnMobile label="Clone" onClick={() => { onClone(menu.session); onClose(); }} />
@@ -417,7 +425,7 @@ function SessionContextMenu({
 }
 
 export function SessionList({
-  boards, sessions, bridgeIdentities, onHiddenProjectsChange, onAddSession, projectBridges, projectComputers = [], onProjectBridgesChange, projectStorageKey = "ftown:projects",
+  boards, upgradedBridges, sessions, bridgeIdentities, onHiddenProjectsChange, onAddSession, projectBridges, projectComputers = [], onProjectBridgesChange, projectStorageKey = "ftown:projects",
   selectedSessionId,
   onSelectSession,
   onReviewPullRequest,
@@ -511,6 +519,8 @@ export function SessionList({
     });
   }, [sessions, setCollapsedSessions]);
 
+  const sessionsById = useMemo(() => new Map(sessions.map(s => [s.id, s])), [sessions]);
+
   // A blocked child has to be on the board. Expand its parent once per
   // transition, after the default fold above, and then leave a manual
   // collapse alone.
@@ -522,10 +532,12 @@ export function SessionList({
       const key = session.block?.transitionKey;
       const parentId = session.parentSessionId;
       if (!key || !parentId || parentId === session.id) continue;
-      const mark = `${session.id}:${key}`;
-      if (revealedBlocksRef.current.has(mark)) continue;
-      revealedBlocksRef.current.add(mark);
-      parents.push(parentId);
+      for (const ancestor of sessionLineage(session, sessionsById).chain.slice(1)) {
+        const mark = JSON.stringify([session.id, key, ancestor.id]);
+        if (revealedBlocksRef.current.has(mark)) continue;
+        revealedBlocksRef.current.add(mark);
+        parents.push(ancestor.id);
+      }
     }
     if (parents.length === 0) return;
     setCollapsedSessions((prev) => {
@@ -536,24 +548,20 @@ export function SessionList({
       }
       return changed ? next : prev;
     });
-  }, [sessions, setCollapsedSessions]);
+  }, [sessions, sessionsById, setCollapsedSessions]);
 
   useEffect(() => {
     if (selectedSessionId === null) return;
-    const byId = new Map(sessions.map((session) => [session.id, session]));
-    const ancestors = new Set<string>();
-    let current = byId.get(selectedSessionId);
-    while (current?.parentSessionId && !ancestors.has(current.parentSessionId)) {
-      ancestors.add(current.parentSessionId);
-      current = byId.get(current.parentSessionId);
-    }
-    if (ancestors.size === 0) return;
+    const selected = sessionsById.get(selectedSessionId);
+    if (!selected) return;
+    const ancestors = sessionLineage(selected, sessionsById).chain.slice(1);
+    if (!ancestors.length) return;
     setCollapsedSessions((collapsedIds) => {
       const next = new Set(collapsedIds);
-      for (const ancestorId of ancestors) next.delete(ancestorId);
+      for (const ancestor of ancestors) next.delete(ancestor.id);
       return next.size === collapsedIds.size ? collapsedIds : next;
     });
-  }, [selectedSessionId, sessions, setCollapsedSessions]);
+  }, [selectedSessionId, sessionsById, setCollapsedSessions]);
 
   /** parentId → rollup text for children card states, computed once per render. */
   const cardRollups = useMemo(() => {
@@ -614,6 +622,19 @@ export function SessionList({
     setDragOverZone(null);
   }
 
+  function dropAction(source: Session, target: Session, zone: SessionDropZone) {
+    const action = resolveSessionDrop({ id: source.id, bridgeId: source.bridgeId,
+      parentSessionId: source.parentSessionId, hasChildren: sessions.some(s => s.parentSessionId === source.id) },
+      { kind: "session", id: target.id, bridgeId: target.bridgeId, parentSessionId: target.parentSessionId, zone });
+    if (!action || action.parentSessionId === (source.parentSessionId ?? null)) return action;
+    if (source.lastKnownOnly || target.lastKnownOnly) return null;
+    if (action.parentSessionId) {
+      const parent = sessionsById.get(action.parentSessionId);
+      if (!parent || parent.lastKnownOnly || parent.parentSessionId) return null;
+    }
+    return action;
+  }
+
   function handleSessionDragOver(e: React.DragEvent, targetSession: Session): void {
     e.preventDefault();
     e.dataTransfer.dropEffect = "move";
@@ -629,20 +650,7 @@ export function SessionList({
     }
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     const zone = getSessionDropZone(e.clientY - rect.top, rect.height);
-    const action = resolveSessionDrop(
-      {
-        id: drag.id,
-        bridgeId: drag.bridgeId,
-        hasChildren: sessions.some((session) => session.parentSessionId === drag.id),
-      },
-      {
-        kind: "session",
-        id: targetSession.id,
-        bridgeId: targetSession.bridgeId,
-        parentSessionId: targetSession.parentSessionId,
-        zone,
-      },
-    );
+    const action = dropAction(draggedSession, targetSession, zone);
     const needsParentChange =
       action?.type === "set-parent" ||
       (action?.type === "reorder" &&
@@ -655,7 +663,7 @@ export function SessionList({
     setDragOverZone(zone);
   }
 
-  function handleSessionDrop(e: React.DragEvent, targetSession: Session): void {
+  async function handleSessionDrop(e: React.DragEvent, targetSession: Session): Promise<void> {
     e.preventDefault();
     const drag = dragRef.current;
     if (!drag || drag.kind !== "session") {
@@ -668,41 +676,19 @@ export function SessionList({
       return;
     }
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    const action = resolveSessionDrop(
-      {
-        id: drag.id,
-        bridgeId: drag.bridgeId,
-        hasChildren: sessions.some((session) => session.parentSessionId === drag.id),
-      },
-      {
-        kind: "session",
-        id: targetSession.id,
-        bridgeId: targetSession.bridgeId,
-        parentSessionId: targetSession.parentSessionId,
-        zone: getSessionDropZone(e.clientY - rect.top, rect.height),
-      },
-    );
+    const action = dropAction(draggedSession, targetSession, getSessionDropZone(e.clientY - rect.top, rect.height));
     if (!action) {
       clearDragState();
       return;
     }
-    if (action.type === "set-parent") {
-      onSetSessionParent?.(action.sessionId, action.parentSessionId);
-      clearDragState();
-      return;
-    }
-    if (!onReorderSessions) {
-      clearDragState();
-      return;
-    }
-
+    clearDragState();
+    setMoveError(null);
     if ((draggedSession.parentSessionId ?? null) !== action.parentSessionId) {
-      if (!onSetSessionParent) {
-        clearDragState();
-        return;
-      }
-      onSetSessionParent(action.sessionId, action.parentSessionId);
+      if (!onSetSessionParent) return;
+      try { await onSetSessionParent(action.sessionId, action.parentSessionId); }
+      catch (error) { setMoveError(error instanceof Error ? error.message : "Could not move session."); return; }
     }
+    if (action.type === "set-parent" || !onReorderSessions) return;
 
     const draggedId = action.sessionId;
     const zone = action.zone;
@@ -865,8 +851,8 @@ export function SessionList({
           minWidth: 0,
           textAlign: "left",
           padding: isSelected
-            ? `9px 12px 9px ${18 + depth * 10}px`
-            : `6px 12px 6px ${18 + depth * 10}px`,
+            ? `9px 12px 9px ${18 + Math.min(depth, 5) * 10}px`
+            : `6px 12px 6px ${18 + Math.min(depth, 5) * 10}px`,
           borderBottom: "none",
           borderTop: isDragOver && dragOverZone === "above" ? "2px solid var(--accent)" : "none",
           ...(isDragOver && dragOverZone === "below" ? { borderBottom: "2px solid var(--accent)" } : {}),
@@ -1182,9 +1168,17 @@ export function SessionList({
       return next;
     });
   }
+  const editedHomes = boards?.projects.filter(p => p.name === editingProject);
   return (
     <div className="flex flex-col">
       {editingProject && <ProjectSettingsDialog key={editingProject} project={editingProject}
+        storageHomes={boards?.move && editedHomes?.map(editedHome => ({
+          id: editedHome.id,
+          home: boards.homes.find(b => b.id === editedHome.bridgeId)?.label ?? projectComputers.find(b => b.id === editedHome.bridgeId)?.label ?? editedHome.bridgeId,
+          available: upgradedBridges?.has(editedHome.bridgeId) ?? false,
+          destinations: boards.homes.filter(b => b.id !== editedHome.bridgeId && upgradedBridges?.has(b.id)),
+          move: target => boards.move!(editedHome, target),
+        }))}
         computers={projectComputers} allowed={projectBridges?.get(editingProject)}
         changeBridges={ids => onProjectBridgesChange?.(editingProject, ids)}
         changeName={to => changeProject(editingProject, to)} close={() => setEditingProject(null)} />}
@@ -1209,7 +1203,7 @@ export function SessionList({
                 event.preventDefault();
                 event.dataTransfer.dropEffect = "move";
                 setDragOverKey(`project:${project}`);
-              } else if (roots.some(root => root.children.some(child => child.session.id === drag.id))) {
+              } else if (session?.parentSessionId && !session.lastKnownOnly && locations.get(session.id)?.project === project && onSetSessionParent) {
                 event.preventDefault();
               }
             }}
@@ -1225,7 +1219,10 @@ export function SessionList({
               else if (drag?.kind === "session") {
                 const session = sessions.find(row => row.id === drag.id && row.bridgeId === drag.bridgeId);
                 if (session && canMoveToProject(session, project)) void moveToProject(session, project).catch(error => setMoveError(error instanceof Error ? error.message : "Could not move session"));
-                else if (roots.some(root => root.children.some(child => child.session.id === drag.id))) onSetSessionParent?.(drag.id, null);
+                else if (session?.parentSessionId && !session.lastKnownOnly && locations.get(session.id)?.project === project && onSetSessionParent) {
+                  void Promise.resolve(onSetSessionParent(session.id, null)).catch(error =>
+                    setMoveError(error instanceof Error ? error.message : "Could not detach session."));
+                }
               }
               clearDragState();
             }}>
@@ -1314,6 +1311,7 @@ export function SessionList({
           onReviewPullRequest={onReviewPullRequest}
           onStop={onStopSession}
           onRemove={onRemoveSession}
+          onAddChild={onAddSession && !contextMenu.session.lastKnownOnly ? () => onAddSession(locations.get(contextMenu.session.id)?.project ?? "", contextMenu.session) : undefined}
           onClone={onCloneSession ?? (() => {})}
           onHandoff={onHandoff ? (session) => setHandoffTarget(session) : undefined}
           onDismissBlock={onDismissBlock}

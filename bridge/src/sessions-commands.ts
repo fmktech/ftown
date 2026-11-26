@@ -15,7 +15,7 @@ import { formatAttentionAnswerText } from './attention-prompt.js';
 import { ATTENTION_ITEM_WAIT_MAX_SECONDS, type AttentionAnswer, type AttentionPrompt } from './attention-prompt-protocol.js';
 import { PREVIEW_CHAT_TEXT_BYTES } from './preview-chat-protocol.js';
 import { validateChatInput } from './preview-chat.js';
-import { api as request, currentPeerTarget, loadPointer, listSessions, readInboxForCli, sendMail } from './cli-client.js';
+import { api as request, currentPeerTarget, loadPointer, listSessions, readInboxForCli, sessionApiAt } from './cli-client.js';
 import {
   MAIL_TYPES,
   AUTOMATION_REMOVED_MESSAGE,
@@ -34,29 +34,22 @@ async function listSessionInfo(): Promise<Session[]> { return listSessions(loadP
 async function resolveFanout(
   mode: 'parent' | 'children' | 'siblings',
   self: string | undefined,
-): Promise<string[]> {
-  if (!self) {
-    throw new Error(`--${mode} requires FTOWN_SESSION_ID to be set`);
-  }
-  const sessions = await listSessionInfo();
-  const me = sessions.find((s) => s.id === self);
-
+): Promise<Array<{ id: string; owner?: string }>> {
+  if (!self) throw new Error(`--${mode} requires FTOWN_SESSION_ID to be set`);
+  const pointer = loadPointer();
+  const { sessions } = await sessionApiAt<{ sessions: Session[] }>(pointer, pointer.bridgeId, 'GET', '/api/sessions');
+  const me = sessions.find(s => s.id === self);
+  if (!me) throw new Error('Current session not found');
   if (mode === 'parent') {
-    const parent = me?.parentSessionId;
-    if (!parent) throw new Error('Current session has no parent');
-    return [parent];
+    if (!me.parentSessionId) throw new Error('Current session has no parent');
+    return [{ id: me.parentSessionId, owner: me.parentBridgeId }];
   }
-
-  if (mode === 'children') {
-    return sessions.filter((s) => s.parentSessionId === self).map((s) => s.id);
-  }
-
-  // siblings
-  const parent = me?.parentSessionId;
-  if (!parent) throw new Error('Current session has no parent (cannot resolve siblings)');
-  return sessions
-    .filter((s) => s.parentSessionId === parent && s.id !== self)
-    .map((s) => s.id);
+  if (mode === 'siblings' && !me.parentSessionId) throw new Error('Current session has no parent (cannot resolve siblings)');
+  const parent = mode === 'children' ? self : me.parentSessionId;
+  const parentOwner = mode === 'children' ? me.bridgeId : me.parentBridgeId ?? me.bridgeId;
+  const remembered = await request<{ sessions: Session[] }>(pointer, 'GET', '/api/peers/sessions');
+  return [...sessions, ...(remembered.sessions ?? [])].filter(row => row.id !== self && row.parentSessionId === parent &&
+    (row.parentBridgeId ?? row.bridgeId) === parentOwner).map(row => ({ id: row.id, owner: row.bridgeId }));
 }
 
 interface UsageRow {
@@ -587,8 +580,19 @@ async function executeSessionCommand(cmd: SessionCommand, rest: string[], option
         if (options.effort) body.effort = options.effort;
         if (options.project) body.projectName = options.project;
         if ((parentId || useParent) && currentPeerTarget()) {
-          body.parentBridgeId = loadPointer().bridgeId;
-          body.parentSessionId = parentId || selfSessionId();
+          const pointer = loadPointer();
+          const id = parentId || selfSessionId();
+          const metadata = await sessionApiAt<{ session: { id: string; bridgeId: string; parentSessionId?: string } }>(
+            pointer, pointer.bridgeId, 'GET', '/api/sessions/' + encodeURIComponent(id));
+          if (metadata.session?.id !== id || metadata.session.bridgeId !== pointer.bridgeId) throw new Error('Parent session unavailable');
+          if (metadata.session.parentSessionId) {
+            const { data } = await api('GET', '/api/host-resources');
+            if ((data as { nestedSessions?: boolean } | null)?.nestedSessions !== true) {
+              throw new Error('Update the destination bridge to create a nested subsession');
+            }
+          }
+          body.parentBridgeId = pointer.bridgeId;
+          body.parentSessionId = id;
         } else if (parentId) body.parentSessionId = parentId;
         else if (useParent) body.parentSessionId = true;
         if (planItem) body.planItem = planItem;
@@ -688,7 +692,7 @@ async function executeSessionCommand(cmd: SessionCommand, rest: string[], option
         const positional = rest;
         const self = process.env.FTOWN_SESSION_ID?.trim();
 
-        let targets: string[];
+        let targets: Array<{ id: string; owner?: string }>;
         let message: string;
 
         if (fanCount === 1) {
@@ -704,7 +708,7 @@ async function executeSessionCommand(cmd: SessionCommand, rest: string[], option
           if (!target) {
             throw new Error('Usage: tell <target|--parent|--children|--siblings> <message...>');
           }
-          targets = [target];
+          targets = [{ id: target, owner: currentPeerTarget() ?? undefined }];
         }
 
         if (!message) throw new Error('Missing message');
@@ -714,13 +718,13 @@ async function executeSessionCommand(cmd: SessionCommand, rest: string[], option
           ? (await listSessionInfo()).find((s) => s.id === self)?.name
           : undefined;
 
-        for (const target of targets) {
+        for (const { id: target, owner } of targets) {
           try {
             if (useKeys) {
               // Explicit keystroke injection into the target terminal (legacy path).
               const reqBody: Record<string, unknown> = { text: message };
               if (self) reqBody.from = self;
-              const { data } = await api('POST', `/api/sessions/${target}/message`, reqBody);
+              const data = await sessionApiAt(loadPointer(), owner, 'POST', `/api/sessions/${target}/message`, reqBody);
               console.log(JSON.stringify({ target, ...(data as Record<string, unknown>) }));
             } else {
               const reqBody: Record<string, unknown> = { body: message };
@@ -728,7 +732,7 @@ async function executeSessionCommand(cmd: SessionCommand, rest: string[], option
               if (fromName) reqBody.fromName = fromName;
               if (mailType) reqBody.type = mailType;
               if (threadId) reqBody.threadId = threadId;
-              const data = await sendMail(loadPointer(), target, reqBody);
+              const data = await sessionApiAt(loadPointer(), owner, 'POST', `/api/sessions/${target}/inbox`, reqBody);
               console.log(JSON.stringify({ target, ...(data as Record<string, unknown>) }));
             }
           } catch (err) {

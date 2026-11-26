@@ -1,5 +1,5 @@
 import { TICKET_NOTIFICATION_WIRE, TICKET_NOTIFICATION_INBOX } from '../../ticket-notification-protocol.js';
-import { PROJECT_DIRECTORY, boardCommandForPath } from '../../project-directory-protocol.js';
+import { PROJECT_MOVE, PROJECT_DIRECTORY, boardCommandForPath } from '../../project-directory-protocol.js';
 import { INSTRUCTIONS_LOCAL, INSTRUCTIONS_SYNC, INSTRUCTIONS_WIRE } from '../../instructions-protocol.js';
 import { TRANSFER_LOCAL, TRANSFER_WIRE } from '../../folder-transfer-protocol.js';
 import type { ApplicationJson, EndpointPermission } from '../protocol.js';
@@ -34,6 +34,7 @@ export function classifyHttp(method: string, path: string): OperationPermission 
   if (boardCommand) return method === 'POST' && !url.search ? classifyCommand(boardCommand) : deny();
   if (url.pathname === TICKET_NOTIFICATION_WIRE) return method === 'POST' && !url.search ? result('control', 'ticket_notify') : deny();
   if (url.pathname === TICKET_NOTIFICATION_INBOX) return method === 'GET' && queryAllows(url, ['after', 'limit']) ? result('read', 'ticket_inbox') : deny();
+  if (url.pathname === PROJECT_MOVE) return method === 'POST' && !url.search ? result('control', 'project_move') : deny();
   if (url.pathname === PROJECT_DIRECTORY) return method === 'POST' && !url.search ? result('read', 'project_directory') : deny();
   if (url.pathname === INSTRUCTIONS_SYNC) return method === 'POST' && !url.search ? result('control', 'instructions_sync') : deny();
   if (url.pathname === INSTRUCTIONS_LOCAL || url.pathname === INSTRUCTIONS_WIRE) {
@@ -42,6 +43,9 @@ export function classifyHttp(method: string, path: string): OperationPermission 
   if (url.pathname === TRANSFER_LOCAL || url.pathname === TRANSFER_WIRE) {
     return method === 'POST' && !url.search ? result('control', url.pathname === TRANSFER_LOCAL ? 'transfer_local' : 'transfer_wire') : deny();
   }
+  if (url.pathname === '/api/team-questions') return method === 'GET' && queryAllows(url, ['parent']) ? result('read', 'team_questions') : deny();
+  if (url.pathname === '/api/team-event') return method === 'POST' && !url.search ? result('control', 'team_event') : deny();
+  if (url.pathname === '/api/child-plan') return method === 'POST' && !url.search ? result('control', 'child_plan') : deny();
   if (url.pathname === '/api/sessions') {
     if (method === 'GET') return result('read', 'sessions_list');
     if (method === 'POST') return result('control', 'sessions_create');

@@ -132,6 +132,22 @@ function createFakeEnv(initialSessions: Session[] = []): FakeEnv {
 }
 
 describe('BoardService', () => {
+  it('gives a nested manager its direct reports and own plan across bridges', async () => {
+    const root = makeSession({id: 'root', name: 'Root'});
+    const manager = makeSession({id: 'manager', name: 'Manager', parentSessionId: 'root', plan: {items: [], seq: 0}});
+    const local = makeSession({id: 'local', name: 'Local', parentSessionId: 'manager'});
+    const peer = makeSession({id: 'peer', name: 'Peer', bridgeId: 'other', parentBridgeId: 'bridge-1', parentSessionId: 'manager',
+      card: {state: 'working', headline: 'Parsing', updatedAt: '2026-11-13T10:01:00Z'}});
+    const env = createFakeEnv([root, manager, local]);
+    env.deps.remoteChildren = async id => id === manager.id ? [peer] : [];
+    const service = new BoardService(env.deps);
+    const board = await service.board({sessionId: manager.id});
+    assert.equal(board.rootId, manager.id);
+    assert.deepEqual(board.cards.map(c => [c.sessionId, c.declared?.headline]), [['local', undefined], ['peer', 'Parsing']]);
+    assert.deepEqual(board.plan?.items, []);
+    assert.deepEqual((await service.board({sessionId: root.id})).cards.map(c => c.sessionId), ['manager']);
+  });
+
   it('returns null from card() for unknown session, and throws Error("Session not found") in board()/digest()', async () => {
     const env = createFakeEnv();
     const service = new BoardService(env.deps);

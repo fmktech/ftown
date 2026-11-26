@@ -935,7 +935,7 @@ describe('board push sources', () => {
       const changed: string[] = [];
       const h = createHarness({ onBoardChanged: root => changed.push(root) });
       await h.coord.emit(makeSession('child', { parentSessionId: 'root' }), kind, 'changed');
-      assert.deepEqual(changed, ['root'], kind);
+      assert.deepEqual(changed, [kind === 'plan' ? 'child' : 'root'], kind);
     }
   });
   it('schedules progress-only card changes and card clearing without status events', async () => {

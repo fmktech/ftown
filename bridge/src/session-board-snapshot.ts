@@ -61,7 +61,7 @@ export function createSessionBoardPublisher(deps: {
   loadSession(id: string): Promise<Session | null>;
   userId: string;
   debounceMs?: number;
-  /** Seed previous roots before mutations can reparent or remove a session. Trees are flattened by SessionController. */
+  /** Seed previous immediate managers before mutations can reparent or remove a session. */
   initialSessions?: Iterable<Pick<Session, 'id' | 'parentSessionId'>>;
 }) {
   const pending = new Map<string, ReturnType<typeof setTimeout>>();

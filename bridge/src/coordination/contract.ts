@@ -108,7 +108,7 @@ export interface CardStoreApi {
 
 // ───────────────────────── Tree event log ─────────────────────────
 
-/** Root of a tree = session.parentSessionId ?? session.id (tree is one level deep). */
+/** Each manager owns a stream of events for its immediate team. */
 export const TREE_EVENTS_FILE = 'tree-events.jsonl'; // in sessionDir(rootId)
 export const TREE_EVENTS_RETAIN = 5_000;   // keep newest N on compaction
 export const TREE_EVENTS_COMPACT_AT = 6_000;
@@ -119,6 +119,7 @@ export const TREE_EVENT_KINDS = ['status', 'attention', 'pr', 'preview', 'exit',
 export type TreeEventKind = typeof TREE_EVENT_KINDS[number];
 
 export interface TreeEvent {
+  deliveryId?: string;
   seq: number;        // strictly increasing per root, starts at 1, survives compaction
   ts: string;         // ISO
   sessionId: string;  // the session the event is about
@@ -171,7 +172,10 @@ export interface BoardQuery {
   all?: boolean;
 }
 
+export type RemoteBoardChild = Pick<Session, 'id' | 'bridgeId' | 'parentSessionId' | 'name' | 'status' | 'createdAt' | 'card'> & { boardBlocked?: boolean };
+
 export interface BoardDeps {
+  remoteChildren?(managerId: string): Promise<RemoteBoardChild[]>;
   /** phase C: archived session records */
   listArchived?(): Promise<Session[]>;
   loadSession(id: string): Promise<Session | null>;

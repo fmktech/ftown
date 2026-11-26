@@ -1,5 +1,5 @@
 import { TICKET_NOTIFICATION_WIRE } from './ticket-notification-protocol.js';
-import { PROJECT_DIRECTORY } from './project-directory-protocol.js';
+import { PROJECT_DIRECTORY, PROJECT_MOVE } from './project-directory-protocol.js';
 import { INSTRUCTIONS_LOCAL, INSTRUCTIONS_SYNC, INSTRUCTIONS_WIRE } from './instructions-protocol.js';
 import { TRANSFER_LOCAL, TRANSFER_WIRE, TRANSFER_REQUEST_TTL_MS } from './folder-transfer-protocol.js';
 import { randomUUID } from 'node:crypto';
@@ -129,6 +129,7 @@ export class PeerControl {
     if (!(PEER_HTTP_METHODS as readonly string[]).includes(method)) throw new PeerTargetError(400, 'Unsupported method');
     if (typeof path !== 'string' || !path.startsWith('/api/') || path.length > 16_384) throw new PeerTargetError(400, 'Invalid path');
     if (path.split('?')[0] === TICKET_NOTIFICATION_WIRE) throw new PeerTargetError(400, 'Ticket notification requires a direct link');
+    if (path.split('?')[0] === PROJECT_MOVE) throw new PeerTargetError(400, 'Project storage moves require a direct link');
     if (path.split('?')[0] === PROJECT_DIRECTORY) throw new PeerTargetError(400, 'Project discovery requires a direct link');
     if ([INSTRUCTIONS_LOCAL, INSTRUCTIONS_SYNC, INSTRUCTIONS_WIRE].includes(path.split('?')[0])) throw new PeerTargetError(400, 'Instructions require a direct link');
     if (path.split('?')[0] === TRANSFER_LOCAL || path.split('?')[0] === TRANSFER_WIRE) {
@@ -163,7 +164,7 @@ export class PeerControl {
     await this.direct.sendBinary(target, frame, signal);
   }
 
-  async directHttp(target: string, path: typeof TICKET_NOTIFICATION_WIRE | typeof PROJECT_DIRECTORY | typeof TRANSFER_WIRE | typeof INSTRUCTIONS_SYNC | typeof INSTRUCTIONS_WIRE, body: unknown): Promise<{ status: number; body: ApplicationJson }> {
+  async directHttp(target: string, path: typeof PROJECT_MOVE | typeof TICKET_NOTIFICATION_WIRE | typeof PROJECT_DIRECTORY | typeof TRANSFER_WIRE | typeof INSTRUCTIONS_SYNC | typeof INSTRUCTIONS_WIRE, body: unknown): Promise<{ status: number; body: ApplicationJson }> {
     const peer = this.resolve(target);
     const route = this.directPath(peer);
     if (!route) throw new PeerTargetError(503, 'Direct bridge link unavailable');

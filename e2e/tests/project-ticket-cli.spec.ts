@@ -50,6 +50,12 @@ test("sessions manage a project on a paired bridge using the ticket CLI", async 
     await command(BRIDGE_HOME, ["boards", "columns", "remove", "Verification", "--move-to", "Done", ...onHome]);
     const moved = await command<{ ticket: { stage: string } }>(otherHome, ["tickets", "show", ticket.id, "--project", name]);
     expect(moved.ticket.stage).toBe("Done");
+    const { project: transferred } = await command<{ project: { id: string; bridgeId: string; homeRevision: number } }>(
+      otherHome, ["projects", "move", project.id, "--to", assignee]);
+    expect(transferred).toMatchObject({ id: project.id, bridgeId: assignee, homeRevision: 1 });
+    // Commands embedded in already delivered messages include the previous home's bridge ID.
+    const history = await command<{ comments: { text: string }[] }>(BRIDGE_HOME, ["tickets", "comments", ticket.id, ...onHome]);
+    expect(history.comments.map(comment => comment.text)).toContain("Build verified");
     await command(BRIDGE_HOME, ["tickets", "delete", ticket.id, ...onHome]);
     await command(BRIDGE_HOME, ["boards", "delete", ...onHome]);
     await command(BRIDGE_HOME, ["boards", "create", ...onHome]);
@@ -126,5 +132,39 @@ test("sessions manage a project discussion on a paired bridge and receive thread
   } finally {
     if (workerId) await bridgeApiFetch("DELETE", "/api/sessions/" + workerId);
     await command(home, ["projects", "delete", project.id]);
+  }
+});
+
+test("nested sessions on A, B and A keep the direct manager and update its plan", async () => {
+  const otherHome = process.env.E2E_SECOND_BRIDGE_HOME ?? join(E2E_DIR, ".bridge-home-2");
+  const a = readBridgePointer(BRIDGE_HOME).bridgeId;
+  const b = readBridgePointer(otherHome).bridgeId;
+  type Created = { session: { id: string; bridgeId: string; parentSessionId?: string; parentBridgeId?: string; projectName: string } };
+  const project = "Nested-" + randomUUID();
+  const created: Array<{ id: string; bridgeHome: string }> = [];
+  try {
+    await expect(async () => {
+      await command(BRIDGE_HOME, ["sessions", "list", "--bridge", b]);
+      await command(otherHome, ["sessions", "list", "--bridge", a]);
+    }).toPass({ timeout: 45_000 });
+    const root = (await command<Created>(BRIDGE_HOME, ["sessions", "create", "--shell", "shell", "--project", project])).session;
+    created.push({ id: root.id, bridgeHome: BRIDGE_HOME });
+    const manager = (await command<Created>(BRIDGE_HOME, ["sessions", "create", "--shell", "shell", "--parent", "--bridge", b], root.id)).session;
+    created.push({ id: manager.id, bridgeHome: otherHome });
+    expect(manager).toMatchObject({ bridgeId: b, parentBridgeId: a, parentSessionId: root.id, projectName: project });
+    const plan = "/api/sessions/" + manager.id + "/plan";
+    const item = await bridgeApiFetch("POST", plan, { bridgeHome: otherHome, body: { title: "Worker task" } });
+    expect(item.status).toBe(200);
+    const { id: planId } = (item.body as { item: { id: string } }).item;
+    const worker = (await command<Created>(otherHome, ["sessions", "create", "--shell", "shell", "--parent", "--plan-item", planId, "--bridge", a], manager.id)).session;
+    created.push({ id: worker.id, bridgeHome: BRIDGE_HOME });
+    expect(worker).toMatchObject({ bridgeId: a, parentBridgeId: b, parentSessionId: manager.id, projectName: project });
+    const ownerPlan = async () => (await bridgeApiFetch("GET", plan, { bridgeHome: otherHome })).body;
+    expect(await ownerPlan()).toMatchObject({ items: [{ id: planId, state: "started", sessionId: worker.id }] });
+    expect((await bridgeApiFetch("DELETE", "/api/sessions/" + worker.id)).status).toBe(200);
+    created.pop();
+    await expect.poll(ownerPlan, { timeout: 45_000 }).toMatchObject({ items: [{ id: planId, state: "todo" }] });
+  } finally {
+    for (const { id, bridgeHome } of created.reverse()) await bridgeApiFetch("DELETE", "/api/sessions/" + id, { bridgeHome });
   }
 });

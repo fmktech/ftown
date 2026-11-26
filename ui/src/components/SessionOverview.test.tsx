@@ -396,7 +396,11 @@ describe("SessionOverview", () => {
     const late = session("late", { name: "Late", parentSessionId: "manager", createdAt: "2026-01-01T00:00:00.000Z" });
     const early = session("early", { name: "Early", parentSessionId: "manager", createdAt: "2025-06-01T00:00:00.000Z" });
     expect(childSessionsOf(manager, [manager, late, early]).map(child => child.id)).toEqual(["early", "late"]);
-    expect(childSessionsOf(manager, [manager, { ...late, parentSessionId: "other" }])).toEqual([]);
+    const grandchild = session("grandchild", { parentSessionId: early.id, parentBridgeId: early.bridgeId });
+    const elsewhere = { ...late, id: "elsewhere", parentBridgeId: "different-owner" };
+    const tree = [manager, early, grandchild, elsewhere];
+    expect(childSessionsOf(manager, tree)).toEqual([early]);
+    expect(childSessionsOf(early, tree)).toEqual([grandchild]);
   });
 });
 

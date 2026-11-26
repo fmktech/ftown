@@ -123,6 +123,7 @@ function cloneItem(item: PlanItem): PlanItem {
   };
   if (item.note !== undefined) copy.note = item.note;
   if (item.sessionId !== undefined) copy.sessionId = item.sessionId;
+  if (item.sessionBridgeId !== undefined) copy.sessionBridgeId = item.sessionBridgeId;
   return copy;
 }
 
@@ -325,6 +326,7 @@ function buildItem(fields: PlanItem): PlanItem {
   };
   if (fields.note !== undefined) item.note = fields.note;
   if (fields.sessionId !== undefined) item.sessionId = fields.sessionId;
+  if (fields.sessionBridgeId !== undefined) item.sessionBridgeId = fields.sessionBridgeId;
   return item;
 }
 
@@ -421,6 +423,7 @@ export function validatePatch(plan: SessionPlan | null | undefined, input: unkno
     state,
     ...(note !== undefined ? { note } : {}),
     ...(sessionId !== undefined ? { sessionId } : {}),
+    ...(sessionId && sessionId === existing.sessionId ? { sessionBridgeId: existing.sessionBridgeId } : {}),
     createdAt: existing.createdAt,
     updatedAt: stamp,
   });
@@ -460,6 +463,17 @@ export function applyRemove(plan: SessionPlan | null | undefined, input: unknown
  * does not undo the publish.
  */
 export class PlanStore {
+  private writes = new Map<string, Promise<void>>();
+
+  private async write<T>(id: string, task: () => Promise<T>): Promise<T> {
+    const prior = this.writes.get(id) ?? Promise.resolve();
+    const next = prior.then(task);
+    const settled = next.then(() => undefined, () => undefined);
+    this.writes.set(id, settled);
+    try { return await next; }
+    finally { if (this.writes.get(id) === settled) this.writes.delete(id); }
+  }
+
   constructor(private readonly deps: PlanStoreDeps) {}
 
   async get(parentId: string): Promise<SessionPlan | null> {
@@ -500,14 +514,16 @@ export class PlanStore {
   }
 
   /** Binds a todo item to a child: state `started`, sessionId = childId. */
-  async startForChild(parentId: string, itemId: string, childId: string): Promise<void> {
+  async startForChild(parentId: string, itemId: string, childId: string, sessionBridgeId?: string): Promise<void> {
     await this.change(parentId, (plan) => {
       const current = plan.items.find((item) => item.id === itemId);
       if (!current) throw new PlanValidationError(`Plan item ${itemId} does not exist`);
+      if (current.state === 'started' && current.sessionId === childId && current.sessionBridgeId === sessionBridgeId) return { plan, summary: '', item: current };
       if (current.state !== 'todo') throw new PlanValidationError(`Plan item ${itemId} is ${current.state}, not todo`);
       const next = applyPatch(plan, { id: itemId, state: 'started', sessionId: childId }, this.stamp());
       const updated = next.items.find((item) => item.id === itemId);
       if (!updated) throw new PlanValidationError(`Plan item ${itemId} does not exist`);
+      if (sessionBridgeId) updated.sessionBridgeId = sessionBridgeId;
       return { plan: next, summary: eventSummary(updated, plan.items, next.items), item: updated };
     });
   }
@@ -516,43 +532,47 @@ export class PlanStore {
    * Marks every item with this child and state `started` as `done`.
    * No match, or a missing parent, is a no-op: a failed card stays `started` for the manager.
    */
-  async completeForChild(parentId: string, childId: string): Promise<void> {
-    const seen = await this.deps.loadSession(parentId);
-    if (!seen) return;
-    const fresh = await this.deps.loadSession(parentId);
-    if (!fresh?.plan) return;
-    const matches = fresh.plan.items.filter((item) => item.sessionId === childId && item.state === 'started');
-    if (matches.length === 0) return;
-    const stamp = this.stamp();
-    let next = fresh.plan;
-    for (const match of matches) {
-      next = applyPatch(next, { id: match.id, state: 'done' }, stamp);
-    }
-    const primary = next.items.find((item) => item.id === matches[0]?.id);
-    if (!primary) return;
-    await this.persist(fresh, { plan: next, summary: eventSummary(primary, fresh.plan.items, next.items), item: primary });
+  async completeForChild(parentId: string, childId: string, sessionBridgeId?: string): Promise<void> {
+    return this.write(parentId, async () => {
+      const seen = await this.deps.loadSession(parentId);
+      if (!seen) return;
+      const fresh = await this.deps.loadSession(parentId);
+      if (!fresh?.plan) return;
+      const matches = fresh.plan.items.filter((item) => item.sessionId === childId && item.sessionBridgeId === sessionBridgeId && item.state === 'started');
+      if (matches.length === 0) return;
+      const stamp = this.stamp();
+      let next = fresh.plan;
+      for (const match of matches) {
+        next = applyPatch(next, { id: match.id, state: 'done' }, stamp);
+      }
+      const primary = next.items.find((item) => item.id === matches[0]?.id);
+      if (!primary) return;
+      await this.persist(fresh, { plan: next, summary: eventSummary(primary, fresh.plan.items, next.items), item: primary });
+    });
   }
 
   /**
    * Returns every item with this child and state `started` to `todo` and clears sessionId.
    * No match, or a missing parent, is a no-op. One event: `<id> todo: <title> (session removed)`.
    */
-  async releaseForChild(parentId: string, childId: string): Promise<void> {
-    const seen = await this.deps.loadSession(parentId);
-    if (!seen) return;
-    const fresh = await this.deps.loadSession(parentId);
-    if (!fresh?.plan) return;
-    const matches = fresh.plan.items.filter((item) => item.sessionId === childId && item.state === 'started');
-    if (matches.length === 0) return;
-    const stamp = this.stamp();
-    let next = fresh.plan;
-    for (const match of matches) {
-      next = applyPatch(next, { id: match.id, state: 'todo' }, stamp);
-    }
-    const primary = next.items.find((item) => item.id === matches[0]?.id);
-    if (!primary) return;
-    const summary = withReady(`${primary.id} todo: ${primary.title} (session removed)`, fresh.plan.items, next.items);
-    await this.persist(fresh, { plan: next, summary, item: primary });
+  async releaseForChild(parentId: string, childId: string, sessionBridgeId?: string): Promise<void> {
+    return this.write(parentId, async () => {
+      const seen = await this.deps.loadSession(parentId);
+      if (!seen) return;
+      const fresh = await this.deps.loadSession(parentId);
+      if (!fresh?.plan) return;
+      const matches = fresh.plan.items.filter((item) => item.sessionId === childId && item.sessionBridgeId === sessionBridgeId && item.state === 'started');
+      if (matches.length === 0) return;
+      const stamp = this.stamp();
+      let next = fresh.plan;
+      for (const match of matches) {
+        next = applyPatch(next, { id: match.id, state: 'todo' }, stamp);
+      }
+      const primary = next.items.find((item) => item.id === matches[0]?.id);
+      if (!primary) return;
+      const summary = withReady(`${primary.id} todo: ${primary.title} (session removed)`, fresh.plan.items, next.items);
+      await this.persist(fresh, { plan: next, summary, item: primary });
+    });
   }
 
   private stamp(): string {
@@ -560,13 +580,15 @@ export class PlanStore {
   }
 
   private async change(parentId: string, mutate: (plan: SessionPlan) => Change): Promise<Change> {
-    const seen = await this.deps.loadSession(parentId);
-    if (!seen) throw new Error('Session not found');
-    const fresh = await this.deps.loadSession(parentId);
-    if (!fresh) throw new Error('Session not found');
-    const result = mutate(fresh.plan ?? emptyPlan());
-    await this.persist(fresh, result);
-    return result;
+    return this.write(parentId, async () => {
+      const seen = await this.deps.loadSession(parentId);
+      if (!seen) throw new Error('Session not found');
+      const fresh = await this.deps.loadSession(parentId);
+      if (!fresh) throw new Error('Session not found');
+      const result = mutate(fresh.plan ?? emptyPlan());
+      if (result.plan !== fresh.plan) await this.persist(fresh, result);
+      return result;
+    });
   }
 
   private async persist(fresh: Session, result: Change): Promise<void> {

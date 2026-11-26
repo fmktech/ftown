@@ -185,7 +185,7 @@ interface UseSessionsResult {
   handoffSession: (sessionId: string, options?: { shellType?: string; model?: string; name?: string }) => Promise<Session>;
   moveSessionToProject: (session: Session, projectName: string, detach?: boolean) => Promise<void>;
   renameSession: (sessionId: string, name: string) => void;
-  setSessionParent: (sessionId: string, parentSessionId: string | null) => void;
+  setSessionParent: (sessionId: string, parentSessionId: string | null) => Promise<void>;
   removeSession: (sessionId: string, onlyIfFinished?: boolean, ownerOnline?: boolean) => void;
   refreshSessions: () => void;
 }
@@ -846,19 +846,23 @@ export function useSessions(
   );
 
   const setSessionParent = useCallback(
-    (sessionId: string, parentSessionId: string | null) => {
-      if (!userId) return;
+    async (sessionId: string, parentSessionId: string | null) => {
+      if (!userId) throw Error("Not connected");
 
-      const payload: UpdateSessionParentPayload = { sessionId, parentSessionId, parentBridgeId: sessionsRef.current.find(s => s.id === parentSessionId)?.bridgeId };
+      const session = sessionsRef.current.find(row => row.id === sessionId);
+      const parent = sessionsRef.current.find(row => row.id === parentSessionId);
+      if (!session || parentSessionId && !parent) throw Error("Session unavailable.");
+      const payload: UpdateSessionParentPayload = { sessionId, bridgeId: session.bridgeId, parentSessionId, parentBridgeId: parent?.bridgeId };
       const command: Command = {
         type: "update_session_parent",
         payload,
         requestId: uuidv4(),
       };
 
-      publishCommand(command);
+      const response = await sendCommand(command);
+      if (!response.success) throw Error(response.error || "Could not move session.");
     },
-    [userId, publishCommand]
+    [userId, sendCommand]
   );
 
   const removeSession = useCallback(

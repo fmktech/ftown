@@ -60,20 +60,20 @@ describe('account-aware session creation', () => {
       assert.deepEqual(child.allowedAccounts, ['personal']);
       assert.deepEqual(childHarness.runs[0].env, { CLAUDE_CONFIG_DIR: join(home, 'claude-personal') });
 
-      // Account comes from the resolved parent; both policies restrict children.
-      const alias = { ...fakeSession('alias'), parentSessionId: 'parent', shellType: 'claude' as const, account: 'other', allowedAccounts: ['personal', 'other'] };
+      // Immediate-parent settings apply within the restrictions of all local ancestors.
+      const alias = { ...fakeSession('alias'), parentSessionId: 'parent', shellType: 'claude' as const, account: 'personal', allowedAccounts: ['personal', 'other'] };
       const aliased = fakeDeps([{ ...parent, allowedAccounts: ['personal'] }, alias]);
       const sibling = await createFtownSession(aliased.deps, { projectName: 'Test project', parentSessionId: 'alias', workingDir: work });
-      assert.equal(sibling.parentSessionId, 'parent');
+      assert.equal(sibling.parentSessionId, 'alias');
       assert.equal(sibling.account, 'personal');
       assert.deepEqual(sibling.allowedAccounts, ['personal']);
       const codexParent = { ...fakeSession('codex-parent'), shellType: 'codex' as const, account: 'codex-lab' };
       const claudeAlias = { ...fakeSession('claude-alias'), parentSessionId: 'codex-parent', shellType: 'claude' as const };
       const codexAliasHarness = fakeDeps([codexParent, claudeAlias]);
       const codexChild = await createFtownSession(codexAliasHarness.deps, { projectName: 'Test project', parentSessionId: 'claude-alias', workingDir: work });
-      assert.equal(codexChild.shellType, 'codex');
-      assert.equal(codexChild.account, 'codex-lab');
-      assert.deepEqual(codexAliasHarness.runs[0].env, { CODEX_HOME: join(home, 'codex-lab') });
+      assert.equal(codexChild.shellType, 'claude');
+      assert.equal(codexChild.account, undefined);
+      assert.equal(codexAliasHarness.runs[0].env?.CODEX_HOME, undefined);
       const restricted = fakeDeps([{ ...parent, allowedAccounts: ['personal'] }, alias]);
       await assert.rejects(createFtownSession(restricted.deps, { projectName: 'Test project', parentSessionId: 'alias', account: 'other', workingDir: work }),
         (error: unknown) => error instanceof AccountSelectionError && error.code === 'account_not_allowed');
@@ -1978,18 +1978,18 @@ it('requires a nonblank project on roots and inherits a remote parent project', 
   assert.equal(child.parentBridgeId, 'remote');
 });
 
-it('creates under a legacy root and resolves a local alias to a root on another machine', async () => {
+it('retains the direct local parent and inherits a legacy missing project from its remote ancestor', async () => {
   const legacy = fakeDeps([fakeSession('legacy')]);
   const child = await createFtownSession(legacy.deps, { parentSessionId: 'legacy', shellType: 'shell' });
   assert.equal(child.projectName, 'Unassigned');
 
-  const harness = fakeDeps([{ ...fakeSession('alias'), parentSessionId: 'root', parentBridgeId: 'remote' }]);
+  const harness = fakeDeps([{ ...fakeSession('alias'), shellType: 'shell', parentSessionId: 'root', parentBridgeId: 'remote' }]);
   harness.deps.loadRemoteParent = async (bridgeId, id) => {
     assert.deepEqual([bridgeId, id], ['remote', 'root']);
     return { ...fakeSession(id), bridgeId, projectName: 'Shared', shellType: 'shell', account: 'remote-only', allowedAccounts: [] };
   };
   const sibling = await createFtownSession(harness.deps, { parentSessionId: 'alias' });
-  assert.deepEqual([sibling.parentSessionId, sibling.parentBridgeId, sibling.projectName, sibling.shellType], ['root', 'remote', 'Shared', 'shell']);
+  assert.deepEqual([sibling.parentSessionId, sibling.parentBridgeId, sibling.projectName, sibling.shellType], ['alias', 'bridge', 'Shared', 'shell']);
   assert.equal(sibling.account, undefined);
   assert.equal(sibling.allowedAccounts, undefined);
 });
@@ -2011,4 +2011,44 @@ it('uses a stable project directory on the destination bridge without interpreti
     if (previous === undefined) delete process.env.FTOWN_PROJECT_DIR; else process.env.FTOWN_PROJECT_DIR = previous;
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+
+it('validates the entire ancestry before launching or binding to a manager on another bridge', async () => {
+  const h = fakeDeps();
+  const parents: Record<string, Session> = {
+    middle: { ...fakeSession('middle'), bridgeId: 'second', parentSessionId: 'top', parentBridgeId: 'third', shellType: 'shell' },
+    top: { ...fakeSession('top'), bridgeId: 'third', projectName: 'Shared' },
+  };
+  h.deps.loadRemoteParent = async (owner, id) => {
+    assert.equal(parents[id].bridgeId, owner);
+    return parents[id];
+  };
+  const calls: string[][] = [];
+  h.deps.remotePlanStore = owner => ({
+    get: async id => { calls.push([owner, id]); return { items: [{ id: 'p1', state: 'todo' }] }; },
+    startForChild: async (id, item, child) => { calls.push([owner, id, item, child]); },
+  });
+  const input = { parentSessionId: 'middle', parentBridgeId: 'second', planItem: 'p1' };
+  const child = await createFtownSession(h.deps, input);
+  assert.deepEqual([child.parentBridgeId, child.parentSessionId, child.projectName], ['second', 'middle', 'Shared']);
+  assert.deepEqual(calls, [['second', 'middle'], ['second', 'middle', 'p1', child.id]]);
+  Object.assign(parents.top, { parentSessionId: 'middle', parentBridgeId: 'second' });
+  await assert.rejects(createFtownSession(h.deps, input), /Cycle/);
+  assert.equal(h.runs.length, 1);
+  delete parents.top;
+  await assert.rejects(createFtownSession(h.deps, input), /Parent session unavailable/);
+  assert.equal(calls.length, 2);
+});
+
+
+it('accepts 32 ancestry edges and rejects a 33rd before creating a worker', async () => {
+  const nodes = Array.from({ length: 33 }, (_, i) => ({
+    ...fakeSession('node' + i), projectName: 'Nested', shellType: 'shell' as const,
+    ...(i ? { parentSessionId: 'node' + (i - 1) } : {}),
+  }));
+  const h = fakeDeps(nodes);
+  assert.equal((await createFtownSession(h.deps, { parentSessionId: 'node31' })).parentSessionId, 'node31');
+  await assert.rejects(createFtownSession(h.deps, { parentSessionId: 'node32' }), /32 parent links/);
+  assert.equal(h.saved.length, 1);
 });

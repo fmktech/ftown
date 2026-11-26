@@ -257,6 +257,10 @@ export class MailDeliveryService {
     this.store = store;
   }
 
+  async hasResultFrom(recipient: string, sender: string): Promise<boolean> {
+    return !!(await this.mailStore?.listAll(recipient, 0))?.some(message => message.from === sender && message.type === 'result');
+  }
+
   setMailStore(mailStore: MailDeliveryMailStore): void {
     if (this.mailStore !== mailStore) this.invalidateRecovery();
     this.mailStore = mailStore;

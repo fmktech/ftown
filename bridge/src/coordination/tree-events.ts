@@ -44,7 +44,7 @@ function parseEvent(line: string): TreeEvent | null {
   if (typeof ts !== 'string' || typeof sessionId !== 'string' || typeof sessionName !== 'string' || typeof summary !== 'string') return null;
   if (typeof kind !== 'string' || !(TREE_EVENT_KINDS as readonly string[]).includes(kind)) return null;
   if (ref !== undefined && typeof ref !== 'string') return null;
-  return { seq, ts, sessionId, sessionName, kind: kind as TreeEventKind, summary, ...(ref !== undefined ? { ref } : {}) };
+  return { seq, ts, sessionId, sessionName, kind: kind as TreeEventKind, summary, ...(typeof record.deliveryId === 'string' ? { deliveryId: record.deliveryId } : {}), ...(ref !== undefined ? { ref } : {}) };
 }
 
 /** Per-root JSONL log of tree events (one JSON object per line, seq survives compaction). */
@@ -113,19 +113,25 @@ export class TreeEventLog implements TreeEventLogApi {
     const summary = truncate(cleanLine(input.summary), TREE_EVENT_SUMMARY_MAX);
     const sessionName = cleanLine(input.sessionName).slice(0, SESSION_NAME_MAX);
     const ref = input.ref === undefined ? undefined : cleanLine(input.ref);
-    return { sessionId: input.sessionId, sessionName, kind: input.kind, summary, ...(ref ? { ref: ref.slice(0, REF_MAX) } : {}) };
+    return { ...(input.deliveryId ? {deliveryId: input.deliveryId} : {}), sessionId: input.sessionId, sessionName, kind: input.kind, summary, ...(ref ? { ref: ref.slice(0, REF_MAX) } : {}) };
   }
 
   async append(rootId: string, input: TreeEventInput): Promise<TreeEvent> {
     this.requireValidId(rootId);
     const fields = this.cleaned(input);
     const event: TreeEvent = { seq: 0, ts: new Date(this.deps.now()).toISOString(), ...fields };
+    let appended = false;
     await this.withLock(rootId, async () => {
+      if (event.deliveryId) {
+        const previous = (await this.events(rootId)).find(row => row.deliveryId === event.deliveryId);
+        if (previous) { Object.assign(event, previous); return; }
+      }
       const { head, count } = await this.stateLocked(rootId);
       event.seq = head + 1;
       const dir = this.deps.sessionDir(rootId);
       await mkdir(dir, { recursive: true, mode: 0o700 });
       await appendFile(this.file(rootId), `${JSON.stringify(event)}\n`, { mode: 0o600 });
+      appended = true;
       this.heads.set(rootId, event.seq);
       this.counts.set(rootId, count + 1);
       if (count + 1 > TREE_EVENTS_COMPACT_AT) {
@@ -136,7 +142,7 @@ export class TreeEventLog implements TreeEventLogApi {
         });
       }
     });
-    for (const wake of Array.from(this.waiters.get(rootId) ?? [])) wake();
+    if (appended) for (const wake of Array.from(this.waiters.get(rootId) ?? [])) wake();
     return event;
   }
 

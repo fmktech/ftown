@@ -15,6 +15,7 @@ import type {
   MailEventSink,
   SessionCardDeclared,
   TreeEventKind,
+  TreeEventInput,
   TreeEventLogApi,
   TreeEventLogDeps,
 } from './contract.js';
@@ -53,6 +54,11 @@ export interface CoordinationMailStore {
 
 export interface CoordinationDeps {
   store: CoordinationSessionStore;
+  remoteResultSender?: (id: string, manager: Session) => Promise<Session | null>;
+  remoteEvent?: (child: Session, event: TreeEventInput) => void;
+  remotePlanLifecycle?: (child: Session, action: 'complete' | 'release') => Promise<void>;
+  remoteParentRunning?: (child: Session) => Promise<boolean>;
+  remoteChildren?: BoardDeps['remoteChildren'];
   attention: CoordinationAttentionStore;
   prStatus: (url: string) => Promise<CoordinationPrStatusResult | null>;
   /** Gate-time status that must be fresh (see PullRequestStatusService.getFresh). */
@@ -148,21 +154,24 @@ export function createCoordination(deps: CoordinationDeps): Coordination {
       exitedSessions.add(session.id);
     }
     try {
-      const rootId = rootOf(session);
-      await events.append(rootId, {
+      const rootId = kind === 'plan' ? session.id : rootOf(session);
+      const event: TreeEventInput = {
         sessionId: session.id,
         sessionName: session.name,
         kind,
         summary,
         ...(ref !== undefined ? { ref } : {}),
-      });
+      };
+      if (kind !== 'plan' && session.parentBridgeId && session.parentBridgeId !== session.bridgeId) {
+        deps.remoteEvent?.(session, event);
+      } else await events.append(rootId, event);
     } catch (error) {
       console.warn(
         '[Coordination] Failed to emit tree event:',
         error instanceof Error ? error.message : String(error),
       );
     } finally {
-      deps.onBoardChanged?.(rootOf(session));
+      deps.onBoardChanged?.(kind === 'plan' ? session.id : rootOf(session));
     }
   }
 
@@ -178,6 +187,7 @@ export function createCoordination(deps: CoordinationDeps): Coordination {
     if (!deps.attention.listRouted || !deps.attention.setRoute) return undefined;
     return {
       listSessions: () => deps.store.listSessions(),
+      remoteParentRunning: deps.remoteParentRunning,
       attention: {
         listRouted: (id) => deps.attention.listRouted!(id),
         setRoute: (id, eventId, fields, expectRoute) => deps.attention.setRoute!(id, eventId, fields, expectRoute),
@@ -230,7 +240,9 @@ export function createCoordination(deps: CoordinationDeps): Coordination {
         await emit(session, 'removed', 'removed');
         // A started plan item was bound to this child. Put it back on the list.
         try {
-          await plan.releaseForChild(session.parentSessionId, session.id);
+          if (session.parentBridgeId && session.parentBridgeId !== session.bridgeId) {
+            await deps.remotePlanLifecycle?.(session, 'release');
+          } else await plan.releaseForChild(session.parentSessionId, session.id);
         } catch (error) {
           console.warn(
             '[Coordination] Failed to release plan item for removed child:',
@@ -268,7 +280,9 @@ export function createCoordination(deps: CoordinationDeps): Coordination {
       // undo the card write.
       if (saved.card?.state === 'done' && previous?.state !== 'done' && saved.parentSessionId) {
         try {
-          await plan.completeForChild(saved.parentSessionId, saved.id);
+          if (saved.parentBridgeId && saved.parentBridgeId !== saved.bridgeId) {
+            await deps.remotePlanLifecycle?.(saved, 'complete');
+          } else await plan.completeForChild(saved.parentSessionId, saved.id);
         } catch (error) {
           console.warn(
             '[Coordination] Failed to complete plan item for child:',
@@ -290,6 +304,7 @@ export function createCoordination(deps: CoordinationDeps): Coordination {
       : {}),
     loadSession: (id) => deps.store.loadSession(id),
     listSessions: () => deps.store.listSessions(),
+    remoteChildren: deps.remoteChildren,
     attention: async (id) => {
       const page = await deps.attention.list(id);
       return { activity: page.activity, openCount: page.openCount };
@@ -309,7 +324,7 @@ export function createCoordination(deps: CoordinationDeps): Coordination {
         const hasChildren = sessions.some(
           (s) => s.parentSessionId === recipientSessionId && s.id !== recipientSessionId,
         );
-        if (!hasChildren) return null;
+        if (!hasChildren && !(await deps.remoteChildren?.(recipientSessionId))?.length) return null;
 
         let since = digestCursors.get(recipientSessionId);
         if (since === undefined) {
@@ -330,11 +345,14 @@ export function createCoordination(deps: CoordinationDeps): Coordination {
     async onAccepted(message: MailMessage, recipient: Session): Promise<void> {
       try {
         if (message.type !== 'result') return;
-        const sender = await deps.store.loadSession(message.from);
-        if (!sender) return;
-        if (rootOf(sender) !== recipient.id) return;
+        const sender = await deps.store.loadSession(message.from) ?? await deps.remoteResultSender?.(message.from, recipient);
+        if (!sender || rootOf(sender) !== recipient.id || (sender.parentBridgeId ?? sender.bridgeId) !== recipient.bridgeId) return;
         const firstLine = (message.body.split(/\r?\n/, 1)[0] ?? '').slice(0, 200);
-        await emit(sender, 'result', firstLine);
+        if (sender.bridgeId === recipient.bridgeId) await emit(sender, 'result', firstLine);
+        else {
+          await events.append(recipient.id, {sessionId: sender.id, sessionName: sender.name, kind: 'result', summary: firstLine, deliveryId: message.id});
+          deps.onBoardChanged?.(recipient.id);
+        }
       } catch (error) {
         console.warn(
           '[Coordination] Failed to handle accepted mail event:',

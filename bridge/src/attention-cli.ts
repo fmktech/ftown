@@ -198,6 +198,7 @@ export function buildAnswers(prompt: AttentionPrompt | undefined, input: AnswerI
 // ───────────────────────── list ─────────────────────────
 
 export interface RoutedItem {
+  bridgeId?: string;
   sessionId: string;
   sessionName: string;
   event: AttentionItem;
@@ -207,7 +208,7 @@ export function formatRoutedItem(item: RoutedItem): string[] {
   const { event } = item;
   const child = item.sessionName || item.sessionId;
   const title = event.title || event.message;
-  const lines = [`${child} ${event.id} ${title}`];
+  const lines = [`${child}${item.bridgeId ? ` (${item.bridgeId})` : ''} ${event.id} ${title}`];
   const questions = event.prompt?.questions ?? [];
   questions.forEach((question, index) => {
     if (questions.length > 1) lines.push(`  Q${index + 1}: ${question.question}`);
@@ -223,12 +224,14 @@ async function listCommand(deps: AttentionCliDeps, opts: { json?: boolean }): Pr
   const self = requireSelf(deps.env);
   const data = (await deps.api('GET', routedPath(self), undefined, callerHeaders(self))) as {
     items?: RoutedItem[];
+    unavailable?: string[];
   };
   const items = data?.items ?? [];
   if (opts.json === true) {
     deps.log(JSON.stringify(data, null, 2));
     return;
   }
+  if (data?.unavailable?.length) deps.log('Could not check bridges: ' + data.unavailable.join(', '));
   if (items.length === 0) {
     deps.log('no routed questions');
     return;

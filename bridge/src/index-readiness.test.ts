@@ -91,7 +91,7 @@ async function startup(pointerFails = false, restart: 'none' | 'success' | 'fail
     const updates = {}; const updateEffects = {};
     const sessionController = {};
     const hostResources = async () => ({});
-    const projectBoards = {};
+    const projectBoards = {}; const storageMoves = {};
     const findDiscussionSession = async () => null;
     const observeProject = async () => ({});
     const projectDirectory = { list: async () => [] };

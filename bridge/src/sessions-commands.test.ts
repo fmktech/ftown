@@ -636,12 +636,26 @@ test('remote create with --parent forwards the caller ID and its owning bridge',
   process.env.FTOWN_SESSION_ID = 'nested-caller';
   try {
     assert.equal(await runSessions(['create', '--parent', '--shell', 'shell']), 0);
-    const forwarded = requests[0].body as { bridge: string; path: string; body: unknown };
+    const forwarded = requests.find(r => (r.body as {path?: string})?.path === '/api/sessions')!.body as { bridge: string; path: string; body: unknown };
     assert.equal(forwarded.bridge, 'destination');
     assert.equal(forwarded.path, '/api/sessions');
     assert.deepEqual(forwarded.body, { shellType: 'shell', parentSessionId: 'nested-caller', parentBridgeId: 'bridge' });
   } finally { setPeerTarget(null); }
+}, request => {
+  if (request.url.endsWith('/api/sessions/nested-caller')) return { session: { id: 'nested-caller', bridgeId: 'bridge', parentSessionId: 'manager' } };
+  if ((request.body as {path?: string})?.path === '/api/host-resources') return { nestedSessions: true };
+  return { session: { id: 'created', status: 'running' } };
 })));
+
+test('remote nested create refuses a destination that would flatten the relationship', async () => fixture(async (requests, output) => {
+  setPeerTarget('older-peer');
+  try {
+    assert.equal(await runSessions(['create', '--parent-id', 'worker', '--shell', 'shell']), 1);
+    assert.ok(output.some(s => s.includes('Update the destination bridge')));
+    assert.equal(requests.some(r => (r.body as { path?: string })?.path === '/api/sessions'), false);
+  } finally { setPeerTarget(null); }
+}, request => request.url.endsWith('/api/sessions/worker')
+  ? { session: { id: 'worker', bridgeId: 'bridge', parentSessionId: 'manager' } } : {}));
 
 test('remembered list reads the local bridge cache', async () => fixture(async requests => {
   assert.equal(await runSessions(['list', '--remembered']), 0);

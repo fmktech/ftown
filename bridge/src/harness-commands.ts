@@ -6,7 +6,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Command, CommanderError } from 'commander';
-import { api, loadPointer, bridgePointerPath, listSessions, resolveSessionId, fetchInbox, fetchInboxPage, readInboxForCli, sendMail } from './cli-client.js';
+import { api, loadPointer, bridgePointerPath, listSessions, resolveSessionId, fetchInbox, fetchInboxPage, readInboxForCli, sessionApiAt } from './cli-client.js';
 import { quoteShellArgument } from './session-shell.js';
 import { runAskHookCli, runningUnderGrokHook } from './ask-question-hook.js';
 import { runHookCli } from './hook-cli.js';
@@ -389,11 +389,15 @@ async function cmdMailSend(
   }
 
   const sessions = await listSessions(pointer);
+  const self = process.env.FTOWN_SESSION_ID?.trim();
+  const sender = sessions.find(s => s.id === self);
   let targetId: string;
+  let owner: string | undefined;
   if (opts.parent) {
-    const parent = process.env.FTOWN_PARENT_SESSION_ID?.trim();
-    if (!parent) throw new Error('--parent requires FTOWN_PARENT_SESSION_ID to be set');
-    targetId = parent;
+    // A live agent's launch environment still names the original parent after a move.
+    if (!sender?.parentSessionId) throw new Error('Current session has no parent');
+    targetId = sender.parentSessionId;
+    owner = sender.parentBridgeId;
   } else {
     if (!opts.target) throw new Error('Missing target (session id/name, or use --parent)');
     if (opts.target === 'project-discussion' && !sessions.some(s => s.name === opts.target || s.id === opts.target)) {
@@ -404,16 +408,15 @@ async function cmdMailSend(
     targetId = resolveSessionId(sessions, opts.target);
   }
 
-  const self = process.env.FTOWN_SESSION_ID?.trim();
   const from = self ?? 'external';
-  const fromName = self ? sessions.find((s) => s.id === self)?.name : undefined;
+  const fromName = sender?.name;
 
   const body: Record<string, unknown> = { body: opts.text, from };
   if (fromName) body.fromName = fromName;
   if (opts.type) body.type = opts.type;
   if (opts.thread) body.threadId = opts.thread;
 
-  const { id } = await sendMail(pointer, targetId, body);
+  const { id } = await sessionApiAt<{ id: string }>(pointer, owner, 'POST', `/api/sessions/${encodeURIComponent(targetId)}/inbox`, body);
   emit(
     opts.json,
     { id, to: targetId, from, type: opts.type ?? 'message' },

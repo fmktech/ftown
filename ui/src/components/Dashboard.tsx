@@ -16,7 +16,8 @@ import { Session, ShellType } from "@/types";
 import { CreateSessionOptions, useSessions } from "@/hooks/useSessions";
 import { useBridgeRpc } from "@/hooks/useBridgeRpc";
 import { useBridges } from "@/hooks/useBridges";
-import { useBridgeUpdates } from "@/hooks/useBridgeUpdates";
+import { sessionLineage } from "@/lib/session-lineage";
+import { supportsNestedSessionsAndProjectMoves, useBridgeUpdates } from "@/hooks/useBridgeUpdates";
 import { BridgeUpdatesDialog } from "./BridgeUpdatesDialog";
 import { ModelRoutingDialog } from "./ModelRoutingDialog";
 import { AppUpdateNotice } from "./AppUpdateNotice";
@@ -137,7 +138,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const startCommand = buildBridgeStartCommand({ apiUrl: typeof window !== "undefined" ? window.location.origin : "" });
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [usageViewSessionId, setUsageViewSessionId] = useState<string | null>(null);
-  const [openBoard, setOpenBoard] = useState<HomeProject | null>(null);
+  const [selectedBoard, setOpenBoard] = useState<HomeProject | null>(null);
   const [inboxOpen, setInboxOpen] = useState(false);
   /** Child attention item opened in the Overview coordinator panel; mirrored to `?attention=` URL state. */
   const [openAttentionId, setOpenAttentionId] = useState<string | null>(null);
@@ -289,7 +290,7 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
   const rpc = useBridgeRpc(client, userId);
   const { bridgeExec } = rpc;
   const { sessions: rawSessions, createSession, stopSession, retrySession, handoffSession, dismissSessionBlock, moveSessionToProject, renameSession, setSessionParent, removeSession } = useSessions(client, userId, rpc,
-    !openBoard && !inboxOpen && selectedSessionId === usageViewSessionId && (isDesktop || mobileTab !== "sessions") ? usageViewSessionId : null);
+    !selectedBoard && !inboxOpen && selectedSessionId === usageViewSessionId && (isDesktop || mobileTab !== "sessions") ? usageViewSessionId : null);
   const { bridges, prepareLocalAccess } = useBridges(client, userId, transport);
   const securityRuntime = client?.securityRuntime;
   useEffect(() => securityRuntime?.onChange(() => setSecurityGeneration(value => value + 1)), [securityRuntime]);
@@ -336,8 +337,14 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
     }
   }, [statsTargets, client, userId]);
   const updateIds = connectionStatus === "connected" ? readyBridges.map(bridge => bridge.bridgeId) : [];
-  const projectDirectory = useProjectDirectory(accountId ?? userId, updateIds, rpc.sendCommand);
+  const projectDirectory = useProjectDirectory(accountId ?? userId, updateIds, rpc.sendCommand, selectedBoard);
+  const openBoard = selectedBoard && (projectDirectory.projects.find(p => p.id === selectedBoard.id) ?? selectedBoard);
+  useEffect(() => {
+    if (openBoard && (openBoard.homeRevision ?? 0) > (selectedBoard?.homeRevision ?? 0)) setOpenBoard(openBoard);
+  }, [openBoard, selectedBoard]);
+  const ticketProject = launchTicket && (projectDirectory.projects.find(project => project.id === launchTicket.project.id) ?? launchTicket.project);
   const updates = useBridgeUpdates(rpc.sendCommand, updateIds);
+  const upgradedBridges = new Set(updateIds.filter(id => supportsNestedSessionsAndProjectMoves(updates.get(id).status?.currentVersion)));
 
   const hasBridges = readyBridges.length > 0;
   const securityBridges = useMemo(() => {
@@ -452,7 +459,7 @@ PY`;
   const projectSessions = useMemo(() => {
     const byId = new Map(sessions.map(session => [session.id, session]));
     return sessions.filter(session => {
-      const root = session.parentSessionId ? byId.get(session.parentSessionId) ?? session : session;
+      const root = sessionLineage(session, byId).chain.at(-1) ?? session;
       return !hiddenProjects.has(root.projectName || "");
     });
   }, [sessions, hiddenProjects]);
@@ -713,12 +720,12 @@ PY`;
 
   const handleCreateSession = useCallback(
     async (prompt: string, options: CreateSessionOptions): Promise<void> => {
-      if (launchTicket && options.projectName !== launchTicket.project.name) throw Error("Choose the ticket’s project to launch this worker.");
+      if (ticketProject && options.projectName !== ticketProject.name) throw Error("Choose the ticket’s project to launch this worker.");
       const created = await createSession(prompt, options);
-      if (launchTicket) {
+      if (launchTicket && ticketProject) {
         try {
           const result = await rpc.sendCommand({ type: "mutate_project_board", requestId: crypto.randomUUID(), payload: {
-            action: "update_ticket", bridgeId: launchTicket.project.bridgeId, projectId: launchTicket.project.id,
+            action: "update_ticket", bridgeId: ticketProject.bridgeId, projectId: ticketProject.id,
             ticketId: launchTicket.ticketId, addSessionId: created.id,
           } });
           if (!result.success) throw Error(result.error);
@@ -729,7 +736,7 @@ PY`;
       handleSelectSession(created.id);
       scheduleTerminalRenderAdjustment();
     },
-    [createSession, handleSelectSession, scheduleTerminalRenderAdjustment, launchTicket, rpc.sendCommand]
+    [createSession, handleSelectSession, scheduleTerminalRenderAdjustment, launchTicket, ticketProject, rpc.sendCommand]
   );
 
   const handleOpenAttentionChange = useCallback((id: string | null) => {
@@ -1373,12 +1380,17 @@ PY`;
             <SessionList
               boards={{ projects: projectDirectory.projects, activeProjectId: openBoard?.id,
                 homes: updateIds.map(id => ({ id, label: bridgeIdentities.get(id)?.name || id })),
+                move: async (project, target) => {
+                  const next = await projectDirectory.move(project, target);
+                  setOpenBoard(current => current?.id === project.id ? next : current);
+                },
                 create: projectDirectory.create, open: project => { setInboxOpen(false); setOpenBoard(project); },
                 change: async (project, name) => {
                   await projectDirectory.mutate(project, name === null ? "delete_project" : "rename_project", name ?? undefined);
                   setOpenBoard(current => current?.id === project.id ? (name ? { ...current, name } : null) : current);
                 },
               }}
+              upgradedBridges={upgradedBridges}
               bridgeIdentities={bridgeIdentities}
               projectBridges={projectBridges}
               projectComputers={securityBridges.filter(b => b.security.status !== "revoked").map(b => ({ id: b.bridgeId, label: b.label || b.bridgeId }))}
@@ -1388,8 +1400,8 @@ PY`;
                 return Array.from(next);
               })}
               projectStorageKey={`ftown:projects:${accountId ?? userId}`}
-              onAddSession={hasBridges ? projectName => {
-                setSessionDefaults({ projectName });
+              onAddSession={hasBridges ? (projectName, parent) => {
+                setSessionDefaults({ projectName, ...(parent && { parentSessionId: parent.id, parentBridgeId: parent.bridgeId, bridgeId: parent.bridgeId, shellType: parent.shellType }) });
                 setShowNewSession(true);
               } : undefined}
               onHiddenProjectsChange={setHiddenProjects}
@@ -1434,7 +1446,7 @@ PY`;
 
         {/* Terminal area */}
         <main aria-hidden={!isDesktop && mobileTab === "sessions" && !inboxOpen && !openBoard} className={`flex-1 flex-col min-h-0 min-w-0 ${mobileTab !== "sessions" || inboxOpen || openBoard ? "flex" : "hidden"} md:flex`}>
-          {openBoard && <ProjectBoardPanel key={openBoard.id} project={openBoard} onOpenUpdates={() => setUpdateBridgeId(openBoard.bridgeId)}
+          {openBoard && <ProjectBoardPanel key={`${openBoard.id}:${openBoard.bridgeId}`} project={openBoard} onOpenUpdates={() => setUpdateBridgeId(openBoard.bridgeId)}
             unavailableMessage={connectionStatus !== "connected" ? "Dashboard disconnected" : activeBridgeIds.has(openBoard.bridgeId) ? "Waiting for a secure connection to the home bridge" : "Home bridge offline"}
             online={updateIds.includes(openBoard.bridgeId)}
             bridgeNames={new Map(securityBridges.filter(b => b.security.status !== "revoked").map(b => [b.bridgeId, bridgeIdentities.get(b.bridgeId)?.name ?? (b.label || b.bridgeId)]))}
@@ -1504,7 +1516,7 @@ PY`;
         isOpen={showNewSession}
         onClose={() => { setShowNewSession(false); setSessionDefaults(undefined); setLaunchTicket(null); }}
         onSubmit={handleCreateSession}
-        bridges={readyBridges}
+        bridges={readyBridges} upgradedBridges={upgradedBridges}
         hostedProjects={projectDirectory.projects.map(p => p.name)} createProjectBoard={projectDirectory.ensureForSession}
         projectBridges={projectBridges}
         resourcesByBridge={resourcesByBridge}

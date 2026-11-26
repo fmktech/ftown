@@ -246,6 +246,7 @@ export interface RenameSessionPayload {
 
 export interface UpdateSessionParentPayload {
   sessionId: string;
+  bridgeId?: string;
   parentBridgeId?: string;
   parentSessionId: string | null;
 }
