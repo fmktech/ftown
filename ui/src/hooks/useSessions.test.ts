@@ -378,20 +378,21 @@ describe("retirement reconciliation through actual hook callbacks", () => {
     const h = setup(true); h.reply(h.request(), [row("retained")], "a"); act(() => h.result.current.removeSession("retained")); expect(h.ids()).toEqual([]);
     act(() => vi.advanceTimersByTime(12_000)); h.reply(h.request(), [row("retained")], "a"); expect(h.ids()).toEqual(["retained"]);
   });
-  it("failed optimistic publish reconciles, but confirmed removal dominates rollback", () => {
-    const h = setup(true); h.reply(h.request(), [row("retained")], "a"); act(() => h.result.current.removeSession("retained"));
-    const removal = h.commands.at(-1)!;
-    act(() => h.responses.forEach(cb => cb({ requestId: removal.requestId, success: false })));
+  it("failed optimistic publish reconciles, but confirmed removal dominates rollback", async () => {
+    const h = setup(true);
+    vi.mocked(h.rpc.sendCommand).mockResolvedValue({ requestId: "r", success: false }); h.reply(h.request(), [row("retained")], "a"); act(() => h.result.current.removeSession("retained"));
+    await act(async () => {});
     h.reply(h.request(), [row("retained")], "a"); expect(h.ids()).toEqual(["retained"]);
     act(() => h.result.current.removeSession("retained")); h.publication(row("retained"), "removed");
     act(() => vi.advanceTimersByTime(13_000)); h.reply(h.request(), [row("retained")], "a"); expect(h.ids()).toEqual([]);
   });
-  it("generic remove success is not authoritative and guarded/offline removal is not optimistic", () => {
-    const h = setup(true); h.reply(h.request(), [row("keep")], "a");
+  it("generic remove success is not authoritative and guarded/offline removal is not optimistic", async () => {
+    const h = setup(true);
+    vi.mocked(h.rpc.sendCommand).mockResolvedValue({ requestId: "r", success: true, data: { removed: false } }); h.reply(h.request(), [row("keep")], "a");
     act(() => h.result.current.removeSession("keep", true)); expect(h.ids()).toEqual(["keep"]);
     act(() => h.result.current.removeSession("keep", false, false)); expect(h.ids()).toEqual(["keep"]);
     act(() => h.result.current.removeSession("keep"));
-    act(() => h.responses.forEach(cb => cb({ requestId: h.commands.at(-1)!.requestId, success: true, data: { removed: false } })));
+    await act(async () => {});
     act(() => vi.advanceTimersByTime(12_000)); h.reply(h.request(), [row("keep")], "a"); expect(h.ids()).toEqual(["keep"]);
   });
   it("reloads only on failed recovery and visibility return", () => {
@@ -648,7 +649,7 @@ describe("create result reconciliation boundaries", () => {
   function pendingCreate() {
     const h = setup(true);
     let resolve!: (response: CommandResponse) => void;
-    vi.mocked(h.rpc.sendCommand).mockImplementation(() => new Promise<CommandResponse>(done => { resolve = done; }));
+    vi.mocked(h.rpc.sendCommand).mockImplementationOnce(() => new Promise<CommandResponse>(done => { resolve = done; }));
     const pending = h.result.current.createSession("", { shellType: "shell", bridgeId: "a" });
     return { ...h, pending, resolve: (session: Session) => resolve({ requestId: "create", success: true, data: { session } }) };
   }
@@ -756,19 +757,53 @@ it("ignores foreign remembered rows and reconciles from the owner", () => {
   expect(h.ids()).toEqual([]);
 });
 
-it("restores last state only for the same approved owner endpoint", () => {
+function cachedDashboard() {
   const h = harness(true);
   const pin = { bridgeId: "a", endpoint: { id: "key-a" }, permissions: ["read"] };
-  const runtime = { identity: { endpoint: { id: "browser" } }, snapshot: () => [], pinnedBridges: () => [pin], bridge: () => pin,
-    state: () => ({ status: "offline" }), onChange: () => () => {} };
-  Object.assign(h.client, { securityRuntime: runtime });
-  const mount = () => renderHook(() => useSessions(h.client, "user", h.rpc));
-  const first = mount();
-  h.reply(h.request(), [row("worker", "a", { status: "running" })], "a");
+  Object.assign(h.client, { securityRuntime: { identity: { endpoint: { id: "browser" } }, snapshot: () => [], pinnedBridges: () => [pin], bridge: () => pin,
+    state: () => ({ status: "offline" }), onChange: () => () => {} } });
+  const hook = renderHook(() => useSessions(h.client, "user", h.rpc));
+  return { ...h, ...hook, pin };
+}
+
+it("keeps an unrelated update in another tab from restoring a removed session on reload", () => {
+  const main = cachedDashboard();
+  main.reply(main.request(), [row("gone"), row("keep")], "a");
+  const initialStorageSize = localStorage.length;
+  const staleTab = cachedDashboard();
+  main.publication(row("gone"), "removed");
+  const inflight = staleTab.request();
+  staleTab.publication(row("keep", "a", { name: "Renamed" }));
+  staleTab.reply(inflight, [row("gone"), row("keep")], "a");
+  staleTab.publication(row("gone"));
+  expect(staleTab.result.current.sessions.map(s => s.id)).toEqual(["keep"]);
+  const fresh = cachedDashboard();
+  expect(fresh.result.current.sessions.map(s => [s.id, s.name])).toEqual([["keep", "Renamed"]]);
+  main.unmount(); staleTab.unmount(); fresh.unmount();
+  vi.setSystemTime(Date.now() + 2 * 24 * 60 * 60_000);
+  expect(cachedDashboard().result.current.sessions.map(s => s.id)).toEqual(["keep"]);
+  expect(localStorage.length).toBe(initialStorageSize);
+});
+
+it("removes a cached completed session on the owner's confirmation when its publication is missed", async () => {
+  const original = cachedDashboard();
+  original.reply(original.request(), [row("gone"), row("keep")], "a");
+  original.unmount();
+  const tab = cachedDashboard();
+  const commands = vi.mocked(tab.rpc.sendCommand);
+  commands.mockImplementation(async c => ({ requestId: c.requestId, success: true, data: { removed: c.type === "remove_session" && "bridgeId" in c.payload && c.payload.bridgeId === "a" } }));
+  await act(async () => tab.result.current.removeSession("gone", true));
+  expect(tab.result.current.sessions.map(row => row.id)).toEqual(["keep"]);
+  expect(cachedDashboard().result.current.sessions.map(row => row.id)).toEqual(["keep"]);
+});
+
+it("restores last state only for the same approved owner endpoint", () => {
+  const first = cachedDashboard();
+  first.reply(first.request(), [row("worker", "a", { status: "running" })], "a");
   first.unmount();
-  const second = mount();
+  const second = renderHook(() => useSessions(first.client, "user", first.rpc));
   expect(second.result.current.sessions).toEqual([row("worker", "a", { status: "running", lastKnownOnly: true })]);
   second.unmount();
-  pin.endpoint.id = "replacement";
-  expect(mount().result.current.sessions).toEqual([]);
+  first.pin.endpoint.id = "replacement";
+  expect(renderHook(() => useSessions(first.client, "user", first.rpc)).result.current.sessions).toEqual([]);
 });

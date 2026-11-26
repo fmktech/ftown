@@ -33,6 +33,10 @@ export type { BridgeExecResponse } from "@/hooks/useBridgeRpc";
 const REMOVED_TOMBSTONE_MS = 12_000;
 const LIST_REPLY_WINDOW_MS = 30_000;
 const MAX_LIST_REQUESTS = 64;
+// The sessions channel retains 24 hours of history. The extra hour also covers
+// a list request already in flight when that history expires.
+const REMOVAL_MARKER_MS = 25 * 60 * 60_000;
+const CACHE_SWEEP_MS = 60 * 60_000;
 type StreamPosition = { offset: number; epoch: string };
 function streamPosition(value: { offset?: number; epoch?: string } | null | undefined): StreamPosition | null {
   return value && Number.isSafeInteger(value.offset) && value.offset! >= 0 && typeof value.epoch === "string" && value.epoch.length > 0
@@ -78,6 +82,15 @@ function isSessionRow(value: unknown): value is Session {
     && typeof row.updatedAt === "string"
     && typeof row.status === "string"
     && ["pending", "running", "completed", "error", "disconnected"].includes(row.status);
+}
+
+function ownerCacheKey(client: MessageClient | null, userId: string | null, bridgeId: string, removedId?: string): string | undefined {
+  const runtime = client?.securityRuntime;
+  if (!userId || !runtime?.identity?.endpoint.id) return;
+  const pin = runtime.bridge(bridgeId);
+  if (!pin?.permissions.includes("read") || ["revoked", "key_changed"].includes(runtime.state(bridgeId).status)) return;
+  const scope = removedId === undefined ? [bridgeId, pin.endpoint.id] : [bridgeId, pin.endpoint.id, removedId];
+  return JSON.stringify([userId, runtime.identity.endpoint.id]) + ":" + JSON.stringify(scope);
 }
 
 // An invalid registration must not leave a previously trusted frame active.
@@ -196,6 +209,12 @@ export function useSessions(
   const usageRefreshRef = useRef<() => Promise<void>>(async () => {});
   const usageGenerationRef = useRef(0);
   const confirmedRemovedRef = useRef(new Set<string>());
+  const isRemoved = useCallback((id: string, bridgeId: string) => {
+    const key = ownerCacheKey(client, userId, bridgeId, id);
+    if (confirmedRemovedRef.current.has(key ?? JSON.stringify([bridgeId, id]))) return true;
+    // A different tab can confirm removal while this one has a snapshot in flight.
+    try { return key !== undefined && localStorage.getItem(key) !== null; } catch { return false; }
+  }, [client, userId]);
   const optimisticRef = useRef(new Map<string, { expiry: number; bridgeId?: string }>());
   const observationsRef = useRef(new Map<string, number>());
   const mutationRef = useRef(0);
@@ -205,7 +224,7 @@ export function useSessions(
   const identityRef = useRef({ client, userId });
   if (identityRef.current.client !== client || identityRef.current.userId !== userId) identityRef.current = { client, userId };
   const requestListRef = useRef<(coalesce?: boolean) => void>(() => {});
-  const removeRef = useRef<(id: string, optimistic: boolean, command: Command) => void>(() => {});
+  const removeRef = useRef<(id: string, optimistic: boolean, onlyIfFinished?: boolean) => void>(() => {});
   const { publishCommand, sendCommand, onResponse, onSubscribed } = rpc;
 
   // Update the synchronous view before React schedules a render. Request
@@ -253,22 +272,44 @@ export function useSessions(
     if (!userId || !runtime?.identity?.endpoint.id || !runtime.pinnedBridges) return;
     const prefix = JSON.stringify([userId, runtime.identity.endpoint.id]);
     const loaded = new Map<string, string>();
+    let nextSweep = 0;
     function restore() {
       if (!runtime) return;
       const pins = runtime.pinnedBridges().filter(pin => pin.permissions.includes("read") && !["revoked", "key_changed"].includes(runtime.state(pin.bridgeId).status));
       const keys = new Map(pins.map(pin => [pin.bridgeId, prefix + ":" + JSON.stringify([pin.bridgeId, pin.endpoint.id])]));
+      const now = Date.now();
+      if (now < nextSweep && loaded.size === keys.size && [...keys].every(([owner, key]) => loaded.get(owner) === key)) return;
+      nextSweep = now + CACHE_SWEEP_MS;
       const rows: Session[] = [];
       try {
+        const expired = new Map<string, Map<string, string>>();
         for (const key of Object.keys(localStorage)) {
           if (!key.startsWith(prefix + ":")) continue;
-          const [owner] = JSON.parse(key.slice(prefix.length + 1));
+          const [owner, endpoint, id] = JSON.parse(key.slice(prefix.length + 1));
+          const cacheKey = prefix + ":" + JSON.stringify([owner, endpoint]);
           const replacement = keys.get(owner);
-          if ((replacement && replacement !== key) || ["revoked", "key_changed"].includes(runtime.state(owner).status)) localStorage.removeItem(key);
+          if ((replacement && replacement !== cacheKey) || ["revoked", "key_changed"].includes(runtime.state(owner).status)) {
+            localStorage.removeItem(key);
+          } else if (typeof id === "string" && Number(localStorage.getItem(key)) <= now) {
+            const markers = expired.get(cacheKey) ?? new Map<string, string>();
+            markers.set(id, key);
+            expired.set(cacheKey, markers);
+          }
+        }
+        for (const [key, markers] of expired) {
+          // A background tab may have last written the aggregate. Scrub its copy
+          // before releasing the deletion evidence, including when reopening offline.
+          const stored = JSON.parse(localStorage.getItem(key) ?? "[]");
+          if (Array.isArray(stored)) {
+            const keep = stored.filter(row => !markers.has(row?.id));
+            if (keep.length !== stored.length) localStorage.setItem(key, JSON.stringify(keep));
+          }
+          for (const marker of markers.values()) localStorage.removeItem(marker);
         }
         for (const [owner, key] of keys) {
           if (loaded.get(owner) === key) continue;
           const stored = JSON.parse(localStorage.getItem(key) || "[]");
-          if (Array.isArray(stored)) rows.push(...stored.filter((row): row is Session => isSessionRow(row) && row.bridgeId === owner).map(row => ({ ...row, lastKnownOnly: true as const })));
+          if (Array.isArray(stored)) rows.push(...stored.filter((row): row is Session => isSessionRow(row) && row.bridgeId === owner && !isRemoved(row.id, owner)).map(row => ({ ...row, lastKnownOnly: true as const })));
         }
       } catch { /* Storage may be unavailable. */ }
       updateSessions(previous => {
@@ -280,8 +321,21 @@ export function useSessions(
       for (const [owner, key] of keys) loaded.set(owner, key);
     }
     restore();
-    return runtime.onChange(restore);
-  }, [client, userId, updateSessions]);
+    const unsubscribe = runtime.onChange(restore);
+    const onRemoval = (event: StorageEvent) => {
+      if (!event.key?.startsWith(prefix + ":") || event.newValue === null) return;
+      try {
+        const [bridgeId, , id] = JSON.parse(event.key.slice(prefix.length + 1));
+        if (typeof id === "string" && event.key === ownerCacheKey(client, userId, bridgeId, id)) {
+          confirmedRemovedRef.current.add(event.key);
+          updateSessions(previous => previous.filter(row => row.id !== id || row.bridgeId !== bridgeId));
+        }
+      } catch { /* Other storage entries are unrelated. */ }
+    };
+    window.addEventListener("storage", onRemoval);
+    const sweep = window.setInterval(restore, CACHE_SWEEP_MS);
+    return () => { unsubscribe(); window.clearInterval(sweep); window.removeEventListener("storage", onRemoval); };
+  }, [client, userId, updateSessions, isRemoved]);
 
   useEffect(() => {
     if (!userId) return;
@@ -322,12 +376,18 @@ export function useSessions(
       publishCommand({ type: "list_sessions", payload: {}, requestId });
     };
     requestListRef.current = requestList;
-    const blocked = (id: string) => confirmedRemovedRef.current.has(id)
+    const blocked = (id: string, bridgeId: string) => isRemoved(id, bridgeId)
       || (optimisticRef.current.get(id)?.expiry ?? 0) > Date.now();
-    const confirm = (id: string) => {
-      confirmedRemovedRef.current.add(id);
+    const confirm = (id: string, bridgeId: string) => {
+      const key = ownerCacheKey(client, userId, bridgeId, id);
+      confirmedRemovedRef.current.add(key ?? JSON.stringify([bridgeId, id]));
+      // One marker per removed ID lets independent tabs record deletions atomically.
+      if (key) try { localStorage.setItem(key, String(Date.now() + REMOVAL_MARKER_MS)); } catch { /* Retain the in-memory confirmation. */ }
       optimisticRef.current.delete(id);
       observationsRef.current.delete(id);
+      for (const [requestId, removal] of removals) {
+        if (removal.id === id) { clearTimeout(removal.timer); removals.delete(requestId); }
+      }
     };
     const observe = (id: string) => observationsRef.current.set(id, ++mutationRef.current);
     const rollback = (requestId: string) => {
@@ -339,34 +399,49 @@ export function useSessions(
       if (![...removals.values()].some(r => r.id === removal.id)) optimisticRef.current.delete(removal.id);
       requestList();
     };
-    removeRef.current = (id, optimistic, command) => {
+    removeRef.current = (id, optimistic, onlyIfFinished) => {
       if (!active) return;
-      if (optimistic && !confirmedRemovedRef.current.has(id)) {
-        const bridgeId = sessionsRef.current.find(s => s.id === id)?.bridgeId
-          ?? optimisticRef.current.get(id)?.bridgeId;
+      const bridgeId = sessionsRef.current.find(s => s.id === id)?.bridgeId ?? optimisticRef.current.get(id)?.bridgeId;
+      if (bridgeId && isRemoved(id, bridgeId)) return;
+      const target = bridgeId && ownerCacheKey(client, userId, bridgeId);
+      const payload: RemoveSessionPayload = { sessionId: id, onlyIfFinished, ...(bridgeId ? { bridgeId } : {}) };
+      const command: Command = { type: "remove_session", payload, requestId: uuidv4() };
+      if (optimistic) {
         optimisticRef.current.set(id, { expiry: Date.now() + REMOVED_TOMBSTONE_MS, bridgeId });
         updateSessions(prev => prev.filter(s => s.id !== id));
         const timer = setTimeout(() => { if (active) rollback(command.requestId); }, REMOVED_TOMBSTONE_MS);
         removals.set(command.requestId, { id, timer });
       }
-      try { publishCommand(command); } catch { rollback(command.requestId); }
+      void sendCommand(command).then(response => {
+        if (!active) return;
+        if (!response.success) { rollback(command.requestId); return; }
+        if (bridgeId && target === ownerCacheKey(client, userId, bridgeId) && (response.data as { removed?: unknown } | undefined)?.removed === true) {
+          // Guarded bulk clears can succeed without a session-update publication.
+          // Only a confirmed removal from our requested owner changes its cache.
+          confirm(id, bridgeId);
+          updateSessions(prev => prev.filter(row => row.id !== id || row.bridgeId !== bridgeId));
+          rememberOwner(bridgeId, sessionsRef.current, id);
+        }
+      }).catch(() => { if (active) rollback(command.requestId); });
     };
 
-    function rememberOwner(bridgeId: string, next: Session[]) {
-      const runtime = client?.securityRuntime;
-      if (!runtime?.identity?.endpoint.id) return;
-      const pin = runtime.bridge(bridgeId);
-      if (pin?.permissions?.includes("read") && runtime?.identity?.endpoint.id && !["revoked", "key_changed"].includes(runtime.state(bridgeId).status)) {
-        const summaries = next.filter(row => row.bridgeId === bridgeId).map(({ id, name, bridgeId, status, projectName, parentSessionId, parentBridgeId, createdAt, updatedAt }) =>
+    function rememberOwner(bridgeId: string, next: Session[], changedId?: string) {
+      const key = ownerCacheKey(client, userId, bridgeId);
+      if (key) {
+        const summaries = next.filter(row => row.bridgeId === bridgeId && (!changedId || row.id === changedId)).map(({ id, name, bridgeId, status, projectName, parentSessionId, parentBridgeId, createdAt, updatedAt }) =>
           ({ id, name, bridgeId, status, projectName, parentSessionId, parentBridgeId, createdAt, updatedAt }));
-        try { localStorage.setItem(JSON.stringify([userId, runtime.identity.endpoint.id]) + ":" + JSON.stringify([bridgeId, pin.endpoint.id]), JSON.stringify(summaries)); } catch {}
+        try {
+          // Only an owner snapshot replaces the complete cache. A publication can
+          // arrive in a tab whose other sessions predate a deletion in another tab.
+          const stored = changedId ? JSON.parse(localStorage.getItem(key) ?? "[]") : [];
+          const unchanged = Array.isArray(stored) ? stored.filter(row => isSessionRow(row) && row.bridgeId === bridgeId && row.id !== changedId) : [];
+          localStorage.setItem(key, JSON.stringify([...unchanged, ...summaries]));
+        } catch { /* Storage may be unavailable. */ }
       }
     }
     const unregisterResponse = onResponse((response: CommandResponse) => {
       if (!active) return;
       pruneRequests();
-      // Broadcast remove replies cannot confirm ownership. A failure can
-      // safely release optimism and reconcile; sticky confirmation still wins.
       if (!response.success) {
         const request = requests.get(response.requestId);
         if (request && request.generation === generation && !request.failed) {
@@ -380,7 +455,7 @@ export function useSessions(
             requestList(true);
           }
         }
-        rollback(response.requestId); return;
+        return;
       }
       if (!response.data || typeof response.data !== "object") return;
       const data = response.data as { sessions?: unknown; bridgeId?: unknown };
@@ -413,17 +488,18 @@ export function useSessions(
           const present = new Set(rows.map(s => s.id));
           for (const current of prev) {
             if (current.bridgeId === bridgeId && !present.has(current.id) && !newer(current.id)) {
-              confirm(current.id); merged.delete(current.id);
+              confirm(current.id, bridgeId); merged.delete(current.id);
             }
           }
           // Optimistically hidden rows also need durable confirmation when
           // this complete owner snapshot proves their absence.
           for (const [id, optimistic] of optimisticRef.current) {
-            if (optimistic.bridgeId === bridgeId && !present.has(id) && !newer(id)) confirm(id);
+            if (optimistic.bridgeId === bridgeId && !present.has(id) && !newer(id)) confirm(id, bridgeId);
           }
         }
         for (const row of rows) {
-          if (blocked(row.id) || newer(row.id)) continue;
+          if (blocked(row.id, row.bridgeId)) { merged.delete(row.id); continue; }
+          if (newer(row.id)) continue;
           merged.set(row.id, mergeSessionSnapshot(merged.get(row.id), row));
           observe(row.id);
         }
@@ -470,11 +546,13 @@ export function useSessions(
         const authoritative = snapshotPositions.get(data.session.bridgeId);
         if (nextPosition && authoritative && nextPosition.epoch === authoritative.epoch && nextPosition.offset <= authoritative.offset) return;
         if ((data.session.status as string) === "removed") {
-          confirm(data.session.id);
-          updateSessions(prev => prev.filter(s => s.id !== data.session.id));
+          if (typeof data.session.bridgeId !== "string" || !data.session.bridgeId) return;
+          confirm(data.session.id, data.session.bridgeId);
+          updateSessions(prev => prev.filter(s => s.id !== data.session.id || s.bridgeId !== data.session.bridgeId));
+          rememberOwner(data.session.bridgeId, sessionsRef.current, data.session.id);
         } else if (!acceptSessionRow(data.session)) {
           updateSessions(prev => clearInvalidPreviews(prev, [data.session]));
-        } else if (!blocked(data.session.id)) {
+        } else if (!blocked(data.session.id, data.session.bridgeId)) {
           const accepted = data.session;
           observe(accepted.id);
           updateSessions(prev => {
@@ -482,8 +560,8 @@ export function useSessions(
             const incoming = mergeSessionSnapshot(current, accepted);
             return current ? prev.map(s => s.id === incoming.id ? incoming : s) : [incoming, ...prev];
           });
+          rememberOwner(data.session.bridgeId, sessionsRef.current, data.session.id);
         }
-        rememberOwner(data.session.bridgeId, sessionsRef.current);
       });
       sessionsSub.on("subscribed", context => {
         if (!active) return;
@@ -523,7 +601,7 @@ export function useSessions(
       if (sessionsSub) { sessionsSub.removeAllListeners(); sessionsSub.unsubscribe(); client!.removeSubscription(sessionsSub); }
       sessionsSubRef.current = null;
     };
-  }, [client, userId, onResponse, onSubscribed, publishCommand, updateSessions]);
+  }, [client, userId, onResponse, onSubscribed, publishCommand, sendCommand, updateSessions, isRemoved]);
 
   const refreshLiveUsage = useCallback(async () => {
     if (!userId || (typeof document !== "undefined" && document.visibilityState === "hidden")) return;
@@ -639,7 +717,7 @@ export function useSessions(
         if (!created || (options?.bridgeId && created.bridgeId !== options.bridgeId)) {
           throw new Error("Bridge returned an invalid created session; refresh before retrying.");
         }
-        if (confirmedRemovedRef.current.has(created.id)
+        if (isRemoved(created.id, created.bridgeId)
           || (optimisticRef.current.get(created.id)?.expiry ?? 0) > Date.now()) {
           throw new Error("Created session is no longer available.");
         }
@@ -655,7 +733,7 @@ export function useSessions(
         return reconciled;
       });
     },
-    [userId, sendCommand, updateSessions]
+    [userId, sendCommand, updateSessions, isRemoved]
   );
 
   const stopSession = useCallback(
@@ -681,10 +759,15 @@ export function useSessions(
       if (options?.model) payload.model = options.model;
       if (options?.name) payload.name = options.name;
       const command: Command = { type: "handoff_session", payload, requestId: uuidv4() };
+      const requestGeneration = usageGenerationRef.current;
       return sendCommand(command).then((resp) => {
         if (!resp.success) throw new Error(resp.error ?? "handoff_session failed");
+        if (requestGeneration !== usageGenerationRef.current) throw new Error("Session handoff context changed.");
         const created = acceptSessionRow((resp.data as { session?: unknown } | undefined)?.session);
         if (!created) throw new Error("Bridge returned an invalid session");
+        if (isRemoved(created.id, created.bridgeId) || (optimisticRef.current.get(created.id)?.expiry ?? 0) > Date.now()) {
+          throw new Error("Handoff session is no longer available.");
+        }
         updateSessions(prev => {
           const current = prev.find(row => row.id === created.id);
           const reconciled = mergeSessionSnapshot(current, created);
@@ -693,7 +776,7 @@ export function useSessions(
         return created;
       });
     },
-    [userId, sendCommand, updateSessions],
+    [userId, sendCommand, updateSessions, isRemoved],
   );
 
   const retrySession = useCallback(
@@ -781,10 +864,7 @@ export function useSessions(
   const removeSession = useCallback(
     (sessionId: string, onlyIfFinished?: boolean, ownerOnline: boolean = true) => {
       if (!userId) return;
-      const payload: RemoveSessionPayload = { sessionId, onlyIfFinished };
-      removeRef.current(sessionId, !onlyIfFinished && ownerOnline, {
-        type: "remove_session", payload, requestId: uuidv4(),
-      });
+      removeRef.current(sessionId, !onlyIfFinished && ownerOnline, onlyIfFinished);
     }, [userId]
   );
 

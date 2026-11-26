@@ -252,6 +252,7 @@ export interface UpdateSessionParentPayload {
 
 export interface RemoveSessionPayload {
   sessionId: string;
+  bridgeId?: string;
   /** Only remove if the session is completed/error (bulk-clear race guard). */
   onlyIfFinished?: boolean;
 }

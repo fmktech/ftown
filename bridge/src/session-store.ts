@@ -140,6 +140,10 @@ export class SessionStore {
     }
   }
 
+  isRetired(sessionId: string): boolean {
+    return this.retiredSessionIds.has(sessionId);
+  }
+
   async saveSession(session: Session): Promise<void> {
     await this.withSessionWrite(session.id, async () => {
       if (this.retiredSessionIds.has(session.id)) return;
@@ -248,7 +252,9 @@ export class SessionStore {
       if (!present.has(sessionId)) this.recordIndex.delete(sessionId);
     }
 
-    return sessions.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    // A session read early in the scan may have been removed while awaiting later records.
+    return sessions.filter(session => !this.isRetired(session.id))
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   }
 
   /**

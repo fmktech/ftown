@@ -6,6 +6,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { EventEmitter } from 'node:events';
 import { SessionStore } from './session-store.js';
 import { TerminalPump } from './terminal-pump.js';
+import { CentrifugoClient } from './centrifugo-client.js';
 import { SessionController } from './session-controller.js';
 import { removeFtownSession, type RemoveFtownSessionDeps } from './remove-ftown-session.js';
 import type { Session, SessionUsage } from './types.js';
@@ -33,12 +34,12 @@ async function fixture(t: TestContext, status: Session['status'] = 'running', co
   await store.saveSession(session);
   const updates: Session[] = [];
   const finished = deferred();
-  const usagePublished = deferred();
   const runner = Object.assign(new EventEmitter(), { stop: () => true });
-  const publish = async (s: Session) => {
-    updates.push(structuredClone(s));
-    if (s.usage) usagePublished.resolve();
-  };
+  const centrifugo = new CentrifugoClient('ws://127.0.0.1:1/unused', '', async () => '', {
+    disabled: true, isSessionRetired: id => store.isRetired(id),
+  });
+  centrifugo.onLocalPublication((_channel, data) => updates.push((data as { session: Session }).session));
+  const publish = (session: Session) => centrifugo.publishSessionUpdate('scratch-user', session);
   const pump = new TerminalPump({
     store, terminalManager: { write() {}, destroy() {} },
     publishTerminalData() {}, publishSessionUpdate: publish,
@@ -47,14 +48,13 @@ async function fixture(t: TestContext, status: Session['status'] = 'running', co
   pump.attach(runner as unknown as Pick<RemoveFtownSessionDeps['runner'], 'on'>);
   const remove = () => removeFtownSession({
     store, runner: runner as unknown as RemoveFtownSessionDeps['runner'],
-    centrifugo: { publishSessionUpdate: async (_user: string, s: Session) => publish(s) } as RemoveFtownSessionDeps['centrifugo'],
-    userId: 'scratch-user',
+    centrifugo, userId: 'scratch-user',
   }, session.id);
   const controller = new SessionController({
     store, runner, publishSessionUpdate: publish, removeSession: remove,
     withSessionWrite: (id, task) => pump.withSessionWrite(id, task), collectUsage,
   });
-  return { dir, store, session, runner, pump, controller, remove, updates, finished, usagePublished };
+  return { dir, store, session, runner, pump, controller, remove, updates, finished };
 }
 
 function gateSave(store: SessionStore, predicate: (session: Session) => boolean = () => true) {
@@ -94,7 +94,7 @@ for (const event of ['complete', 'error'] as const) {
     gate.release.resolve();
     await f.finished.promise;
     await assertAbsent(f);
-    assert.equal(f.updates.at(-1)?.status, event === 'complete' ? 'completed' : 'error');
+    assert.deepEqual(f.updates.map(s => s.status), ['removed']);
   });
 }
 
@@ -106,9 +106,9 @@ test('late pump usage save cannot recreate a removed record', { timeout: 5000 },
   await gate.entered.promise;
   await f.remove();
   gate.release.resolve();
-  await f.usagePublished.promise;
   await f.pump.withSessionWrite(f.session.id, async () => {});
   await assertAbsent(f);
+  assert.deepEqual(f.updates.map(s => s.status), ['completed', 'removed']);
 });
 
 test('controller usage reloads under the pump queue after retirement', { timeout: 5000 }, async (t) => {
