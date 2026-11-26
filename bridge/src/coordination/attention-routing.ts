@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import type { AttentionItem } from '../attention-events.js';
 import { formatAttentionAnswerMail } from '../attention-prompt.js';
+import { quoteShellArgument } from '../session-shell.js';
 import { AttentionError } from '../attention-store.js';
 import type { ArchivedSession, Session } from '../types.js';
 import {
@@ -50,9 +51,10 @@ export function formatParentQuestionMail(child: Session, item: AttentionItem): s
     }
     middle = `${lines.join('\n')}\n`;
   }
+  const bridgeArg = child.parentBridgeId && child.parentBridgeId !== child.bridgeId ? ` --bridge ${quoteShellArgument(child.bridgeId)}` : '';
   const footer =
-    `Answer: ftown attention answer ${child.id} ${item.id} --option <n> | --text "<reply>"\n` +
-    `Escalate to the human: ftown attention escalate ${child.id} ${item.id} --note "<context>"`;
+    `Answer: ftown attention answer ${child.id} ${item.id}${bridgeArg} --option <n> | --text "<reply>"\n` +
+    `Escalate to the human: ftown attention escalate ${child.id} ${item.id}${bridgeArg} --note "<context>"`;
   return header + middle + footer;
 }
 
@@ -91,6 +93,7 @@ export async function queueAttentionAnswer({ child, item, sender, acceptMail }: 
 
 export interface EscalateParentChildrenDeps {
   listSessions(): Promise<Session[]>;
+  remoteParentRunning?: (child: Session) => Promise<boolean>;
   attention: {
     listRouted: AttentionRoutingStoreApi['listRouted'];
     setRoute(
@@ -110,28 +113,26 @@ export async function escalateParentChildren(
 ): Promise<Array<{ sessionId: string; item: AttentionItem }>> {
   const sessions = await deps.listSessions();
   const children = sessions.filter(
-    (s) => s.parentSessionId === parentSessionId && s.id !== parentSessionId,
+    (s) => s.parentSessionId === parentSessionId && s.id !== parentSessionId && (!s.parentBridgeId || s.parentBridgeId === s.bridgeId),
   );
   if (children.length === 0) return [];
-  const escalatedAt = new Date((deps.now ?? Date.now)()).toISOString();
   const results: Array<{ sessionId: string; item: AttentionItem }> = [];
   for (const child of children) {
-    const routed = await deps.attention.listRouted(child.id);
-    for (const item of routed) {
-      const updated = await deps.attention.setRoute(child.id, item.id, {
-        route: 'human',
-        escalatedAt,
-        escalationNote: PARENT_UNAVAILABLE_NOTE,
-      }, 'parent');
-      if (updated && updated.route === 'human') {
-        results.push({ sessionId: child.id, item: updated });
-        try {
-          deps.onEscalated?.(child.id, updated);
-        } catch {
-          // Observer errors must not abort remaining escalations.
-        }
-      }
-    }
+    results.push(...await escalateChildItems(child.id, await deps.attention.listRouted(child.id), deps));
+  }
+  return results;
+}
+
+async function escalateChildItems(childId: string, items: AttentionItem[], deps: EscalateParentChildrenDeps) {
+  const escalatedAt = new Date((deps.now ?? Date.now)()).toISOString();
+  const results: Array<{ sessionId: string; item: AttentionItem }> = [];
+  for (const item of items) {
+    const updated = await deps.attention.setRoute(childId, item.id, {
+      route: 'human', escalatedAt, escalationNote: PARENT_UNAVAILABLE_NOTE,
+    }, 'parent');
+    if (updated?.route !== 'human') continue;
+    results.push({ sessionId: childId, item: updated });
+    try { deps.onEscalated?.(childId, updated); } catch { /* Continue delivering the other items. */ }
   }
   return results;
 }
@@ -162,17 +163,25 @@ export async function escalateOrphanedParentItems(
 ): Promise<Array<{ sessionId: string; item: AttentionItem }>> {
   const sessions = await deps.listSessions();
   const byId = new Map(sessions.map((session) => [session.id, session]));
-  const deadParentIds: string[] = [];
-  const checked = new Set<string>();
+  const results: Array<{ sessionId: string; item: AttentionItem }> = [];
+  const liveness = new Map<string, boolean>();
   for (const child of sessions) {
     const parentId = child.parentSessionId;
-    if (!parentId || parentId === child.id || checked.has(parentId)) continue;
-    checked.add(parentId);
-    if (!parentCanAnswer(byId.get(parentId), deps)) deadParentIds.push(parentId);
-  }
-  const results: Array<{ sessionId: string; item: AttentionItem }> = [];
-  for (const parentId of deadParentIds) {
-    results.push(...await escalateParentChildren(parentId, deps));
+    const routed = await deps.attention.listRouted(child.id);
+    if (!routed.length) continue;
+    // A question mailed before a reparent must not remain in the former manager's queue.
+    const orphaned = routed.filter(item => !parentId || (item.routedTo !== undefined && item.routedTo !== parentId));
+    if (orphaned.length) results.push(...await escalateChildItems(child.id, orphaned, deps));
+    const items = routed.filter(item => !orphaned.includes(item));
+    if (!items.length || !parentId || parentId === child.id) continue;
+    const remote = !!child.parentBridgeId && child.parentBridgeId !== child.bridgeId;
+    if (!remote && parentCanAnswer(byId.get(parentId), deps)) continue;
+    if (remote) {
+      const key = JSON.stringify([child.parentBridgeId, parentId]);
+      if (!liveness.has(key)) liveness.set(key, !!await deps.remoteParentRunning?.(child));
+      if (liveness.get(key)) continue;
+    }
+    results.push(...await escalateChildItems(child.id, items, deps));
   }
   return results;
 }

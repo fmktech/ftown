@@ -92,7 +92,7 @@ export async function sessionBlocksTicket(session: Session, attention: Attention
   return !!(await attention.explicitSnapshot(session.id)).attention;
 }
 
-const supportedProjectVersion = 3;
+export const supportedProjectVersion = 4;
 
 function projectSchemaVersion(db: DatabaseSync): number {
   const version = Number(db.prepare('PRAGMA user_version').get()!.user_version);
@@ -132,6 +132,12 @@ function migrate(db: DatabaseSync): void {
       initializeDiscussion(db);
       db.exec('PRAGMA user_version=3');
     }
+    if (version < 4) db.exec(`
+      CREATE TABLE project_home (revision INTEGER NOT NULL DEFAULT 0, phase TEXT NOT NULL DEFAULT 'active', operation TEXT, target TEXT, batches INTEGER NOT NULL DEFAULT 0);
+      INSERT INTO project_home DEFAULT VALUES;
+      CREATE TABLE project_move_receipts (operation TEXT PRIMARY KEY, origin TEXT NOT NULL, destination TEXT NOT NULL, revision INTEGER NOT NULL);
+      PRAGMA user_version=4;
+    `);
     db.exec('COMMIT');
   } catch (error) { db.exec('ROLLBACK'); throw error; }
 }
@@ -220,6 +226,19 @@ function validateParent(db: DatabaseSync, ticketId: string, parentId: string | n
   if (cycle) throw new Error('A ticket cannot be its own ancestor');
 }
 
+export function initializeProjectDatabase(db: DatabaseSync, projectName: string): void {
+  db.exec(`
+    CREATE TABLE project (name TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE unlinked_sessions (session_id TEXT PRIMARY KEY);
+    CREATE TABLE tickets (id TEXT PRIMARY KEY, title TEXT NOT NULL, stage TEXT NOT NULL);
+    CREATE TABLE ticket_sessions (
+      session_id TEXT PRIMARY KEY, ticket_id TEXT NOT NULL REFERENCES tickets(id), blocked INTEGER NOT NULL DEFAULT 0
+    );
+  `);
+  migrate(db);
+  db.prepare('INSERT INTO project (name) VALUES (?)').run(projectName);
+}
+
 /** Every visible project directory contains one fully initialized, independently restorable database. */
 export class ProjectBoardStore {
   private readonly root: string;
@@ -241,6 +260,9 @@ export class ProjectBoardStore {
         }
         migrate(db);
       }
+      const home = db.prepare('SELECT phase,target FROM project_home').get()!;
+      if (home.phase === 'moved') throw new Error('Project storage moved to bridge ' + home.target);
+      if (!readOnly && home.phase !== 'active') throw new Error('Project storage is moving. Retry when the move finishes.');
       return fn(db);
     } finally { db.close(); }
   }
@@ -255,10 +277,26 @@ export class ProjectBoardStore {
       const db = new DatabaseSync(join(this.root, dir.name, 'board.sqlite'), { readOnly: true });
       try {
         const row = db.prepare('SELECT name FROM project WHERE deleted = 0').get();
-        if (row) projects.push({ id: dir.name, name: String(row.name), bridgeId: this.bridgeId });
+        if (row) {
+          const hasHome = db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='project_home'").get();
+          const revision = hasHome ? Number(db.prepare('SELECT revision FROM project_home').get()?.revision ?? 0) : 0;
+          projects.push({ id: dir.name, name: String(row.name), bridgeId: this.bridgeId, ...(revision ? { homeRevision: revision } : {}) });
+        }
       } finally { db.close(); }
     }
     return projects.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  movedHome(projectId: string): HomeProject | undefined {
+    if (!id.safeParse(projectId).success) return;
+    const file = join(this.root, projectId, 'board.sqlite');
+    if (!existsSync(file)) return;
+    const db = new DatabaseSync(file, { readOnly:true });
+    try {
+      if (!db.prepare("SELECT 1 FROM sqlite_schema WHERE name='project_home'").get()) return;
+      const row = db.prepare("SELECT name, target, revision FROM project,project_home WHERE phase='moved'").get();
+      if (row) return {id:projectId, name:String(row.name), bridgeId:String(row.target), homeRevision:Number(row.revision)};
+    } finally { db.close(); }
   }
 
   private initialize(projectId: string, projectName: string): void {
@@ -267,16 +305,7 @@ export class ProjectBoardStore {
     try {
       const db = new DatabaseSync(join(dir, 'board.sqlite'));
       try {
-        db.exec(`
-          CREATE TABLE project (name TEXT NOT NULL, deleted INTEGER NOT NULL DEFAULT 0);
-          CREATE TABLE unlinked_sessions (session_id TEXT PRIMARY KEY);
-          CREATE TABLE tickets (id TEXT PRIMARY KEY, title TEXT NOT NULL, stage TEXT NOT NULL);
-          CREATE TABLE ticket_sessions (
-            session_id TEXT PRIMARY KEY, ticket_id TEXT NOT NULL REFERENCES tickets(id), blocked INTEGER NOT NULL DEFAULT 0
-          );
-        `);
-        migrate(db);
-        db.prepare('INSERT INTO project (name) VALUES (?)').run(projectName);
+        initializeProjectDatabase(db, projectName);
       } finally { db.close(); }
       renameSync(dir, join(this.root, projectId));
     } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -302,7 +331,8 @@ export class ProjectBoardStore {
       if (row.observed_status !== null) ticket.sessionStatuses[workerId] = row.observed_status as Session['status'];
       if (row.blocked) ticket.blocked = true;
     }
-    return { project: { id: projectId, name: String(meta.name), bridgeId: this.bridgeId }, boardEnabled: Boolean(meta.board_enabled), columns: readColumns(db), tickets: [...tickets.values()] };
+    const revision = Number(db.prepare('SELECT revision FROM project_home').get()!.revision);
+    return { project: { id: projectId, name: String(meta.name), bridgeId: this.bridgeId, ...(revision ? { homeRevision: revision } : {}) }, boardEnabled: Boolean(meta.board_enabled), columns: readColumns(db), tickets: [...tickets.values()] };
   }
 
   read(projectId: string): ProjectBoard {
@@ -332,7 +362,7 @@ export class ProjectBoardStore {
   }
 
   pendingDiscussionMail(projectId: string, after = 0, limit = 100): DiscussionMail[] {
-    return this.withDb(projectId, true, db => db.prepare('SELECT * FROM discussion_mail WHERE seq>? ORDER BY seq LIMIT ?')
+    return this.withDb(projectId, true, db => db.prepare("SELECT * FROM discussion_mail WHERE seq>? AND (SELECT phase FROM project_home)='active' ORDER BY seq LIMIT ?")
       .all(after, limit).map(row => ({
         seq: Number(row.seq), id: String(row.id), threadId: String(row.thread_id), postId: String(row.post_id),
         bridgeId: String(row.bridge_id), sessionId: String(row.session_id), body: String(row.body),
@@ -359,7 +389,7 @@ export class ProjectBoardStore {
   }
 
   pendingNotifications(projectId: string, after = 0, limit = 100): TicketNotification[] {
-    return this.withDb(projectId, true, db => db.prepare('SELECT seq, payload FROM notification_outbox WHERE seq>? ORDER BY seq LIMIT ?')
+    return this.withDb(projectId, true, db => db.prepare("SELECT seq, payload FROM notification_outbox WHERE seq>? AND (SELECT phase FROM project_home)='active' ORDER BY seq LIMIT ?")
       .all(after, limit).map(row => ({ ...JSON.parse(String(row.payload)), seq: Number(row.seq) })));
   }
 

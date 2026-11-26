@@ -138,3 +138,25 @@ it("moves an assigned child into an occupied project as a new root", () => {
   fireEvent.click(dialog.getByRole("button", { name: "Move" }));
   expect(move).toHaveBeenCalledWith(child, "Target", true);
 });
+
+it("offers upgraded online home bridges in project settings and preserves the destination after a failed move", async () => {
+  const home = { id: "platform", name: "Platform", bridgeId: "desk" };
+  const homes = [{id: "desk", label: "Desk"}, {id: "studio", label: "Studio"}, {id: "old", label: "Older bridge"}];
+  const move = vi.fn().mockRejectedValueOnce(Error("Target disconnected")).mockResolvedValueOnce(undefined);
+  render(<SessionList sessions={[]} selectedSessionId={null} onSelectSession={vi.fn()}
+    onProjectBridgesChange={vi.fn()} upgradedBridges={new Set(["desk", "studio"])} projectBridges={new Map([["Platform", ["desk"]]])}
+    boards={{ projects: [home], homes, create: vi.fn(), change: vi.fn(), open: vi.fn(), move }} />);
+  fireEvent.click(screen.getByLabelText("More actions for Platform"));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Project settings" }));
+  const dialog = within(screen.getByRole("dialog", { name: "Project settings" }));
+  const picker = dialog.getByLabelText("New home bridge");
+  expect(within(picker).queryByRole("option", { name: "Older bridge" })).toBeNull();
+  fireEvent.change(picker, { target: { value: "studio" } });
+  const button = dialog.getByRole("button", { name: "Move project storage" });
+  fireEvent.click(button);
+  expect((await dialog.findByRole("alert")).textContent).toBe("Target disconnected");
+  expect((picker as HTMLSelectElement).value).toBe("studio");
+  fireEvent.click(button);
+  expect(move).toHaveBeenCalledTimes(2);
+  expect(move).toHaveBeenLastCalledWith(home, "studio");
+});

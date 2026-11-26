@@ -1,9 +1,11 @@
 import { z } from 'zod';
 
-/** Direct peer read of projects stored by the responding home bridge. */
+/** Paired bridges exchange a project through a direct link. */
+export const PROJECT_MOVE = '/api/projects/move-storage';
 export const PROJECT_DIRECTORY = '/api/projects/directory';
 export const projectDirectoryEntry = z.object({
   id: z.string().min(1).max(128),
+  homeRevision: z.number().int().nonnegative().optional(),
   name: z.string().min(1).max(256),
   bridgeId: z.string().min(1).max(256),
 });

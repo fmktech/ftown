@@ -18,21 +18,35 @@ function boardRequest<T>(command: ProjectBoardCommand, payload: Record<string, u
   return api<T>(loadPointer(), 'POST', '/api/project-board/' + command, payload);
 }
 
-async function directory() {
-  const { projects, homeBridgeId } = await boardRequest<{ projects: HomeProject[]; homeBridgeId: string }>('list_projects', {});
-  return projects.filter(project => !currentPeerTarget() || project.bridgeId === homeBridgeId);
+async function directory(selector?: string) {
+  const { projects, homeBridgeId, movedProjectId } = await boardRequest<{
+    projects: HomeProject[]; homeBridgeId: string; movedProjectId?: string
+  }>('list_projects', selector ? {projectId: selector} : {});
+  const rows = projects.filter(project => !currentPeerTarget() || project.bridgeId === homeBridgeId || project.id === movedProjectId);
+  return {rows, homeBridgeId};
 }
 
 async function locateProject(selector?: string) {
   if (!selector?.trim()) throw new Error('Supply --project <name|id> (see ftown projects list)');
-  const projects = await directory();
-  const exact = projects.filter(project => project.id === selector);
-  const matches = exact.length ? exact : projects.filter(project => project.name === selector);
+  let {rows, homeBridgeId} = await directory(selector);
+  const exact = rows.filter(project => project.id === selector);
+  const matches = exact.length ? exact : rows.filter(project => project.name === selector);
   const unique = new Map(matches.map(project => [project.bridgeId + '/' + project.id, project]));
   if (unique.size === 0) throw new Error('Unknown project: ' + selector);
   if (unique.size > 1) throw new Error('Ambiguous project. Specify its project ID or home with --bridge.');
-  const [project] = unique.values();
-  if (!currentPeerTarget() && project.bridgeId !== loadPointer().bridgeId) setPeerTarget(project.bridgeId);
+  let [project] = unique.values();
+  const visited = new Set<string>();
+  while (project.bridgeId !== homeBridgeId) {
+    if (visited.has(project.bridgeId)) throw new Error('Project home changed during lookup. Retry.');
+    visited.add(project.bridgeId);
+    setPeerTarget(project.bridgeId === loadPointer().bridgeId ? undefined : project.bridgeId);
+    const directoryAtHome = await directory(project.id);
+    homeBridgeId = directoryAtHome.homeBridgeId;
+    const next = directoryAtHome.rows.filter(row => row.id === project.id)
+      .sort((a, b) => (b.homeRevision ?? 0) - (a.homeRevision ?? 0))[0];
+    if (!next || (next.homeRevision ?? 0) < (project.homeRevision ?? 0)) throw new Error('Project home is unavailable.');
+    project = next;
+  }
   return project;
 }
 
@@ -143,9 +157,19 @@ export async function runProjectCommands(group: 'projects' | 'boards' | 'tickets
     });
   } else if (group === 'projects') {
     command('list').description('List known projects and their homes')
-      .action(async () => print({ projects: await directory() }));
+      .action(async () => print({ projects: (await directory()).rows }));
     command('create <name>').option('--id <uuid>', 'Stable project ID for retries')
       .action(async (name, options) => print({ project: (await mutate('create_project', options.id ?? randomUUID(), { name })).project }));
+    command('move <project>').requiredOption('--to <bridge>', 'New storage bridge name or ID').description('Move the project database to a paired bridge').action(async (selector, options) => {
+      const { id } = await locateProject(selector);
+      const move = (poll: boolean) => boardRequest<{moving?: boolean; project?: HomeProject}>('mutate_project_board', {
+        action: 'move_project', projectId: id, targetBridgeId: options.to, waitForMove: true, poll
+      });
+      let response = await move(false);
+      while (response.moving) response = await move(true);
+      if (!response.project) throw new Error('The storage bridge did not confirm the move.');
+      print({ project: response.project });
+    });
     command('rename <project> <name>').action(async (selector, name) => {
       const { id } = await locateProject(selector);
       print({ project: (await mutate('rename_project', id, { name })).project });

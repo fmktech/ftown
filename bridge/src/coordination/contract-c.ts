@@ -21,6 +21,7 @@ export interface PlanItem {
   priority: PlanPriority; // default 2
   state: PlanState;
   sessionId?: string;    // child session doing it (set by start / --plan-item)
+  sessionBridgeId?: string; // Owner of a remotely bound child. Absent for local children.
   createdAt: string;
   updatedAt: string;
 }

@@ -48,6 +48,7 @@ export interface SessionUsage {
 /** Session shape as returned by GET /api/sessions and /api/sessions/:id. */
 export interface Session {
   id: string;
+  bridgeId?: string;
   name: string;
   status: string;
   workingDir?: string;

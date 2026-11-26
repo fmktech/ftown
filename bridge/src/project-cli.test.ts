@@ -20,17 +20,29 @@ test('a session can address its remote project by name, read every page and disa
   const ticketId = ids.at(-1)!;
   for (let n = 0; n < 12; n++) remote.mutate({ ...target, action: 'add_ticket_comment', ticketId, commentId: randomUUID(), text: 'Comment ' + n }, 'Worker');
   let duplicate = false;
+  let stale = false;
   const home = join(work, '.ftown');
   mkdirSync(home);
   const secure = await secureFixture(home, async (url, init) => {
     const route = new URL(String(url)).pathname;
     if (route === '/api/project-board/list_projects') {
       const projects = remote.list();
+      if (stale) return Response.json({homeBridgeId:'bridge', projects:[{...projects[0], bridgeId:'original'}]});
       if (duplicate) projects.push({ id: randomUUID(), bridgeId: 'bridge', name: 'Product' });
       return Response.json({ homeBridgeId: 'bridge', projects });
     }
     const forwarded = JSON.parse(String(init?.body));
+    if (stale && forwarded.path === '/api/project-board/list_projects') {
+      const prior: Record<string, {next: string; revision: number}> = {
+        original: {next:'intermediate',revision:1}, intermediate: {next:'remote',revision:2}
+      };
+      const hop = prior[forwarded.bridge];
+      if (hop) return Response.json({homeBridgeId:forwarded.bridge, movedProjectId:projectId,
+        projects:[{id:projectId, name:'Product', bridgeId:hop.next, homeRevision:hop.revision}]});
+      return Response.json({homeBridgeId:'remote', projects:[{...remote.list()[0],homeRevision:2}]});
+    }
     if (route !== '/api/peers/http' || forwarded.bridge !== 'remote') return Response.json({ error: 'Wrong home bridge' }, { status: 404 });
+    if (forwarded.path === '/api/project-board/list_projects') return Response.json({homeBridgeId:'remote', projects:remote.list()});
     const payload = forwarded.body;
     if (forwarded.path.endsWith('_project_discussion')) {
       const { projectId, actorSessionId, ...operation } = payload;
@@ -96,6 +108,10 @@ test('a session can address its remote project by name, read every page and disa
   assert.equal(JSON.parse(messages.pop()!).ticket.stage, 'Review');
   assert.equal(await tickets('update', ticketId, '--project', projectId, '--stage', 'id:Backlog'), 0);
   assert.equal(JSON.parse(messages.pop()!).ticket.stage, 'Backlog');
+  stale = true;
+  assert.equal(await tickets('show',ticketId,'--project',projectId), 0, messages.at(-1));
+  assert.equal(JSON.parse(messages.pop()!).ticket.id,ticketId);
+  stale = false;
   duplicate = true;
   assert.equal(await tickets('comments', ticketId, '--project', 'Product'), 1);
   assert.match(messages.pop()!, /Ambiguous project/);

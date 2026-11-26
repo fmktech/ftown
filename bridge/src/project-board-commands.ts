@@ -3,12 +3,14 @@ import { BridgeSecurityError } from './security/bridge/errors.js';
 import type { BridgeSecurityService } from './security/bridge/security.js';
 import type { VerifiedPrincipal } from './security/protocol.js';
 
+import type { ProjectStorageMoves } from './project-storage-move.js';
 import type { ProjectBoardCommand } from './project-directory-protocol.js';
 
 export interface BoardCommandDeps {
   bridgeId: string;
   security?: BridgeSecurityService;
   projectBoards?: ProjectBoardStore;
+  storageMoves?: ProjectStorageMoves;
   rememberedProjects?: () => Promise<HomeProject[]>;
   discussionSession?: (bridgeId: string, sessionId: string) => Promise<{ name: string; projectName?: string } | null>;
   observeProject?: (projectId: string) => Promise<ProjectBoard>;
@@ -23,9 +25,22 @@ export async function runProjectBoardCommand(deps: BoardCommandDeps, command: Pr
   if (command === 'list_projects') {
     const remembered = await deps.rememberedProjects?.() ?? [];
     await security.policy.revalidate(principal, 'read');
-    return { homeBridgeId: bridgeId, projects: [...projectBoards.list(), ...remembered] };
+    const entries = [...projectBoards.list(), ...remembered];
+    // Previously issued links may explicitly address an old home. Only a lookup
+    // by stable ID follows its redirect, so deleted projects stay out of the directory.
+    const redirect = typeof payload.projectId === 'string' ? projectBoards.movedHome(payload.projectId) : undefined;
+    if (redirect && security.peerBridges().some(peer => peer.bridgeId === redirect.bridgeId)) entries.push(redirect);
+    const revisions = new Map<string, number>();
+    for (const entry of entries) revisions.set(entry.id, Math.max(entry.homeRevision ?? 0, revisions.get(entry.id) ?? 0));
+    const projects = entries.filter(entry => (entry.homeRevision ?? 0) === revisions.get(entry.id));
+    return { homeBridgeId: bridgeId, projects, ...(redirect && { movedProjectId: redirect.id }) };
   }
   if (typeof payload.projectId !== 'string') throw new Error('Missing project ID');
+  if (command === 'mutate_project_board' && payload.action === 'move_project') {
+    if (!deps.storageMoves || typeof payload.targetBridgeId !== 'string') throw new Error('Project storage moves unavailable');
+    if (payload.waitForMove === true) return deps.storageMoves.waitForMove(payload.projectId, payload.targetBridgeId, payload.poll === true);
+    return { project: await deps.storageMoves.move(payload.projectId, payload.targetBridgeId) };
+  }
   if (command === 'get_project_discussion' || command === 'mutate_project_discussion') {
     const { bridgeId: _home, projectId, actorSessionId, ...operation } = payload;
     const endpoint = principal.endpoint;

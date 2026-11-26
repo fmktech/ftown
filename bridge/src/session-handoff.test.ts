@@ -404,3 +404,13 @@ test('an archive failure names the session that was already created', async () =
     /Handoff created new-session but could not finish moving old: disk full/,
   );
 });
+
+
+test('hierarchy preflight leaves a manager running when a replacement would orphan children', async () => {
+  const h = harness();
+  h.sessions.set('old', session({ id: 'old' }));
+  h.deps.checkHierarchy = async () => { throw new Error('Hand off the child sessions before their manager'); };
+  await assert.rejects(handoffSession(h.deps, 'old'), /child sessions/);
+  assert.deepEqual(h.events, []);
+  assert.deepEqual(h.created, []);
+});

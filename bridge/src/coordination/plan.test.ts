@@ -710,3 +710,21 @@ test('completeForChild ignores other children and non-started items, and several
     ['p4', 'done', 'child-a'],
   ]);
 });
+
+
+test('concurrent remote bindings choose one owner and only its lifecycle can modify the assignment', async () => {
+  const { sessions, store } = makeHarness();
+  sessions.set('manager', makeSession('manager'));
+  const { id } = await store.add('manager', { title: 'Work' });
+  const attempts = await Promise.allSettled(['A', 'B'].map(owner => store.startForChild('manager', id, 'child', owner)));
+  assert.equal(attempts.filter(a => a.status === 'fulfilled').length, 1);
+  const owner = (await store.get('manager'))!.items[0].sessionBridgeId!;
+  const other = owner === 'A' ? 'B' : 'A';
+  await store.patch('manager', id, { title: 'Renamed' });
+  await store.releaseForChild('manager', 'child', other);
+  await store.completeForChild('manager', 'child');
+  assert.equal((await store.get('manager'))!.items[0].state, 'started');
+  await store.releaseForChild('manager', 'child', owner);
+  const item = (await store.get('manager'))!.items[0];
+  assert.deepEqual([item.state, item.sessionId, item.sessionBridgeId], ['todo', undefined, undefined]);
+});

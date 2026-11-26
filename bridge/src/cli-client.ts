@@ -30,6 +30,9 @@ export async function api<T = unknown>(
   fetchFn: typeof fetch = fetch,
 ): Promise<T> {
   const result = await apiResponse(pointer, method, path, body, extraHeaders, signal, fetchFn);
+  return apiResult<T>(result);
+}
+function apiResult<T>(result: { status: number; body: ApplicationJson }): T {
   if (result.status < 200 || result.status >= 300) {
     const error = result.body && typeof result.body === 'object' && !Array.isArray(result.body) ? result.body.error : undefined;
     throw new Error(typeof error === 'string' ? error : `HTTP ${result.status}`);
@@ -51,9 +54,18 @@ export async function apiResponse(pointer: BridgePointer, method: string, path: 
   if (peerTarget !== null && path !== '/api/peers' && !path.startsWith('/api/peers?') && !path.startsWith('/api/peers/')) {
     // The caller's own session id means nothing on another bridge (and a peer refuses it): it is not forwarded.
     const forward: Record<string, unknown> = { bridge: peerTarget, method, path, timeoutMs: PEER_REQUEST_TIMEOUT_MS };
+    const caller = Object.entries(extraHeaders ?? {}).find(([key]) => key.toLowerCase() === 'x-ftown-session-id')?.[1];
+    const parentAction = method === 'POST' && /\/attention\/[^/]+\/(answer|escalate)$/.test(path);
+    const forceCard = method === 'PUT' && path.endsWith('/card') && (body as {force?: boolean} | undefined)?.force;
+    if (caller && (parentAction || forceCard)) body = { ...(body as Record<string, unknown>), parentSessionId: caller };
     if (body !== undefined) forward.body = body;
     return apiResponse(pointer, 'POST', '/api/peers/http', forward, undefined, signal, fetchFn);
   }
+  return localApiResponse(pointer, method, path, body, extraHeaders, signal, fetchFn);
+}
+
+async function localApiResponse(pointer: BridgePointer, method: string, path: string, body?: unknown,
+  extraHeaders?: Record<string, string>, signal?: AbortSignal, fetchFn: typeof fetch = fetch): Promise<{ status: number; body: ApplicationJson }> {
   const requestId = randomUUID();
   const data: { [key: string]: ApplicationJson } = { timeoutMs: 60000 };
   if (body !== undefined) data.body = applicationJson(body);
@@ -225,6 +237,14 @@ export async function writeMailOutput(text: string): Promise<void> {
         settled = true; cleanup(); resolve();
       });
     } catch (error) { failed(error instanceof Error ? error : new Error(String(error))); }
+  });
+}
+
+/** Reach the owner named by a session relationship without changing the CLI's global target. */
+export async function sessionApiAt<T>(pointer: BridgePointer, owner: string | undefined, method: 'GET' | 'POST', path: string, body?: unknown): Promise<T> {
+  if (!owner || owner === pointer.bridgeId) return apiResult<T>(await localApiResponse(pointer, method, path, body));
+  return api(pointer, 'POST', '/api/peers/http', {
+    bridge: owner, method, path, timeoutMs: PEER_REQUEST_TIMEOUT_MS, ...(body === undefined ? {} : { body }),
   });
 }
 

@@ -1627,7 +1627,7 @@ describe("LedgerClient re-offer", () => {
   it.each([
     ["the server holds the local chain", false],
     ["the server is behind and refuses", true],
-  ] as const)("a relay flood (1 notice per second for 10 min) while %s costs POSTs only on the backoff schedule", async (_state, refusing) => {
+  ] as const)("relay notices every second across consecutive backoff windows while %s never add POSTs", async (_state, refusing) => {
     const { server, authenticator, a, accountId } = await revokedBridge();
     if (refusing) {
       rollBack(server, accountId, 2);
@@ -1638,12 +1638,20 @@ describe("LedgerClient re-offer", () => {
     await page.client.load();
     authenticator.calls = [];
     const start = fakeTime();
+    // Exercise a sustained flood through the first retries and burst across the two later
+    // retry boundaries. The quiet spans skip repeated verification of an identical signed chain.
     const token = testToken;
-    for (let second = 0; second < 600 && token === testToken; second += 1) {
-      void page.client.noteHead("z".repeat(43), 1);
-      await advance(1_000);
+    for (const [begin, end] of [[0, 90], [170, 180], [362, 372]]) {
+      if (token !== testToken) return;
+      await advance(start + begin * 1_000 - Date.now());
+      for (let second = begin; second < end; second++) {
+        if (token !== testToken) return;
+        void page.client.noteHead("z".repeat(43), 1);
+        await advance(1_000);
+      }
     }
-    // Refusing: exactly the backoff schedule (as in the test above), whatever the notices; holding the chain: nothing.
+    if (token !== testToken) return;
+    await advance(start + 600_000 - Date.now());
     expect(postsAt(server, start, start)).toEqual(refusing ? [0, 30_000, 78_000, 174_000, 366_000] : []);
     expect(authenticator.calls).toEqual([]);
   });

@@ -131,6 +131,7 @@ session in that same directory. The brief carries the original prompt, the
 block reason, about the last 300 screen lines, `git log` and `git diff
 --stat` against the worktree base, the linked PR, and the plan item. The
 plan item and PR link move to the new session. The old session is archived.
+Finish and archive or move a manager’s children before replacing it. A worker with an active binding on a remote manager must finish or release that plan item before handoff.
 The command prints the new session as JSON, or only the id with `--plain`.
 The default name is `<old name> handoff`. Omit `--shell` and `--model` and
 the bridge picks the next routing model that still has quota; if routing
@@ -177,8 +178,7 @@ ids; `after` ids must exist, with no self-reference or cycles.
 `--plan-item <id>` (on `ftown sessions create`, requires `--parent` or
 `--parent-id`) fails with an error before any session is created when the
 item is unknown or not `todo`; after creation the item becomes `started`
-with the child linked, and a linking failure only warns (the session
-stays). When a linked child's card becomes `done`, the item becomes
+with the child linked. For a remote manager, the destination confirms the binding before launching the worker. A local linking failure warns and leaves the launched session running. When a linked child's card becomes `done`, the item becomes
 `done`; a `failed` card leaves it `started` for the manager to decide.
 Setting an item back to `todo` clears its linked session. Exit codes for
 `ftown plan`: 0 ok, 1 error, 2 usage.
@@ -456,11 +456,11 @@ Fan-out targets are messaged sequentially, one JSON result line per target.
 | `--shell` | Explicit harness override: `claude`, `cursor`, `codex`, `grok`, `muse`, `antigravity`, `pi`, `omp`, `kimi-code`, `opencode`, `shell`, or Claude Code provider flavors `zai`, `kimi`, `deepseek`, `fireworks`. When omitted inside a session, inherits that session's harness; outside a session, defaults to `claude`. |
 | `--prompt` | Initial task — passed as a CLI launch argument to `claude`/Claude provider flavors/`cursor`/`codex`/`grok`/`muse`/`antigravity`/`pi`/`omp` (typed after boot for other shells) |
 | `--workdir` | Working directory |
-| `--project <name>` | Required for a new root. Children inherit their root’s project. |
+| `--project <name>` | Required for a new root. Children inherit their manager’s project. |
 | `--name` | Dashboard label |
 | `--effort <level>` | Reasoning effort for claude, codex, grok, muse, antigravity and omp (opencode: `--model provider/model#<level>`) |
 | `--command` | Full command override, run exactly as written: skips the `--shell` builder and the flags it adds for unattended runs (a codex launched this way asks for approvals). Not for setting a model or effort. |
-| `--parent` | Attach to the root of the calling session (`$FTOWN_SESSION_ID`), including when creating on another bridge. |
+| `--parent` | Make the calling session (`$FTOWN_SESSION_ID`) the immediate parent, including when creating on another bridge. |
 | `--parent-id` | Explicit parent session UUID |
 | `--plan-item <id>` | Do plan item `p<n>` of the parent (requires `--parent` or `--parent-id`; see Plan list) |
 | `--worktree` | Create a bridge-owned git worktree for the session (see Worktrees) |
@@ -570,7 +570,20 @@ The CLI wraps the loopback API. Raw access if needed:
 | GET | `/api/archive` | List removed-session tombstones |
 | POST | `/api/sessions/:id/revive` | Recreate a removed session (new id) |
 
-To move a session under a different parent, PATCH it with the new parent's id:
+Any session can create a child, including a worker that already has a parent.
+Use `ftown sessions create --parent` from the intended manager. Explicit parent
+and bridge IDs identify the immediate parent across computers. Creation verifies
+up to 32 parent links, starting with the immediate manager. The bridges that own
+those ancestors must be reachable when creating a child. Existing workers keep
+their recorded parents.
+
+Removing a manager archives only that session. Its children keep running with
+the old parent ID; reviving the manager creates a new ID. To restore delegation
+for an orphaned leaf, detach it or move it to a live root manager as described
+below. If the orphan still has children, finish and archive those children or
+move its leaves first.
+
+Reparenting existing sessions supports moving a leaf to a root manager. To move a session under a different parent, PATCH it with the new parent's id:
 
 ```json
 { "parentSessionId": "new-parent-session-id" }

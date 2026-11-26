@@ -97,10 +97,10 @@ const accounts = [
 ];
 const parent: Session = { id: "parent", name: "Manager", bridgeId: "a", shellType: "claude", status: "running", createdAt: "2026-11-16", updatedAt: "2026-11-16", account: "work", allowedAccounts: ["work", "coding"] };
 
-function accountsModal(overrides: { sessions?: Session[]; defaults?: SessionDefaults; sendCommand?: (command: Command) => Promise<CommandResponse> } = {}) {
+function accountsModal(overrides: { upgradedBridges?: Set<string>; sessions?: Session[]; defaults?: SessionDefaults; sendCommand?: (command: Command) => Promise<CommandResponse> } = {}) {
   const onSubmit = vi.fn(async () => undefined);
   const sendCommand = overrides.sendCommand ?? vi.fn(async () => ({ requestId: "accounts", success: true, data: { accounts } }));
-  const result = render(<NewSessionModal isOpen onClose={vi.fn()} onSubmit={onSubmit} bridges={bridges} sessions={overrides.sessions} defaults={{ projectName: "Test project", ...overrides.defaults }} sendCommand={sendCommand} />);
+  const result = render(<NewSessionModal isOpen onClose={vi.fn()} onSubmit={onSubmit} bridges={bridges} upgradedBridges={overrides.upgradedBridges ?? new Set(["a", "b"])} sessions={overrides.sessions} defaults={{ projectName: "Test project", ...overrides.defaults }} sendCommand={sendCommand} />);
   return { ...result, onSubmit, sendCommand };
 }
 
@@ -219,27 +219,39 @@ it("blocks another shell when the parent has no stored account but disallows def
   expect(onSubmit).not.toHaveBeenCalled();
 });
 
-it("intersects a selected child and its resolved parent's policy and inherits the resolved account", async () => {
-  const root = { ...parent, id: "root", name: "Root", account: "spare", allowedAccounts: ["spare", "work"] };
-  const child = { ...parent, id: "child", name: "Child", parentSessionId: "root", account: "work", allowedAccounts: ["spare", "coding"] };
-  const { onSubmit } = accountsModal({ sessions: [root, child] });
+it("inherits the immediate parent's account and intersects account policies at every level on that bridge", async () => {
+  const root = { ...parent, id: "root", projectName: "Nested", account: "spare", allowedAccounts: ["spare", "work"] };
+  const middle = { ...parent, id: "middle", parentSessionId: root.id, allowedAccounts: ["work", "coding"] };
+  const child = { ...parent, id: "child", parentSessionId: middle.id, account: "work", allowedAccounts: ["spare", "work", "coding"] };
+  const { onSubmit } = accountsModal({ sessions: [root, middle, child] });
   await waitFor(() => expect((screen.getByLabelText("Account") as HTMLSelectElement).disabled).toBe(false));
   fireEvent.change(screen.getByLabelText(/Parent Session/), { target: { value: "child" } });
   const picker = screen.getByLabelText("Account") as HTMLSelectElement;
-  expect(Array.from(picker.options).map(option => option.value)).toEqual(["spare"]);
-  expect(picker.value).toBe("spare");
+  expect(Array.from(picker.options).map(option => option.value)).toEqual(["work"]);
   fireEvent.click(screen.getByRole("button", { name: "Create Session" }));
-  expect(onSubmit).toHaveBeenCalledWith("", expect.objectContaining({ parentSessionId: "child", account: "spare" }));
+  expect(onSubmit).toHaveBeenCalledWith("", expect.objectContaining({ parentSessionId: "child", projectName: "Nested", account: "work" }));
 });
 
-it("treats an unavailable resolved parent account as default while keeping the direct policy", async () => {
-  const alias = { ...parent, id: "alias", parentSessionId: "missing", allowedAccounts: ["default", "work"] };
-  const { onSubmit } = accountsModal({ sessions: [alias] });
+it.each([
+  { sessions: [{ ...parent, id: "child", parentSessionId: "child" }], error: /invalid parent link/ },
+  { sessions: [parent, { ...parent, id: "child", parentSessionId: parent.id }], error: /Update the destination bridge/ },
+])("keeps an unverifiable or unsupported nested parent from being silently flattened", async ({sessions, error}) => {
+  const { onSubmit } = accountsModal({ sessions, upgradedBridges: new Set() });
   await waitFor(() => expect((screen.getByLabelText("Account") as HTMLSelectElement).disabled).toBe(false));
-  fireEvent.change(screen.getByLabelText(/Parent Session/), { target: { value: "alias" } });
-  expect((screen.getByLabelText("Account") as HTMLSelectElement).value).toBe("default");
+  fireEvent.change(screen.getByLabelText(/Parent Session/), { target: { value: "child" } });
+  expect(screen.getByRole("alert").textContent).toMatch(error);
+  fireEvent.keyDown(screen.getByLabelText(/Session Name/), { key: "Enter", ctrlKey: true });
+  expect((screen.getByRole("button", { name: "Create Session" }) as HTMLButtonElement).disabled).toBe(true);
+  expect(onSubmit).not.toHaveBeenCalled();
+});
+
+it("lets the destination verify an ancestor that the browser cannot see", async () => {
+  const child = { ...parent, id: "child", parentSessionId: "grandparent", parentBridgeId: "peer" };
+  const { onSubmit } = accountsModal({ sessions: [child] });
+  await waitFor(() => expect((screen.getByLabelText("Account") as HTMLSelectElement).disabled).toBe(false));
+  fireEvent.change(screen.getByLabelText(/Parent Session/), { target: { value: child.id } });
   fireEvent.click(screen.getByRole("button", { name: "Create Session" }));
-  expect(onSubmit).toHaveBeenCalledWith("", expect.objectContaining({ parentSessionId: "alias", account: "default" }));
+  expect(onSubmit).toHaveBeenCalledWith("", expect.objectContaining({ parentSessionId: child.id, parentBridgeId: child.bridgeId }));
 });
 
 it.each([
@@ -358,7 +370,7 @@ it("starts a fresh modal opening with the default account after a canceled selec
 it("shows CPU, RAM and disk space beside the reporting computer", () => {
   const sample = { sampledAt: 1, cpuPercent: 62, freeRamBytes: 4 * 2 ** 30, totalRamBytes: 16 * 2 ** 30, freeDiskBytes: 21 * 2 ** 30 };
   render(<NewSessionModal isOpen onClose={vi.fn()} onSubmit={vi.fn()} bridges={bridges}
-    resourcesByBridge={new Map([["a", { ...sample, availableRamBytes: 12 * 2 ** 30, memoryPressure: "normal" as const }], ["b", sample]])}
+    resourcesByBridge={new Map<string, import("@/lib/host-resources").HostResources>([["a", { ...sample, availableRamBytes: 12 * 2 ** 30, memoryPressure: "normal" as const }], ["b", sample]])}
     sendCommand={vi.fn(async () => ({ requestId: "accounts", success: true, data: { accounts } }))} />);
   expect(screen.getByRole("option", { name: /first.*RAM 12.0\/16.0 GiB available.*memory pressure normal/ })).toBeTruthy();
   expect(screen.getByRole("option", { name: /second.*CPU 62%.*RAM 4.0\/16.0 GiB free.*disk 21.0 GiB free/ })).toBeTruthy();

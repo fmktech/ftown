@@ -39,6 +39,7 @@ export interface HandoffRouting {
 export interface SessionHandoffDeps {
   loadSession(id: string): Promise<Session | null>;
   saveSession(session: Session): Promise<void>;
+  checkHierarchy?: (session: Session) => Promise<void>;
   publishSession(session: Session): Promise<void>;
   createSession(input: CreateFtownSessionInput): Promise<Session>;
   /** Stop the old agent and fence its worktree before staging or replacement launch. */
@@ -395,6 +396,7 @@ async function resolveTarget(session: Session, request: HandoffRequest, routing:
 export async function handoffSession(deps: SessionHandoffDeps, sessionId: string, request: HandoffRequest = {}): Promise<HandoffResult> {
   const session = await deps.loadSession(sessionId);
   if (!session) throw new Error(`Session not found: ${sessionId}`);
+  await deps.checkHierarchy?.(session);
   const target = await resolveTarget(session, request, deps.routing);
   await deps.stopSession(session.id);
   const commit = await commitWork(session, deps, session.id);
@@ -406,7 +408,7 @@ export async function handoffSession(deps: SessionHandoffDeps, sessionId: string
   const logText = await gitText(run, dir, base ? ['log', '--oneline', `${base}..HEAD`] : ['log', '-n', '20', '--oneline']);
   const diffText = await gitText(run, dir, base ? ['diff', '--stat', base] : ['diff', '--stat', 'HEAD']);
   let planItem: PlanItem | undefined;
-  if (session.parentSessionId && deps.plan) {
+  if (session.parentSessionId && (!session.parentBridgeId || session.parentBridgeId === session.bridgeId) && deps.plan) {
     const plan = await deps.plan.get(session.parentSessionId);
     planItem = plan?.items.find((item) => item.sessionId === session.id && item.state === 'started');
   }

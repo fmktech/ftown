@@ -264,9 +264,11 @@ describe('attention-routing', () => {
     const shellParent = makeSession('p-shell', { status: 'running', shellType: 'shell' });
     const cDead = makeSession('c-dead', { parentSessionId: 'p-dead' });
     const cLive = makeSession('c-live', { parentSessionId: 'p-live' });
+    const remoteChild = makeSession('c-remote', {parentSessionId: 'p-dead', parentBridgeId: 'other'});
     const cGhost = makeSession('c-ghost', { parentSessionId: 'p-ghost' });
     const cShell = makeSession('c-shell', { parentSessionId: 'p-shell' });
     const items = new Map<string, AttentionItem[]>([
+      ['c-remote', [makeItem({id: 'a-remote', route: 'parent', routedTo: 'p-dead'})]],
       ['c-dead', [makeItem({ id: 'a-dead', route: 'parent', routedTo: 'p-dead' })]],
       ['c-live', [makeItem({ id: 'a-live', route: 'parent', routedTo: 'p-live' })]],
       ['c-ghost', [makeItem({ id: 'a-ghost', route: 'parent', routedTo: 'p-ghost' }),
@@ -275,7 +277,8 @@ describe('attention-routing', () => {
     ]);
     const notices: string[] = [];
     const deps = {
-      listSessions: async () => [deadParent, liveParent, shellParent, cDead, cLive, cGhost, cShell],
+      listSessions: async () => [deadParent, liveParent, shellParent, remoteChild, cDead, cLive, cGhost, cShell],
+      remoteParentRunning: async (child: Session) => child.parentBridgeId === 'other',
       attention: {
         listRouted: async (childId: string) => (items.get(childId) ?? [])
           .filter((item) => item.route === 'parent' && !item.resolvedAt)
@@ -294,6 +297,7 @@ describe('attention-routing', () => {
     const first = await escalateOrphanedParentItems(deps);
     assert.deepEqual(first.map((entry) => entry.item.id).sort(), ['a-dead', 'a-ghost', 'a-shell']);
     assert.deepEqual([...notices].sort(), ['c-dead:a-dead', 'c-ghost:a-ghost', 'c-shell:a-shell']);
+    assert.equal(items.get('c-remote')![0].route, 'parent');
     assert.equal(items.get('c-live')![0].route, 'parent');
     assert.equal(items.get('c-ghost')!.find((item) => item.id === 'a-resolved')!.route, 'parent');
     for (const childId of ['c-dead', 'c-ghost', 'c-shell']) {

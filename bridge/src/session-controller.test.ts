@@ -1,3 +1,4 @@
+import { parseRemoteParent, SessionHierarchyWrites } from './session-parent.js';
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -197,7 +198,7 @@ describe('SessionController.update — pull request metadata', () => {
 });
 
 describe('SessionController.update — reparent', () => {
-  it('flattens to the proposed parent\'s root so trees stay one level deep', async () => {
+  it('rejects moving existing sessions beneath a non-root', async () => {
     const h = setup([
       makeSession({ id: 'root' }),
       makeSession({ id: 'child', parentSessionId: 'root' }),
@@ -206,8 +207,8 @@ describe('SessionController.update — reparent', () => {
 
     const result = await h.controller.update('sess-1', { parent: { value: 'child' } });
 
-    assert.ok(result.ok);
-    if (result.ok) assert.equal(result.session.parentSessionId, 'root');
+    assert.deepEqual(result, { ok: false, code: 'invalid', message: 'Existing sessions can only move under a root session' });
+    assert.equal(h.store.saved.length, 0);
   });
 
   it('clears the parent on null/undefined/empty-string values', async () => {
@@ -791,21 +792,42 @@ it('keeps a link incarnation for equivalent URLs and replaces it after unlink', 
   assert.notEqual(h.store.sessions.get('sess-1')!.pullRequestLinkId, first);
 });
 
-it('moves under the root on a third machine and rejects moves with remote children', async () => {
+it('moves a leaf under a remote root and rejects moves with remote children', async () => {
   const child = makeSession({ id: 'worker', bridgeId: 'destination' });
   let remoteChildren = true;
   const h = setup([child], { sessionFactory: {
     hasRemoteChildren: async () => remoteChildren,
     loadRemoteParent: async (owner: string, id: string) => {
-      if (owner === 'source' && id === 'caller') return makeSession({ id, bridgeId: owner, parentSessionId: 'manager', parentBridgeId: 'third' });
       assert.deepEqual([owner, id], ['third', 'manager']);
       return makeSession({ id, bridgeId: owner, projectName: 'Shared' });
     },
   } as NonNullable<SessionControllerDeps['sessionFactory']> });
-  const move = () => h.controller.update(child.id, { parent: { value: 'caller', bridgeId: 'source' } });
+  const move = () => h.controller.update(child.id, { parent: { value: 'manager', bridgeId: 'third' } });
   assert.deepEqual(await move(), { ok: false, code: 'invalid', message: 'Session with children cannot be reparented' });
   remoteChildren = false;
   const result = await move();
   assert.ok(result.ok);
   assert.deepEqual([result.session.parentSessionId, result.session.parentBridgeId, result.session.projectName], ['manager', 'third', 'Shared']);
+});
+
+
+it('concurrent reciprocal moves on paired bridges cannot create a cycle', async () => {
+  const nodes = ['A', 'B'].map(id => makeSession({ id, bridgeId: id }));
+  const writes = nodes.map(() => new SessionHierarchyWrites());
+  let readers = 0;
+  let both!: () => void;
+  const barrier = new Promise<void>(resolve => { both = resolve; });
+  const owners = nodes.map((node, i) => setup([node], { sessionFactory: {
+    bridgeId: node.bridgeId, hierarchyWrites: writes[i],
+    hasRemoteChildren: async () => false,
+    loadRemoteParent: async (_owner: string, id: string) => {
+      if (++readers === 2) both();
+      await barrier;
+      return parseRemoteParent({ session: nodes[1-i], hierarchyChanging: writes[1-i].isMoving(id) });
+    },
+  } as NonNullable<SessionControllerDeps['sessionFactory']> }));
+  const results = await Promise.all(owners.map((owner, i) => owner.controller.update(nodes[i].id,
+    { parent: { value: nodes[1-i].id, bridgeId: nodes[1-i].bridgeId } })));
+  assert.equal(results.some(result => result.ok), false);
+  assert.ok(writes.every((owner, i) => !owner.isMoving(nodes[i].id)));
 });

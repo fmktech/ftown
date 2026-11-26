@@ -17,7 +17,7 @@ export class TicketNotificationInbox {
       db.exec(`CREATE TABLE IF NOT EXISTS receipts (
         sequence INTEGER PRIMARY KEY, home TEXT NOT NULL, id TEXT NOT NULL, event TEXT NOT NULL,
         UNIQUE (home, id)
-      )`);
+      ); CREATE INDEX IF NOT EXISTS receipts_event_id ON receipts(id)`);
       return fn(db);
     } finally { db.close(); }
   }
@@ -25,8 +25,10 @@ export class TicketNotificationInbox {
   receive(homeBridgeId: string, body: unknown): string {
     const event = ticketNotificationBody.parse(body);
     if (event.bridgeId !== this.bridgeId) throw new Error('Incorrect notification recipient');
-    this.withDb(db => db.prepare('INSERT INTO receipts(home,id,event) VALUES(?,?,?) ON CONFLICT(home,id) DO NOTHING')
-      .run(homeBridgeId, event.id, JSON.stringify(event)));
+    const serialized = JSON.stringify(event);
+    this.withDb(db => db.prepare(`INSERT OR IGNORE INTO receipts(home,id,event)
+      SELECT ?,?,? WHERE NOT EXISTS (SELECT 1 FROM receipts WHERE id=? AND event=?)`)
+      .run(homeBridgeId, event.id, serialized, event.id, serialized));
     return event.id;
   }
 

@@ -14,6 +14,10 @@ function atLeast(current: string, latest: string): boolean {
   for (let i = 0; i < 3; i++) if (left[i] !== right[i]) return left[i] > right[i];
   return true;
 }
+/** 0.30.72 added immediate-parent delegation and project storage migration. */
+export function supportsNestedSessionsAndProjectMoves(current: unknown): boolean {
+  return version(current) && atLeast(current, "0.30.72");
+}
 const id = (v: unknown): v is string => typeof v === "string" && /^[A-Za-z0-9_-]{1,200}$/.test(v);
 const date = (v: unknown) => typeof v === "string" && v.length < 80 && Number.isFinite(Date.parse(v));
 const phases = ["staging", "prepared", "restarting", "succeeded", "failed"];

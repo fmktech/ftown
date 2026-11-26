@@ -2,6 +2,7 @@ export interface DraggedSession {
   id: string;
   bridgeId: string;
   hasChildren?: boolean;
+  parentSessionId?: string;
 }
 
 export type SessionDropZone = "above" | "inside" | "below";
@@ -55,7 +56,7 @@ export function resolveSessionDrop(
   if (dragged.id === target.id) return null;
   if (target.zone === "inside" && (dragged.hasChildren || target.parentSessionId)) return null;
   if (target.zone !== "inside") {
-    if (dragged.hasChildren && target.parentSessionId) return null;
+    if (dragged.hasChildren && dragged.parentSessionId !== target.parentSessionId) return null;
     return {
       type: "reorder",
       sessionId: dragged.id,

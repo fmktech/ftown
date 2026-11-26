@@ -352,25 +352,44 @@ async function waitingComputer(options: { knows: () => boolean; revoked?: () => 
   const runtime = new SecureEndpointRuntime(browser, { ledger });
   const raw = new RawClient(); raw.state = 'connected';
   let hellos = 0;
+  let published = Promise.withResolvers<void>();
   raw.publish.mockImplementation(async (_channel: string, packet: unknown) => {
     const envelope = packet as SecureEnvelope;
     if (envelope.purpose !== 'hello') return;
     hellos++;
-    if (!options.knows()) return; // an unknown endpoint gets no answer at all
+    const sent = published;
+    published = Promise.withResolvers<void>();
+    if (!options.knows()) { sent.resolve(); return; } // an unknown endpoint gets no answer at all
     const hello = JSON.parse(new TextDecoder().decode(await open(a, browser.endpoint, envelope,
       { ownerId: accountId, bridgeId: 'bridge-a', channel: envelope.channel, recipientId: a.endpoint.id, purpose: 'hello' })));
     const now = Date.now();
     await runtime.receive(await seal(a, browser.endpoint, { ...envelope, senderId: a.endpoint.id, recipientId: browser.endpoint.id, purpose: 'welcome', createdAt: now,
       expiresAt: now + 120000 }, new TextEncoder().encode(JSON.stringify({ type: 'welcome', challenge: hello.challenge, receiverEpoch: 'boot-a' }))), envelope.channel);
+    sent.resolve();
   });
   const handshake = vi.spyOn(runtime, 'handshake');
   const client = new SecureMessageClient(raw as unknown as Centrifuge, userId, runtime, { retry: FAST });
   const ledgerChanged = () => { for (const listener of [...listeners]) listener(); };
-  return { runtime, raw, client, handshake, hellos: () => hellos, ledgerChanged };
+  // WebCrypto still uses the real thread pool. The fake clock may advance to a
+  // hello deadline only after the peer actually received that encrypted hello.
+  const nextHello = () => published.promise;
+  async function missFirstHello() {
+    const delivered = nextHello();
+    const rejected = expect(client.ensureReady('bridge-a')).rejects.toMatchObject({ code: 'bridge_offline' });
+    await delivered;
+    await vi.advanceTimersByTimeAsync(FAST.helloTimeoutMs);
+    await rejected;
+  }
+  async function nextRetry() {
+    const delivered = nextHello();
+    await vi.advanceTimersToNextTimerAsync();
+    await delivered;
+  }
+  return { runtime, client, handshake, hellos: () => hellos, ledgerChanged, nextHello, missFirstHello, nextRetry };
 }
-const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 describe('account computer readiness after a new browser enrolls', () => {
+  afterEach(() => vi.useRealTimers());
   it('keeps the retry delay when another bridge reports readiness changes', async () => {
     vi.useFakeTimers();
     try {
@@ -402,37 +421,55 @@ describe('account computer readiness after a new browser enrolls', () => {
   });
 
   it('retries a trusted computer that answered nothing until it applies the ledger, then re-lists sessions', async () => {
+    vi.useFakeTimers();
     let knows = false;
     const f = await waitingComputer({ knows: () => knows });
-    const subscribed = vi.fn(); f.client.getSubscription(channel)?.on('subscribed', subscribed);
-    await expect(f.client.ensureReady('bridge-a')).rejects.toMatchObject({ code: 'bridge_offline' });
+    const subscribed = Promise.withResolvers<void>();
+    f.client.getSubscription(channel)?.on('subscribed', () => subscribed.resolve());
+    await f.missFirstHello();
     expect(f.runtime.state('bridge-a').status).toBe('offline');
-    await vi.waitFor(() => expect(f.hellos()).toBeGreaterThanOrEqual(2));
+    await f.nextRetry();
+    await vi.advanceTimersByTimeAsync(FAST.helloTimeoutMs);
     knows = true;
-    await vi.waitFor(() => expect(f.runtime.state('bridge-a').status).toBe('ready'), { timeout: 2000 });
-    await vi.waitFor(() => expect(subscribed).toHaveBeenCalled());
-    const settled = f.hellos(); await pause(150); expect(f.hellos()).toBe(settled);
+    await f.nextRetry();
+    await subscribed.promise;
+    expect(f.runtime.state('bridge-a').status).toBe('ready');
+    const settled = f.hellos();
+    await vi.advanceTimersByTimeAsync(FAST.windowMs);
+    expect(f.hellos()).toBe(settled);
     f.client.dispose(); f.runtime.dispose();
   });
 
   it('gives up after the window (the computer stays offline), and a ledger change re-evaluates it', async () => {
+    vi.useFakeTimers();
     let knows = false;
     const f = await waitingComputer({ knows: () => knows });
-    await expect(f.client.ensureReady('bridge-a')).rejects.toBeTruthy();
-    await pause(FAST.windowMs + 300);
-    const spent = f.hellos(); expect(spent).toBeGreaterThan(4);
-    await pause(200); expect(f.hellos()).toBe(spent); expect(f.runtime.state('bridge-a').status).toBe('offline');
-    knows = true; f.ledgerChanged();
-    await vi.waitFor(() => expect(f.runtime.state('bridge-a').status).toBe('ready'), { timeout: 2000 });
+    await f.missFirstHello();
+    const deadline = Date.now() + FAST.windowMs;
+    while (Date.now() < deadline) {
+      await f.nextRetry();
+      await vi.advanceTimersByTimeAsync(FAST.helloTimeoutMs);
+    }
+    const spent = f.hellos();
+    expect(spent).toBeGreaterThan(4);
+    await vi.advanceTimersByTimeAsync(FAST.windowMs);
+    expect(f.handshake).toHaveBeenCalledTimes(spent);
+    expect(f.runtime.state('bridge-a').status).toBe('offline');
+    knows = true;
+    const welcome = f.nextHello();
+    f.ledgerChanged();
+    await welcome;
+    expect(f.runtime.state('bridge-a').status).toBe('ready');
     f.client.dispose(); f.runtime.dispose();
   });
 
   it('never retries a computer whose access was revoked', async () => {
+    vi.useFakeTimers();
     let revoked = false;
     const f = await waitingComputer({ knows: () => false, revoked: () => revoked });
-    await expect(f.client.ensureReady('bridge-a')).rejects.toBeTruthy();
+    await f.missFirstHello();
     revoked = true;
-    await pause(200);
+    await vi.advanceTimersByTimeAsync(FAST.windowMs);
     expect(f.handshake).toHaveBeenCalledTimes(2); // the first retry meets the revocation and stops
     await expect(f.handshake.mock.results[1].value).rejects.toMatchObject({ code: 'endpoint_revoked' });
     f.client.dispose(); f.runtime.dispose();

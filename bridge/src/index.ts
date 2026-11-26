@@ -20,6 +20,7 @@ import { PublishRouter } from './direct-transport/publish-router.js';
 import { LoopbackPeerServer } from './direct-transport/loopback-server.js';
 import { toWireSession } from './session-wire.js';
 import { ProcessRunner } from './claude-runner.js';
+import { ProjectStorageMoves } from './project-storage-move.js';
 import { ProjectBoardStore, sessionBlocksTicket, type ProjectBoard } from './project-board-store.js';
 import { SessionStore } from './session-store.js';
 import { MailStore } from './mail-store.js';
@@ -30,7 +31,8 @@ import { BridgePushNotifier } from './push-notifier.js';
 import { LocalApiServer } from './local-api-server.js';
 import { parsePeerSessions, startPeerSessionCache, startPeerProjectDirectory } from './peer-session-cache.js';
 import { hostResourceSampler } from './host-resources.js';
-import { parseRemoteParent, sessionRequestPrincipal } from './session-parent.js';
+import { hasPendingChild, parseRemoteParent, sessionRequestPrincipal, SessionHierarchyWrites } from './session-parent.js';
+import { remoteChildPlanStore, remotePlanBlocksHandoff } from './remote-child-plan.js';
 import { PeerControl } from './peer-control.js';
 import { PeerLinks } from './peer-link.js';
 import { launchCapabilities, probeLaunchCapabilities } from './harness-registry.js';
@@ -55,6 +57,7 @@ import { PullRequestStatusService } from './pull-request-status.js';
 import { createPrReviewService } from './pull-request-review.js';
 import { PullRequestEventWatcher } from './pull-request-events.js';
 import { createSessionBoardPublisher, liveSessionBoardRoots, type SessionBoardSource } from './session-board-snapshot.js';
+import { PeerTeamOutbox } from './coordination/peer-team.js';
 import { createCoordination } from './coordination/wiring.js';
 import { removeFtownSession } from './remove-ftown-session.js';
 import { SessionResurrection, shouldResurrectStoredSession } from './session-resurrection.js';
@@ -860,8 +863,15 @@ program
     const mailStore = new MailStore((sessionId) => store.sessionDir(sessionId));
     localApiServer.setMailStore(mailStore);
     const pullRequestStatuses = new PullRequestStatusService();
+    let teamOutbox: PeerTeamOutbox;
+    let remoteChildren: NonNullable<import('./coordination/contract.js').BoardDeps['remoteChildren']> = async () => [];
     const coordination = createCoordination({
       store,
+      remotePlanLifecycle: async (child, action) => teamOutbox.plan(child, action),
+      remoteEvent: (child, event) => teamOutbox.event(child, event),
+      remoteParentRunning: (child) => localApiServer.managerCanAnswer(child),
+      remoteChildren: id => remoteChildren(id),
+      remoteResultSender: (id, manager) => localApiServer.remoteResultSender(id, manager),
       attention: attentionStore,
       prStatus: async (url) => (await pullRequestStatuses.get([url])).statuses[0] ?? null,
       prStatusFresh: (url) => pullRequestStatuses.getFresh(url),
@@ -890,7 +900,7 @@ program
     for (const rootId of bootstrapBoardRoots) boardPublisher.schedule(rootId);
     bootstrapBoardRoots.clear();
     const stopBoardObserver = centrifugo.onLocalPublication(boardPublisher.observePublication);
-    localApiServer.setCoordination(coordination);
+    localApiServer.setCoordination(coordination, scheduleBoard);
     const stopPushSessionObserver = centrifugo.onLocalPublication((channel, data) => {
       if (channel !== `sessions:updates#${userId}` || !data || typeof data !== 'object') return;
       const update = data as { type?: string; session?: { id?: string; status?: string } };
@@ -940,7 +950,10 @@ program
       }),
     });
     const peerControl = new PeerControl(security, centrifugo, peerLinks);
+    teamOutbox = new PeerTeamOutbox(join(dataDir, 'team-outbox-' + security.endpoint.id + '.sqlite'), peerControl);
+    const hierarchyWrites = new SessionHierarchyWrites();
     const sessionFactoryDeps: CreateFtownSessionDeps = {
+      hierarchyWrites,
       loadRemoteParent: async (owner, id) => {
         const actor = sessionRequestPrincipal.getStore();
         if (actor && !security.permitsPeerLookup(actor)) throw new Error('Parent session unavailable');
@@ -956,9 +969,10 @@ program
         const snapshots = await Promise.all((await peerControl.list()).map(async peer => {
           const result = await peerControl.http(peer.bridgeId, 'GET', '/api/sessions');
           if (result.status !== 200) throw new Error('Cannot verify children on peer bridge');
-          return parsePeerSessions(result.body, peer.bridgeId);
+          return hasPendingChild(result.body, bridgeId, id) || parsePeerSessions(result.body, peer.bridgeId)
+            .some(row => row.parentSessionId === id && (row.parentBridgeId ?? row.bridgeId) === bridgeId);
         }));
-        return snapshots.some(rows => rows.some(row => row.parentSessionId === id && (row.parentBridgeId ?? bridgeId) === bridgeId));
+        return snapshots.some(Boolean);
       },
       store,
       updateAdmission,
@@ -972,6 +986,8 @@ program
       wireTerminalInput,
       getTerminalSize: (sid) => terminalManager.getSize(sid),
       planStore: coordination.plan,
+      remotePlanStore: owner => remoteChildPlanStore(peerControl, owner),
+      releaseRemotePlan: child => teamOutbox.plan(child, 'release'),
       isWsl2,
     };
     localApiServer.setSessionFactory(sessionFactoryDeps);
@@ -1004,7 +1020,9 @@ program
       loadTerminalLog: (id) => store.loadTerminalLog(id),
       loadActivity: async (id) => (await attentionStore.list(id, { limit: 1 })).activity.state,
       listMail: async (sessionId) => (await mailStore.listAll(sessionId, 0)).map((message) => ({ from: message.from, type: message.type })),
-      acceptMail: (parent, body) => localApiServer.acceptSessionMail(parent, body),
+      loadParent: child => localApiServer.loadManager(child),
+      remoteResultReported: child => localApiServer.remoteResultReported(child),
+      acceptMail: (parent, body) => localApiServer.mailManager(parent, body),
       recordAttention: async (sessionId, input) => {
         const item = await attentionStore.record(sessionId, 'Notification', {
           notification_type: 'agent_needs_input',
@@ -1200,31 +1218,53 @@ program
       }
       throw new Error(`old tmux session ${id} is still running; handoff was not started`);
     };
-    const runHandoff = (sessionId: string, request: HandoffRequest) => handoffSession({
-      loadSession: (id) => store.loadSession(id),
-      saveSession: (session) => store.saveSession(session),
-      publishSession: (session) => centrifugo.publishSessionUpdate(userId, session),
-      createSession: (input) => createFtownSession(sessionFactoryDeps, input),
-      stopSession: stopHandoffSession,
-      isSessionHealthy: (id) => waitForSessionHealthy(async () => {
-        const session = await store.loadSession(id);
-        return { status: session?.status, processActive: runner.isRunning(id) };
-      }),
-      archiveSession: async (id) => {
-        const result = await sessionController.remove(id, undefined, 'keep');
-        if (!result.removed) throw new Error(`could not archive session ${id}`);
-      },
-      plan: coordination.plan,
-      loadTerminalLog: (id) => store.loadTerminalLog(id),
-      routing: modelRouting,
-    }, sessionId, request);
+    const runHandoff = async (sessionId: string, request: HandoffRequest) => {
+      const release = hierarchyWrites.begin(sessionId);
+      try {
+        return await handoffSession({
+          loadSession: (id) => store.loadSession(id),
+          saveSession: (session) => store.saveSession(session),
+          publishSession: (session) => centrifugo.publishSessionUpdate(userId, session),
+          createSession: (input) => createFtownSession(sessionFactoryDeps, input),
+          checkHierarchy: async session => {
+            const pending = hierarchyWrites.pendingParents().some(p => p.bridgeId === bridgeId && p.id === session.id);
+            const local = await store.listSessions();
+            if (pending || local.some(s => s.parentSessionId === session.id && (s.parentBridgeId ?? s.bridgeId) === session.bridgeId)
+              || await sessionFactoryDeps.hasRemoteChildren!(session.id)) throw new Error('Hand off the child sessions before their manager');
+            if (await remotePlanBlocksHandoff(peerControl, session)) throw new Error('Release the active plan item on the parent bridge before handoff');
+          },
+          stopSession: stopHandoffSession,
+          isSessionHealthy: (id) => waitForSessionHealthy(async () => {
+            const session = await store.loadSession(id);
+            return { status: session?.status, processActive: runner.isRunning(id) };
+          }),
+          archiveSession: async (id) => {
+            const result = await sessionController.remove(id, undefined, 'keep');
+            if (!result.removed) throw new Error(`could not archive session ${id}`);
+          },
+          plan: coordination.plan,
+          loadTerminalLog: (id) => store.loadTerminalLog(id),
+          routing: modelRouting,
+        }, sessionId, request);
+      } finally {
+        release();
+      }
+    };
     localApiServer.setHandoff(runHandoff);
     const projectBoards = new ProjectBoardStore(dataDir, bridgeId);
-    const peerCache = await startPeerSessionCache(peerControl, join(dataDir, "peer-sessions-" + security.endpoint.id + ".json"));
+    const peerCache = await startPeerSessionCache(peerControl, join(dataDir, "peer-sessions-" + security.endpoint.id + ".json"), rows => {
+      for (const id of new Set(rows.filter(row => row.parentBridgeId === bridgeId).map(row => row.parentSessionId))) {
+        if (id) scheduleBoard(id);
+      }
+    });
+    remoteChildren = async (managerId) => (await peerCache.list()).flatMap(child =>
+        child.parentSessionId === managerId && child.parentBridgeId === bridgeId && child.status !== 'disconnected'
+          ? [{ ...child, status: child.status }] : []);
     const projectDirectory = await startPeerProjectDirectory(peerControl, join(dataDir, "peer-projects-" + security.endpoint.id + ".json"));
+    const storageMoves = new ProjectStorageMoves(dataDir, bridgeId, projectBoards, peerControl, projectDirectory.rememberMove);
     localApiServer.setLocalProjects(() => projectBoards.list());
     const findDiscussionSession = (origin: string, id: string) => discussionSession(bridgeId, sid => store.loadSession(sid), peerControl, origin, id);
-    localApiServer.setBoardCommands({ discussionSession: findDiscussionSession, bridgeId, security, projectBoards, rememberedProjects: projectDirectory.list, observeProject,
+    localApiServer.setBoardCommands({ discussionSession: findDiscussionSession, bridgeId, security, projectBoards, storageMoves, rememberedProjects: projectDirectory.list, observeProject,
       ready: () => ready && !updateAdmission.isFrozen, deliverProject });
     const ticketInbox = new TicketNotificationInbox(join(dataDir, 'ticket-inboxes', security.endpoint.id + '.sqlite'), bridgeId);
     localApiServer.setTicketInbox(ticketInbox);
@@ -1288,6 +1328,7 @@ program
       const projects = projectBoards.list();
       if (!projects.length) return;
       await Promise.all(projects.map(async ({ id }) => {
+        storageMoves.recover(id);
         try { await observeProject(id); }
         catch { console.error('[Bridge] Could not refresh project workers:', id); }
         void deliverProject(id);
@@ -1295,7 +1336,8 @@ program
     }
     const ticketTimer = setInterval(() => {
       if (!ready || updateAdmission.isFrozen) return;
-      maintenance ??= refreshProjects().catch(() => console.error('[Bridge] Could not refresh project boards'))
+      void teamOutbox.flush().catch(err => console.warn('[Bridge] Failed to refresh team notifications:', err));
+      maintenance ??= Promise.all([refreshProjects(), coordination.escalateOrphanedParentItems()]).then(() => {}).catch(() => console.error('[Bridge] Could not refresh project boards'))
         .finally(() => { maintenance = undefined; });
     }, 30_000);
     ticketTimer.unref();
@@ -1311,7 +1353,7 @@ program
         return { type: 'command_response', response: { requestId: route.requestId, success: true } };
       }
       let result: CommandResponse | undefined;
-      await createCommandHandler({ bridgeId, hostResources, projectBoards, rememberedProjects: projectDirectory.list,
+      await createCommandHandler({ bridgeId, hostResources, projectBoards, storageMoves, rememberedProjects: projectDirectory.list,
         discussionSession: findDiscussionSession, observeProject, security, sessionController, attentionStore, updates, updateEffects, pullRequestStatuses,
         directAddress: () => addressed?.address() ?? null, pullRequestReview,
         modelRouting: () => modelRouting,
@@ -1324,8 +1366,8 @@ program
         publishCommandResponse: async response => { result = response; },
       })(message.application.data as unknown as Parameters<ReturnType<typeof createCommandHandler>>[0], message);
       if (route.command === 'mutate_project_discussion' || route.command === 'mutate_project_board' || route.command === 'get_project_board') {
-        const payload = (message.application.data as { payload?: { projectId?: unknown } } | null)?.payload;
-        if (result?.success && typeof payload?.projectId === 'string') void deliverProject(payload.projectId);
+        const payload = (message.application.data as { payload?: { projectId?: unknown; action?: unknown } } | null)?.payload;
+        if (result?.success && payload?.action !== 'move_project' && typeof payload?.projectId === 'string') void deliverProject(payload.projectId);
       }
       return applicationJson({ type: 'command_response', response: result ?? { requestId: route.requestId, success: false, error: 'bridge_error' } });
     };
@@ -1430,7 +1472,7 @@ program
           centrifugo.disconnect();
 
           const drained = await Promise.allSettled([
-            localApiServer.closeTransfers(), peerCache.stop(), projectDirectory.stop(), pullRequestEvents.stop(),
+            teamOutbox.close(), localApiServer.closeTransfers(), peerCache.stop(), projectDirectory.stop(), pullRequestEvents.stop(),
             maintenance, ...deliveries.values(),
             // An already-started resurrection can still attach a PTY. Detach once it finishes.
             Promise.resolve(startupWork).then(() => terminalOutput.stop()),

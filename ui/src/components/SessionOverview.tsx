@@ -108,7 +108,8 @@ export interface SessionOverviewProps {
 /** Children of `session`, oldest first (the order the tree was built in). */
 export function childSessionsOf(session: Session, sessions: ReadonlyArray<Session>): Session[] {
   return sessions
-    .filter(candidate => candidate.parentSessionId === session.id)
+    .filter(candidate => candidate.id !== session.id && candidate.parentSessionId === session.id
+      && (!candidate.parentBridgeId || candidate.parentBridgeId === session.bridgeId))
     .sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0));
 }
 

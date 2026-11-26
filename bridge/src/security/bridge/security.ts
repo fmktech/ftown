@@ -260,7 +260,7 @@ export class BridgeSecurityService implements Omit<BridgeSecurity, 'adoptAccount
       if (Object.keys(data).some(key => key !== 'body' && key !== 'timeoutMs' && key !== 'callerSessionId')
         || (data.timeoutMs !== undefined && (typeof data.timeoutMs !== 'number' || !Number.isInteger(data.timeoutMs) || data.timeoutMs < 1 || data.timeoutMs > 60000))) throw new BridgeSecurityError('invalid_envelope');
       const operation = classifyHttp(route.method, route.path);
-      if ((operation.operation === 'instructions_wire' || operation.operation === 'instructions_sync' || operation.operation === 'project_directory' || operation.operation === 'ticket_notify') && transport.transport !== 'bridge-link') throw new BridgeSecurityError('wrong_context');
+      if ((operation.operation === 'instructions_wire' || operation.operation === 'instructions_sync' || operation.operation === 'project_move' || operation.operation === 'project_directory' || operation.operation === 'ticket_notify') && transport.transport !== 'bridge-link') throw new BridgeSecurityError('wrong_context');
       if (operation.operation === 'instructions_local' && transport.transport !== 'local-http') throw new BridgeSecurityError('wrong_context');
       if (operation.operation === 'transfer_wire' && transport.transport !== 'bridge-link') throw new BridgeSecurityError('wrong_context');
       if (operation.operation === 'transfer_local' && transport.transport !== 'local-http') throw new BridgeSecurityError('wrong_context');

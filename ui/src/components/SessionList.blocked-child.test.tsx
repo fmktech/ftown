@@ -40,14 +40,16 @@ it("keeps an ordinary child folded under its parent", async () => {
   expect(screen.queryByText("Handoff child")).toBeNull();
 });
 
-it("shows a blocked child on the board by expanding its parent once", async () => {
+it("reveals a blocked grandchild through its cross-bridge ancestors", async () => {
   renderList([
     session({ id: "parent", projectName: "Platform", name: "Handoff parent" }),
+    session({ id: "manager", bridgeId: "studio", name: "Manager", parentSessionId: "parent", parentBridgeId: "bridge" }),
     session({
       id: "child",
       bridgeId: "remote",
       name: "Handoff child",
-      parentSessionId: "parent",
+      parentSessionId: "manager",
+      parentBridgeId: "studio",
       shellType: "muse",
       block: {
         reason: "usage_limit",

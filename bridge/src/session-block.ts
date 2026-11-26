@@ -51,6 +51,8 @@ export interface SessionFailureDeps {
   withSessionWrite(id: string, task: () => Promise<void>): Promise<void>;
   loadTerminalLog?(id: string): Promise<string>;
   loadActivity?(id: string): Promise<'thinking' | 'tool_use' | 'idle' | 'unknown'>;
+  loadParent?(child: Session): Promise<Session | null>;
+  remoteResultReported?(child: Session): Promise<boolean>;
   listMail?(sessionId: string): Promise<Array<{ from: string; type: string }>>;
   acceptMail(parent: Session, body: { from: string; fromName?: string; type: 'escalation'; idempotencyKey: string; body: string }): Promise<{ ok: boolean; error?: string }>;
   recordAttention(sessionId: string, input: { title: string; message: string; notificationId: string }): Promise<boolean>;
@@ -357,6 +359,7 @@ export class SessionFailureMonitor {
     const parentId = session.parentSessionId;
     if (!parentId || !this.deps.listMail) return false;
     try {
+      if (session.parentBridgeId && session.parentBridgeId !== session.bridgeId) return !!await this.deps.remoteResultReported?.(session);
       const mail = await this.deps.listMail(parentId);
       return mail.some((message) => message.type === 'result' && message.from === session.id);
     } catch {
@@ -366,7 +369,7 @@ export class SessionFailureMonitor {
 
   private async notify(session: Session, block: SessionBlock, _lastError: string): Promise<boolean> {
     const parentId = session.parentSessionId;
-    const parent = parentId ? await this.deps.loadSession(parentId) : null;
+    const parent = !parentId ? null : this.deps.loadParent ? await this.deps.loadParent(session) : await this.deps.loadSession(parentId);
     const planItem = parent?.plan?.items.find((item) => item.sessionId === session.id);
     const body = buildBlockedMail({
       id: session.id,
@@ -389,7 +392,8 @@ export class SessionFailureMonitor {
           idempotencyKey: `session-block:${session.id}:${block.transitionKey}`,
           body,
         });
-        return accepted.ok;
+        if (accepted.ok) return true;
+        if (parent.bridgeId === session.bridgeId) return false;
       }
       const message = sanitizeAttentionText(body, ATTENTION_CHARS);
       return await this.deps.recordAttention(session.id, {

@@ -9,7 +9,7 @@ tiers first); never route to `exhausted`.
 
 Compare bridge capacity with `ftown bridges --resources --json`. To copy files, see **Copy a folder and launch a worker** in `sessions.md`.
 
-Keep the plan on the manager, not in a ticket system.
+Each manager owns its plan. A worker can delegate again with `--parent`.
 Add steps with `ftown plan add` (`--after`/`--priority` set precedence;
 ready = every `after` done or dropped) and create each child with
 `--plan-item`, so its item starts and completes with the child:

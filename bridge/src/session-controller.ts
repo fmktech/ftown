@@ -112,6 +112,7 @@ export interface WorktreeRemoveOutcome {
 
 export class SessionController {
   private readonly deps: SessionControllerDeps;
+  private hierarchyWrites = Promise.resolve();
   private readonly metadataWrites = new Map<string, Promise<void>>();
   private readonly previewReader: SessionPreviewReader;
   private readonly worktrees: WorktreeApi;
@@ -299,14 +300,24 @@ export class SessionController {
 
   /**
    * Update metadata in one load-mutate-save-publish pass.
-   * Reparenting flattens to the proposed parent's root so
-   * session trees stay one level deep.
+   * Only leaves can be moved beneath existing roots. Deeper edges are formed
+   * when creating a new child, which cannot already be an ancestor.
    */
   async update(
     sessionId: string,
     input: SessionUpdateInput,
   ): Promise<SessionControllerResult<{ session: Session }>> {
-    return this.withSessionMutation(sessionId, () => this.updateMetadata(sessionId, input));
+    const update = () => this.withSessionMutation(sessionId, () => this.updateMetadata(sessionId, input));
+    if (!input.parent) return update();
+    const { value, bridgeId } = input.parent;
+    const factory = this.deps.sessionFactory;
+    const next = this.hierarchyWrites.then(async () => {
+      const target = typeof value === 'string' && value && factory ? { bridgeId: bridgeId ?? factory.bridgeId, id: value } : undefined;
+      const done = factory?.hierarchyWrites?.begin(sessionId, target);
+      try { return await update(); } finally { done?.(); }
+    });
+    this.hierarchyWrites = next.then(() => undefined, () => undefined);
+    return next;
   }
 
   private async withSessionMutation<T>(sessionId: string, update: () => Promise<T>): Promise<T> {
@@ -360,26 +371,27 @@ export class SessionController {
         parentSessionId = undefined;
       } else if (typeof raw !== 'string') {
         return { ok: false, code: 'invalid', message: 'Invalid parentSessionId' };
-      } else if (raw === session.id) {
+      } else if (raw === session.id && (!input.parent.bridgeId || input.parent.bridgeId === session.bridgeId)) {
         return { ok: false, code: 'invalid', message: 'Session cannot be its own parent' };
       } else {
         try {
-          const { root } = await resolveSessionParent(this.deps.store, session.bridgeId, raw, input.parent.bridgeId, this.deps.sessionFactory?.loadRemoteParent);
-          parentProject = root.projectName || 'Unassigned';
-          parentBridgeId = root.bridgeId;
-          parentSessionId = root.id;
+          const ancestry = await resolveSessionParent(this.deps.store, session.bridgeId, raw, input.parent.bridgeId, this.deps.sessionFactory?.loadRemoteParent, this.deps.sessionFactory?.hierarchyWrites);
+          if (ancestry.some(p => p.id === session.id && p.bridgeId === session.bridgeId)) {
+            return { ok: false, code: 'invalid', message: 'Session cannot be parented under its own descendant' };
+          }
+          if (ancestry.length !== 1) return { ok: false, code: 'invalid', message: 'Existing sessions can only move under a root session' };
+          const parent = ancestry[0];
+          parentProject = parent.projectName || 'Unassigned';
+          parentBridgeId = parent.bridgeId;
+          parentSessionId = parent.id;
         } catch (error) {
           return { ok: false, code: 'invalid', message: error instanceof Error ? error.message : 'Parent session unavailable' };
         }
-        if (parentSessionId === session.id) {
-          return {
-            ok: false,
-            code: 'invalid',
-            message: 'Session cannot be parented under its own descendant',
-          };
-        }
+      }
+      if (session.parentSessionId !== parentSessionId || (session.parentBridgeId ?? session.bridgeId) !== (parentBridgeId ?? session.bridgeId)) {
+        const pending = this.deps.sessionFactory?.hierarchyWrites?.pendingParents() ?? [];
         const sessions = await this.deps.store.listSessions();
-        let hasChildren = sessions.some(candidate => candidate.parentSessionId === session.id);
+        let hasChildren = pending.some(p => p.id === session.id && p.bridgeId === session.bridgeId) || sessions.some(candidate => candidate.parentSessionId === session.id && (candidate.parentBridgeId ?? candidate.bridgeId) === session.bridgeId);
         if (!hasChildren && this.deps.sessionFactory?.hasRemoteChildren) {
           try { hasChildren = await this.deps.sessionFactory.hasRemoteChildren(session.id); }
           catch { return { ok: false, code: 'conflict', message: 'Reconnect peer bridges to verify this session has no children' }; }

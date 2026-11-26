@@ -119,7 +119,7 @@ describe("resolveSessionDrop", () => {
     ).toEqual({ type: "set-parent", sessionId: "session-a", parentSessionId: "session-b" });
   });
 
-  it("does not highlight a child row as a parent when the server would normalize it", () => {
+  it("keeps existing sessions from being moved inside a subsession", () => {
     const target = {
       kind: "session" as const,
       id: "child-b",

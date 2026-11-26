@@ -1,9 +1,10 @@
+import { applyRemoteChildPlan, CHILD_PLAN_PATH } from './remote-child-plan.js';
 import { runProjectBoardCommand, type BoardCommandDeps } from './project-board-commands.js';
 import { ProjectBoardChanged } from './project-board-store.js';
 import { BridgeSecurityError } from './security/bridge/errors.js';
 import type { TicketNotificationInbox } from './ticket-notifications.js';
 import { TICKET_NOTIFICATION_WIRE, TICKET_NOTIFICATION_INBOX } from './ticket-notification-protocol.js';
-import { boardCommandForPath, PROJECT_DIRECTORY, type ProjectDirectoryEntry } from './project-directory-protocol.js';
+import { boardCommandForPath, PROJECT_DIRECTORY, PROJECT_MOVE, type ProjectDirectoryEntry } from './project-directory-protocol.js';
 import { INSTRUCTIONS_LOCAL, INSTRUCTIONS_SYNC, INSTRUCTIONS_WIRE } from './instructions-protocol.js';
 import { mergeGlobal, readRevision } from './instructions.js';
 import { peerResources, type HostResources } from './host-resources.js';
@@ -79,9 +80,11 @@ import {
   markArchivedWorktreeRetained,
 } from './coordination/attention-routing.js';
 import { handleBriefRoutes } from './coordination/routes-brief.js';
+import { TEAM_EVENT_PATH, teamEvent } from './coordination/peer-team.js';
+import { boardManagerId } from './coordination/board.js';
 import { createPlanRoutes } from './coordination/routes-plan.js';
 import { createWorktreeRoutes } from './coordination/routes-worktrees.js';
-import { createCoordination, rootOf, type Coordination } from './coordination/wiring.js';
+import { createCoordination, type Coordination } from './coordination/wiring.js';
 import { GitWorktrees } from './worktrees.js';
 import { PeerTargetError, type PeerControl } from './peer-control.js';
 import { MAX_LINK_SDP_CHARS, type PeerLinks } from './peer-link.js';
@@ -377,6 +380,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
           || (timeoutMs !== undefined && typeof timeoutMs !== 'number')) {
           return { status: 400, body: { error: 'Expected { bridge, method, path, body?, timeoutMs? }' } };
         }
+        if (request.path.split('?')[0] === CHILD_PLAN_PATH) return { status: 403, body: { error: 'Bridge plan updates are internal' } };
         return await this.peerControl.http(request.bridge, request.method, request.path, request.body, timeoutMs as number | undefined);
       }
     } catch (error) {
@@ -442,6 +446,60 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     }
     if (route.kind !== 'http') throw new Error('Invalid application route');
     const routePath = route.path.split('?')[0];
+    if (routePath === '/api/team-questions') {
+      const owner = message.principal.endpoint.kind === 'bridge'
+        && this.security.peerBridges().find(peer => peer.endpoint.id === message.principal.endpoint.id)?.bridgeId;
+      if (!owner) return { status: 403, body: {error: 'permission_denied'} };
+      if (!this.store || !this.attention) return {status: 503, body: {error: 'Attention unavailable'}};
+      const parentId = new URL(route.path, 'http://localhost').searchParams.get('parent');
+      if (!parentId || !/^[A-Za-z0-9_-]{1,200}$/.test(parentId)) return {status: 400, body: {error: 'Invalid parent'}};
+      await this.security.revalidate(message.principal);
+      const children = (await this.store.listSessions()).filter(s => s.parentBridgeId === owner && s.parentSessionId === parentId);
+      const items = await Promise.all(children.map(async child => (await this.attention!.listRouted(child.id))
+        .filter(item => item.routedTo === parentId).map(event => ({sessionId: child.id, sessionName: child.name, bridgeId: child.bridgeId, event}))));
+      return {status: 200, body: applicationJson({items: items.flat()})};
+    }
+    if (routePath === TEAM_EVENT_PATH) {
+      const peer = message.principal.endpoint.kind === 'bridge'
+        && this.security.peerBridges().find(row => row.endpoint.id === message.principal.endpoint.id);
+      if (!peer) return { status: 403, body: { error: 'permission_denied' } };
+      const parsed = teamEvent.safeParse((message.application.data as {body?: unknown} | null)?.body);
+      if (!parsed.success) return { status: 400, body: { error: 'Invalid team event' } };
+      const {manager, deliveryId, event} = parsed.data;
+      const coordination = this.getCoordination();
+      if (!this.store || !this.peerControl || !coordination) return {status: 503, body: {error: 'Coordination unavailable'}};
+      const parent = await this.store.loadSession(manager);
+      if (!parent || parent.bridgeId !== this.security.bridgeId) return {status: 410, body: {error: 'Manager retired'}};
+      const response = await this.peerControl.http(peer.bridgeId, 'GET', '/api/sessions/' + event.sessionId, undefined, 6_000);
+      let child = (response.body as {session?: Session} | null)?.session;
+      if (response.status === 404) {
+        const archived = await this.peerControl.http(peer.bridgeId, 'GET', '/api/archive?sessionId=' + event.sessionId, undefined, 6_000);
+        if (archived.status !== 200) return {status: 503, body: {error: 'Child archive unavailable'}};
+        child = (archived.body as {archived?: Session[]} | null)?.archived?.filter(row => row.id === event.sessionId).at(-1);
+      } else if (response.status !== 200) return {status: 503, body: {error: 'Child unavailable'}};
+      if (child?.id !== event.sessionId || child.bridgeId !== peer.bridgeId
+        || child.parentSessionId !== manager || child.parentBridgeId !== parent.bridgeId) return {status: 410, body: {error: 'Relationship changed'}};
+      await this.security.revalidate(message.principal);
+      await coordination.events.append(manager, {...event, sessionName: child.name, deliveryId});
+      this.onTeamChanged?.(manager);
+      return {status: 200, body: {ok: true}};
+    }
+    if (routePath === CHILD_PLAN_PATH) {
+      await this.security.revalidate(message.principal);
+      const peer = message.principal.endpoint.kind === 'bridge'
+        && this.security.peerBridges().find(peer => peer.endpoint.id === message.principal.endpoint.id);
+      if (!peer) return { status: 403, body: { error: 'permission_denied' } };
+      const plans = this.getCoordination()?.plan;
+      if (!plans || !this.peerControl) return { status: 503, body: { error: 'Plan tracking unavailable' } };
+      const data = message.application.data as { body?: unknown } | null;
+      try {
+        return { status: 200, body: applicationJson(await applyRemoteChildPlan(this.peerControl, plans, this.security.bridgeId,
+          peer.bridgeId, data?.body, () => this.security!.revalidate(message.principal))) };
+      } catch (error) {
+        if (error instanceof BridgeSecurityError) throw error;
+        return { status: 400, body: { error: 'Invalid child plan operation' } };
+      }
+    }
     const boardCommand = boardCommandForPath(route.path);
     if (route.method === 'POST' && boardCommand) {
       const endpoint = message.principal.endpoint;
@@ -451,7 +509,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       if (typeof body !== 'object' || Array.isArray(body) || 'bridgeId' in body) return { status: 400, body: { error: 'Invalid project board payload' } };
       try {
         const data = await runProjectBoardCommand(this.boardCommands, boardCommand, { ...body, bridgeId: this.security.bridgeId }, message.principal);
-        if ((boardCommand === 'mutate_project_board' || boardCommand === 'get_project_board' || boardCommand === 'mutate_project_discussion') && typeof body.projectId === 'string') {
+        if ((boardCommand === 'mutate_project_board' || boardCommand === 'get_project_board' || boardCommand === 'mutate_project_discussion') && body.action !== 'move_project' && typeof body.projectId === 'string') {
           void this.boardCommands.deliverProject(body.projectId);
         }
         return { status: 200, body: applicationJson(data) };
@@ -483,20 +541,32 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
         return { status: 400, body: { error: 'Could not store ticket notification' } };
       }
     }
+    if (routePath === PROJECT_MOVE) {
+      const peer = this.security.peerBridges().find(p => p.endpoint.id === message.principal.endpoint.id);
+      if (!peer || message.principal.endpoint.kind !== 'bridge') return {status:403,body:{error:'permission_denied'}};
+      if (!this.boardCommands?.ready() || !this.boardCommands.storageMoves) return {status:503,body:{error:'Storage moves unavailable'}};
+      await this.security.revalidate(message.principal);
+      try {
+        const body = (message.application.data as {body?:unknown}).body;
+        return {status:200,body:this.boardCommands.storageMoves.receive(peer.bridgeId,body)};
+      } catch (error) {
+        return {status:409,body:{error:error instanceof Error ? error.message.slice(0,300) : 'Project move failed'}};
+      }
+    }
     if (routePath === PROJECT_DIRECTORY) {
       const { endpoint } = message.principal;
       if (endpoint.kind !== 'bridge' || !this.security.peerBridges().some(peer => peer.endpoint.id === endpoint.id))
         return { status: 403, body: { error: 'permission_denied' } };
       await this.security.revalidate(message.principal);
       if (!this.localProjects) return { status: 503, body: { error: 'Project directory unavailable' } };
-      const projects = this.localProjects().map(({ id, bridgeId, name }) => ({ id, bridgeId, name }));
+      const projects = this.localProjects().map(({ id, bridgeId, name, homeRevision }) => ({ id, bridgeId, name, ...(homeRevision ? {homeRevision} : {}) }));
       return { status: 200, body: applicationJson({ projects }) };
     }
     if (routePath === INSTRUCTIONS_LOCAL || routePath === INSTRUCTIONS_WIRE || routePath === INSTRUCTIONS_SYNC) return this.dispatchInstructions(message, routePath);
     if (routePath === '/api/host-resources' && route.method === 'GET') {
       await this.security.revalidate(message.principal);
       if (!this.hostResources) return { status: 503, body: { error: 'Host resources unavailable' } };
-      return { status: 200, body: applicationJson({ bridgeId: this.security.bridgeId, resources: await this.hostResources() }) };
+      return { status: 200, body: applicationJson({ bridgeId: this.security.bridgeId, nestedSessions: true, resources: await this.hostResources() }) };
     }
     if (routePath === TRANSFER_LOCAL || routePath === TRANSFER_WIRE) return this.dispatchTransfer(message, routePath);
     if (routePath === '/api/peers' || routePath.startsWith('/api/peers/')) return this.dispatchPeers(message, route.method, route.path);
@@ -694,21 +764,74 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     throw new BadRequestError("Invalid attention target");
   }
 
+  async remoteResultSender(id: string, manager: Session): Promise<Session | null> {
+    const principal = sessionRequestPrincipal.getStore();
+    if (!principal || principal.endpoint.kind !== 'bridge' || !this.peerControl || !/^[A-Za-z0-9_-]{1,200}$/.test(id)) return null;
+    const owner = this.security?.peerBridges().find(peer => peer.endpoint.id === principal.endpoint.id)?.bridgeId;
+    if (!owner) return null;
+    const result = await this.peerControl.http(owner, 'GET', '/api/sessions/' + id, undefined, 6_000);
+    const child = (result.body as {session?: Session} | null)?.session;
+    await this.security!.revalidate(principal);
+    return result.status === 200 && child?.id === id && child.bridgeId === owner
+      && child.parentSessionId === manager.id && child.parentBridgeId === manager.bridgeId ? child : null;
+  }
+
+  /** Look up the current manager at the owner explicitly named by the child. */
+  async loadManager(child: Session): Promise<Session | null> {
+    if (!child.parentSessionId || !this.store) return null;
+    const owner = child.parentBridgeId ?? child.bridgeId;
+    if (owner === child.bridgeId) {
+      const parent = await this.store.loadSession(child.parentSessionId);
+      return parent?.bridgeId === owner ? parent : null;
+    }
+    const actor = sessionRequestPrincipal.getStore();
+    if (!this.peerControl || (actor && !this.security?.permitsPeerLookup(actor))) return null;
+    try {
+      const reply = await this.peerControl.http(owner, 'GET', '/api/sessions/' + encodeURIComponent(child.parentSessionId), undefined, 6_000);
+      if (actor) await this.security!.revalidate(actor);
+      const parent = (reply.body as { session?: Session } | null)?.session;
+      return reply.status === 200 && parent?.id === child.parentSessionId && parent.bridgeId === owner && typeof parent.name === 'string' ? parent : null;
+    } catch { return null; }
+  }
+
+  async mailManager(parent: Session, body: Record<string, unknown>): Promise<{ ok: boolean; error?: string }> {
+    if (!this.securityInfo || parent.bridgeId === this.securityInfo.bridgeId) return this.acceptSessionMail(parent, body);
+    if (!this.peerControl) return { ok: false, error: 'Manager bridge unavailable' };
+    try {
+      const result = await this.peerControl.http(parent.bridgeId, 'POST', '/api/sessions/' + encodeURIComponent(parent.id) + '/inbox', body);
+      return result.status === 201 ? { ok: true } : { ok: false, error: 'Manager inbox unavailable' };
+    } catch { return { ok: false, error: 'Manager bridge unavailable' }; }
+  }
+
+  async managerCanAnswer(child: Session): Promise<boolean> {
+    return (await this.resolveAttentionRouting(child)).route === 'parent';
+  }
+
+  async remoteResultReported(child: Session): Promise<boolean> {
+    if (!child.parentBridgeId || !child.parentSessionId || !this.peerControl) return false;
+    const result = await this.peerControl.http(child.parentBridgeId, 'GET',
+      '/api/sessions/' + encodeURIComponent(child.parentSessionId) + '/inbox?peek=1&resultFrom=' + encodeURIComponent(child.id));
+    return result.status === 200 && (result.body as { reported?: boolean } | null)?.reported === true;
+  }
+
   private async resolveAttentionRouting(
     child: Session,
     to?: 'human',
   ): Promise<{ route: AttentionRoute; parent: Session | null }> {
-    if (!this.store || !child.parentSessionId) {
-      return { route: 'human', parent: null };
+    if (to === 'human') return {route: 'human', parent: null};
+    const parent = await this.loadManager(child);
+    let parentRunning = !!parent && parent.status === 'running';
+    if (parentRunning && parent) {
+      if (parent.bridgeId === child.bridgeId) {
+        if (typeof this.runner?.isRunning === 'function') parentRunning = this.runner.isRunning(parent.id);
+      } else {
+        try {
+          const reply = await this.peerControl!.http(parent.bridgeId, 'GET', '/api/sessions/' + encodeURIComponent(parent.id) + '/running', undefined, 6_000);
+          parentRunning = reply.status === 200 && (reply.body as { running?: boolean } | null)?.running === true;
+        } catch { parentRunning = false; }
+      }
     }
-    const parent = await this.store.loadSession(child.parentSessionId);
-    const parentRunning =
-      !!parent &&
-      (typeof this.runner?.isRunning === 'function'
-        ? this.runner.isRunning(parent.id)
-        : parent.status === 'running');
-    const route = decideRoute(child, parent, parentRunning, to);
-    return { route, parent };
+    return { route: decideRoute(child, parent, parentRunning, to), parent };
   }
 
   /** Hold pushes for this session until the created item id is known. */
@@ -773,11 +896,12 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
   ): Promise<AttentionItem | undefined> {
     let failed = false;
     try {
-      const accepted = await this.acceptSessionMail(parent, {
+      const accepted = await this.mailManager(parent, {
         from: child.id,
         fromName: child.name,
         type: 'escalation',
         threadId: item.id,
+        idempotencyKey: 'parent-question:' + child.id + ':' + item.id,
         body: formatParentQuestionMail(child, item),
       });
       if (!accepted.ok) {
@@ -808,19 +932,34 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     }
   }
 
+  private peerParent(child: Session, claimed: unknown): string | undefined {
+    const actor = sessionRequestPrincipal.getStore();
+    if (actor?.endpoint.kind !== 'bridge' || !child.parentSessionId || child.parentSessionId !== claimed) return undefined;
+    const owner = this.security?.peerBridges().find(peer => peer.endpoint.id === actor.endpoint.id)?.bridgeId;
+    return owner && owner === child.parentBridgeId && owner !== child.bridgeId ? child.parentSessionId : undefined;
+  }
+
   /** Caller must be the child's parent. Returns the parent session, or null after writing 403. */
   private async loadParentCaller(
     req: IncomingMessage,
     res: ServerResponse,
     child: Session,
-  ): Promise<Session | null> {
+    claimed: unknown,
+  ): Promise<Pick<Session, 'id' | 'name'> | null> {
+    const actor = sessionRequestPrincipal.getStore();
+    if (actor?.endpoint.kind === 'bridge') {
+      const id = this.peerParent(child, claimed);
+      if (id) return { id, name: id };
+      jsonResponse(res, 403, { error: 'Only the parent session can do this', code: 'forbidden' });
+      return null;
+    }
     const caller = this.readCallerSessionId(req);
     if (!this.store || !child.parentSessionId || caller !== child.parentSessionId) {
       jsonResponse(res, 403, { error: 'Only the parent session can do this', code: 'forbidden' });
       return null;
     }
     const parent = await this.store.loadSession(child.parentSessionId);
-    if (!parent || parent.id !== child.parentSessionId) {
+    if (!parent || parent.id !== child.parentSessionId || parent.bridgeId !== (child.parentBridgeId ?? child.bridgeId)) {
       jsonResponse(res, 403, { error: 'Only the parent session can do this', code: 'forbidden' });
       return null;
     }
@@ -897,10 +1036,12 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       jsonResponse(res, 503, { error: 'Attention store not ready', code: 'attention_not_ready' });
       return;
     }
-    const parent = await this.loadParentCaller(req, res, child);
+    const body = await parseBody(req);
+    if (!body || typeof body !== 'object' || Array.isArray(body)) throw new BadRequestError('Invalid parent action');
+    const parent = await this.loadParentCaller(req, res, child, body.parentSessionId);
     if (!parent) return;
+    if (sessionRequestPrincipal.getStore()?.endpoint.kind === 'bridge') delete body.parentSessionId;
     if (action === 'answer') {
-      const body = await parseBody(req);
       if (!body || typeof body !== 'object' || Array.isArray(body)
         || Object.keys(body).some((key) => key !== 'answers')) {
         throw new BadRequestError('Invalid attention answer');
@@ -919,7 +1060,6 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       jsonResponse(res, 200, { event: item });
       return;
     }
-    const body = await parseBody(req);
     if (!body || typeof body !== 'object' || Array.isArray(body)
       || Object.keys(body).some((key) => key !== 'note')) {
       throw new BadRequestError('Invalid escalation');
@@ -945,7 +1085,10 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     jsonResponse(res, 200, { event: updated });
   }
 
-  setCoordination(coordination: Coordination): void {
+  private onTeamChanged?: (manager: string) => void;
+
+  setCoordination(coordination: Coordination, onTeamChanged?: (manager: string) => void): void {
+    this.onTeamChanged = onTeamChanged;
     this.coordination = coordination;
     this.defaultCoordination = null;
     if (typeof this.mail.setDigestProvider === 'function') {
@@ -1243,6 +1386,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
 
     // GET /api/sessions
     if (path === '/api/sessions' && req.method === 'GET') {
+      const pendingParents = this.sessionDeps?.hierarchyWrites?.pendingParents() ?? [];
       const sessions = await (this.getSessionController()?.list() ?? this.store.listSessions());
       if (url.searchParams.get('boardAttention') === '1' && this.attention) {
         const rows = [];
@@ -1252,7 +1396,7 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
           rows.push({ ...toWireSession(session), boardBlocked });
         }
         jsonResponse(res, 200, { sessions: rows });
-      } else jsonResponse(res, 200, { sessions: sessions.map(toWireSession) });
+      } else jsonResponse(res, 200, { sessions: sessions.map(toWireSession), ...(pendingParents.length ? { pendingParents } : {}) });
       return;
     }
 
@@ -1339,7 +1483,10 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     // env is stripped: it can carry API keys and only revive (server-side)
     // needs it.
     if (path === '/api/archive' && req.method === 'GET') {
-      const archived = (await this.store.listArchived()).map((record) => {
+      const sessionId = url.searchParams.get('sessionId');
+      if (sessionId && !/^[A-Za-z0-9_-]{1,200}$/.test(sessionId)) throw new BadRequestError('Invalid session ID');
+      const records = await this.store.listArchived();
+      const archived = (sessionId ? records.filter(row => row.id === sessionId).slice(-1) : records).map((record) => {
         const sanitized = { ...record };
         delete sanitized.env;
         delete sanitized.previewSource;
@@ -1402,7 +1549,20 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
           const routed = await this.attention.listRouted(child.id);
           for (const event of routed) items.push({ sessionId: child.id, sessionName: child.name, event });
         }
-        jsonResponse(res, 200, { items });
+        const principal = sessionRequestPrincipal.getStore();
+        const unavailable: string[] = [];
+        if (principal?.endpoint.kind === 'local-cli' && this.peerControl) {
+          const peers = await this.peerControl.list();
+          await Promise.all(peers.map(async peer => {
+            try {
+              const result = await this.peerControl!.http(peer.bridgeId, 'GET', '/api/team-questions?parent=' + encodeURIComponent(id), undefined, 6_000);
+              const body = result.body as {items?: typeof items} | null;
+              if (result.status !== 200 || !Array.isArray(body?.items)) throw new Error();
+              items.push(...body.items.filter(row => row.event?.routedTo === id && row.event.route === 'parent'));
+            } catch { unavailable.push(peer.bridgeId); }
+          }));
+        }
+        jsonResponse(res, 200, { items, ...(unavailable.length ? {unavailable} : {}) });
         return;
       }
       if (attentionSub === 'ask') {
@@ -1586,6 +1746,9 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
           throw new BadRequestError('Card update must be an object');
         }
         const rawBody = body as Record<string, unknown>;
+        const peer = sessionRequestPrincipal.getStore()?.endpoint.kind === 'bridge';
+        const claimed = rawBody.parentSessionId;
+        if (peer) delete rawBody.parentSessionId;
         const keys = Object.keys(rawBody);
         if (keys.length === 0) throw new BadRequestError('Empty card update');
         for (const key of keys) {
@@ -1607,7 +1770,8 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
           jsonResponse(res, 404, { error: 'Session not found' });
           return;
         }
-        const callerId = this.readCallerSessionId(req);
+        const callerId = peer ? this.peerParent(targetSession, claimed)
+          : !targetSession.parentBridgeId || targetSession.parentBridgeId === targetSession.bridgeId ? this.readCallerSessionId(req) : undefined;
         const forcedByParent =
           force &&
           Boolean(callerId && targetSession.parentSessionId && callerId === targetSession.parentSessionId);
@@ -1768,7 +1932,8 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
       }
       const session = await this.store.loadSession(id);
       if (!session) { jsonResponse(res, 404, { error: 'Session not found' }); return; }
-      const rootId = rootOf(session);
+      const known = await this.rememberedPeerSessions?.() as Session[] | undefined;
+      const rootId = boardManagerId(session, await this.store.listSessions(), known?.some(s => s.parentSessionId === session.id && s.parentBridgeId === session.bridgeId));
       if (waitSeconds && waitSeconds > 0) {
         const controller = new AbortController();
         const cancel = () => controller.abort();
@@ -1898,12 +2063,13 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     // GET /api/sessions/:id
     if (sessionMatch && req.method === 'GET') {
       const sessionId = sessionMatch[1];
+      const moving = this.sessionDeps?.hierarchyWrites?.isMoving(sessionId);
       const session = await (this.getSessionController()?.get(sessionId) ?? this.store.loadSession(sessionId));
       if (!session) {
         jsonResponse(res, 404, { error: 'Session not found' });
         return;
       }
-      jsonResponse(res, 200, { session: toWireSession(session), capabilities: {
+      jsonResponse(res, 200, { session: toWireSession(session), ...(moving || this.sessionDeps?.hierarchyWrites?.isMoving(sessionId) ? { hierarchyChanging: true } : {}), capabilities: {
         ...(this.attention ? { attention: { version: 1, request: true, prompt: true } } : {}),
         sessionMetadata: { pullRequest: true, preview: true },
       } });
@@ -2396,6 +2562,14 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     if (!child || child.id !== signal.sessionId || child.bridgeId !== bridgeId || child.status !== 'running' || child.shellType === 'shell'
       || !child.parentSessionId || child.parentSessionId === child.id || !/^[A-Za-z0-9_-]{1,200}$/.test(child.parentSessionId)) return;
     const parentId = child.parentSessionId;
+    if (child.parentBridgeId && child.parentBridgeId !== bridgeId) {
+      if (!await this.managerCanAnswer(child)) return;
+      const current = await store.loadSession(child.id);
+      if (!isCurrent() || current?.status !== 'running' || current.parentSessionId !== parentId
+        || current.parentBridgeId !== child.parentBridgeId || !runner.isRunning(current.id)) return;
+      await this.getCoordination()?.emit(current, 'idle', (sanitizeAttentionText(current.name, 200) || 'Session') + ' idle for 2m');
+      return;
+    }
     const parent = await store.loadSession(parentId);
     if (!parent || parent.id !== parentId || parent.bridgeId !== bridgeId || parent.status !== 'running' || parent.shellType === 'shell') return;
     const currentParent = await store.loadSession(parentId);
@@ -2497,6 +2671,13 @@ export class LocalApiServer extends EventEmitter<HookServerEvents> {
     const session = await this.store.loadSession(sessionId);
     if (!session) {
       jsonResponse(res, 404, { error: 'Session not found' });
+      return;
+    }
+
+    const resultFrom = url.searchParams.get('resultFrom');
+    if (resultFrom !== null) {
+      if (url.searchParams.get('peek') !== '1' || !/^[A-Za-z0-9_-]{1,200}$/.test(resultFrom)) throw new BadRequestError('Invalid result query');
+      jsonResponse(res, 200, { reported: await this.mail.hasResultFrom(sessionId, resultFrom) });
       return;
     }
 

@@ -123,6 +123,13 @@ function buildArchivedCard(session: Session): SessionCard {
   };
 }
 
+export function boardManagerId(session: Session, sessions: Session[], hasRemoteChildren = false): string {
+  if (!session.parentSessionId || session.plan || hasRemoteChildren || sessions.some(
+    child => child.parentSessionId === session.id && (child.parentBridgeId ?? child.bridgeId) === session.bridgeId,
+  )) return session.id;
+  return session.parentSessionId;
+}
+
 export class BoardService implements BoardServiceApi {
   private readonly deps: BoardDeps;
 
@@ -211,17 +218,15 @@ export class BoardService implements BoardServiceApi {
     if (!session) {
       throw new Error('Session not found');
     }
-    const rootId = session.parentSessionId ?? session.id;
-    const listArchived = this.deps.listArchived;
-
-    const [allSessions, cursor, eventsPage, archivedSessions, rootSession] = await Promise.all([
-      this.deps.listSessions(),
+    const [allSessions, directRemote, archivedSessions] = await Promise.all([
+      this.deps.listSessions(), this.deps.remoteChildren?.(session.id) ?? [],
+      query.all && this.deps.listArchived ? this.deps.listArchived() : [],
+    ]);
+    const rootId = boardManagerId(session, [...allSessions, ...archivedSessions], directRemote.length > 0);
+    const [cursor, eventsPage, rootSession] = await Promise.all([
       this.deps.events.head(rootId),
-      query.since !== undefined
-        ? readAllEventsSince(this.deps, rootId, query.since)
-        : Promise.resolve(null),
-      query.all && listArchived ? listArchived() : Promise.resolve([] as Session[]),
-      session.id === rootId ? Promise.resolve(session) : this.deps.loadSession(rootId),
+      query.since !== undefined ? readAllEventsSince(this.deps, rootId, query.since) : null,
+      session.id === rootId ? session : this.deps.loadSession(rootId),
     ]);
 
     const sinceSessionIds = eventsPage
@@ -264,10 +269,19 @@ export class BoardService implements BoardServiceApi {
       }
     }
 
-    let cards = [
-      ...(await Promise.all(children.map((c) => this.buildCardForSession(c)))),
-      ...archivedChildren.map((c) => buildArchivedCard(c)),
-    ];
+    const remote = rootId === session.id ? directRemote : await this.deps.remoteChildren?.(rootId) ?? [];
+    const remoteCards: SessionCard[] = remote
+      .filter(child => !liveIds.has(child.id) && (!sinceSessionIds || sinceSessionIds.has(child.id))
+        && (query.all || sinceSessionIds?.has(child.id) || child.status === 'running' || child.status === 'pending'))
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+      .map(child => ({
+        sessionId: child.id, name: child.name, parentSessionId: rootId, declared: child.card ?? null, stale: true,
+        derived: { status: child.status, activity: 'unknown', openAttention: 0, unreadMail: 0, previews: [] },
+      }));
+    const createdAt = new Map([...children, ...remote].map(child => [child.id, child.createdAt]));
+    const active = [...await Promise.all(children.map(c => this.buildCardForSession(c))), ...remoteCards];
+    active.sort((a, b) => (createdAt.get(a.sessionId) ?? '').localeCompare(createdAt.get(b.sessionId) ?? ''));
+    let cards = [...active, ...archivedChildren.map(c => buildArchivedCard(c))];
 
     if (query.ready) {
       cards = cards.filter(
@@ -303,7 +317,9 @@ export class BoardService implements BoardServiceApi {
     if (!session) {
       throw new Error('Session not found');
     }
-    const rootId = session.parentSessionId ?? session.id;
+    const allSessions = await this.deps.listSessions();
+    const directRemote = await this.deps.remoteChildren?.(session.id) ?? [];
+    const rootId = boardManagerId(session, allSessions, directRemote.length > 0);
     const { events } = await readAllEventsSince(this.deps, rootId, sinceSeq);
     if (events.length === 0) {
       return { line: null, cursor: sinceSeq };
@@ -342,9 +358,11 @@ export class BoardService implements BoardServiceApi {
     const parts: string[] = [];
     for (const ev of visibleEvents) {
       const card = cardsById.get(ev.sessionId) ?? null;
-      const name = card?.name ?? ev.sessionName;
-      const state = card?.declared?.state ?? '-';
-      const rawHeadline = card?.declared?.headline ?? '';
+      const remote = directRemote.find(child => child.id === ev.sessionId);
+      const name = card?.name ?? remote?.name ?? ev.sessionName;
+      const declared = card?.declared ?? remote?.card;
+      const state = declared?.state ?? '-';
+      const rawHeadline = declared?.headline ?? '';
       const headline = sliceCodePoints(rawHeadline, 60);
       const prState = card?.derived.pr?.state;
 
