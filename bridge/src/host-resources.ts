@@ -1,6 +1,9 @@
 import { z } from 'zod';
+import { hostResourcesSchema, type HostResources } from './host-resources-protocol.js';
+export type { HostResources } from './host-resources-protocol.js';
 import type { PeerControl } from './peer-control.js';
-import { cpus, freemem, totalmem } from 'node:os';
+import { execFile } from 'node:child_process';
+import { cpus, freemem, platform, totalmem } from 'node:os';
 import { statfs } from 'node:fs/promises';
 
 function cpuTime() {
@@ -13,10 +16,26 @@ function cpuTime() {
   return { idle, total };
 }
 
+// XNU exposes NOTE_MEMORYSTATUS_PRESSURE_* flags through this sysctl on macOS.
+// https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/event_private.h
+function macMemoryPressure(): Promise<HostResources['memoryPressure']> {
+  const output = new Promise<string>((resolve, reject) => {
+    execFile('/usr/sbin/sysctl', ['-n', 'kern.memorystatus_vm_pressure_level'], { timeout: 1000, maxBuffer: 1024 },
+      (error, stdout) => error ? reject(error) : resolve(stdout));
+  });
+  return output.then(stdout => {
+    switch (stdout.trim()) {
+      case '1': return 'normal';
+      case '2': return 'warning';
+      case '4': return 'critical';
+    }
+  }, () => undefined);
+}
+
 export function hostResourceSampler(dataDir: string) {
   let previous = cpuTime();
   let sampledAt = 0;
-  let cached: Promise<{ cpuPercent: number | null; freeRamBytes: number; totalRamBytes: number; freeDiskBytes: number | null; sampledAt: number }> | undefined;
+  let cached: Promise<HostResources> | undefined;
   return () => {
     const now = Date.now();
     if (cached && now - sampledAt < 10_000) return cached;
@@ -27,25 +46,23 @@ export function hostResourceSampler(dataDir: string) {
     sampledAt = now;
     const freeRamBytes = freemem();
     const totalRamBytes = totalmem();
-    cached = statfs(dataDir).then(fs => fs.bavail * fs.bsize, () => null)
-      .then(freeDiskBytes => ({ sampledAt: now, cpuPercent, freeRamBytes, totalRamBytes, freeDiskBytes }));
+    cached = Promise.all([
+      statfs(dataDir).then(fs => fs.bavail * fs.bsize, () => null),
+      platform() === 'darwin' ? macMemoryPressure() : undefined,
+    ]).then(([freeDiskBytes, memoryPressure]) => ({
+      sampledAt: now, cpuPercent, freeRamBytes, totalRamBytes, freeDiskBytes,
+      ...(memoryPressure && { memoryPressure }),
+    }));
     return cached;
   };
 }
-
-const bytes = z.number().int().nonnegative().safe();
-const resourceReport = z.object({
-  sampledAt: bytes, cpuPercent: z.number().min(0).max(100).nullable(),
-  freeRamBytes: bytes, totalRamBytes: bytes, freeDiskBytes: bytes.nullable(),
-});
-export type HostResources = z.infer<typeof resourceReport>;
 
 export async function peerResources(peers: Pick<PeerControl, 'http'>, bridgeId: string): Promise<HostResources | null> {
   try {
     const reply = await peers.http(bridgeId, 'GET', '/api/host-resources', undefined, 5000);
     if (reply.status !== 200) return null;
-    const report = z.object({ bridgeId: z.literal(bridgeId), resources: resourceReport }).safeParse(reply.body);
-    if (report.success && report.data.resources.freeRamBytes <= report.data.resources.totalRamBytes) return report.data.resources;
+    const report = z.object({ bridgeId: z.literal(bridgeId), resources: hostResourcesSchema }).safeParse(reply.body);
+    if (report.success) return report.data.resources;
   } catch { /* An unavailable peer has no current reading. */ }
   return null;
 }

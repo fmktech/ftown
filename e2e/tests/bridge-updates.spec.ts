@@ -1,7 +1,7 @@
 import { expect } from "@playwright/test";
 import { test } from "../helpers/fixtures";
 import { login, sharedAccountId, waitForBridgeOnline } from "../helpers/app";
-import { readBridgePointer } from "../helpers/bridge-api";
+import { bridgeApiFetch, readBridgePointer } from "../helpers/bridge-api";
 
 for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
   test(`bridge update menu displays real status at ${viewport.width}px`, async ({ page }, testInfo) => {
@@ -16,6 +16,17 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
     await page.getByRole("button", { name: "Computers", exact: true }).click();
     const row = page.locator(`[data-bridge-row="${bridgeId}"]`);
     await expect(row).toBeVisible();
+    const version = row.getByText(/^Bridge version \d+\.\d+\.\d+$/);
+    await expect(version).toBeVisible();
+    const runningVersion = await version.textContent();
+    const report = await bridgeApiFetch("GET", "/api/host-resources");
+    expect(report.status).toBe(200);
+    const { resources } = report.body as { resources: { totalRamBytes: number; memoryPressure?: string } };
+    const ram = row.locator("dl > div").filter({ has: page.getByText("RAM free", { exact: true }) });
+    const totalGiB = await page.evaluate(bytes => (bytes / 2 ** 30).toLocaleString(undefined, { maximumFractionDigits: 1 }), resources.totalRamBytes);
+    await expect(ram.getByText(`of ${totalGiB} GiB total`, { exact: true })).toBeVisible();
+    await expect(ram.locator("dd")).toHaveText(/^\p{Number}.*? GiB\s*of /u);
+    if (!resources.memoryPressure) await expect(row.getByText("Memory pressure")).toHaveCount(0);
     const actions = row.getByRole("button", { name: "Updates…" });
     const bounds = await actions.boundingBox();
     expect(bounds && bounds.width >= 44 && bounds.height >= 44).toBeTruthy();
@@ -31,6 +42,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
     const installed = installedText ?? "";
     const latest = latestText ?? "";
     expect(installed).toMatch(stable);
+    expect(runningVersion).toBe(`Bridge version ${installed}`);
     expect(latest === "Unknown" || stable.test(latest)).toBe(true);
     const compare = (a: string, b: string) => {
       const left = a.split(".").map(BigInt), right = b.split(".").map(BigInt);

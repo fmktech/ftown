@@ -45,6 +45,8 @@ vi.mock("@/hooks/useSessions", () => ({ useSessions: (_client: unknown, _user: u
 vi.mock("@/hooks/useBridgeRpc", () => ({ useBridgeRpc: () => ({ bridgeExec: state.bridgeExec,
   sendCommand: vi.fn().mockImplementation(async command => {
     state.rpcCommands.push(command.type);
+    if (command.type === "get_bridge_update") return { success: true, data: { schema: 1, bridgeId: command.payload.bridgeId,
+      currentVersion: "1.2.0", latestVersion: "1.3.0", checkedAt: null, availability: "available", canUpdate: false, blockedReason: "unsupported_launch", operation: null, manualCommand: "npx ftown@1.3.0 setup" } };
     if (command.type === "get_session_board" && state.boardSnapshot) return { success: true, data: state.boardSnapshot };
     return command.type === "send_message" ? { success: true, data: { sessionId: "ordinary", messageId: "m1", status: "queued" } } : { success: true, data: { sessionId: "ordinary", attention: null, sequence: 0 } };
   }),
@@ -122,8 +124,10 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); Reflect.deleteProperty(navig
 it("does not reissue bridge update reads when Dashboard rerenders with a fresh RPC callback", async () => {
   dashboard();
   await waitFor(() => expect(state.rpcCommands.filter(type => type === "get_bridge_update")).toHaveLength(1));
-  fireEvent.click(screen.getByRole("button", { name: "Connect a bridge" }));
-  expect(screen.getByText("Connect a bridge:")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Computers" }));
+  const computers = within(screen.getByRole("dialog", { name: "Bridges" }));
+  expect(await computers.findByText("1.2.0")).toBeTruthy();
+  expect(computers.queryByText("1.3.0")).toBeNull();
   await act(async () => { await Promise.resolve(); });
   expect(state.rpcCommands.filter(type => type === "get_bridge_update")).toHaveLength(1);
 });

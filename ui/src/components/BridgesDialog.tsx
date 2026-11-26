@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { bridgeLetter } from "./BridgeBadge";
+import type { UpdateView } from "@/hooks/useBridgeUpdates";
 import type { HostResources } from "@/lib/host-resources";
 
 import type { BridgeSecurityState } from "@security/protocol";
@@ -12,6 +13,7 @@ interface Computer {
   label: string;
   number?: number;
   online: boolean;
+  update?: Pick<UpdateView, "status" | "lastKnownVersion">;
   connection?: BridgeSecurityState["status"];
   ready: boolean;
 }
@@ -52,15 +54,18 @@ export function BridgesDialog({ computers, resources, create, updates, security,
     <div className="computers-list">{computers.map(bridge => {
       const sample = bridge.online ? resources.get(bridge.id) : undefined;
       const lock = bridgeConnectionLock(bridge.connection);
+      const runningVersion = bridge.online ? bridge.update?.status?.currentVersion : undefined;
+      const version = runningVersion ?? bridge.update?.lastKnownVersion;
       return <section key={bridge.id} data-bridge-row={bridge.id} aria-label={bridge.label} className="computer-card">
         <header><span className="bridge-index">{bridge.number ? bridgeLetter(bridge.number) : "—"}</span><strong title={bridge.label}>{bridge.label}</strong>
           <span className="computer-status" data-online={bridge.online}>{bridge.online ? "Online" : "Offline"}</span></header>
+        <p className="computer-version">Bridge version <strong>{version ?? "Unknown"}</strong>{version && !runningVersion && " (last reported)"}</p>
         {sample ? <dl className="computer-load" title={`Sampled at ${new Date(sample.sampledAt).toLocaleTimeString()}`}>
           <div><dt>CPU</dt><dd>{sample.cpuPercent === null ? "—" : sample.cpuPercent + "%"}</dd>
             {sample.cpuPercent !== null && <meter aria-label="CPU usage" min={0} max={100} value={sample.cpuPercent} />}</div>
-          <div><dt>RAM free</dt><dd title={gib(sample.totalRamBytes) + " total"}>{gib(sample.freeRamBytes)}</dd>
-            {sample.totalRamBytes > 0 && <meter aria-label="RAM usage" min={0} max={sample.totalRamBytes} value={sample.totalRamBytes - sample.freeRamBytes} />}</div>
+          <div><dt>RAM free</dt><dd>{gib(sample.freeRamBytes)}<small>of {gib(sample.totalRamBytes)} total</small></dd></div>
           <div><dt>Disk free</dt><dd>{sample.freeDiskBytes === null ? "—" : gib(sample.freeDiskBytes)}</dd></div>
+          {sample.memoryPressure && <div className="computer-pressure"><dt>Memory pressure</dt><dd>{sample.memoryPressure}</dd></div>}
         </dl> : <p className="computer-load-empty">Load unavailable</p>}
         <div role="toolbar" aria-label={`Actions for ${bridge.label}`} className="computer-toolbar"
           onKeyDown={event => {

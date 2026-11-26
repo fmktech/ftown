@@ -6,7 +6,7 @@ import { InstructionsDialog } from "./InstructionsDialog";
 import { ProjectBoardPanel } from "./ProjectBoardPanel";
 import { useProjectDirectory, type HomeProject } from "@/hooks/useProjectDirectory";
 import { BridgesDialog } from "./BridgesDialog";
-import { validResources, type HostResources } from "@/lib/host-resources";
+import { parseResources, type HostResources } from "@/lib/host-resources";
 import { useState, useCallback, useMemo, useEffect, useRef, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
 import type { MessageClient } from "@/lib/message-client";
 import { isPreviewDescriptor } from "@/lib/session-preview";
@@ -321,9 +321,10 @@ export function Dashboard({ client, connectionStatus, connectionError, userId, t
         pending = true;
         try {
           const reply = await statsCommand.current({ type: "get_host_resources", requestId: crypto.randomUUID(), payload: { bridgeId } });
-          const data = reply.data as { bridgeId?: string; hostResources?: HostResources } | undefined;
-          if (active && reply.success && data?.bridgeId === bridgeId && validResources(data.hostResources)) {
-            const sample = data.hostResources;
+          const data = reply.data as { bridgeId?: string; hostResources?: unknown } | undefined;
+          if (active && reply.success && data?.bridgeId === bridgeId) {
+            const sample = parseResources(data.hostResources);
+            if (!sample) return;
             setResourcesByBridge(previous => new Map(previous).set(bridgeId, sample));
           }
         } catch { /* Retry on the next sampling interval. */ }
@@ -1482,6 +1483,7 @@ PY`;
 
       {showBridges && <BridgesDialog computers={securityBridges.filter(b => b.security.status !== "revoked").map(b => ({
         id: b.bridgeId, number: bridgeIdentities.get(b.bridgeId)?.number, label: bridgeIdentities.get(b.bridgeId)?.name || b.label || b.bridgeId, connection: b.security.status,
+        update: updates.get(b.bridgeId),
         online: connectionStatus === "connected" && activeBridgeIds.has(b.bridgeId),
         ready: connectionStatus === "connected" && readyBridges.some(bridge => bridge.bridgeId === b.bridgeId),
       }))} resources={resourcesByBridge} close={() => setShowBridges(false)}
